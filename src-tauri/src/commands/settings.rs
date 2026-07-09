@@ -142,6 +142,39 @@ pub async fn pick_output_dir(app: AppHandle) -> AppResult<Option<String>> {
         .map(|p| p.to_string_lossy().to_string()))
 }
 
+/// 选择单个 .txt 文件（提示词导入）。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_txt_file(app: AppHandle) -> AppResult<Option<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("文本文件", &["txt"])
+        .blocking_pick_file();
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 选择多张图片（参考图上传）。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_image_files(app: AppHandle) -> AppResult<Vec<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("图片", &["png", "jpg", "jpeg", "webp", "bmp"])
+        .blocking_pick_files();
+    Ok(picked
+        .map(|list| {
+            list.into_iter()
+                .filter_map(|p| p.into_path().ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// 在系统文件管理器中打开日志目录。
 #[tauri::command]
 #[specta::specta]

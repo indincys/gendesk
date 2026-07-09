@@ -16,6 +16,7 @@ export type {
   BatchView,
   CreateBatchInput,
   FrontendErrorPayload,
+  GroupView,
   ImportPreview,
   ImportPreviewGroup,
   ImportResult,

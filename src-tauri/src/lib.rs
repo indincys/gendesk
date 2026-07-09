@@ -34,6 +34,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::pick_output_dir,
+            commands::settings::pick_txt_file,
+            commands::settings::pick_image_files,
             commands::settings::open_logs_dir,
             commands::settings::open_path_in_folder,
             // api_keys 域
@@ -47,6 +49,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::refs::list_ref_images,
             commands::refs::set_ref_image_group,
             // prompts 域
+            commands::prompts::list_prompt_groups,
             commands::prompts::parse_prompt_txt,
             commands::prompts::commit_prompt_import,
             // batches / tasks 域（引擎）

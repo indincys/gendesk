@@ -44,6 +44,28 @@ async pickOutputDir() : Promise<Result<string | null, AppError>> {
 }
 },
 /**
+ * 选择单个 .txt 文件（提示词导入）。
+ */
+async pickTxtFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_txt_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选择多张图片（参考图上传）。
+ */
+async pickImageFiles() : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_image_files") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 在系统文件管理器中打开日志目录。
  */
 async openLogsDir() : Promise<Result<null, AppError>> {
@@ -133,6 +155,17 @@ async listRefImages() : Promise<Result<RefImageView[], AppError>> {
 async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_ref_image_group", { id, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出全部提示词分组（含 active 提示词数）。
+ */
+async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_prompt_groups") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -356,6 +389,10 @@ source: string | null;
  * 关联任务 ID（若发生在任务上下文），用于全链路贯穿。
  */
 taskId: string | null }
+/**
+ * 分组视图（生成页 / 提示词库列表）。
+ */
+export type GroupView = { id: number; name: string; prefix: string; scene: string; isTemp: boolean; count: number }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */

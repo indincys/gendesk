@@ -60,6 +60,38 @@ fn gen_prefix_from_name(name: &str) -> String {
     }
 }
 
+/// 分组视图（生成页 / 提示词库列表）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupView {
+    pub id: i64,
+    pub name: String,
+    pub prefix: String,
+    pub scene: String,
+    pub is_temp: bool,
+    pub count: i64,
+}
+
+/// 列出全部提示词分组（含 active 提示词数）。
+#[tauri::command]
+#[specta::specta]
+pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<GroupView>> {
+    let groups = repo::list_groups(&state.db).await?;
+    let mut out = Vec::with_capacity(groups.len());
+    for g in groups {
+        let count = repo::count_in_group(&state.db, g.id).await?;
+        out.push(GroupView {
+            id: g.id,
+            name: g.name,
+            prefix: g.prefix,
+            scene: g.scene,
+            is_temp: g.is_temp != 0,
+            count,
+        });
+    }
+    Ok(out)
+}
+
 /// 第一步：解析 txt，构建预览（不落库）。
 #[tauri::command]
 #[specta::specta]

@@ -16,7 +16,10 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: cargo audit
         working-directory: src-tauri
-        run: cargo audit
+        # 忽略「无修复且本项目不可达」的传递性告警（均有理由）：
+        # RUSTSEC-2023-0071 rsa Marvin —— 经 sqlx-mysql 传递，本项目仅用 SQLite，从不走 RSA 路径；
+        # RUSTSEC-2024-0429 glib unsound —— 来自 Linux WebKitGTK 依赖链，双端为 mac/win，不涉及。
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0429
 
   pnpm-audit:
     runs-on: ubuntu-latest

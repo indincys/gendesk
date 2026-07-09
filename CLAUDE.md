@@ -1,4 +1,4 @@
-# CLAUDE.md — GenDesk 开发约定
+# &#x20;CLAUDE.md — GenDesk 开发约定
 
 > 本文件是 AI 开发本仓库的操作手册。**每条铁律都有 guardrails/CI 对应检查**；
 > 改规则必须同步改检查（否则等于没规则）。权威文档：
@@ -28,9 +28,9 @@
 1. **业务真相只在 Rust**：任务状态、编号发放、文件操作、DB 读写全部经 Rust 命令；
    前端不持有可变业务状态，Zustand 只做事件镜像与 UI 态。
 2. **单写者事务**：所有状态迁移由调度器串行提交；配合 single-instance 禁双开。
-3. **前端只经&#x20;********`src/lib/ipc/`********&#x20;出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
+3. **前端只经&#x20;********`src/lib/ipc/`********\*\*\*\* 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
 4. **事件驱动不轮询**：进度/汇总/健康经 Tauri 事件推送，250ms 节流；导航徽章由事件驱动。
-5. **token 只从&#x20;********`src/styles/globals.css`********&#x20;取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
+5. **token 只从&#x20;********`src/styles/globals.css`********\*\*\*\* 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
 6. **视觉以原型 HTML 源码为准**（读源码，不截图猜测）。
 
 ## IPC 约定
@@ -45,7 +45,7 @@
 ## 错误处理规范
 
 - 统一 `thiserror` 错误类型（`src-tauri/src/error.rs`）经 IPC 序列化给前端。
-- **非测试代码禁&#x20;********`unwrap`********/********`expect`********/\*\*\*\*****`panic`** → Cargo `[lints.clippy]` 强制（deny）。
+- **非测试代码禁&#x20;********`unwrap`********\*\*\*\*/********`expect`************/\*\*\*\*********`panic`** → Cargo `[lints.clippy]` 强制（deny）。
   测试内允许，但须以带说明注释的 `#[allow(...)]` 局部放开（guardrails 校验说明）。
 - 前端未捕获错误经 `reportFrontendError` → `log_frontend_error` 命令汇入统一 tracing 日志。
 - 业务错误六类：Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other（技术文档 4.2）。
@@ -87,9 +87,9 @@ cargo test（含 bindings 同步）· cargo check。
 ## 里程碑进度
 
 - [x] **M0 骨架与门禁** — Tauri2+React19 骨架、设计 tokens、窗口壳、命令面板、质量门禁全套。
-- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
+- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api\_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
 - [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
   调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
   域命令 + 4 事件(status/progress/summary/keyHealth)。**待做**：M2 出口 cargo-mutants + `/code-review ultra`（用户触发）。
-- [ ] M3 业务页面 · [ ] M4 更新发布链 · [ ] M5 收尾质量关。
+- [ ] M3 业务页面 · \[ ] M4 更新发布链 · \[ ] M5 收尾质量关。
 

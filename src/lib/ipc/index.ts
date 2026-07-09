@@ -5,21 +5,30 @@
 // - 提供事件订阅助手
 // guardrails 强制 `invoke(` / `listen(` 仅允许出现在 `src/lib/ipc/` 下。
 
-import { type AppError, type Result, commands } from "./bindings";
+import { events, type AppError, type Result, commands } from "./bindings";
 
-export { commands };
+export { commands, events };
 export type {
   AddApiKeyInput,
   ApiKeyView,
   AppError,
+  BatchSummary,
+  BatchView,
+  CreateBatchInput,
   FrontendErrorPayload,
   ImportPreview,
   ImportPreviewGroup,
   ImportResult,
+  KeyHealth,
   RefImageView,
+  RefMappingInput,
   Result,
   Settings,
   SettingsPatch,
+  SummaryCounts,
+  TaskProgress,
+  TaskStatusChanged,
+  TaskView,
   UpdateApiKeyPatch,
 } from "./bindings";
 

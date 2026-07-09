@@ -231,11 +231,12 @@ pub async fn mark_fail(
     Ok(())
 }
 
-/// 重新入队（fail/retry → q），清错误，保留 retry_count。用于手动/中断重试。
+/// 重新入队（fail/retry/rev → q），清错误，保留 retry_count。
+/// 用于手动/中断重试，以及验收页「微调重试」（rev 重新生成）。
 pub async fn requeue(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE tasks SET status = 'q', error_type = NULL, error_message = NULL, updated_at = ?2
-         WHERE id = ?1 AND status IN ('fail','retry')",
+         WHERE id = ?1 AND status IN ('fail','retry','rev')",
     )
     .bind(id)
     .bind(now_unix())

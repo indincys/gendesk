@@ -21,16 +21,21 @@ export type {
   ImportPreviewGroup,
   ImportResult,
   KeyHealth,
+  PromptView,
+  RefImageDetail,
   RefImageView,
   RefMappingInput,
   Result,
+  ReviewItemView,
   Settings,
   SettingsPatch,
   SummaryCounts,
   TaskProgress,
   TaskStatusChanged,
   TaskView,
+  TrashItemView,
   UpdateApiKeyPatch,
+  WorkView,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */

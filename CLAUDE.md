@@ -91,5 +91,7 @@ cargo test（含 bindings 同步）· cargo check。
 - [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
   调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
   域命令 + 4 事件(status/progress/summary/keyHealth)。**待做**：M2 出口 cargo-mutants + `/code-review ultra`（用户触发）。
-- [ ] M3 业务页面 · \[ ] M4 更新发布链 · \[ ] M5 收尾质量关。
+- [~] **M3 业务页面（进行中）** — 已完成：设置页(3.1)、图片生成页(3.4)、任务队列页(3.5) + 前端引擎事件 store + 导航徽章 + 共享 UI。核心闭环「配 Key→生成→实时任务」端到端可用。
+  剩余：参考图库(3.2)、提示词库(3.3)、图片验收(3.6)、作品库(3.7)、废纸篓(3.8) 页 + review/works/trash 后端域 + 全局串联(3.9)。
+- [ ] M4 更新发布链 · [ ] M5 收尾质量关。
 

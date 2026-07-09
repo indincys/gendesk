@@ -3,14 +3,26 @@ import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
+import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
+import { useEffect } from "react";
 
 /** 应用外壳（执行计划 0.4）：标题栏 + 侧栏 + 主面板容器。 */
 export function AppShell() {
   useGlobalKeyboard();
   const route = useUiStore((s) => s.route);
   const platform = useUiStore((s) => s.platform);
+  const initEngine = useEngineStore((s) => s.init);
   const ActivePage = ROUTE_BY_KEY[route].component;
+
+  // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）。
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void initEngine().then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, [initEngine]);
 
   return (
     <div className={`app ${platform === "win" ? "win" : "mac"}`}>

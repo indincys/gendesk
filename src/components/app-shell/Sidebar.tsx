@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import { ROUTES, type RouteDef } from "@/routes";
+import { navBadges, useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { Search } from "lucide-react";
 
@@ -10,6 +11,7 @@ export function Sidebar() {
   const openPalette = useUiStore((s) => s.openPalette);
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
+  const badges = useEngineStore(navBadges);
 
   const make = ROUTES.filter((r) => r.group === "make");
   const asset = ROUTES.filter((r) => r.group === "asset");
@@ -17,6 +19,12 @@ export function Sidebar() {
 
   const NavItem = ({ r }: { r: RouteDef }) => {
     const Icon = r.icon;
+    const badge =
+      r.key === "tasks" && badges.running > 0
+        ? { cls: "nb-run", n: badges.running, spin: true }
+        : r.key === "review" && badges.review > 0
+          ? { cls: "nb-amb", n: badges.review, spin: false }
+          : null;
     return (
       <div
         className={cn("nv", route === r.key && "on")}
@@ -27,6 +35,12 @@ export function Sidebar() {
       >
         <Icon className="ic" />
         <span className="f1">{r.label}</span>
+        {badge && (
+          <span className={cn("nbdg", badge.cls)}>
+            {badge.spin && <i className="spn s9" />}
+            {badge.n}
+          </span>
+        )}
         <span className="kbd">
           {mod}
           {r.shortcut}

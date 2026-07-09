@@ -48,7 +48,7 @@ jobs:
             librsvg2-dev patchelf libssl-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -63,6 +63,13 @@ jobs:
         run: cargo test
       - name: bindings.ts 已同步
         run: git diff --exit-code -- src/lib/ipc/bindings.ts
+      - name: 覆盖率闸门（engine / ids / importer ≥ 85%）
+        working-directory: src-tauri
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov --lib \
+            --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/)' \
+            --fail-under-lines 85
       - name: cargo check
         working-directory: src-tauri
         run: cargo check

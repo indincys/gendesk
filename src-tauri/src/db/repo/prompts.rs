@@ -92,6 +92,41 @@ pub async fn insert_prompt(
     Ok(id)
 }
 
+/// 分组内全部 active 提示词（id + 正文），供批次展开。
+pub async fn list_active_prompts(
+    pool: &SqlitePool,
+    group_id: i64,
+) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, text FROM prompts WHERE group_id = ?1 AND status = 'active' ORDER BY id ASC",
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// 验收通过时写回微调文本并标记 edited（R8）。
+pub async fn apply_edit(pool: &SqlitePool, prompt_id: i64, text: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE prompts SET text = ?2, edited = 1, updated_at = ?3 WHERE id = ?1")
+        .bind(prompt_id)
+        .bind(text)
+        .bind(crate::db::now_unix())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 分组转正式（临时组首次验收通过，R7）。
+pub async fn promote_group(pool: &SqlitePool, group_id: i64) -> Result<bool, sqlx::Error> {
+    let affected =
+        sqlx::query("UPDATE prompt_groups SET is_temp = 0 WHERE id = ?1 AND is_temp = 1")
+            .bind(group_id)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok(affected > 0)
+}
+
 pub async fn count_in_group(pool: &SqlitePool, group_id: i64) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM prompts WHERE group_id = ?1 AND status = 'active'",

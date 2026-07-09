@@ -39,6 +39,10 @@ impl DataDirs {
     pub fn outputs(&self) -> PathBuf {
         self.root.join("outputs")
     }
+    /// 生成结果暂存（未验收）。验收通过后再输出到 outputs/{批次}。
+    pub fn results(&self) -> PathBuf {
+        self.root.join("results")
+    }
     pub fn trash(&self) -> PathBuf {
         self.root.join("trash")
     }
@@ -52,6 +56,7 @@ impl DataDirs {
             self.refs(),
             self.thumbs(),
             self.outputs(),
+            self.results(),
             self.trash(),
             self.logs(),
         ] {

@@ -59,17 +59,25 @@ pub struct SettingsPatch {
     pub paused: Option<bool>,
 }
 
-async fn load(state: &AppState) -> AppResult<Settings> {
-    let default_dir = state.dirs.outputs().to_string_lossy().to_string();
-    match repo::get_raw(&state.db).await? {
+/// 从连接池加载设置（供引擎启动读取策略/重试/暂停态）。
+pub async fn load_settings(
+    pool: &sqlx::SqlitePool,
+    default_output_dir: &str,
+) -> AppResult<Settings> {
+    match repo::get_raw(pool).await? {
         Some(json) => {
             let mut s: Settings = serde_json::from_str(&json)
-                .unwrap_or_else(|_| Settings::defaults(default_dir.clone()));
+                .unwrap_or_else(|_| Settings::defaults(default_output_dir.to_string()));
             s.sanitize();
             Ok(s)
         }
-        None => Ok(Settings::defaults(default_dir)),
+        None => Ok(Settings::defaults(default_output_dir.to_string())),
     }
+}
+
+async fn load(state: &AppState) -> AppResult<Settings> {
+    let default_dir = state.dirs.outputs().to_string_lossy().to_string();
+    load_settings(&state.db, &default_dir).await
 }
 
 async fn save(state: &AppState, s: &Settings) -> AppResult<()> {
@@ -108,6 +116,19 @@ pub async fn update_settings(
     }
     s.sanitize();
     save(&state, &s).await?;
+
+    // 实时应用到引擎。
+    state
+        .engine
+        .set_strategy(crate::engine::strategy::Strategy::from_str_or_default(
+            &s.schedule_strategy,
+        ));
+    state.engine.set_user_retry(s.retry_count.max(0) as u32);
+    if s.paused {
+        state.engine.pause();
+    } else {
+        state.engine.resume();
+    }
     Ok(s)
 }
 

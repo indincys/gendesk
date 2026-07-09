@@ -123,7 +123,12 @@ pub async fn add_api_key(
     let row = repo::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::Database("刚插入的 Key 未找到".into()))?;
-    to_view(&state, row).await
+    let view = to_view(&state, row).await?;
+    let _ = state
+        .engine
+        .reload_keys(&state.db, state.secrets.as_ref())
+        .await;
+    Ok(view)
 }
 
 #[tauri::command]
@@ -147,7 +152,12 @@ pub async fn update_api_key(
     let row = repo::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
-    to_view(&state, row).await
+    let view = to_view(&state, row).await?;
+    let _ = state
+        .engine
+        .reload_keys(&state.db, state.secrets.as_ref())
+        .await;
+    Ok(view)
 }
 
 #[tauri::command]
@@ -158,6 +168,10 @@ pub async fn set_api_key_enabled(
     enabled: bool,
 ) -> AppResult<()> {
     repo::set_enabled(&state.db, id, enabled).await?;
+    let _ = state
+        .engine
+        .reload_keys(&state.db, state.secrets.as_ref())
+        .await;
     Ok(())
 }
 
@@ -167,6 +181,10 @@ pub async fn delete_api_key(state: State<'_, AppState>, id: i64) -> AppResult<()
     if let Some(account) = repo::delete(&state.db, id).await? {
         let _ = state.secrets.delete(&account);
     }
+    let _ = state
+        .engine
+        .reload_keys(&state.db, state.secrets.as_ref())
+        .await;
     Ok(())
 }
 

@@ -4,6 +4,7 @@ pub mod api_keys;
 pub mod prompts;
 pub mod refs;
 pub mod settings;
+pub mod tasks;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败

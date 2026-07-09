@@ -159,12 +159,121 @@ async commitPromptImport(preview: ImportPreview, ctx: string) : Promise<Result<I
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
+ */
+async createBatch(input: CreateBatchInput) : Promise<Result<BatchView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_batch", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listBatches() : Promise<Result<BatchView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_batches") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pauseQueue() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pause_queue") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resumeQueue() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_queue") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出某批次任务，可按 5 视觉组筛选：all/pending/running/failed/review/done。
+ */
+async listTasks(batchId: number, statusGroup: string | null, page: number | null) : Promise<Result<TaskView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_tasks", { batchId, statusGroup, page }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getTask(id: number) : Promise<Result<TaskView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_task", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
+ */
+async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_task", { id, editedPrompt }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重试某批次全部失败任务。
+ */
+async retryFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_failed_tasks", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重试全部因中断而失败的任务（error_type=Interrupted）。
+ */
+async retryInterruptedTasks() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_interrupted_tasks") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 统计当前中断任务数（前端 banner 用）。
+ */
+async countInterrupted() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("count_interrupted") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
 /** user-defined events **/
 
 
+export const events = __makeEvents__<{
+batchSummary: BatchSummary,
+keyHealth: KeyHealth,
+taskProgress: TaskProgress,
+taskStatusChanged: TaskStatusChanged
+}>({
+batchSummary: "batch-summary",
+keyHealth: "key-health",
+taskProgress: "task-progress",
+taskStatusChanged: "task-status-changed"
+})
 
 /** user-defined constants **/
 
@@ -218,6 +327,16 @@ export type AppError =
  */
 { type: "Internal"; message: string }
 /**
+ * `batch://summary`（250ms 节流）
+ */
+export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean }
+export type BatchView = { id: number; createdAt: number; status: string; taskCount: number }
+export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
+/**
+ * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
+ */
+export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
+/**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */
 export type FrontendErrorPayload = { 
@@ -255,7 +374,17 @@ export type ImportResult = { groupIds: number[]; inserted: number;
  * 是否新建了临时分组（ctx=generate）
  */
 temp: boolean }
+/**
+ * `keys://health`
+ */
+export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: number; successRate: number }
+/**
+ * Key 健康状态。
+ */
+export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
+export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number }
+export type RefMappingInput = { refImageId: number; promptGroupId: number }
 /**
  * 应用设置（单行 JSON 持久化）。
  */
@@ -284,6 +413,72 @@ paused: boolean }
  * 设置补丁（部分更新）。
  */
 export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null }
+/**
+ * 5 视觉组计数。
+ */
+export type SummaryCounts = { 
+/**
+ * 待处理 q
+ */
+pending: number; 
+/**
+ * 生成中 run+retry
+ */
+running: number; 
+/**
+ * 异常 fail
+ */
+failed: number; 
+/**
+ * 待验收 rev
+ */
+review: number; 
+/**
+ * 已通过 pass
+ */
+passed: number; 
+/**
+ * 未通过 rej
+ */
+rejected: number; total: number }
+/**
+ * `task://progress`（250ms 节流）
+ */
+export type TaskProgress = { taskId: number; pct: number; phase: Phase }
+export type TaskStatus = 
+/**
+ * 待生成
+ */
+"q" | 
+/**
+ * 生成中
+ */
+"run" | 
+/**
+ * 重试中（退避/排队等待再次生成）
+ */
+"retry" | 
+/**
+ * 成功（即待验收）
+ */
+"rev" | 
+/**
+ * 已通过
+ */
+"pass" | 
+/**
+ * 未通过
+ */
+"rej" | 
+/**
+ * 失败（可手动重试的终态）
+ */
+"fail"
+/**
+ * `task://status-changed`
+ */
+export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskStatus; errorType: ErrorType | null; errorMessage: string | null; retryCount: number; apiKeyId: number | null }
+export type TaskView = { id: number; batchId: number; status: string; refImageId: number; promptId: number; apiKeyId: number | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
 
 /** tauri-specta globals **/

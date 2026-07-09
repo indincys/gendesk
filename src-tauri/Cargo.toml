@@ -26,9 +26,21 @@ tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+async-trait = "0.1"
+base64 = "0.22"
+futures-util = "0.3"
 
 # 异步运行时（调度循环、per-Key Semaphore；M1 起用于数据层测试）
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+
+# 生图 API 调用（rustls 免 OpenSSL）
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "rustls-native-certs",
+    "multipart",
+    "json",
+    "stream",
+] }
 
 # 数据层
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
@@ -57,6 +69,8 @@ tracing-appender = "0.2"
 tempfile = "3"
 proptest = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+wiremock = "0.6"
+futures = "0.3"
 
 # --- Lints：机器强制铁律（执行计划 §1.2）。非测试代码禁 unwrap/expect/panic。---
 [lints.rust]

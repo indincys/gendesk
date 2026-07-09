@@ -88,5 +88,8 @@ cargo test（含 bindings 同步）· cargo check。
 
 - [x] **M0 骨架与门禁** — Tauri2+React19 骨架、设计 tokens、窗口壳、命令面板、质量门禁全套。
 - [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
-- [ ] M2 任务引擎 · [ ] M3 业务页面 · [ ] M4 更新发布链 · [ ] M5 收尾质量关。
+- [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
+  调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
+  域命令 + 4 事件(status/progress/summary/keyHealth)。**待做**：M2 出口 cargo-mutants + `/code-review ultra`（用户触发）。
+- [ ] M3 业务页面 · [ ] M4 更新发布链 · [ ] M5 收尾质量关。
 

@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+:root{--bg:oklch(96.4% .004 255);--panel:#fff;--sub:oklch(97.9% .003 255);--inset:oklch(95.1% .005 255);--line:oklch(32% .02 260/.08);--line2:oklch(32% .02 260/.16);--t1:oklch(27% .018 262);--t2:oklch(47% .016 262);--t3:oklch(62% .014 262);--acc:oklch(58% .18 257);--acc2:oklch(48% .17 257);--accbg:oklch(58% .18 257/.1);--accbg2:oklch(58% .18 257/.18);--accln:oklch(58% .18 257/.45);--ok:oklch(55% .1 155);--okbg:oklch(55% .1 155/.11);--wr:oklch(58% .11 75);--wrbg:oklch(70% .13 80/.15);--er:oklch(54% .15 25);--erbg:oklch(54% .15 25/.09);--mono:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;--sh1:0 1px 2px oklch(20% .02 260/.06);--sh2:0 1px 2px oklch(20% .02 260/.04),0 3px 14px oklch(20% .02 260/.05);--sh3:0 2px 8px oklch(20% .02 260/.07),0 20px 60px oklch(24% .03 262/.18)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei UI",sans-serif;font-size:13px;color:var(--t1);background:var(--bg);overflow:hidden;-webkit-font-smoothing:antialiased;user-select:none}
+a{color:var(--acc2);text-decoration:none}a:hover{color:var(--acc);text-decoration:underline}
+::selection{background:var(--accbg2)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:oklch(32% .02 260/.16);border:3px solid transparent;background-clip:content-box;border-radius:6px}::-webkit-scrollbar-thumb:hover{background-color:oklch(32% .02 260/.28)}::-webkit-scrollbar-corner{background:transparent}
+:focus-visible{outline:2px solid var(--accln);outline-offset:1px}
+.ic{width:15px;height:15px;flex:none}.ic12{width:12px;height:12px;flex:none}.ic18{width:18px;height:18px;flex:none}
+.app{height:100vh;display:flex;flex-direction:column;background:radial-gradient(1100px 320px at 22% -8%,oklch(98.6% .007 262/.85),transparent 62%),var(--bg);min-width:1140px}
+.tbar{height:44px;display:flex;align-items:center;gap:12px;padding:0 14px;flex:none}
+.app.win .tbar{padding-right:0}
+.tlc{width:12px;height:12px;border-radius:99px;display:inline-block;box-shadow:inset 0 0 0 .5px oklch(0% 0 0/.12)}
+.tlr{background:#ec6a5e}.tly{background:#f5bf4f}.tlg{background:#61c554}
+.wb{width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--t2);cursor:pointer;transition:background .1s}
+.wb:hover{background:oklch(91% .008 260)}
+.wbx:hover{background:oklch(58% .19 25);color:#fff}
+.logo{width:22px;height:22px;border-radius:7px;background:linear-gradient(145deg,oklch(62% .17 257),oklch(50% .18 257));display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 2px oklch(40% .12 262/.4),inset 0 1px 0 oklch(100% 0 0/.2);flex:none}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:99px;border:1px solid var(--accln);background:var(--accbg);color:var(--acc2);font-size:11.5px;font-weight:500;cursor:pointer;font-family:inherit;animation:pop .3s}
+.pdot{width:6px;height:6px;border-radius:99px;background:var(--acc);animation:blk 2s infinite}
+.tbtn{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 9px;border-radius:8px;border:none;background:transparent;color:var(--t3);cursor:pointer;font-family:inherit;font-size:12px;transition:background .12s,color .12s}
+.tbtn:hover{background:oklch(93% .006 258/.8);color:var(--t2)}
+.shell{flex:1;display:flex;min-height:0;padding:0 10px 10px;gap:2px}
+.side{width:212px;flex:none;display:flex;flex-direction:column;padding:2px 8px 2px 4px;min-height:0}
+.sbtn{display:flex;align-items:center;gap:8px;height:30px;border-radius:8px;border:1px solid var(--line);background:oklch(100% 0 0/.55);color:var(--t3);font-size:12px;padding:0 9px;cursor:pointer;box-shadow:var(--sh1);transition:color .12s,background .12s;font-family:inherit;margin-bottom:6px}
+.sbtn:hover{color:var(--t2);background:#fff}
+.nsec{font-size:10.5px;font-weight:600;letter-spacing:.07em;color:var(--t3);padding:12px 8px 5px}
+.nv{display:flex;align-items:center;gap:9px;height:29px;padding:0 8px;border-radius:8px;color:var(--t2);cursor:pointer;transition:background .1s,color .1s;font-size:13px}
+.nv:hover{background:oklch(93.5% .006 258/.75);color:var(--t1)}
+.nv.on{background:var(--accbg);color:var(--acc2);font-weight:500}
+.nv .kbd{opacity:0;transition:opacity .1s}
+.nv:hover .kbd{opacity:1}
+.nv:hover .nbdg{display:none}
+.nbdg{font:500 10.5px var(--mono);color:var(--t3);background:var(--inset);border-radius:99px;padding:2px 7px;display:inline-flex;align-items:center;gap:5px}
+.nb-run{color:var(--acc2);background:var(--accbg)}
+.nb-amb{color:oklch(45% .1 70);background:var(--wrbg)}
+.qcard{border:1px solid var(--line);background:oklch(100% 0 0/.7);border-radius:10px;box-shadow:var(--sh1);padding:9px 11px;margin:10px 2px 4px;cursor:pointer;transition:border-color .12s,background .12s}
+.qcard:hover{border-color:var(--line2);background:#fff}
+.sfoot{font-size:10.5px;color:var(--t3);padding:10px 8px 4px}
+.main{flex:1;min-width:0;background:linear-gradient(180deg,#fff,oklch(99.4% .002 255));border:1px solid var(--line);border-radius:13px;box-shadow:var(--sh2);display:flex;flex-direction:column;overflow:hidden;position:relative}
+.phd{min-height:50px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--line);flex:none}
+.ptt{font-size:14px;font-weight:600;white-space:nowrap}
+.pcap{font-size:12px;color:var(--t3)}
+.pbody{flex:1;overflow:auto;min-height:0}
+.cwrap{max-width:860px;margin:0 auto;padding:18px 24px 26px}
+.kbd{font:500 10px var(--mono);color:var(--t3);border:1px solid var(--line2);border-bottom-width:2px;border-radius:5px;padding:1px 5px;background:#fff;white-space:nowrap}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh1)}
+.chead{display:flex;align-items:center;gap:8px;padding:0 12px;min-height:46px}
+.cico{width:24px;height:24px;border-radius:7px;background:var(--inset);display:flex;align-items:center;justify-content:center;color:var(--t2);flex:none}
+.cnt{font-size:11px;color:var(--t3);background:var(--sub);border:1px solid var(--line);padding:2px 8px;border-radius:99px;white-space:nowrap}
+.empt{padding:30px 20px 34px;text-align:center;border-top:1px solid var(--line)}
+.emic{width:34px;height:34px;border-radius:10px;background:var(--inset);color:var(--t3);display:flex;align-items:center;justify-content:center;margin:0 auto 10px}
+.grow{display:flex;align-items:center;gap:9px;min-height:44px;padding:4px 12px;border-top:1px solid var(--line)}
+.ggrp{padding:10px 12px 8px;border-top:1px solid var(--line)}
+.gdot{width:8px;height:8px;border-radius:3px;flex:none}
+.refgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:12px;padding:12px;border-top:1px solid var(--line)}
+.reftile{position:relative;min-width:0}
+.rtph{aspect-ratio:1;border-radius:9px;border:1px solid var(--line)}
+.rtx{position:absolute;top:5px;right:5px;width:20px;height:20px;border-radius:6px;background:oklch(20% .02 260/.55);color:#fff;border:none;display:none;align-items:center;justify-content:center;cursor:pointer;z-index:2}
+.reftile:hover .rtx{display:flex}
+.mapchip{margin-top:7px;width:100%;height:26px;border-radius:7px;border:1px solid var(--line2);background:#fff;font-size:11px;font-weight:500;color:var(--t2);display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;padding:0 7px;transition:border-color .12s,background .12s;font-family:inherit}
+.mapchip.needmap{border-color:oklch(60% .11 75/.55);color:oklch(45% .1 70);background:var(--wrbg);animation:plz 1.5s ease-out 2}
+.mapchip.mapped{border-color:var(--accln);color:var(--acc2);background:var(--accbg)}
+.genbar{display:flex;align-items:center;gap:14px;padding:12px 18px;border-top:1px solid var(--line);background:linear-gradient(180deg,oklch(99.2% .002 255),#fff);flex:none}
+.fchip{font:500 11px var(--mono);color:var(--t2);background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:3px 8px;white-space:nowrap}
+.fchip.warn{color:oklch(45% .1 70);background:var(--wrbg);border-color:oklch(60% .11 75/.4)}
+.ph{position:relative;overflow:hidden}
+.ph:after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(-45deg,oklch(30% .03 262/.03) 0 1.5px,transparent 1.5px 10px)}
+.phl{position:absolute;left:6px;bottom:5px;font:500 9px var(--mono);letter-spacing:.05em;color:oklch(35% .03 262/.55);z-index:1;background:oklch(100% 0 0/.6);padding:2px 5px;border-radius:4px}
+.bdg{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;border-radius:6px;font-size:11px;font-weight:500;white-space:nowrap;flex:none}
+.b-gray{background:var(--inset);color:var(--t2)}
+.b-blue{background:var(--accbg);color:var(--acc2)}
+.b-amber{background:var(--wrbg);color:oklch(43% .1 70)}
+.b-red{background:var(--erbg);color:var(--er)}
+.b-green{background:var(--okbg);color:oklch(40% .1 155)}
+.dt{width:6px;height:6px;border-radius:99px;background:currentColor;flex:none}
+.chip{font:500 10.5px var(--mono);color:var(--t2);background:var(--sub);border:1px solid var(--line);border-radius:5px;padding:2px 6px;white-space:nowrap}
+.btn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line2);background:linear-gradient(180deg,#fff,oklch(98.6% .002 255));color:var(--t1);font-size:12.5px;font-weight:500;font-family:inherit;display:inline-flex;align-items:center;gap:6px;cursor:pointer;box-shadow:var(--sh1);transition:border-color .12s,background .12s,transform .05s;white-space:nowrap}
+.btn:hover{border-color:oklch(32% .02 260/.3);background:#fff}
+.btn:active{transform:translateY(.5px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none;transform:none}
+.sm{height:26px;padding:0 9px;font-size:12px;border-radius:7px}
+.pri{background:linear-gradient(180deg,oklch(63% .17 256),oklch(56% .19 257));border-color:oklch(48% .18 257);color:#fff;box-shadow:0 1px 2px oklch(42% .16 257/.45),inset 0 1px 0 oklch(100% 0 0/.18)}
+.pri:hover{background:linear-gradient(180deg,oklch(65% .17 256),oklch(58% .19 257));border-color:oklch(48% .18 257)}
+.gho{background:transparent;border-color:transparent;box-shadow:none;color:var(--t2)}
+.gho:hover{background:var(--inset);border-color:transparent;color:var(--t1)}
+.dng{color:var(--er)}
+.dng:hover{background:var(--erbg);color:var(--er)}
+.icb{width:26px;height:26px;border-radius:7px;border:none;background:transparent;color:var(--t3);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .12s,color .12s;flex:none}
+.icb:hover{background:var(--inset);color:var(--t1)}
+.inp{height:30px;border:1px solid var(--line2);border-radius:8px;background:#fff;padding:0 10px;font-size:12.5px;font-family:inherit;color:var(--t1);outline:none;transition:border-color .12s,box-shadow .12s}
+.inp:focus{border-color:var(--accln);box-shadow:0 0 0 3px var(--accbg)}
+.srch{position:relative;display:flex;align-items:center}
+.srch .ic{position:absolute;left:9px;color:var(--t3);pointer-events:none}
+.srch .inp{padding-left:30px;width:190px}
+.ta{width:100%;min-height:170px;border:1px solid var(--line2);border-radius:9px;padding:10px 12px;font-size:12.5px;line-height:1.8;font-family:inherit;color:var(--t1);outline:none;resize:vertical;background:var(--sub)}
+.ta:focus{border-color:var(--accln);box-shadow:0 0 0 3px var(--accbg);background:#fff}
+.tgrid{display:grid;grid-template-columns:106px 168px minmax(170px,1fr) 58px 168px 44px 74px;align-items:center;column-gap:10px;padding:0 14px}
+.th{height:32px;font-size:11px;font-weight:500;color:var(--t3);border-bottom:1px solid var(--line);position:sticky;top:0;background:#fff;z-index:2}
+.tr{min-height:40px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .1s;font-size:12.5px}
+.tr:hover{background:var(--sub)}
+.tract{opacity:0;display:flex;gap:2px;justify-content:flex-end;transition:opacity .1s}
+.tr:hover .tract{opacity:1}
+.thumb{width:26px;height:26px;border-radius:6px;border:1px solid var(--line);flex:none}
+.pg{height:4px;background:var(--inset);border-radius:99px;overflow:hidden;flex:1}
+.pg i{display:block;height:100%;background:var(--acc);border-radius:99px;transition:width .3s ease}
+.spn{width:11px;height:11px;border-radius:99px;border:1.5px solid var(--accln);border-top-color:var(--acc);animation:rot .8s linear infinite;flex:none}
+.s9{width:9px;height:9px}
+.terr{font-size:11.5px;color:var(--er);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kbar{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 14px;background:var(--sub);border-bottom:1px solid var(--line);cursor:pointer;transition:background .12s;flex:none}
+.kbar:hover{background:var(--inset)}
+.kd{width:7px;height:7px;border-radius:99px}
+.kd-ok{background:var(--ok)}.kd-lim{background:var(--wr)}.kd-off{background:oklch(82% .008 260)}.kd-auth{background:var(--er)}
+.kexp{padding:12px 14px;border-bottom:1px solid var(--line);background:var(--sub);display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.kcard{background:#fff;border:1px solid var(--line);border-radius:9px;padding:10px 11px;box-shadow:var(--sh1)}
+.ban{display:flex;align-items:center;gap:9px;margin:12px 14px 0;padding:8px 12px;border:1px solid oklch(60% .11 75/.4);background:var(--wrbg);border-radius:9px;font-size:12px;color:oklch(40% .09 70)}
+.seg{display:inline-flex;background:var(--inset);border-radius:8px;padding:2px;gap:2px}
+.sgi{height:24px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:background .12s,color .12s;white-space:nowrap}
+.sgi.on{background:#fff;color:var(--t1);box-shadow:var(--sh1)}
+.sgi.dis{opacity:.4;cursor:not-allowed}
+.rng{appearance:none;-webkit-appearance:none;width:104px;height:3px;border-radius:99px;background:oklch(88% .008 260);outline:none}
+.rng::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:99px;background:#fff;border:1px solid var(--line2);box-shadow:var(--sh1);cursor:pointer}
+.rgrid{display:grid;gap:12px;padding:16px 18px 80px}
+.rcard{position:relative;cursor:pointer;min-width:0}
+.rcimg{aspect-ratio:1;border-radius:10px;border:1px solid var(--line);transition:box-shadow .15s,transform .12s}
+.rcard.sel .rcimg{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--acc);transform:scale(.99)}
+.rck{position:absolute;top:7px;left:7px;width:20px;height:20px;border-radius:7px;background:#fff;border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;color:transparent;transition:opacity .12s;box-shadow:var(--sh1);opacity:0;z-index:2}
+.rcard:hover .rck{opacity:1}
+.rcard.sel .rck{opacity:1;background:var(--acc);border-color:var(--acc2);color:#fff}
+.hacts{position:absolute;right:7px;top:7px;display:flex;gap:4px;opacity:0;transition:opacity .12s;z-index:2}
+.rcard:hover .hacts{opacity:1}
+.hbtn{width:24px;height:24px;border-radius:7px;background:oklch(100% 0 0/.93);border:1px solid var(--line);box-shadow:var(--sh1);display:flex;align-items:center;justify-content:center;color:var(--t2);cursor:pointer;transition:color .1s}
+.hbtn:hover{color:var(--t1);background:#fff}
+.rmeta{display:flex;align-items:center;gap:6px;margin-top:6px;min-width:0}
+.rdet{position:absolute;inset:0;background:#fff;display:flex;z-index:5;animation:fin .16s}
+.rdimgw{flex:1;background:var(--inset);display:flex;align-items:center;justify-content:center;padding:26px;min-width:0}
+.rdimg{width:min(100%,620px);aspect-ratio:1;border-radius:12px;box-shadow:var(--sh2);border:1px solid var(--line)}
+.rdside{width:344px;flex:none;border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.rdbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line)}
+.ptext{font-size:12.5px;line-height:1.85;color:var(--t1);user-select:text;white-space:pre-wrap}
+.hintbar{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;display:flex;align-items:center;gap:14px;background:oklch(100% 0 0/.92);border:1px solid var(--line);box-shadow:var(--sh2);border-radius:99px;padding:7px 16px;font-size:11.5px;color:var(--t3);z-index:6;white-space:nowrap}
+.wgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:14px;padding:16px 18px 40px}
+.wcard{cursor:pointer;min-width:0}
+.wcimg{aspect-ratio:4/3;border-radius:10px;border:1px solid var(--line);transition:box-shadow .15s}
+.wcard:hover .wcimg{box-shadow:var(--sh2)}
+.star{background:none;border:none;padding:2px;color:oklch(78% .015 260);cursor:pointer;transition:color .12s,transform .12s;display:inline-flex;flex:none}
+.star.on{color:oklch(68% .13 80)}
+.star:hover{transform:scale(1.15)}
+.gsec{border-bottom:1px solid var(--line);padding-bottom:8px}
+.ghead{display:flex;align-items:center;gap:9px;min-height:48px;padding:4px 18px 0}
+.prow{display:flex;align-items:center;gap:10px;height:32px;padding:0 18px 0 40px;cursor:pointer;transition:background .1s;font-size:12.5px}
+.prow:hover{background:var(--sub)}
+.prow .star{opacity:0}
+.prow:hover .star{opacity:1}
+.prow .star.on{opacity:1}
+.pid{font:500 10.5px var(--mono);color:var(--acc2);background:var(--accbg);border:1px solid oklch(58% .17 257/.24);border-radius:5px;padding:2px 6px;white-space:nowrap;cursor:pointer}
+.fgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(142px,1fr));gap:12px;padding:10px 18px 16px}
+.xrow{display:flex;align-items:center;gap:12px;min-height:54px;padding:6px 18px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .1s}
+.xrow:hover{background:var(--sub)}
+.xrow.sel{background:var(--accbg)}
+.xthumb{width:38px;height:38px;border-radius:8px;border:1px solid var(--line);flex:none;filter:grayscale(.55);opacity:.85}
+.swrap{max-width:768px;margin:0 auto;padding:20px 24px 48px}
+.sec{margin-bottom:28px}
+.sechead{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.krow{border:1px solid var(--line);border-radius:11px;background:#fff;box-shadow:var(--sh1);padding:11px 13px;margin-bottom:8px}
+.stp{display:inline-flex;align-items:center;border:1px solid var(--line2);border-radius:7px;background:#fff;height:24px}
+.stpb{width:24px;height:100%;border:none;background:transparent;color:var(--t2);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;font-family:inherit}
+.stpb:hover{color:var(--t1);background:var(--sub)}
+.stpv{min-width:26px;text-align:center;font:500 12px var(--mono)}
+.rc{flex:1;border:1px solid var(--line2);border-radius:10px;padding:12px 14px;cursor:pointer;transition:border-color .12s,background .12s,box-shadow .12s;background:#fff}
+.rc.on{border-color:var(--accln);background:var(--accbg);box-shadow:0 0 0 1px var(--accln)}
+.pathwell{font:500 11.5px var(--mono);background:var(--sub);border:1px solid var(--line);border-radius:8px;padding:8px 11px;color:var(--t2);user-select:text}
+.sw{width:32px;height:19px;border-radius:99px;background:oklch(88% .008 260);border:1px solid var(--line2);position:relative;cursor:pointer;transition:background .15s,border-color .15s;flex:none}
+.sw i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:99px;background:#fff;box-shadow:0 1px 2px oklch(20% .02 260/.25);transition:left .15s}
+.sw.on{background:var(--acc);border-color:var(--acc2)}
+.sw.on i{left:15px}
+.ovl{position:fixed;inset:0;background:oklch(22% .02 262/.3);display:flex;align-items:flex-start;justify-content:center;z-index:50;animation:fin .13s;padding:0 20px}
+.mdl{background:#fff;border-radius:13px;border:1px solid var(--line);box-shadow:var(--sh3);margin-top:9vh;animation:pop .18s cubic-bezier(.2,.9,.3,1);display:flex;flex-direction:column;max-height:78vh;width:560px;max-width:100%}
+.w360{width:360px}.w420{width:420px}.w640{width:640px}.w700{width:700px}
+.mhead{display:flex;align-items:center;gap:9px;padding:13px 16px 11px;border-bottom:1px solid var(--line);flex:none}
+.mbody{padding:14px 16px;overflow:auto;min-height:0}
+.mlist{padding:6px 8px;overflow:auto;min-height:0}
+.mfoot{display:flex;align-items:center;gap:8px;padding:11px 16px;border-top:1px solid var(--line);flex:none;background:var(--sub);border-radius:0 0 13px 13px}
+.pickrow{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:9px;cursor:pointer;transition:background .1s}
+.pickrow:hover{background:var(--sub)}
+.ckb{width:17px;height:17px;border-radius:6px;border:1px solid var(--line2);background:#fff;display:flex;align-items:center;justify-content:center;color:transparent;transition:background .12s;flex:none}
+.ckb.on{background:var(--acc);border-color:var(--acc2);color:#fff}
+.drop{border:1px dashed var(--line2);border-radius:11px;background:var(--sub);padding:34px 20px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+.drop:hover{border-color:var(--accln);background:var(--accbg)}
+.dscrim{position:fixed;inset:0;background:oklch(22% .02 262/.14);z-index:40;animation:fin .13s}
+.drw{position:fixed;top:52px;right:10px;bottom:10px;width:400px;background:#fff;border:1px solid var(--line);border-radius:13px;box-shadow:var(--sh3);z-index:45;display:flex;flex-direction:column;animation:din .2s cubic-bezier(.2,.9,.3,1);overflow:hidden}
+.att{display:flex;gap:10px;padding:7px 0}
+.attdot{width:7px;height:7px;border-radius:99px;margin-top:4px;flex:none}
+.ovtop{align-items:flex-start}
+.plt{width:600px;max-width:92vw;background:#fff;border-radius:13px;border:1px solid var(--line);box-shadow:var(--sh3);margin-top:14vh;overflow:hidden;animation:pop .16s cubic-bezier(.2,.9,.3,1)}
+.plin{display:flex;align-items:center;gap:10px;padding:0 15px;height:46px;border-bottom:1px solid var(--line);color:var(--t3)}
+.plinp{flex:1;border:none;outline:none;font-size:13.5px;font-family:inherit;color:var(--t1);background:transparent;height:100%}
+.pllist{max-height:320px;overflow:auto;padding:6px}
+.pltit{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:8px;cursor:pointer;font-size:12.5px}
+.pltit:hover{background:var(--sub)}
+.pltit.on{background:var(--accbg)}
+.plcat{font-size:11px;color:var(--t3);width:52px;flex:none}
+.tstwrap{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:80;pointer-events:none}
+.tst{display:flex;align-items:center;gap:8px;background:oklch(25% .015 262);color:oklch(96% .003 255);font-size:12.5px;font-weight:500;padding:9px 13px;border-radius:10px;box-shadow:var(--sh3);animation:tin .22s cubic-bezier(.2,.9,.3,1)}
+.tsi{color:oklch(75% .1 155)}
+.bigempty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 20px;color:var(--t3);gap:9px;text-align:center}
+.mono{font-family:var(--mono)}
+.t2{color:var(--t2)}.t3{color:var(--t3)}
+.mt4{margin-top:4px}.mt6{margin-top:6px}.mt10{margin-top:10px}.mt14{margin-top:14px}.mt20{margin-top:20px}
+.mr6{margin-right:6px}
+.gap4{gap:4px}.gap6{gap:6px}.gap7{gap:7px}.gap9{gap:9px}.gap14{gap:14px}
+.fs10{font-size:10.5px}
+.cmp .tr{min-height:35px}.cmp .nv{height:26px}.cmp .prow{height:28px}.cmp .phd{min-height:44px}.cmp .grow{min-height:38px}.cmp .xrow{min-height:46px}
+.pgrid{display:flex;flex-wrap:wrap;gap:6px;padding:10px 18px 16px}
+.pchip{font:500 10.5px var(--mono);color:var(--t2);background:var(--sub);border:1px solid var(--line);border-radius:6px;padding:4px 8px;cursor:pointer;transition:border-color .1s,color .1s,background .1s;display:inline-flex;align-items:center;gap:5px}
+.pchip:hover{border-color:var(--accln);color:var(--acc2);background:var(--accbg)}
+.favdot{width:5px;height:5px;border-radius:99px;background:oklch(68% .13 80);flex:none}
+.gpick{border:1px solid var(--line);border-radius:11px;padding:10px 12px 8px;margin-bottom:8px;cursor:pointer;transition:border-color .12s,background .12s,box-shadow .12s;background:#fff}
+.gpick:hover{border-color:var(--line2)}
+.gpick.sel{border-color:var(--accln);background:var(--accbg);box-shadow:0 0 0 1px var(--accln)}
+.klist{border:1px solid var(--line);border-radius:11px;overflow:hidden;box-shadow:var(--sh1);background:#fff}
+.kline{display:grid;grid-template-columns:170px minmax(110px,1fr) 80px 84px 54px 104px 34px 26px;align-items:center;column-gap:10px;padding:0 12px;height:40px;font-size:12px}
+.kline+.kline{border-top:1px solid var(--line)}
+.kline.khd{height:26px;background:var(--sub);font-size:10.5px;color:var(--t3)}
+@keyframes rot{to{transform:rotate(360deg)}}
+@keyframes fin{from{opacity:0}}
+@keyframes pop{from{opacity:0;transform:scale(.97) translateY(6px)}}
+@keyframes tin{from{opacity:0;transform:translateY(8px) scale(.97)}}
+@keyframes din{from{opacity:0;transform:translateX(14px)}}
+@keyframes plz{0%{box-shadow:0 0 0 0 oklch(60% .11 75/.4)}80%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@keyframes blk{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+</helmet>
+<div class="app {{shellCls}}">
+<div class="tbar">
+<sc-if value="{{isMac}}" hint-placeholder-val="{{true}}"><div class="fx ac gap8 noshrink"><i class="tlc tlr"></i><i class="tlc tly"></i><i class="tlc tlg"></i></div></sc-if>
+<div class="fx ac gap7"><span class="logo"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2 9.7 6.3 14 8 9.7 9.7 8 14 6.3 9.7 2 8 6.3 6.3Z"></path></svg></span><span class="fw6 fs13 nowrap">GenDesk</span><span class="t3 fs11 nowrap">图片生产 · 本地</span></div>
+<div class="f1"></div>
+<sc-if value="{{updateReady}}" hint-placeholder-val="{{false}}"><button class="pill" onClick="{{restartNow}}"><span class="pdot"></span>v1.1.0 已就绪 · 重启安装</button></sc-if>
+<button class="tbtn" onClick="{{palOpenFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg>跳转<span class="kbd">{{mod}} K</span></button>
+<sc-if value="{{isWin}}" hint-placeholder-val="{{false}}"><div class="fx ac noshrink"><span class="wb"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.2"><path d="M4 8h8"></path></svg></span><span class="wb"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="4.5" y="4.5" width="7" height="7" rx="1"></rect></svg></span><span class="wb wbx"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.2"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></span></div></sc-if>
+</div>
+<div class="shell">
+<div class="side">
+<button class="sbtn" onClick="{{palOpenFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><span class="f1" style="text-align:left">搜索或跳转…</span><span class="kbd">{{mod}} K</span></button>
+<div class="nsec">制作</div>
+<div class="nv {{navGen.cls}}" onClick="{{navGen.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2 9.7 6.3 14 8 9.7 9.7 8 14 6.3 9.7 2 8 6.3 6.3Z"></path></svg><span class="f1">图片生成</span><span class="kbd">{{mod}}1</span></div>
+<div class="nv {{navTasks.cls}}" onClick="{{navTasks.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"></path><circle cx="2.7" cy="4" r=".4" fill="currentColor" stroke="none"></circle><circle cx="2.7" cy="8" r=".4" fill="currentColor" stroke="none"></circle><circle cx="2.7" cy="12" r=".4" fill="currentColor" stroke="none"></circle></svg><span class="f1">任务队列</span><sc-if value="{{navTasks.hasB}}" hint-placeholder-val="{{false}}"><span class="nbdg nb-run"><i class="spn s9"></i>{{navTasks.bdg}}</span></sc-if><span class="kbd">{{mod}}2</span></div>
+<div class="nv {{navRev.cls}}" onClick="{{navRev.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"></circle><path d="M5.4 8.2 7.2 10l3.4-3.8"></path></svg><span class="f1">图片验收</span><sc-if value="{{navRev.hasB}}" hint-placeholder-val="{{false}}"><span class="nbdg nb-amb">{{navRev.bdg}}</span></sc-if><span class="kbd">{{mod}}3</span></div>
+<div class="nsec">资产</div>
+<div class="nv {{navLib.cls}}" onClick="{{navLib.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="2.5" width="4.6" height="4.6" rx="1.3"></rect><rect x="8.9" y="2.5" width="4.6" height="4.6" rx="1.3"></rect><rect x="2.5" y="8.9" width="4.6" height="4.6" rx="1.3"></rect><rect x="8.9" y="8.9" width="4.6" height="4.6" rx="1.3"></rect></svg><span class="f1">作品库</span><span class="kbd">{{mod}}4</span></div>
+<div class="nv {{navPrm.cls}}" onClick="{{navPrm.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4.5h10M3 8h10M3 11.5h5.5"></path></svg><span class="f1">提示词库</span><span class="kbd">{{mod}}5</span></div>
+<div class="nv {{navRef.cls}}" onClick="{{navRef.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.6"></rect><circle cx="6" cy="6.5" r="1.1"></circle><path d="M4 12.5 8.5 8l5 4.5"></path></svg><span class="f1">参考图库</span><span class="kbd">{{mod}}6</span></div>
+<div class="f1"></div>
+<sc-if value="{{qc_show}}" hint-placeholder-val="{{false}}"><div class="qcard" onClick="{{qc_go}}"><div class="fx ac gap6"><i class="spn s9"></i><span class="fs12 fw5 f1 nowrap ohide">{{qc_label}}</span><span class="mono fs10 t3">{{qc_pct}}%</span></div><div class="pg mt6"><i style="width:{{qc_pct}}%"></i></div><div class="fs10 t3 mt6">{{qc_sub}}</div></div></sc-if>
+<div class="nv {{navTrash.cls}}" onClick="{{navTrash.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg><span class="f1">废纸篓</span><sc-if value="{{navTrash.hasB}}" hint-placeholder-val="{{false}}"><span class="nbdg">{{navTrash.bdg}}</span></sc-if><span class="kbd">{{mod}}7</span></div>
+<div class="nv {{navSet.cls}}" onClick="{{navSet.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 5h11M2.5 11h11"></path><circle cx="6" cy="5" r="1.7" fill="#fff"></circle><circle cx="10" cy="11" r="1.7" fill="#fff"></circle></svg><span class="f1">设置</span><span class="kbd">{{mod}}8</span></div>
+<div class="sfoot">{{verLabel}}</div>
+</div>
+<div class="main">
+<sc-if value="{{isGen}}" hint-placeholder-val="{{true}}">
+<div class="col f1 ohide" data-screen-label="图片生成">
+<div class="phd"><span class="ptt">图片生成</span><span class="pcap">{{g_batchCap}}</span><div class="f1"></div><span class="pcap">参考图 × 提示词组 → 任务队列 → 验收 → 输出</span></div>
+<div class="pbody">
+<div class="cwrap">
+<div class="card">
+<div class="chead"><span class="cico"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4.5h10M3 8h10M3 11.5h5.5"></path></svg></span><span class="fw6 fs13">提示词</span><sc-if value="{{g_hasGroups}}" hint-placeholder-val="{{false}}"><span class="cnt">{{g_groupCap}}</span></sc-if><div class="f1"></div><button class="btn sm gho" onClick="{{g_import}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5V11M4.8 7.8 8 11l3.2-3.2M3.5 13h9"></path></svg>导入 .txt</button><button class="btn sm" onClick="{{g_pickGroups}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>选择提示词组</button></div>
+<sc-if value="{{g_noGroups}}" hint-placeholder-val="{{true}}"><div class="empt"><div class="emic"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4.5h10M3 8h10M3 11.5h5.5"></path></svg></div><div class="fs13 fw5 t2">尚未选择提示词</div><div class="fs12 t3 mt4">从提示词库选择分组，或导入 .txt 作为本批次的临时提示词</div><div class="fx jc gap8 mt14"><button class="btn" onClick="{{g_pickGroups}}">选择提示词组</button><button class="btn gho" onClick="{{g_import}}">导入 .txt</button></div></div></sc-if>
+<sc-for list="{{g_groups}}" as="g" hint-placeholder-count="0"><div class="ggrp"><div class="fx ac gap9"><i class="gdot" style="background:{{g.dot}}"></i><span class="fw5 nowrap">{{g.name}}</span><span class="chip">{{g.prefix}}</span><span class="bdg b-gray">{{g.scene}}</span><sc-if value="{{g.temp}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber">临时 · 验收通过后自动入库</span></sc-if><span class="t3 fs11 nowrap ohide f1">{{g.tagStr}}</span><span class="t3 fs12 nowrap">{{g.count}} 条</span><button class="icb" onClick="{{g.remove}}" title="移除"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="pgrid" style="padding:8px 0 2px"><sc-for list="{{g.chips}}" as="p" hint-placeholder-count="10"><button class="pchip" onClick="{{p.open}}" title="{{p.tip}}"><sc-if value="{{p.fav}}" hint-placeholder-val="{{false}}"><i class="favdot"></i></sc-if>{{p.num}}</button></sc-for></div></div></sc-for>
+</div>
+<div class="card mt14">
+<div class="chead"><span class="cico"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.6"></rect><circle cx="6" cy="6.5" r="1.1"></circle><path d="M4 12.5 8.5 8l5 4.5"></path></svg></span><span class="fw6 fs13">参考图</span><sc-if value="{{g_hasRefs}}" hint-placeholder-val="{{false}}"><span class="cnt">{{g_refCap}}</span></sc-if><div class="f1"></div><button class="btn sm gho" onClick="{{g_upload}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11V3.5M4.8 6.7 8 3.5l3.2 3.2M3.5 13h9"></path></svg>上传</button><button class="btn sm" onClick="{{g_pickRefs}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>从参考图库选择</button></div>
+<sc-if value="{{g_noRefs}}" hint-placeholder-val="{{true}}"><div class="empt"><div class="emic"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.6"></rect><circle cx="6" cy="6.5" r="1.1"></circle><path d="M4 12.5 8.5 8l5 4.5"></path></svg></div><div class="fs13 fw5 t2">尚未选择参考图</div><div class="fs12 t3 mt4">从参考图库选择已有素材，或上传新图；每张参考图将挂靠一个提示词组</div><div class="fx jc gap8 mt14"><button class="btn" onClick="{{g_pickRefs}}">选择参考图</button><button class="btn gho" onClick="{{g_upload}}">上传参考图</button></div></div></sc-if>
+<sc-if value="{{g_hasRefs}}" hint-placeholder-val="{{false}}"><div class="refgrid"><sc-for list="{{g_refs}}" as="r" hint-placeholder-count="0"><div class="reftile"><div class="ph rtph" style="background:{{r.bg}}"><span class="phl">{{r.tag}}</span><button class="rtx" onClick="{{r.remove}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="fs11 fw5 mt6 nowrap ohide tc mono">{{r.name}}</div><button class="mapchip {{r.mapCls}}" onClick="{{r.openMap}}"><span class="nowrap ohide">{{r.mapLabel}}</span><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6.5 4 4 4-4"></path></svg></button></div></sc-for></div><div class="fs11 t3" style="padding:0 12px 12px">每张参考图需指定一个提示词组；不同参考图可共用同一组提示词，各自独立生成。</div></sc-if>
+</div>
+</div>
+</div>
+<div class="genbar"><div class="fx ac gap6 wrap f1"><sc-for list="{{g_formula}}" as="f" hint-placeholder-count="0"><span class="fchip {{f.cls}}">{{f.t}}</span></sc-for><sc-if value="{{g_showTotal}}" hint-placeholder-val="{{false}}"><span class="t3 fs12">=</span><span class="fw6 fs13" style="color:var(--acc2)">{{g_total}} 个任务</span></sc-if></div><sc-if value="{{g_hasMsg}}" hint-placeholder-val="{{false}}"><span class="fs12 nowrap" style="color:var(--wr)">{{g_msg}}</span></sc-if><button class="btn pri" disabled="{{g_blocked}}" onClick="{{g_startFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M5.5 4v8l6.5-4z"></path></svg>开始生成</button></div>
+</div>
+</sc-if>
+<sc-if value="{{t_isTasks}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="任务队列">
+<div class="phd"><span class="ptt">任务队列</span><button class="btn sm gho" onClick="{{t_batchFn}}">{{t_batchLabel}}<svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6.5 4 4 4-4"></path></svg></button><div class="fx ac gap6"><sc-for list="{{t_sumChips}}" as="c" hint-placeholder-count="0"><span class="bdg {{c.cls}}"><span class="dt"></span>{{c.txt}}</span></sc-for></div><div class="f1"></div><sc-if value="{{t_hasFailed}}" hint-placeholder-val="{{false}}"><button class="btn sm gho" onClick="{{t_retryAllFn}}">重试全部失败 · {{t_failedN}}</button></sc-if><button class="btn sm" onClick="{{t_pauseFn}}">{{t_pauseLabel}}</button></div>
+<div class="kbar" onClick="{{t_kbToggle}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="color:var(--t3)"><circle cx="5.5" cy="10.5" r="2.8"></circle><path d="m7.8 8.2 4.7-4.7M10.5 5.5l2 2"></path></svg><span class="fs12 fw5 t2">API Key</span><div class="fx ac gap4"><sc-for list="{{t_kdots}}" as="d" hint-placeholder-count="0"><i class="{{d.cls}}"></i></sc-for></div><span class="fs11 t3 mono">{{t_kbSum}}</span><sc-if value="{{t_kbHasAlert}}" hint-placeholder-val="{{false}}"><span class="bdg {{t_kbAlertCls}}"><span class="dt"></span>{{t_kbAlert}}</span></sc-if><div class="f1"></div><button class="btn sm gho" onClick="{{navSet.go}}">完整管理</button><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--t3)"><path d="m4 6.5 4 4 4-4"></path></svg></div>
+<sc-if value="{{t_keybarOpen}}" hint-placeholder-val="{{false}}"><div class="kexp"><sc-for list="{{t_keys}}" as="k" hint-placeholder-count="3"><div class="kcard"><div class="fx ac gap7"><i class="kd {{k.dotCls}}"></i><span class="fw5 fs12 f1 nowrap ohide">{{k.alias}}</span><span class="bdg {{k.stCls}}">{{k.stLabel}}</span></div><div class="fx ac gap8 mt6"><span class="chip">{{k.id}}</span><span class="fs10 t3 mono nowrap ohide f1">{{k.model}}</span><span class="fs10 t3 mono nowrap">并发 {{k.used}}/{{k.cap}}</span></div><div class="fx ac gap8 mt6"><span class="fs10 t3">{{k.rate}}</span><div class="f1"></div><span class="sw {{k.swCls}}" onClick="{{k.togg}}"><i></i></span></div></div></sc-for></div></sc-if>
+<sc-if value="{{t_intShow}}" hint-placeholder-val="{{false}}"><div class="ban"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"></circle><path d="M8 4.8v3.8"></path><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"></circle></svg><span class="f1">{{t_intN}} 个任务因上次退出被中断 — 任务现场已保留，排队任务未清空，可直接继续。</span><button class="btn sm" onClick="{{t_intRetry}}">重试中断任务</button><button class="icb" onClick="{{t_intDismiss}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div></sc-if>
+<div class="fx ac gap8" style="padding:10px 14px 8px"><div class="seg"><sc-for list="{{t_tabs}}" as="tb" hint-placeholder-count="6"><span class="sgi {{tb.cls}}" onClick="{{tb.go}}">{{tb.label}}<span class="fs10 mono" style="opacity:.55">{{tb.n}}</span></span></sc-for></div><div class="f1"></div><span class="fs11 t3 nowrap">事件推送 250ms 节流 · 列表虚拟滚动</span></div>
+<div class="f1" style="overflow:auto;min-height:0">
+<div class="tgrid th"><span>状态</span><span>参考图</span><span>提示词</span><span>Key</span><span>进度 / 结果</span><span class="tc">重试</span><span></span></div>
+<sc-if value="{{t_hasRows}}" hint-placeholder-val="{{false}}"><sc-for list="{{t_rows}}" as="t" hint-placeholder-count="8"><div class="tgrid tr" onClick="{{t.open}}"><span><span class="bdg {{t.stCls}}"><sc-if value="{{t.spin}}" hint-placeholder-val="{{false}}"><i class="spn s9"></i></sc-if>{{t.stLabel}}</span></span><span class="fx ac gap8 ohide"><span class="ph thumb" style="background:{{t.thumbBg}}"></span><span class="mono fs11 nowrap ohide">{{t.refName}}</span></span><span class="fx ac gap7 ohide"><span class="pid">{{t.pid}}</span><span class="t3 fs11 nowrap ohide">{{t.gname}}</span></span><span><span class="chip">{{t.keyTag}}</span></span><span class="fx ac gap8 ohide"><sc-if value="{{t.showBar}}" hint-placeholder-val="{{false}}"><div class="pg"><i style="width:{{t.pct}}%"></i></div><span class="mono fs10 t3 noshrink" style="width:30px;text-align:right">{{t.pct}}%</span></sc-if><sc-if value="{{t.showErr}}" hint-placeholder-val="{{false}}"><span class="terr" title="{{t.errFull}}">{{t.errT}}</span><sc-if value="{{t.isAuth}}" hint-placeholder-val="{{false}}"><button class="btn sm dng noshrink" style="height:22px;padding:0 7px" onClick="{{t.disableKeyFn}}">停用该 Key</button></sc-if></sc-if><sc-if value="{{t.showRes}}" hint-placeholder-val="{{false}}"><span class="fs11 {{t.resCls}} nowrap ohide">{{t.resT}}</span></sc-if></span><span class="tc mono fs11 t3">{{t.retries}}</span><span class="tract"><sc-if value="{{t.canRetry}}" hint-placeholder-val="{{false}}"><button class="btn sm gho" onClick="{{t.retryFn}}">重试</button></sc-if></span></div></sc-for></sc-if>
+<sc-if value="{{t_archived}}" hint-placeholder-val="{{false}}"><div class="bigempty"><div class="fs13 fw5 t2">{{t_archLabel}}</div><div class="fs12 t3">任务明细已归档；通过验收的作品与提示词记录长期保留</div><button class="btn mt10" onClick="{{t_archGo}}">打开作品库</button></div></sc-if>
+<sc-if value="{{t_empty}}" hint-placeholder-val="{{false}}"><div class="bigempty"><div class="fs13 fw5 t2">当前筛选下没有任务</div><div class="fs12 t3">切换上方状态分组，或回到图片生成页创建新批次</div></div></sc-if>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{r_isRev}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide posrel" data-screen-label="图片验收">
+<div class="phd"><span class="ptt">图片验收</span><span class="cnt">{{r_count}} 待验收</span><span class="pcap">{{r_proc}}</span><div class="f1"></div><sc-if value="{{r_hasSel}}" hint-placeholder-val="{{false}}"><span class="fs12 t2 nowrap">已选 {{r_selN}}</span><button class="btn sm" onClick="{{r_passSel}}">通过所选</button><button class="btn sm gho dng" onClick="{{r_trashSel}}">移入废纸篓</button><button class="btn sm gho" onClick="{{r_clearSel}}">清除</button><span style="width:1px;height:16px;background:var(--line2)"></span></sc-if><span class="fs11 t3 nowrap">每行</span><input type="range" min="3" max="8" value="{{r_cols}}" onInput="{{r_onCols}}" class="rng"/></div>
+<sc-if value="{{r_hasItems}}" hint-placeholder-val="{{false}}"><div class="pbody"><div class="rgrid" style="grid-template-columns:repeat({{r_cols}},1fr)"><sc-for list="{{r_items}}" as="i" hint-placeholder-count="8"><div class="rcard {{i.selCls}}" onClick="{{i.click}}" onDoubleClick="{{i.dbl}}"><div class="ph rcimg" style="background:{{i.bg}}"><span class="phl">{{i.tag}}</span></div><span class="rck"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><div class="hacts"><button class="hbtn" onClick="{{i.passFn}}" title="通过"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></button><button class="hbtn" onClick="{{i.failFn}}" title="不通过"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button><button class="hbtn" onClick="{{i.zoomFn}}" title="大图逐张"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3H13v3.5M6.5 13H3V9.5M13 3 9.2 6.8M3 13l3.8-3.8"></path></svg></button></div><div class="rmeta"><span class="pid">{{i.pid}}</span><span class="fs10 t3 mono nowrap ohide">{{i.refName}}</span></div></div></sc-for></div></div>
+<div class="hintbar"><span class="fx ac gap6"><span class="kbd">双击</span>大图</span><span class="fx ac gap6"><span class="kbd">⏎</span>通过</span><span class="fx ac gap6"><span class="kbd">⌫</span>不通过</span><span class="fx ac gap6"><span class="kbd">R</span>微调重试</span><span class="fx ac gap6"><span class="kbd">←</span><span class="kbd">→</span>切换</span></div></sc-if>
+<sc-if value="{{r_empty}}" hint-placeholder-val="{{false}}"><div class="bigempty"><div class="fs13 fw5 t2">没有待验收的图片</div><div class="fs12 t3">生成完成的任务会自动进入这里 — 网格粗筛，大图逐张精审</div></div></sc-if>
+<sc-if value="{{rd_open}}" hint-placeholder-val="{{false}}"><div class="rdet"><div class="rdimgw"><div class="ph rdimg" style="background:{{rd_bg}}"><span class="phl">GEN · {{rd_pid}} · 1024×1024 · 原图按需加载</span></div></div><div class="rdside"><div class="fx ac gap8" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="pid">{{rd_pid}}</span><span class="fs12 fw5 nowrap ohide f1">{{rd_gname}}</span><button class="icb" onClick="{{rd_close}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="f1" style="overflow:auto;padding:12px 14px"><div class="fx ac gap6 wrap"><span class="chip">{{rd_refName}}</span><span class="chip">{{rd_keyTag}}</span><span class="chip">1024×1024</span></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">提示词原文</div><div class="ptext mt6">{{rd_text}}</div></div><sc-if value="{{rd_editOpen}}" hint-placeholder-val="{{false}}"><div style="padding:12px 14px;border-top:1px solid var(--line)"><div class="fs11 fw6 t3" style="margin-bottom:6px">微调提示词 · 仅用于本次重试，验收通过后按微调版本入库</div><textarea class="ta" style="min-height:110px" defaultValue="{{rd_text}}" onInput="{{rd_onDraft}}"></textarea><div class="fx gap8 mt10"><div class="f1"></div><button class="btn sm" onClick="{{rd_editToggle}}">收起</button><button class="btn pri sm" onClick="{{rd_retryGo}}">用微调提示词重试</button></div></div></sc-if><div class="rdbar"><button class="icb" onClick="{{rd_prev}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m10 4-4 4 4 4"></path></svg></button><span class="mono fs11 t3 nowrap">{{rd_pos}}</span><button class="icb" onClick="{{rd_next}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 4 4 4-4 4"></path></svg></button><div class="f1"></div><sc-if value="{{rd_notEdit}}" hint-placeholder-val="{{true}}"><button class="btn sm gho" onClick="{{rd_editToggle}}">重试 R</button></sc-if><button class="btn sm gho dng" onClick="{{rd_fail}}">不通过 ⌫</button><button class="btn pri sm" onClick="{{rd_pass}}">通过 ⏎</button></div></div></div></sc-if>
+</div>
+</sc-if>
+<sc-if value="{{w_isLib}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="作品库">
+<div class="phd"><span class="ptt">作品库</span><span class="cnt">{{w_count}} 张已通过</span><div class="f1"></div><div class="seg"><sc-for list="{{w_filters}}" as="fl" hint-placeholder-count="4"><span class="sgi {{fl.cls}}" onClick="{{fl.go}}">{{fl.label}}</span></sc-for></div></div>
+<sc-if value="{{w_hasItems}}" hint-placeholder-val="{{false}}"><div class="pbody"><div class="wgrid"><sc-for list="{{w_items}}" as="w" hint-placeholder-count="8"><div class="wcard" onClick="{{w.open}}"><div class="ph wcimg" style="background:{{w.bg}}"><span class="phl">{{w.tag}}</span></div><div class="rmeta"><span class="pid">{{w.pid}}</span><span class="fs10 t3 nowrap ohide f1">{{w.gname}} · {{w.date}}</span><button class="star {{w.favCls}}" onClick="{{w.favFn}}" title="收藏"><svg class="ic12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.8 9.6 6.4 14.2 8 9.6 9.6 8 14.2 6.4 9.6 1.8 8 6.4 6.4Z"></path></svg></button></div></div></sc-for></div></div></sc-if>
+<sc-if value="{{w_empty}}" hint-placeholder-val="{{false}}"><div class="bigempty"><div class="fs13 fw5 t2">该筛选下暂无作品</div><div class="fs12 t3">通过验收的图片会归档到这里，并同步输出到本地批次文件夹</div></div></sc-if>
+</div>
+</sc-if>
+<sc-if value="{{p_isPrm}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="提示词库">
+<div class="phd"><span class="ptt">提示词库</span><span class="cnt">{{p_total}} 条</span><div class="f1"></div><div class="srch"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><input class="inp" placeholder="搜索编号或正文…" value="{{p_q}}" onInput="{{p_onQ}}"/></div><button class="btn sm" onClick="{{p_import}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5V11M4.8 7.8 8 11l3.2-3.2M3.5 13h9"></path></svg>导入 .txt</button></div>
+<div class="pbody">
+<sc-for list="{{p_secs}}" as="g" hint-placeholder-count="3"><div class="gsec"><div class="ghead"><i class="gdot" style="background:{{g.dot}}"></i><span class="fw6 fs13 nowrap">{{g.name}}</span><span class="chip">{{g.prefix}}</span><span class="bdg b-gray">{{g.scene}}</span><sc-if value="{{g.temp}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber">临时 · 待验收入库</span></sc-if><span class="t3 fs11 nowrap ohide f1">{{g.tagStr}}</span><span class="fs11 t3 nowrap">{{g.count}}</span><button class="btn sm gho" onClick="{{g.viewWorks}}">查看作品</button></div><div class="pgrid"><sc-for list="{{g.rows}}" as="p" hint-placeholder-count="12"><button class="pchip" onClick="{{p.open}}" title="{{p.tip}}"><sc-if value="{{p.fav}}" hint-placeholder-val="{{false}}"><i class="favdot"></i></sc-if>{{p.num}}</button></sc-for></div></div></sc-for>
+<div class="fs11 t3" style="padding:14px 18px 24px">提示词库不提供单条撰写录入；.txt 导入自动解析「分组 / 标签 / 正文」并按前缀编号。点击编号一步查看原文（悬停可预览开头），详情内可编辑、收藏或删除；琥珀点为已收藏。</div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{f_isRef}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="参考图库">
+<div class="phd"><span class="ptt">参考图库</span><span class="cnt">{{f_total}} 张</span><span class="pcap">与提示词库共用同一套分组体系</span><div class="f1"></div><button class="btn sm" onClick="{{f_import}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11V3.5M4.8 6.7 8 3.5l3.2 3.2M3.5 13h9"></path></svg>导入参考图</button></div>
+<div class="pbody">
+<sc-for list="{{f_secs}}" as="g" hint-placeholder-count="3"><div class="gsec"><div class="ghead"><span class="fw6 fs13 nowrap">{{g.name}}</span><span class="fs11 t3">{{g.count}}</span></div><div class="fgrid"><sc-for list="{{g.tiles}}" as="i" hint-placeholder-count="4"><div class="rcard" onClick="{{i.open}}"><div class="ph rcimg" style="background:{{i.bg}}"><span class="phl">{{i.tag}}</span></div><div class="rmeta"><span class="mono fs11 fw5 nowrap ohide f1">{{i.name}}</span></div><div class="fs10 t3" style="margin-top:2px">{{i.used}}</div></div></sc-for></div></div></sc-for>
+<div class="fs11 t3" style="padding:14px 18px 24px">点击图片查看大图、更换文件、调整分组或删除；参考图与任务、通过作品保持关联。</div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{x_isTrash}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="废纸篓">
+<div class="phd"><span class="ptt">废纸篓</span><span class="cnt">{{x_count}} 项</span><span class="pcap">清理后彻底删除 · 编号回收 · 不可恢复</span><div class="f1"></div><sc-if value="{{x_hasSel}}" hint-placeholder-val="{{false}}"><button class="btn sm dng" onClick="{{x_delSel}}">彻底删除所选 · {{x_selN}}</button></sc-if><sc-if value="{{x_hasRows}}" hint-placeholder-val="{{false}}"><button class="btn sm gho dng" onClick="{{x_clearAll}}">清空废纸篓</button></sc-if></div>
+<div class="pbody">
+<sc-if value="{{x_hasRows}}" hint-placeholder-val="{{false}}"><sc-for list="{{x_rows}}" as="x" hint-placeholder-count="4"><div class="xrow {{x.selCls}}" onClick="{{x.togg}}"><span class="ckb {{x.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="ph xthumb" style="background:{{x.bg}}"></span><span class="pid noshrink">{{x.pid}}</span><span class="mono fs11 t3 f1 nowrap ohide">{{x.refName}}</span><span class="bdg b-gray noshrink">{{x.src}}</span><span class="fs11 t3 noshrink" style="width:76px;text-align:right">{{x.time}}</span><button class="icb" onClick="{{x.delFn}}" title="彻底删除"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg></button></div></sc-for></sc-if>
+<sc-if value="{{x_empty}}" hint-placeholder-val="{{false}}"><div class="bigempty"><div class="fs13 fw5 t2">废纸篓是空的</div><div class="fs12 t3">验收未通过与手动删除的内容会先进入这里等待清理</div></div></sc-if>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{s_isSet}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="设置">
+<div class="phd"><span class="ptt">设置</span><span class="pcap">API Key · 调度与重试 · 输出 · 通用</span></div>
+<div class="pbody"><div class="swrap">
+<div class="sec"><div class="sechead"><span class="fw6 fs13">API Key</span><span class="cnt">{{s_keySum}}</span><div class="f1"></div><button class="btn sm" onClick="{{s_addFn}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>添加 Key</button></div>
+<div class="klist"><div class="kline khd"><span>Key</span><span>Base URL</span><span>模型</span><span>并发 1–10</span><span>成功率</span><span>状态</span><span></span><span></span></div><sc-for list="{{s_keys}}" as="k" hint-placeholder-count="3"><div class="kline"><span class="fx ac gap7 ohide"><i class="kd {{k.dotCls}}"></i><span class="fw5 nowrap ohide" title="{{k.masked}}">{{k.alias}}</span><span class="chip">{{k.id}}</span></span><span class="mono fs10 t3 nowrap ohide">{{k.url}}</span><span class="mono fs10 t3 nowrap ohide">{{k.model}}</span><span><span class="stp"><button class="stpb" onClick="{{k.dec}}">−</button><span class="stpv">{{k.conc}}</span><button class="stpb" onClick="{{k.inc}}">+</button></span></span><span class="mono fs11 t2">{{k.rateShort}}</span><span><span class="bdg {{k.stCls}}">{{k.stLabel}}</span></span><span class="sw {{k.swCls}}" onClick="{{k.togg}}"><i></i></span><button class="icb" onClick="{{k.delFn}}" title="删除"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg></button></div></sc-for></div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">调度与重试</span></div>
+<div class="fx gap10"><div class="rc {{s_evenCls}}" onClick="{{s_setEven}}"><div class="fw5 fs13">平均轮询</div><div class="fs11 t3 mt4" style="line-height:1.6">任务平均分配到全部可用 Key，吞吐稳定，适合各 Key 质量接近的场景</div></div><div class="rc {{s_rateCls}}" onClick="{{s_setRate}}"><div class="fw5 fs13">成功率优先</div><div class="fs11 t3 mt4" style="line-height:1.6">优先调度历史成功率更高的 Key，失败自动切换，适合 Key 质量参差的场景</div></div></div>
+<div class="fx ac gap10 mt14 wrap"><span class="fs12 t2 nowrap">失败重试次数</span><span class="stp"><button class="stpb" onClick="{{s_rDec}}">−</button><span class="stpv">{{s_retries}}</span><button class="stpb" onClick="{{s_rInc}}">+</button></span><span class="fs11 t3">超时 / 限流 / 违规默认各自动重试 1 次并切换可用 Key；再次失败则中断并保留错误原因</span></div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">输出与归档</span></div>
+<div class="fx ac gap10"><div class="pathwell f1">{{s_dir}}</div><button class="btn sm" onClick="{{s_dirFn}}">更改目录</button></div>
+<div class="fx ac gap8 mt10 wrap"><span class="fs12 t2 nowrap">命名规则</span><span class="chip">参考图名</span><span class="t3">_</span><span class="chip">日期</span><span class="t3">_</span><span class="chip">提示词编号</span><span class="t3 fs12">→</span><span class="chip" style="color:var(--acc2)">{{s_nameEx}}</span></div>
+<div class="fs11 t3 mt10">仅验收通过的图片会输出到本地；按生成批次自动创建输出子文件夹。</div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">通用</span></div>
+<div class="fx ac gap10"><span class="fs12 t2" style="width:72px">主题</span><div class="seg"><span class="sgi on">浅色</span><span class="sgi dis">深色 · V2</span></div></div>
+<div class="fx ac gap10 mt10"><span class="fs12 t2" style="width:72px">动效</span><div class="seg"><span class="sgi {{s_mFullCls}}" onClick="{{s_setMFull}}">标准</span><span class="sgi {{s_mRedCls}}" onClick="{{s_setMRed}}">减弱</span></div><span class="fs11 t3">跟随系统 prefers-reduced-motion 自动降级</span></div>
+<div class="fx ac gap10 mt14"><span class="fs12 t2" style="width:72px">更新</span><span class="fs12 nowrap">当前 {{s_ver}}</span><button class="btn sm" onClick="{{s_checkFn}}">检查更新</button><sc-if value="{{updateReady}}" hint-placeholder-val="{{false}}"><button class="pill" onClick="{{restartNow}}"><span class="pdot"></span>v1.1.0 已就绪 · 重启安装</button></sc-if></div>
+<div class="fs11 t3 mt10">启动时自动检查并后台下载，下载完成后提示重启安装；内部小规模分发未购买代码签名，首次运行如遇 SmartScreen / Gatekeeper 提示按内部指引放行。</div>
+</div>
+</div></div>
+</div>
+</sc-if>
+</div>
+</div>
+</div>
+<sc-if value="{{m_groups}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">选择提示词组</span><span class="cnt">已选 {{mg_n}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><sc-for list="{{mg_rows}}" as="o" hint-placeholder-count="3"><div class="gpick {{o.selCls}}" onClick="{{o.toggle}}"><div class="fx ac gap9"><span class="ckb {{o.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><i class="gdot" style="background:{{o.dot}}"></i><span class="fw5 nowrap">{{o.name}}</span><span class="chip">{{o.prefix}}</span><span class="bdg b-gray">{{o.scene}}</span><span class="t3 fs11 f1 nowrap ohide">{{o.tagStr}}</span><span class="t3 fs12 nowrap">{{o.count}} 条</span></div><div class="pgrid" style="padding:8px 0 2px"><sc-for list="{{o.chips}}" as="p" hint-placeholder-count="8"><button class="pchip" onClick="{{p.open}}" title="{{p.tip}}"><sc-if value="{{p.fav}}" hint-placeholder-val="{{false}}"><i class="favdot"></i></sc-if>{{p.num}}</button></sc-for></div></div></sc-for></div><div class="mfoot"><span class="fs11 t3">选中分组的全部提示词参与本批生成 · 点击编号可查看原文</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{mg_confirm}}">添加所选</button></div></div></div></sc-if>
+<sc-if value="{{m_refs}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">从参考图库选择</span><span class="cnt">已选 {{mr_n}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><sc-for list="{{mr_secs}}" as="s" hint-placeholder-count="2"><div class="fs11 fw6 t3 mt6" style="margin-bottom:8px">{{s.name}}</div><div class="grid" style="grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px"><sc-for list="{{s.tiles}}" as="o" hint-placeholder-count="3"><div class="rcard {{o.ck}}" onClick="{{o.toggle}}"><div class="ph rcimg" style="background:{{o.bg}}"><span class="phl">{{o.tag}}</span></div><span class="rck"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><div class="fs10 mono t2 mt4 nowrap ohide tc">{{o.name}}</div></div></sc-for></div></sc-for></div><div class="mfoot"><span class="fs11 t3">选中的参考图会进入生成页的已选区</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{mr_confirm}}">添加所选</button></div></div></div></sc-if>
+<sc-if value="{{m_assign}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">为 <span class="mono fs12" style="color:var(--acc2)">{{ma_name}}</span> 指定提示词组</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><sc-for list="{{ma_rows}}" as="o" hint-placeholder-count="2"><div class="gpick {{o.selCls}}" onClick="{{o.pick}}"><div class="fx ac gap9"><span class="ckb {{o.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><i class="gdot" style="background:{{o.dot}}"></i><span class="fw5 nowrap">{{o.name}}</span><span class="chip">{{o.prefix}}</span><div class="f1"></div><span class="t3 fs12 nowrap">{{o.count}} 条</span></div><div class="pgrid" style="padding:8px 0 2px"><sc-for list="{{o.chips}}" as="p" hint-placeholder-count="8"><button class="pchip" onClick="{{p.open}}" title="{{p.tip}}"><sc-if value="{{p.fav}}" hint-placeholder-val="{{false}}"><i class="favdot"></i></sc-if>{{p.num}}</button></sc-for></div></div></sc-for></div><div class="mfoot"><span class="fs11 t3">点击卡片完成挂靠 · 点击编号可查看提示词原文</span><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{m_import}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">导入提示词 .txt</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><sc-if value="{{mi_isDrop}}" hint-placeholder-val="{{true}}"><div class="drop" onClick="{{mi_dropFn}}"><svg class="ic18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--t3)"><path d="M8 11V3.5M4.8 6.7 8 3.5l3.2 3.2M3.5 13h9"></path></svg><div class="fs12 fw5 t2 mt10">拖入 .txt 文件，或点击选择</div><div class="fs11 t3 mt4">按「分组 / 标签 / 正文」解析，自动分配编号（原型内为模拟解析）</div></div></sc-if><sc-if value="{{mi_isPrev}}" hint-placeholder-val="{{false}}"><div class="fx ac gap8"><span class="chip">{{mi_file}}</span><span class="fs11 t3">解析成功</span></div><div class="mt10" style="border:1px solid var(--line);border-radius:9px;overflow:hidden"><sc-for list="{{mi_rows}}" as="o" hint-placeholder-count="1"><div class="fx ac gap9" style="padding:9px 11px"><i class="gdot" style="background:oklch(70% .09 40)"></i><span class="fw5 fs12 nowrap">{{o.name}}</span><span class="t3 fs11 f1 nowrap ohide">{{o.tagStr}}</span><span class="chip">{{o.range}}</span><span class="t3 fs11 nowrap">{{o.count}} 条</span></div></sc-for></div><div class="fs11 t3 mt10">{{mi_note}}</div></sc-if></div><sc-if value="{{mi_isPrev}}" hint-placeholder-val="{{false}}"><div class="mfoot"><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{mi_confirm}}">导入 {{mi_total}} 条</button></div></sc-if></div></div></sc-if>
+<sc-if value="{{m_gview}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">{{mgv_name}}</span><span class="cnt">{{mgv_count}} 条</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="pgrid" style="padding:0"><sc-for list="{{mgv_rows}}" as="p" hint-placeholder-count="12"><button class="pchip" onClick="{{p.open}}" title="{{p.tip}}"><sc-if value="{{p.fav}}" hint-placeholder-val="{{false}}"><i class="favdot"></i></sc-if>{{p.id}}</button></sc-for></div></div><div class="mfoot"><span class="fs11 t3">点击编号查看提示词原文</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{m_prompt}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w700" onClick="{{stop}}"><div class="mhead"><span class="pid">{{mp_id}}</span><span class="fw5 fs12 nowrap">{{mp_gname}}</span><span class="bdg b-gray">{{mp_scene}}</span><sc-if value="{{mp_edited}}" hint-placeholder-val="{{false}}"><span class="bdg b-blue">已微调</span></sc-if><span class="t3 fs11 f1 nowrap ohide">{{mp_tagStr}}</span><button class="star {{mp_favCls}}" onClick="{{mp_favFn}}" title="收藏"><svg class="ic" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.8 9.6 6.4 14.2 8 9.6 9.6 8 14.2 6.4 9.6 1.8 8 6.4 6.4Z"></path></svg></button><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><sc-if value="{{mp_notEditing}}" hint-placeholder-val="{{true}}"><div class="ptext">{{mp_text}}</div></sc-if><sc-if value="{{mp_editing}}" hint-placeholder-val="{{false}}"><textarea class="ta" defaultValue="{{mp_text}}" onInput="{{mp_onDraft}}"></textarea></sc-if></div><div class="mfoot"><sc-if value="{{mp_hasWorks}}" hint-placeholder-val="{{false}}"><span class="fs11 t3">已产出 {{mp_works}} 张通过作品</span></sc-if><div class="f1"></div><button class="btn gho dng sm" onClick="{{mp_delFn}}">删除</button><sc-if value="{{mp_notEditing}}" hint-placeholder-val="{{true}}"><button class="btn sm" onClick="{{mp_editFn}}">编辑</button></sc-if><sc-if value="{{mp_editing}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{mp_cancelEdit}}">取消</button><button class="btn pri sm" onClick="{{mp_saveFn}}">保存修改</button></sc-if></div></div></div></sc-if>
+<sc-if value="{{m_confirm}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w360" onClick="{{stop}}"><div class="mbody" style="padding:18px 18px 4px"><div class="fw6 fs13">{{mc_title}}</div><div class="fs12 t2 mt6" style="line-height:1.7">{{mc_desc}}</div></div><div class="mfoot" style="border-top:none;background:#fff;border-radius:0 0 13px 13px"><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">取消</button><button class="btn sm {{mc_cls}}" onClick="{{mc_yes}}">{{mc_label}}</button></div></div></div></sc-if>
+<sc-if value="{{dr_open}}" hint-placeholder-val="{{false}}"><div class="dscrim" onClick="{{dr_close}}"></div><div class="drw"><div class="fx ac gap8" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span class="bdg {{dr_stCls}}">{{dr_stLabel}}</span><span class="pid">{{dr_pid}}</span><span class="fs12 fw5 f1 nowrap ohide">{{dr_gname}}</span><button class="icb" onClick="{{dr_close}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="f1" style="overflow:auto;padding:14px"><div class="ph" style="background:{{dr_bg}};aspect-ratio:16/10;border-radius:10px;border:1px solid var(--line)"><span class="phl">GEN · {{dr_pid}} · 缩略图 512px</span></div><sc-if value="{{dr_showBar}}" hint-placeholder-val="{{false}}"><div class="fx ac gap8 mt10"><div class="pg"><i style="width:{{dr_pct}}%"></i></div><span class="mono fs10 t3">{{dr_pct}}%</span></div></sc-if><sc-if value="{{dr_hasErr}}" hint-placeholder-val="{{false}}"><div class="ban" style="margin:12px 0 0"><span class="f1" style="line-height:1.6"><b class="fw6">{{dr_errT}}</b> — {{dr_errM}}</span><sc-if value="{{dr_isAuth}}" hint-placeholder-val="{{false}}"><button class="btn sm dng noshrink" onClick="{{dr_disableFn}}">停用该 Key</button></sc-if></div></sc-if><div class="fx ac gap6 mt12 wrap"><span class="chip">{{dr_refName}}</span><span class="chip">{{dr_keyTag}}</span><span class="chip">重试 {{dr_retries}}</span><span class="chip">{{dr_file}}</span></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">执行记录</div><div class="mt6"><sc-for list="{{dr_attempts}}" as="a" hint-placeholder-count="2"><div class="att"><i class="attdot" style="background:{{a.dot}}"></i><div class="f1"><div class="fs12 fw5">{{a.t}}</div><div class="fs11 t3" style="line-height:1.6">{{a.sub}}</div></div></div></sc-for></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">提示词原文</div><div class="ptext mt6">{{dr_text}}</div></div><div class="rdbar"><button class="btn sm gho" onClick="{{dr_openPrompt}}">查看提示词详情</button><div class="f1"></div><sc-if value="{{dr_canRetry}}" hint-placeholder-val="{{false}}"><button class="btn pri sm" onClick="{{dr_retryFn}}">重新生成</button></sc-if></div></div></sc-if>
+<sc-if value="{{m_work}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w700" onClick="{{stop}}"><div class="mhead"><span class="pid">{{wk_pid}}</span><span class="fw5 fs12 nowrap ohide">{{wk_gname}}</span><span class="bdg b-green">已通过</span><span class="t3 fs11 f1 nowrap ohide">{{wk_tagStr}}</span><button class="star {{wk_favCls}}" onClick="{{wk_favFn}}" title="收藏"><svg class="ic" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.8 9.6 6.4 14.2 8 9.6 9.6 8 14.2 6.4 9.6 1.8 8 6.4 6.4Z"></path></svg></button><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fx gap14"><div style="width:300px;flex:none"><div class="ph" style="background:{{wk_bg}};aspect-ratio:1;border-radius:10px;border:1px solid var(--line)"><span class="phl">OUT · {{wk_pid}}</span></div><div class="fx ac gap6 mt10 wrap"><span class="chip">{{wk_refName}}</span><span class="chip">{{wk_batch}}</span><span class="chip">{{wk_date}}</span></div><div class="pathwell mt10" style="font-size:10.5px">{{wk_file}}</div><button class="btn sm mt10 w100" style="justify-content:center" onClick="{{wk_folderFn}}">打开所在文件夹</button></div><div class="f1" style="min-width:0"><div class="fs11 fw6 t3" style="letter-spacing:.05em">对应提示词</div><div class="ptext mt6" style="max-height:340px;overflow:auto">{{wk_text}}</div></div></div></div><div class="mfoot"><span class="fs11 t3">作品与提示词、参考图长期关联，可追溯</span><div class="f1"></div><button class="btn sm gho dng" onClick="{{wk_delFn}}">删除</button><button class="btn sm" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{m_refd}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13 mono">{{rf_name}}</span><span class="bdg b-gray">{{rf_gname}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fx gap14"><div style="width:280px;flex:none"><div class="ph" style="background:{{rf_bg}};aspect-ratio:1;border-radius:10px;border:1px solid var(--line)"><span class="phl">REF · {{rf_name}}</span></div><div class="fx ac gap6 mt10 wrap"><span class="chip">{{rf_used}}</span><span class="chip">{{rf_works}}</span></div><div class="fx gap8 mt10"><button class="btn sm f1" style="justify-content:center" onClick="{{rf_replaceFn}}">更换图片</button><button class="btn sm gho dng" onClick="{{rf_delFn}}">删除</button></div></div><div class="f1" style="min-width:0"><div class="fs11 fw6 t3" style="letter-spacing:.05em">所属分组</div><div class="mt6"><sc-for list="{{rf_rows}}" as="o" hint-placeholder-count="3"><div class="pickrow" onClick="{{o.pick}}"><span class="ckb {{o.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><i class="gdot" style="background:{{o.dot}}"></i><span class="fw5 f1 nowrap ohide">{{o.name}}</span></div></sc-for></div><div class="fs11 t3 mt10" style="line-height:1.7">参考图与提示词库共用分组体系；调整分组不影响历史任务与作品的关联。</div></div></div></div></div></div></sc-if>
+<sc-if value="{{m_key}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">添加 API Key</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody col gap10"><div class="col gap4"><span class="fs11 t3">别名</span><input class="inp" placeholder="例如：主力 · 直连"/></div><div class="col gap4"><span class="fs11 t3">API Key</span><input class="inp mono" placeholder="sk-…"/></div><div class="col gap4"><span class="fs11 t3">Base URL</span><input class="inp mono" placeholder="https://api.example.com/v1"/></div><div class="fx gap10"><div class="col gap4 f1"><span class="fs11 t3">模型</span><input class="inp mono" defaultValue="gpt-image-2"/></div><div class="col gap4" style="width:90px"><span class="fs11 t3">并发上限</span><input class="inp mono" defaultValue="2"/></div></div></div><div class="mfoot"><span class="fs11 t3">按 OpenAI 兼容端点接入 · GPT-Image 2</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{ak_save}}">保存</button></div></div></div></sc-if>
+<sc-if value="{{m_batch}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">切换批次</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mlist"><sc-for list="{{mb_rows}}" as="b" hint-placeholder-count="3"><div class="pickrow" onClick="{{b.pick}}"><span class="ckb {{b.cls}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="fs12 f1">{{b.label}}</span></div></sc-for></div><div class="mfoot"><span class="fs11 t3">历史批次已归档，仅保留通过作品与记录</span><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{pal_open}}" hint-placeholder-val="{{false}}"><div class="ovl ovtop" onClick="{{pal_close}}"><div class="plt" onClick="{{stop}}"><div class="plin"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><input class="plinp" placeholder="跳转页面或执行操作…" value="{{pal_q}}" onInput="{{pal_onQ}}" autoFocus="{{true}}"/><span class="kbd">esc</span></div><div class="pllist"><sc-for list="{{pal_items}}" as="c" hint-placeholder-count="6"><div class="pltit {{c.cls}}" onClick="{{c.run}}"><span class="plcat">{{c.cat}}</span><span class="f1 fw5">{{c.t}}</span><sc-if value="{{c.hasK}}" hint-placeholder-val="{{false}}"><span class="kbd">{{c.k}}</span></sc-if></div></sc-for></div></div></div></sc-if>
+<div class="tstwrap"><sc-for list="{{ts_list}}" as="t" hint-placeholder-count="0"><div class="tst"><svg class="ic12 tsi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg><span>{{t.msg}}</span></div></sc-for></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;platform&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;mac&quot;,&quot;win&quot;],&quot;default&quot;:&quot;mac&quot;,&quot;tsType&quot;:&quot;'mac'|'win'&quot;,&quot;section&quot;:&quot;环境&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;standard&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;standard&quot;,&quot;tsType&quot;:&quot;'standard'|'compact'&quot;,&quot;section&quot;:&quot;环境&quot;},&quot;simKeyIssue&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;演示场景&quot;}}">
+class Component extends DCLogic {
+  state = this.seed();
+  seed(){
+    const mkG=(id,name,scene,tags,hue,n)=>{const g={id,name,scene,tags,hue,prompts:[]};for(let i=1;i<=n;i++){g.prompts.push({pid:id+'-'+String(i).padStart(4,'0'),text:this.mkP(id,scene,i),fav:(i*7)%9===1,edited:false});}return g;};
+    const groups=[mkG('DZ','电商主图 · 白底棚拍','商品',['白底','3C','主图'],262,24),mkG('RX','人像写真 · 胶片风','人像',['胶片','室内','半身'],25,18),mkG('CJ','场景合成 · 节日氛围','场景',['节日','合成','夜景'],155,9),mkG('JJ','家居静物 · 自然光','静物',['家居','木质','晨光'],80,12)];
+    const refs=[['productA','DZ',248],['productB','DZ',288],['productC','DZ',210],['productD','DZ',330],['model_01','RX',22],['model_02','RX',48],['model_03','RX',345],['scene_snow','CJ',235],['scene_market','CJ',38],['wood_desk','JJ',85],['linen_sofa','JJ',60],['vase_light','JJ',118]].map((r,i)=>({id:'R'+(i+1),name:r[0],gid:r[1],hue:r[2],used:(i*5+3)%17+1}));
+    const keys=[{id:'K-A',alias:'主力 · 直连',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:4,on:true,hl:'ok',rate:98.6},{id:'K-B',alias:'主力 · 备份',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:3,on:true,hl:'ok',rate:97.1},{id:'K-C',alias:'中转 · 极速',url:'https://fast.relay-img.cn/v1',model:'gpt-image-2',cap:2,on:true,hl:'lim',rate:91.4},{id:'K-D',alias:'备用 · 低价',url:'https://cheap.gate-ai.net/v1',model:'gpt-image-2',cap:2,on:true,hl:'ok',rate:95.0},{id:'K-E',alias:'测试 Key',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:1,on:false,hl:'ok',rate:88.2},{id:'K-F',alias:'新购 · 未验证',url:'https://api.newpool.dev/v1',model:'gpt-image-2',cap:2,on:true,hl:'ok',rate:0}];
+    const works=[];
+    ['DZ-0001','DZ-0002','DZ-0003','DZ-0004','DZ-0005','DZ-0006'].forEach((pid,i)=>works.push({wid:'W13'+i,pid,gid:'DZ',ref:'productA',date:'今天 14:0'+i,batch:13,fav:i===1}));
+    [['JJ-0001','wood_desk',11,'7月2日'],['JJ-0003','wood_desk',11,'7月2日'],['JJ-0005','linen_sofa',11,'7月2日'],['JJ-0008','vase_light',11,'7月2日'],['RX-0002','model_01',9,'6月24日'],['RX-0004','model_01',9,'6月24日'],['RX-0007','model_02',9,'6月24日'],['RX-0009','model_02',9,'6月24日'],['RX-0012','model_03',9,'6月24日'],['CJ-0002','scene_snow',8,'6月18日'],['CJ-0003','scene_snow',8,'6月18日'],['CJ-0007','scene_market',8,'6月18日']].forEach((w,i)=>works.push({wid:'WO'+i,pid:w[0],gid:w[0].split('-')[0],ref:w[1],batch:w[2],date:w[3],fav:i%5===2}));
+    const trash=[{tid:'X1',pid:'DZ-0020',ref:'productA',src:'验收未通过',time:'今天 15:21'},{tid:'X2',pid:'RX-0003',ref:'model_01',src:'验收未通过',time:'今天 15:02'},{tid:'X3',pid:'JJ-0002',ref:'wood_desk',src:'验收未通过',time:'7月2日'},{tid:'X4',pid:'CJ-0004',ref:'scene_market',src:'手动删除',time:'6月24日'},{tid:'X5',pid:'RX-0011',ref:'model_03',src:'验收未通过',time:'6月18日'}];
+    return {route:'generate',ver:'1.0.0',updateReady:false,paused:false,keybar:false,intDismiss:false,groups,refs,keys,tasks:this.mkTasks(),works,trash,batches:[{n:13,cur:true},{n:11,done:'48 张 · 7月2日'},{n:9,done:'120 张 · 6月24日'}],batchView:13,gen:{gids:[],temp:null,rids:[],map:{}},modal:null,drawer:null,pal:{open:false,q:''},tfilter:'all',rev:{det:false,cur:0,cols:5,sel:[],edit:false,draft:''},lib:{gid:'',fav:false},toasts:[]};
+  }
+  mkP(gid,scene,i){
+    const S={DZ:['无线降噪耳机','便携胶囊咖啡机','钛金属保温杯','桌面氛围灯','机械键盘','折叠蓝牙音箱'],RX:['棕发女生的半身像','穿白衬衫男生的侧脸','银发老人阅读的瞬间','双人对坐交谈的场景'],CJ:['冬季集市的夜景','新年家庭餐桌','烟花下的老街区','雪后清晨的庭院'],JJ:['原木餐桌的一角','亚麻沙发的局部','陶瓷花瓶与晨光','厨房台面的静物组合']}[gid]||['画面主体'];
+    const L=['来自左上方 45° 的柔光箱主光，右侧以 1/2 功率白色反光板补光','单侧大面积柔光为主，暗部用米色反光板轻微提亮','顶部环形柔光配合两侧对称辅光，整体光比控制在 1:2 以内','以窗光为主光源，室内暖色台灯做点缀光'];
+    const T=['整体色调偏冷白，白平衡控制在 5600K 左右','奶油色暖调，白平衡约 4300K，高光略微柔化','中性灰白基调，轻微压低黄色通道饱和度','低对比胶片调，暗部略带青灰色倾向'];
+    const C=['正面平视机位','30° 俯视机位','侧后方 3/4 视角','低机位轻微仰视'];
+    const s=S[i%S.length],l=L[i%4],t=T[(i+1)%4],c=C[(i+2)%4];
+    return '以参考图中的'+s+'为绝对主体，严格保持其外观、材质、比例与细节特征不变，生成一张可直接商用的'+scene+'成图。构图采用'+c+'，主体占画面约三分之二，四周保留均匀留白，背景使用'+(gid==='DZ'?'纯白无缝背景纸，地面保留极浅的自然投影':'与主体气质一致的简洁环境，虚化程度适中，不得出现抢视线的杂物')+'。光线设定：'+l+'，在主体受光侧保留一条干净的高光边缘以强化轮廓，阴影方向全图统一。色彩要求：'+t+'，整体饱和度控制在中低区间，禁止出现色偏、过曝与死黑。相机参数参考：等效 '+(50+(i%4)*15)+'mm 焦段，光圈 f/'+[2.8,4,5.6,8][i%4]+'，景深覆盖主体全部关键细节。输出规范：分辨率不低于 2048×2048，主体边缘干净无毛边与白边，画面中不得出现任何文字、水印、logo 变形、多余装饰图形或畸变结构；若出现手部或人物肢体，必须结构自然、无多指缺指。同一分组内的图片需保持统一的光影逻辑与色彩秩序，成组交付时风格一致，最终成图需与参考图的透视关系保持一致，可直接用于'+(scene==='商品'?'电商详情页头图':'内容发布素材')+'场景。';
+  }
+  mkTasks(){
+    const a=[];let n=0;const K=['K-A','K-B','K-C','K-D'];
+    const add=(ref,gid,i,st,ex)=>{n++;a.push(Object.assign({id:'T'+String(n).padStart(3,'0'),batch:13,refId:ref,gid,pid:gid+'-'+String(i).padStart(4,'0'),keyId:K[n%4],st,pct:st==='run'?10+((n*29)%70):(st==='retry'?42:(st==='q'?0:100)),retries:st==='retry'?1:0,err:null,note:''},ex||{}));};
+    for(let i=1;i<=6;i++)add('productA','DZ',i,'pass');
+    for(let i=7;i<=16;i++)add('productA','DZ',i,'rev');
+    add('productA','DZ',17,'run');add('productA','DZ',18,'run');
+    add('productA','DZ',19,'fail',{retries:2,err:{k:'ContentPolicy',t:'提示词违规',m:'重试 1 次后仍被内容策略拦截，属于内容问题而非系统故障 · 建议修改提示词后重试'}});
+    add('productA','DZ',20,'rej');
+    for(let i=21;i<=24;i++)add('productA','DZ',i,'q');
+    for(let i=1;i<=4;i++)add('productB','CJ',i,'rev');
+    add('productB','CJ',5,'retry',{note:'限流 · 正在排队重试',err:{k:'RateLimited',t:'接口限流',m:'429 · 已退避 18s，将自动重试并切换 Key'}});
+    add('productB','CJ',6,'fail',{err:{k:'Interrupted',t:'因中断请重试',m:'上次退出时任务被中断，任务现场已保留，不会丢失 · 点击重试继续'}});
+    for(let i=7;i<=9;i++)add('productB','CJ',i,'q');
+    add('model_01','RX',1,'run');
+    add('model_01','RX',2,'fail',{keyId:'K-C',err:{k:'Auth',t:'Key 已失效',m:'401 · K-C 鉴权失败，不会自动重试 · 建议停用该 Key'}});
+    add('model_01','RX',3,'rej');
+    for(let i=4;i<=18;i++)add('model_01','RX',i,'q');
+    return a;
+  }
+  componentDidMount(){this._t=setInterval(()=>this.tick(),700);this._k=e=>this.onKey(e);window.addEventListener('keydown',this._k);}
+  componentWillUnmount(){clearInterval(this._t);window.removeEventListener('keydown',this._k);}
+  rnd(){this._r=((this._r||7)*9301+49297)%233280;return this._r/233280;}
+  hueOf(s){let x=0;for(let i=0;i<s.length;i++)x=(x*31+s.charCodeAt(i))%360;return x;}
+  bg(h,d){const l1=d?90.5:93.5,l2=d?86:89.5;return 'linear-gradient(145deg,oklch('+l1+'% .032 '+h+'),oklch('+l2+'% .05 '+((h+42)%360)+'))';}
+  refBg(name){const r=this.state.refs.find(x=>x.name===name);return this.bg(r?r.hue:this.hueOf(name));}
+  resBg(pid){return this.bg(this.hueOf(pid+'x'),true);}
+  grp(id){const t=this.state.gen.temp;if(t&&t.id===id)return t;return this.state.groups.find(g=>g.id===id);}
+  prm(pid){const g=this.grp(pid.split('-')[0]);return g?g.prompts.find(p=>p.pid===pid):null;}
+  toast(msg){this._tid=(this._tid||0)+1;const id=this._tid;this.setState(s=>({toasts:[...s.toasts,{id,msg}]}));setTimeout(()=>this.setState(s=>({toasts:s.toasts.filter(x=>x.id!==id)})),3200);}
+  go(r){this.setState({route:r,drawer:null});}
+  openM(m){this.setState({modal:m});}
+  closeM(){const m=this.state.modal;this.setState({modal:(m&&m.back)?m.back:null});}
+  enabledKeys(){return this.state.keys.filter(k=>k.on&&!(this.props.simKeyIssue&&k.id==='K-C'));}
+  nextKey(){const ks=this.enabledKeys();if(!ks.length)return 'K-A';this._ki=((this._ki||0)+1)%ks.length;return ks[this._ki].id;}
+  patchTask(id,fn){this.setState(s=>({tasks:s.tasks.map(t=>t.id===id?Object.assign({},t,fn(t)):t)}));}
+  tick(){
+    const s=this.state;if(s.paused||s.modal||s.rev.det&&false)return;let ch=false;
+    const tasks=s.tasks.map(t=>Object.assign({},t));
+    tasks.forEach(t=>{if(t.st==='run'||t.st==='retry'){ch=true;t.pct=Math.min(100,t.pct+7+Math.floor(this.rnd()*12));if(t.pct>=100){t.st='rev';t.pct=100;}}});
+    tasks.forEach(t=>{if(t.st==='run'&&t.pct>15&&t.pct<85&&this.rnd()<.018){ch=true;if(t.retries<1){t.st='retry';t.retries++;t.pct=0;t.note='超时 · 已切换 Key 自动重试';t.keyId=this.nextKey();}else{t.st='fail';t.err={k:'Timeout',t:'读取超时',m:'重试 1 次后仍超时 · 已保留错误现场，可手动重试'};}}});
+    let act=tasks.filter(t=>t.st==='run'||t.st==='retry').length;
+    for(const t of tasks){if(act>=4)break;if(t.st==='q'){t.st='run';t.pct=2;t.keyId=this.nextKey();act++;ch=true;}}
+    if(ch)this.setState({tasks});
+  }
+  palOpen(){this.setState({pal:{open:true,q:''}});}
+  palClose(){this.setState({pal:{open:false,q:''}});}
+  palItems(){
+    const s=this.state,q=(s.pal.q||'').toLowerCase();
+    const P=[['generate','图片生成','1'],['tasks','任务队列','2'],['review','图片验收','3'],['library','作品库','4'],['prompts','提示词库','5'],['refs','参考图库','6'],['trash','废纸篓','7'],['settings','设置 · API Key','8']].map(p=>({cat:'跳转',t:p[1],hasK:true,k:(this.props.platform==='win'?'Ctrl':'⌘')+p[2],fn:()=>this.go(p[0])}));
+    const A=[{cat:'操作',t:'导入提示词 .txt',fn:()=>{this.go('prompts');this.openM({t:'import',stage:'drop',ctx:'lib'});}},{cat:'操作',t:s.paused?'继续队列':'暂停队列',fn:()=>this.tPause()},{cat:'操作',t:'检查更新',fn:()=>this.checkUpdate()}];
+    return P.concat(A).filter(c=>!q||c.t.toLowerCase().includes(q));
+  }
+  checkUpdate(){if(this.state.updateReady)return this.toast('新版本已下载完成，等待重启安装');this.toast('正在检查更新…');setTimeout(()=>{this.setState({updateReady:true});this.toast('发现 v1.1.0 · 已在后台下载完成');},900);}
+  onKey(e){
+    const s=this.state,mod=e.metaKey||e.ctrlKey;
+    if(mod&&(e.key==='k'||e.key==='K')){e.preventDefault();s.pal.open?this.palClose():this.palOpen();return;}
+    if(s.pal.open){if(e.key==='Escape')this.palClose();else if(e.key==='Enter'){const it=this.palItems()[0];if(it){this.palClose();it.fn();}}return;}
+    const tag=(e.target&&e.target.tagName)||'';if(tag==='INPUT'||tag==='TEXTAREA')return;
+    if(mod&&e.key>='1'&&e.key<='8'){e.preventDefault();this.go(['generate','tasks','review','library','prompts','refs','trash','settings'][+e.key-1]);return;}
+    if(e.key==='Escape'){if(s.modal)return this.closeM();if(s.drawer)return this.setState({drawer:null});if(s.route==='review'&&s.rev.det)return this.revClose&&this.revClose();return;}
+    if(s.route==='review'&&!s.modal&&this.revKey)this.revKey(e);
+  }
+  gPickGroups(){this.openM({t:'groups',sel:[...this.state.gen.gids]});}
+  gPickRefs(){this.openM({t:'refs',sel:[...this.state.gen.rids]});}
+  gImport(ctx){this.openM({t:'import',stage:'drop',ctx});}
+  gAssign(rid){this.openM({t:'assign',rid});}
+  gViewGroup(gid){this.openM({t:'gview',gid});}
+  openPrompt(pid,back){this.openM({t:'prompt',pid,edit:false,draft:'',back:back||null});}
+  gRemoveGroup(gid){this.setState(s=>{const map={};Object.keys(s.gen.map).forEach(k=>{if(s.gen.map[k]!==gid)map[k]=s.gen.map[k];});return {gen:Object.assign({},s.gen,{gids:s.gen.gids.filter(x=>x!==gid),temp:s.gen.temp&&s.gen.temp.id===gid?null:s.gen.temp,map})};});}
+  gRemoveRef(rid){this.setState(s=>{const map=Object.assign({},s.gen.map);delete map[rid];return {gen:Object.assign({},s.gen,{rids:s.gen.rids.filter(x=>x!==rid),map})};});}
+  gUpload(){const s=this.state;const free=s.refs.find(r=>!s.gen.rids.includes(r.id));if(!free)return this.toast('参考图库素材已全部选入');this.setState(st=>({gen:Object.assign({},st.gen,{rids:[...st.gen.rids,free.id]})}));this.toast('模拟上传 · '+free.name+' 已加入并存入参考图库');}
+  gStart(){
+    const s=this.state,G=s.gen;const nb=(Math.max(...s.batches.map(b=>b.n))+1);
+    let n=s.tasks.length;const nt=[];
+    G.rids.forEach(rid=>{const ref=s.refs.find(r=>r.id===rid);const g=this.grp(G.map[rid]);if(!g)return;g.prompts.forEach(p=>{n++;nt.push({id:'T'+String(n).padStart(3,'0'),batch:nb,refId:ref.name,gid:g.id,pid:p.pid,keyId:this.nextKey(),st:'q',pct:0,retries:0,err:null,note:''});});});
+    this.setState(st=>({tasks:[...st.tasks,...nt],groups:(st.gen.temp&&G.rids.some(r=>G.map[r]===st.gen.temp.id))?[...st.groups,Object.assign({},st.gen.temp,{temp:true})]:st.groups,batches:[{n:nb,cur:true},...st.batches.map(b=>Object.assign({},b,{cur:false}))],batchView:nb,route:'tasks',gen:{gids:[],temp:null,rids:[],map:{}}}));
+    this.toast('已创建 '+nt.length+' 个任务 · 批次 #'+nb);
+  }
+  tPause(){this.setState(s=>({paused:!s.paused}));this.toast(this.state.paused?'队列已继续':'队列已暂停 · 进行中任务将完成当前请求');}
+  tRetry(id){this.patchTask(id,t=>({st:'q',pct:0,err:null,note:'手动重试'}));this.toast(id+' 已重新排队');}
+  tRetryAll(){const s=this.state;const n=s.tasks.filter(t=>t.st==='fail'&&t.batch===s.batchView).length;this.setState(st=>({tasks:st.tasks.map(t=>t.st==='fail'&&t.batch===st.batchView?Object.assign({},t,{st:'q',pct:0,err:null,note:'批量重试'}):t)}));this.toast('已重新排队 '+n+' 个失败任务');}
+  tIntRetry(){this.setState(s=>({intDismiss:true,tasks:s.tasks.map(t=>t.err&&t.err.k==='Interrupted'?Object.assign({},t,{st:'q',pct:0,err:null,note:'中断恢复'}):t)}));this.toast('中断任务已重新排队');}
+  tKeyToggle(kid){this.setState(s=>({keys:s.keys.map(k=>k.id===kid?Object.assign({},k,{on:!k.on}):k)}));}
+  stateBadge(st){return {q:{cls:'b-gray',label:'待生成'},run:{cls:'b-blue',label:'生成中',spin:true},retry:{cls:'b-blue',label:'重试中',spin:true},fail:{cls:'b-red',label:'失败'},rev:{cls:'b-amber',label:'待验收'},pass:{cls:'b-green',label:'已通过'},rej:{cls:'b-gray',label:'未通过'}}[st];}
+  shellVals(){
+    const s=this.state;const plat=this.props.platform??'mac';const mac=plat!=='win';
+    const dens=(this.props.density??'standard')==='compact'?'cmp':'';
+    const N=r=>({cls:s.route===r?'on':'',go:()=>this.go(r)});
+    const active=s.tasks.filter(t=>['q','run','retry'].includes(t.st)).length;
+    const revN=s.tasks.filter(t=>t.st==='rev').length;
+    const running=s.tasks.filter(t=>t.st==='run'||t.st==='retry').length;
+    const bt=s.tasks.filter(t=>t.batch===s.batchView);
+    const doneN=bt.filter(t=>['rev','pass','rej','fail'].includes(t.st)).length;
+    return {shellCls:(mac?'mac':'win')+' '+dens,isMac:mac,isWin:!mac,mod:mac?'⌘':'Ctrl',
+    navGen:N('generate'),navTasks:Object.assign(N('tasks'),{hasB:active>0,bdg:String(active)}),navRev:Object.assign(N('review'),{hasB:revN>0,bdg:String(revN)}),navLib:N('library'),navPrm:N('prompts'),navRef:N('refs'),navTrash:Object.assign(N('trash'),{hasB:s.trash.length>0,bdg:String(s.trash.length)}),navSet:N('settings'),
+    updateReady:s.updateReady,restartNow:()=>{this.setState({updateReady:false,ver:'1.1.0'});this.toast('模拟重启 · 已更新到 v1.1.0');},
+    verLabel:'GenDesk v'+s.ver+' · 数据保存在本机',palOpenFn:()=>this.palOpen(),
+    qc_show:running>0&&s.route!=='tasks',qc_label:'批次 #'+s.batchView+' 生成中',qc_pct:Math.round(doneN/Math.max(1,bt.length)*100),qc_sub:running+' 个并发 · 完成 '+doneN+'/'+bt.length,qc_go:()=>this.go('tasks'),
+    stop:e=>e.stopPropagation(),mClose:()=>this.closeM()};
+  }
+  genVals(){
+    const s=this.state,G=s.gen;
+    const gidsAll=G.temp?[G.temp.id,...G.gids.filter(x=>x!==G.temp.id)]:G.gids;
+    const groups=gidsAll.map(id=>{const g=this.grp(id);return {name:g.name,prefix:g.id+'-',scene:g.scene,tagStr:g.tags.join(' · '),count:g.prompts.length,dot:'oklch(70% .1 '+g.hue+')',temp:!!g.temp,chips:g.prompts.map(p=>({num:p.pid.split('-')[1],tip:p.text.slice(0,88)+'…',fav:p.fav,open:()=>this.openPrompt(p.pid)})),remove:()=>this.gRemoveGroup(id)};});
+    const refs=G.rids.map(rid=>{const rf=s.refs.find(x=>x.id===rid);const m=G.map[rid];const mg=m?this.grp(m):null;return {name:rf.name,bg:this.bg(rf.hue),tag:'REF · '+rf.gid,mapCls:m?'mapped':'needmap',mapLabel:(m&&mg)?('→ '+m+' · '+mg.name.split(' · ')[0]):'指定提示词组',openMap:()=>this.gAssign(rid),remove:()=>this.gRemoveRef(rid)};});
+    const parts=[];let total=0;let unmapped=0;
+    G.rids.forEach(rid=>{const rf=s.refs.find(x=>x.id===rid);const m=G.map[rid];if(m){const g=this.grp(m);if(g){total+=g.prompts.length;parts.push({t:rf.name+' × '+m+'('+g.prompts.length+')',cls:''});}}else{unmapped++;parts.push({t:rf.name+' × ?',cls:'warn'});}});
+    let msg='';
+    if(!gidsAll.length&&!G.rids.length)msg='';
+    else if(!gidsAll.length)msg='请先选择提示词组';
+    else if(!G.rids.length)msg='请添加参考图';
+    else if(unmapped>0)msg=unmapped+' 张参考图未指定提示词组';
+    const blocked=!gidsAll.length||!G.rids.length||unmapped>0||total===0;
+    const nb=Math.max(...s.batches.map(b=>b.n))+1;
+    return {isGen:s.route==='generate',g_batchCap:'新批次 · 将创建为批次 #'+nb+'，输出按批次建文件夹',g_hasGroups:gidsAll.length>0,g_noGroups:gidsAll.length===0,g_groupCap:'已选 '+gidsAll.length+' 组 · '+gidsAll.reduce((a,id)=>a+this.grp(id).prompts.length,0)+' 条',g_groups:groups,g_pickGroups:()=>this.gPickGroups(),g_import:()=>this.gImport('gen'),
+    g_hasRefs:G.rids.length>0,g_noRefs:G.rids.length===0,g_refCap:'已选 '+G.rids.length+' 张',g_refs:refs,g_pickRefs:()=>this.gPickRefs(),g_upload:()=>this.gUpload(),
+    g_formula:parts,g_showTotal:total>0,g_total:total,g_hasMsg:msg!=='',g_msg:msg,g_blocked:blocked,g_startFn:()=>this.gStart()};
+  }
+  taskVals(){
+    const s=this.state;const bt=s.tasks.filter(t=>t.batch===s.batchView);
+    const cnt=f=>bt.filter(f).length;
+    const nq=cnt(t=>t.st==='q'),nrun=cnt(t=>t.st==='run'||t.st==='retry'),nfail=cnt(t=>t.st==='fail'),nrev=cnt(t=>t.st==='rev'),ndone=cnt(t=>t.st==='pass'||t.st==='rej');
+    const tabs=[['all','全部',bt.length],['q','待处理',nq],['run','生成中',nrun],['fail','异常',nfail],['rev','待验收',nrev],['done','已完成',ndone]].map(x=>({label:x[1],n:String(x[2]),cls:s.tfilter===x[0]?'on':'',go:()=>this.setState({tfilter:x[0]})}));
+    const flt={all:()=>true,q:t=>t.st==='q',run:t=>t.st==='run'||t.st==='retry',fail:t=>t.st==='fail',rev:t=>t.st==='rev',done:t=>t.st==='pass'||t.st==='rej'}[s.tfilter];
+    const rows=bt.filter(flt).map(t=>{const b=this.stateBadge(t.st);const g=this.grp(t.gid);return {stCls:b.cls,stLabel:b.label,spin:!!b.spin,thumbBg:this.refBg(t.refId),refName:t.refId,pid:t.pid,gname:g?g.name.split(' · ')[0]:t.gid,keyTag:t.keyId,
+    showBar:t.st==='run'||t.st==='retry',pct:t.pct,showErr:t.st==='fail',errT:t.err?t.err.t:'',errFull:t.err?t.err.m:'',isAuth:!!(t.err&&t.err.k==='Auth'),disableKeyFn:e=>{e.stopPropagation();this.tKeyToggle(t.keyId);this.toast('已停用 '+t.keyId+' · 后续任务将分配到其他 Key');},
+    showRes:t.st==='q'||t.st==='rev'||t.st==='pass'||t.st==='rej',resT:{q:t.note?'排队中 · '+t.note:'排队中',rev:'成功 · 等待验收',pass:'已通过验收',rej:'已移入废纸篓'}[t.st]||'',resCls:{q:'t3',rev:'',pass:'',rej:'t3'}[t.st]||'t3',
+    retries:String(t.retries),open:()=>this.setState({drawer:t.id}),canRetry:t.st==='fail',retryFn:e=>{e.stopPropagation();this.tRetry(t.id);}};});
+    const keys=s.keys.map(k=>{let hl=k.hl;if(this.props.simKeyIssue&&k.id==='K-C')hl='auth';if(!k.on)hl='off';const used=s.tasks.filter(t=>(t.st==='run'||t.st==='retry')&&t.keyId===k.id).length;
+    return {id:k.id,alias:k.alias,model:k.model,used:String(used),cap:String(k.cap),rate:k.rate?k.rate+'%':'暂无记录',dotCls:'kd-'+hl,stLabel:{ok:'正常',lim:'限流退避中',off:'已停用',auth:'失效 · 建议停用'}[hl],stCls:{ok:'b-green',lim:'b-amber',off:'b-gray',auth:'b-red'}[hl],swCls:k.on?'on':'',togg:()=>this.tKeyToggle(k.id)};});
+    const enabled=keys.filter(k=>k.dotCls!=='kd-off');
+    const usedTotal=s.tasks.filter(t=>t.st==='run'||t.st==='retry').length;
+    const capTotal=s.keys.filter(k=>k.on).reduce((a,k)=>a+k.cap,0);
+    const hasAuth=keys.some(k=>k.dotCls==='kd-auth');const hasLim=keys.some(k=>k.dotCls==='kd-lim');
+    const intN=bt.filter(t=>t.st==='fail'&&t.err&&t.err.k==='Interrupted').length;
+    const arch=s.batchView!==Math.max(...s.batches.map(b=>b.n))&&bt.length===0;
+    const archB=s.batches.find(b=>b.n===s.batchView);
+    return {t_isTasks:s.route==='tasks',t_tabs:tabs,t_batchLabel:'批次 #'+s.batchView,t_batchFn:()=>this.openM({t:'batch'}),
+    t_paused:s.paused,t_pauseLabel:s.paused?'继续队列':'暂停队列',t_pauseFn:()=>this.tPause(),
+    t_hasFailed:nfail>0,t_failedN:String(nfail),t_retryAllFn:()=>this.tRetryAll(),
+    t_keybarOpen:s.keybar,t_kbToggle:()=>this.setState(st=>({keybar:!st.keybar})),t_kdots:keys.map(k=>({cls:'kd '+k.dotCls})),t_kbSum:enabled.length+' 个可用 · 并发 '+usedTotal+'/'+capTotal,t_keys:keys,
+    t_kbHasAlert:hasAuth||hasLim,t_kbAlert:hasAuth?'1 个 Key 鉴权失效 · 建议停用':'K-C 触发限流 · 自动退避中',t_kbAlertCls:hasAuth?'b-red':'b-amber',
+    t_intShow:intN>0&&!s.intDismiss,t_intN:String(intN),t_intRetry:()=>this.tIntRetry(),t_intDismiss:()=>this.setState({intDismiss:true}),
+    t_hasRows:rows.length>0,t_rows:rows,t_empty:rows.length===0&&!arch,t_archived:arch,t_archLabel:archB&&archB.done?'批次 #'+s.batchView+' 已完成并归档 · '+archB.done:'',t_archGo:()=>this.go('library'),
+    t_sumChips:[{cls:'b-gray',txt:'排队 '+nq},{cls:'b-blue',txt:'生成中 '+nrun},{cls:'b-red',txt:'异常 '+nfail},{cls:'b-amber',txt:'待验收 '+nrev},{cls:'b-green',txt:'已完成 '+ndone}],...this.drawerVals()};
+  }
+  drawerVals(){
+    const s=this.state;const t=s.tasks.find(x=>x.id===s.drawer);
+    if(!t)return {dr_open:false};
+    const b=this.stateBadge(t.st);const g=this.grp(t.gid);const p=this.prm(t.pid);
+    const atts=[{t:'创建任务',sub:'加入批次 #'+t.batch+' 队列 · 分配 '+t.keyId,dot:'oklch(75% .02 260)'}];
+    if(t.retries>0)atts.push({t:'自动重试 ×'+t.retries,sub:t.note||'已切换可用 Key','dot':'oklch(70% .13 80)'});
+    if(t.err)atts.push({t:t.err.t,sub:t.err.m,dot:'oklch(60% .15 25)'});
+    if(t.st==='rev')atts.push({t:'生成完成',sub:'长边 512px 缩略图已缓存 · 等待人工验收',dot:'oklch(60% .1 155)'});
+    if(t.st==='pass')atts.push({t:'验收通过',sub:'原图已输出到批次文件夹',dot:'oklch(60% .1 155)'});
+    return {dr_open:true,dr_bg:this.resBg(t.pid),dr_stCls:b.cls,dr_stLabel:b.label,dr_pid:t.pid,dr_gname:g?g.name:t.gid,dr_refName:t.refId,dr_keyTag:t.keyId,dr_retries:String(t.retries),
+    dr_showBar:t.st==='run'||t.st==='retry',dr_pct:t.pct,dr_hasErr:!!t.err&&t.st==='fail',dr_errT:t.err?t.err.t:'',dr_errM:t.err?t.err.m:'',dr_isAuth:!!(t.err&&t.err.k==='Auth'),dr_disableFn:()=>{this.tKeyToggle(t.keyId);this.toast('已停用 '+t.keyId);},
+    dr_text:p?p.text:'',dr_openPrompt:()=>this.openPrompt(t.pid),dr_canRetry:t.st==='fail',dr_retryFn:()=>{this.tRetry(t.id);this.setState({drawer:null});},dr_close:()=>this.setState({drawer:null}),dr_attempts:atts,dr_file:t.refId+'_260708_'+t.pid.replace('-','')+'.JPG'};
+  }
+  mdlVals(){
+    const s=this.state,m=s.modal||{};const T=m.t;
+    const v={m_groups:T==='groups',m_refs:T==='refs',m_assign:T==='assign',m_import:T==='import',m_gview:T==='gview',m_prompt:T==='prompt',m_confirm:T==='confirm'};
+    if(T==='groups'){v.mg_n=String(m.sel.length);v.mg_rows=s.groups.map(g=>({name:g.name,prefix:g.id+'-',scene:g.scene,tagStr:g.tags.join(' · '),count:g.prompts.length,dot:'oklch(70% .1 '+g.hue+')',ck:m.sel.includes(g.id)?'on':'',selCls:m.sel.includes(g.id)?'sel':'',chips:g.prompts.map(p=>({num:p.pid.split('-')[1],tip:p.text.slice(0,88)+'…',fav:p.fav,open:e=>{e.stopPropagation();this.openPrompt(p.pid,m);}})),toggle:()=>this.openM(Object.assign({},m,{sel:m.sel.includes(g.id)?m.sel.filter(x=>x!==g.id):[...m.sel,g.id]}))}));v.mg_confirm=()=>{this.setState(st=>({gen:Object.assign({},st.gen,{gids:m.sel})}));this.closeM();};}
+    if(T==='refs'){v.mr_n=String(m.sel.length);v.mr_secs=s.groups.map(g=>({name:g.name,tiles:s.refs.filter(r=>r.gid===g.id).map(r=>({bg:this.bg(r.hue),tag:'REF',name:r.name,ck:m.sel.includes(r.id)?'sel':'',toggle:()=>this.openM(Object.assign({},m,{sel:m.sel.includes(r.id)?m.sel.filter(x=>x!==r.id):[...m.sel,r.id]}))}))})).filter(x=>x.tiles.length);v.mr_confirm=()=>{this.setState(st=>{const map=Object.assign({},st.gen.map);Object.keys(map).forEach(k=>{if(!m.sel.includes(k))delete map[k];});return {gen:Object.assign({},st.gen,{rids:m.sel,map})};});this.closeM();};}
+    if(T==='assign'){const rf=s.refs.find(r=>r.id===m.rid);v.ma_name=rf?rf.name:'';const gidsAll=s.gen.temp?[s.gen.temp.id,...s.gen.gids]:s.gen.gids;v.ma_rows=gidsAll.map(id=>{const g=this.grp(id);const on=s.gen.map[m.rid]===id;return {name:g.name,prefix:g.id+'-',count:g.prompts.length,dot:'oklch(70% .1 '+g.hue+')',ck:on?'on':'',selCls:on?'sel':'',chips:g.prompts.map(p=>({num:p.pid.split('-')[1],tip:p.text.slice(0,88)+'…',fav:p.fav,open:e=>{e.stopPropagation();this.openPrompt(p.pid,m);}})),pick:()=>{this.setState(st=>({gen:Object.assign({},st.gen,{map:Object.assign({},st.gen.map,{[m.rid]:id})})}));this.closeM();}};});}
+    if(T==='import'){v.mi_isDrop=m.stage==='drop';v.mi_isPrev=m.stage==='prev';v.mi_dropFn=()=>this.openM(Object.assign({},m,{stage:'prev'}));v.mi_file='提示词_露营装备_0708.txt';v.mi_rows=[{name:'露营装备 · 临时导入',tagStr:'露营 · 户外 · 静物',count:8,range:'LY-0001 – LY-0008'}];v.mi_total='8';v.mi_note=m.ctx==='gen'?'将作为临时分组加入本批次；验收通过后自动写入提示词库，编号已按 LY 前缀自动分配。':'将新建分组并写入提示词库，编号按 LY 前缀自动递增分配。';
+    v.mi_confirm=()=>{const g={id:'LY',name:'露营装备 · 临时导入',scene:'静物',tags:['露营','户外'],hue:40,temp:m.ctx==='gen',prompts:Array.from({length:8},(_,i)=>({pid:'LY-'+String(i+1).padStart(4,'0'),text:this.mkP('JJ','静物',i+3),fav:false,edited:false}))};
+    if(m.ctx==='gen')this.setState(st=>({gen:Object.assign({},st.gen,{temp:g})}));else{g.temp=false;this.setState(st=>({groups:[...st.groups,g]}));}
+    this.closeM();this.toast('已导入 8 条 · 编号 LY-0001 – LY-0008');};}
+    if(T==='gview'){const g=this.grp(m.gid);v.mgv_name=g?g.name:'';v.mgv_count=g?String(g.prompts.length):'0';v.mgv_rows=g?g.prompts.map(p=>({id:p.pid,tip:p.text.slice(0,88)+'…',fav:p.fav,open:()=>this.openPrompt(p.pid)})):[];}
+    if(T==='prompt'){const p=this.prm(m.pid);const g=this.grp(m.pid.split('-')[0]);if(p&&g){const wn=s.works.filter(w=>w.pid===p.pid).length;Object.assign(v,{mp_id:p.pid,mp_gname:g.name,mp_scene:g.scene,mp_tagStr:g.tags.join(' · '),mp_edited:p.edited,mp_favCls:p.fav?'on':'',mp_favFn:()=>this.pFav(p.pid),mp_text:p.text,mp_editing:m.edit,mp_notEditing:!m.edit,mp_onDraft:e=>{this.state.modal.draft=e.target.value;},mp_editFn:()=>this.openM(Object.assign({},m,{edit:true,draft:p.text})),mp_cancelEdit:()=>this.openM(Object.assign({},m,{edit:false})),mp_saveFn:()=>{const d=this.state.modal.draft||p.text;this.pEdit(p.pid,d);this.openM(Object.assign({},m,{edit:false}));this.toast('已保存修改 · 后续生成将使用新文案');},mp_delFn:()=>this.openM({t:'confirm',title:'删除提示词 '+p.pid+'？',desc:'该提示词记录将移入废纸篓，编号在清理后回收。',label:'删除',cls:'dng',back:m,yes:()=>{this.pDel(p.pid);this.setState({modal:null});}},),mp_hasWorks:wn>0,mp_works:String(wn)});}}
+    if(T==='confirm'){v.mc_title=m.title;v.mc_desc=m.desc;v.mc_label=m.label||'确认';v.mc_cls=m.cls==='dng'?'dng':'pri';v.mc_yes=()=>{m.yes&&m.yes();};}
+    return v;
+  }
+  pFav(pid){this.setState(s=>({groups:s.groups.map(g=>Object.assign({},g,{prompts:g.prompts.map(p=>p.pid===pid?Object.assign({},p,{fav:!p.fav}):p)}))}));}
+  pEdit(pid,text){this.setState(s=>({groups:s.groups.map(g=>Object.assign({},g,{prompts:g.prompts.map(p=>p.pid===pid?Object.assign({},p,{text,edited:true}):p)}))}));}
+  pDel(pid){const p=this.prm(pid);this.setState(s=>({groups:s.groups.map(g=>Object.assign({},g,{prompts:g.prompts.filter(x=>x.pid!==pid)})),trash:[{tid:'X'+Date.now(),pid,ref:'—',src:'手动删除',time:'刚刚'},...s.trash]}));this.toast(pid+' 已移入废纸篓');}
+  palVals(){
+    const s=this.state;const items=this.palItems().map((c,i)=>({cat:c.cat,t:c.t,hasK:!!c.hasK,k:c.k||'',cls:i===0?'on':'',run:()=>{this.palClose();c.fn();}}));
+    return {pal_open:s.pal.open,pal_q:s.pal.q,pal_onQ:e=>this.setState({pal:{open:true,q:e.target.value}}),pal_close:()=>this.palClose(),pal_items:items};
+  }
+  revItems(){const s=this.state;return s.tasks.filter(t=>t.st==='rev'&&t.batch===s.batchView);}
+  revClose(){this.setState(s=>({rev:Object.assign({},s.rev,{det:false,edit:false})}));}
+  revNav(d){const n=this.revItems().length;if(!n)return;this.setState(s=>({rev:Object.assign({},s.rev,{cur:Math.max(0,Math.min(n-1,s.rev.cur+d)),edit:false})}));}
+  maybeArchiveTemp(gids){const g=this.state.groups.find(x=>x.temp&&gids.includes(x.id));if(g){this.setState(s=>({groups:s.groups.map(x=>x.id===g.id?Object.assign({},x,{temp:false}):x)}));this.toast('临时分组「'+g.name+'」已自动写入提示词库');}}
+  revPass(tid){const t=this.state.tasks.find(x=>x.id===tid);if(!t)return;const file=t.refId+'_260708_'+t.pid.replace('-','')+'.JPG';this.setState(s=>({tasks:s.tasks.map(x=>x.id===tid?Object.assign({},x,{st:'pass'}):x),works:[{wid:'W'+t.id,pid:t.pid,gid:t.gid,ref:t.refId,date:'刚刚',batch:t.batch,fav:false},...s.works],rev:Object.assign({},s.rev,{sel:(s.rev.sel||[]).filter(i=>i!==tid),edit:false})}));this.toast('已通过 · 输出 '+file);this.maybeArchiveTemp([t.gid]);}
+  revFail(tid){const t=this.state.tasks.find(x=>x.id===tid);if(!t)return;this.setState(s=>({tasks:s.tasks.map(x=>x.id===tid?Object.assign({},x,{st:'rej'}):x),trash:[{tid:'X'+t.id,pid:t.pid,ref:t.refId,src:'验收未通过',time:'刚刚'},...s.trash],rev:Object.assign({},s.rev,{sel:(s.rev.sel||[]).filter(i=>i!==tid),edit:false})}));this.toast(t.pid+' 未通过 · 已移入废纸篓');}
+  revRetryGo(tid){const t=this.state.tasks.find(x=>x.id===tid);if(!t)return;const d=this.state.rev.draft;const p=this.prm(t.pid);const changed=d&&p&&d!==p.text;if(changed)this.pEdit(t.pid,d);this.patchTask(tid,()=>({st:'retry',pct:0,note:changed?'验收重试 · 已微调提示词':'验收重试'}));this.setState(s=>({rev:Object.assign({},s.rev,{edit:false,draft:''})}));this.toast(changed?'已用微调后的提示词重新生成':'已重新排队生成');}
+  revPassSel(){const s=this.state;const sel=s.rev.sel||[];if(!sel.length)return;const nw=[];const tasks=s.tasks.map(t=>{if(sel.includes(t.id)&&t.st==='rev'){nw.push({wid:'W'+t.id,pid:t.pid,gid:t.gid,ref:t.refId,date:'刚刚',batch:t.batch,fav:false});return Object.assign({},t,{st:'pass'});}return t;});this.setState({tasks,works:[...nw,...s.works],rev:Object.assign({},s.rev,{sel:[]})});this.toast('已通过 '+nw.length+' 张 · 已输出到批次文件夹');this.maybeArchiveTemp(nw.map(w=>w.gid));}
+  revTrashSel(){const s=this.state;const sel=s.rev.sel||[];if(!sel.length)return;const nx=[];const tasks=s.tasks.map(t=>{if(sel.includes(t.id)&&t.st==='rev'){nx.push({tid:'X'+t.id,pid:t.pid,ref:t.refId,src:'验收未通过',time:'刚刚'});return Object.assign({},t,{st:'rej'});}return t;});this.setState({tasks,trash:[...nx,...s.trash],rev:Object.assign({},s.rev,{sel:[]})});this.toast(nx.length+' 张未通过 · 已移入废纸篓');}
+  revKey(e){const s=this.state;const items=this.revItems();const c=items[Math.max(0,Math.min(s.rev.cur,items.length-1))];if(s.rev.det){if(e.key==='ArrowRight'){e.preventDefault();this.revNav(1);}else if(e.key==='ArrowLeft'){e.preventDefault();this.revNav(-1);}else if(e.key==='Enter'){e.preventDefault();if(c)this.revPass(c.id);}else if(e.key==='Backspace'){e.preventDefault();if(c)this.revFail(c.id);}else if(e.key==='r'||e.key==='R'){e.preventDefault();const p=c?this.prm(c.pid):null;this.setState(st=>({rev:Object.assign({},st.rev,{edit:!st.rev.edit,draft:p?p.text:''})}));}}else if(e.key==='Enter'&&items.length){e.preventDefault();this.setState(st=>({rev:Object.assign({},st.rev,{det:true,cur:0,edit:false})}));}}
+  wFav(wid){this.setState(s=>({works:s.works.map(w=>w.wid===wid?Object.assign({},w,{fav:!w.fav}):w)}));}
+  wDel(wid){const w=this.state.works.find(x=>x.wid===wid);if(!w)return;this.setState(s=>({works:s.works.filter(x=>x.wid!==wid),trash:[{tid:'XW'+wid,pid:w.pid,ref:w.ref,src:'手动删除',time:'刚刚'},...s.trash]}));this.closeM();this.toast('作品已移入废纸篓');}
+  xDel(ids){this.setState(s=>({trash:s.trash.filter(x=>!ids.includes(x.tid)),trashSel:[]}));this.closeM();this.toast('已彻底删除 '+ids.length+' 项 · 对应编号已回收');}
+  kCap(kid,d){this.setState(s=>({keys:s.keys.map(k=>k.id===kid?Object.assign({},k,{cap:Math.max(1,Math.min(10,k.cap+d))}):k)}));}
+  pg2Vals(){
+    const s=this.state;const items=this.revItems();const sel=s.rev.sel||[];
+    const cur=Math.max(0,Math.min(s.rev.cur,items.length-1));
+    const bt=s.tasks.filter(t=>t.batch===s.batchView);
+    const proc=bt.filter(t=>t.st==='pass'||t.st==='rej').length;
+    const r_items=items.map((t,i)=>({bg:this.resBg(t.pid),tag:'GEN · '+t.pid,pid:t.pid,refName:t.refId,selCls:sel.includes(t.id)?'sel':'',
+      click:()=>this.setState(st=>({rev:Object.assign({},st.rev,{sel:(st.rev.sel||[]).includes(t.id)?st.rev.sel.filter(x=>x!==t.id):[...(st.rev.sel||[]),t.id]})})),
+      dbl:()=>this.setState(st=>({rev:Object.assign({},st.rev,{det:true,cur:i,edit:false,draft:''})})),
+      zoomFn:e=>{e.stopPropagation();this.setState(st=>({rev:Object.assign({},st.rev,{det:true,cur:i,edit:false,draft:''})}));},
+      passFn:e=>{e.stopPropagation();this.revPass(t.id);},failFn:e=>{e.stopPropagation();this.revFail(t.id);}}));
+    const c=items[cur];const cp=c?this.prm(c.pid):null;const cg=c?this.grp(c.gid):null;
+    const wf=s.lib||{gid:'',fav:false};
+    const filtered=s.works.filter(w=>(!wf.gid||w.gid===wf.gid)&&(!wf.fav||w.fav));
+    const filters=[{label:'全部',cls:(!wf.gid&&!wf.fav)?'on':'',go:()=>this.setState({lib:{gid:'',fav:false}})},{label:'收藏',cls:wf.fav?'on':'',go:()=>this.setState({lib:{gid:'',fav:true}})}].concat(s.groups.map(g=>({label:g.name.split(' · ')[0],cls:wf.gid===g.id?'on':'',go:()=>this.setState({lib:{gid:g.id,fav:false}})})));
+    const w_items=filtered.map(w=>({bg:this.resBg(w.pid),tag:'OUT · '+w.pid,pid:w.pid,gname:(this.grp(w.gid)||{name:w.gid}).name.split(' · ')[0],date:w.date,favCls:w.fav?'on':'',favFn:e=>{e.stopPropagation();this.wFav(w.wid);},open:()=>this.openM({t:'work',wid:w.wid})}));
+    const m=s.modal||{};const v={};
+    if(m.t==='work'){const w=s.works.find(x=>x.wid===m.wid);if(w){const p=this.prm(w.pid);const g=this.grp(w.gid)||{name:w.gid,tags:[]};Object.assign(v,{wk_bg:this.resBg(w.pid),wk_pid:w.pid,wk_gname:g.name,wk_tagStr:g.tags.join(' · '),wk_refName:w.ref,wk_date:w.date,wk_batch:'批次 #'+w.batch,wk_file:w.ref+'_260708_'+w.pid.replace('-','')+'.JPG',wk_favCls:w.fav?'on':'',wk_favFn:()=>this.wFav(w.wid),wk_folderFn:()=>this.toast('模拟 · 已在访达 / 资源管理器中显示'),wk_delFn:()=>this.openM({t:'confirm',title:'删除该作品？',desc:'作品记录与输出文件将移入废纸篓，清理后不可恢复。',label:'删除',cls:'dng',yes:()=>this.wDel(w.wid)}),wk_text:p?p.text:'（对应提示词已删除，正文不可追溯）'});}}
+    return Object.assign(v,{m_work:m.t==='work',
+    r_isRev:s.route==='review',r_hasItems:items.length>0,r_empty:items.length===0,r_count:String(items.length),r_proc:'本批已处理 '+proc+' / '+bt.length,
+    r_cols:s.rev.cols,r_onCols:e=>this.setState(st=>({rev:Object.assign({},st.rev,{cols:+e.target.value})})),
+    r_hasSel:sel.length>0,r_selN:String(sel.length),r_passSel:()=>this.revPassSel(),r_trashSel:()=>this.revTrashSel(),r_clearSel:()=>this.setState(st=>({rev:Object.assign({},st.rev,{sel:[]})})),
+    r_items,rd_open:s.rev.det&&!!c,rd_bg:c?this.resBg(c.pid):'',rd_pid:c?c.pid:'',rd_gname:cg?cg.name:'',rd_refName:c?c.refId:'',rd_keyTag:c?c.keyId:'',rd_text:cp?cp.text:'',rd_pos:(items.length?cur+1:0)+' / '+items.length,
+    rd_prev:()=>this.revNav(-1),rd_next:()=>this.revNav(1),rd_pass:()=>{if(c)this.revPass(c.id);},rd_fail:()=>{if(c)this.revFail(c.id);},rd_close:()=>this.revClose(),
+    rd_editOpen:s.rev.edit,rd_notEdit:!s.rev.edit,rd_editToggle:()=>this.setState(st=>({rev:Object.assign({},st.rev,{edit:!st.rev.edit,draft:cp?cp.text:''})})),rd_onDraft:e=>{this.state.rev.draft=e.target.value;},rd_retryGo:()=>{if(c)this.revRetryGo(c.id);},
+    w_isLib:s.route==='library',w_count:String(s.works.length),w_filters:filters,w_items,w_hasItems:w_items.length>0,w_empty:w_items.length===0});
+  }
+  pg3Vals(){
+    const s=this.state;const m=s.modal||{};const v={};
+    const q=(s.pq||'').toLowerCase();
+    const p_secs=s.groups.map(g=>{const rows=g.prompts.filter(p=>!q||p.pid.toLowerCase().includes(q)||p.text.includes(s.pq)).map(p=>({id:p.pid,num:p.pid.split('-')[1],tip:p.text.slice(0,88)+'…',fav:p.fav,open:()=>this.openPrompt(p.pid)}));
+      const favN=g.prompts.filter(p=>p.fav).length;
+      return {name:g.name,prefix:g.id+'-',dot:'oklch(70% .1 '+g.hue+')',scene:g.scene,tagStr:g.tags.map(t=>'#'+t).join('  '),count:g.prompts.length+' 条'+(favN?' · 收藏 '+favN:''),temp:!!g.temp,viewWorks:()=>{this.setState({lib:{gid:g.id,fav:false}});this.go('library');},rows,hasRows:rows.length>0};}).filter(x=>!q||x.hasRows);
+    const f_secs=s.groups.map(g=>({name:g.name,count:s.refs.filter(r=>r.gid===g.id).length+' 张',tiles:s.refs.filter(r=>r.gid===g.id).map(r=>({bg:this.bg(r.hue),tag:'REF · '+r.gid,name:r.name,used:'用于 '+(s.tasks.filter(t=>t.refId===r.name).length||r.used)+' 个任务',open:()=>this.openM({t:'refd',rid:r.id})}))})).filter(x=>x.tiles.length);
+    const xsel=s.trashSel||[];
+    const x_rows=s.trash.map(x=>({bg:this.resBg(x.pid),pid:x.pid,refName:x.ref||'—',src:x.src,time:x.time,selCls:xsel.includes(x.tid)?'sel':'',ck:xsel.includes(x.tid)?'on':'',
+      togg:()=>this.setState(st=>({trashSel:(st.trashSel||[]).includes(x.tid)?st.trashSel.filter(i=>i!==x.tid):[...(st.trashSel||[]),x.tid]})),
+      delFn:e=>{e.stopPropagation();this.openM({t:'confirm',title:'彻底删除 '+x.pid+'？',desc:'缩略图与提示词记录将被删除，编号 '+x.pid+' 回收，不可恢复。',label:'彻底删除',cls:'dng',yes:()=>this.xDel([x.tid])});}}));
+    const s_keys=s.keys.map(k=>{let hl=k.hl;if(this.props.simKeyIssue&&k.id==='K-C')hl='auth';if(!k.on)hl='off';return {id:k.id,alias:k.alias,masked:'sk-…'+k.id.slice(-1).toLowerCase()+'8f2',url:k.url,model:k.model,conc:String(k.cap),dec:()=>this.kCap(k.id,-1),inc:()=>this.kCap(k.id,1),rate:k.rate?k.rate+'% 成功率':'暂无成功率记录',rateShort:k.rate?k.rate+'%':'—',stLabel:{ok:'正常',lim:'限流退避中',off:'已停用',auth:'失效 · 建议停用'}[hl],stCls:{ok:'b-green',lim:'b-amber',off:'b-gray',auth:'b-red'}[hl],swCls:k.on?'on':'',togg:()=>this.tKeyToggle(k.id),
+      delFn:()=>this.openM({t:'confirm',title:'删除 '+k.alias+'？',desc:'删除后该 Key 的历史调度记录仍保留在任务中。',label:'删除',cls:'dng',yes:()=>{this.setState(st=>({keys:st.keys.filter(x=>x.id!==k.id)}));this.closeM();this.toast('已删除 '+k.id);}})};});
+    const strat=s.strategy||'even';const rt=s.retries==null?1:s.retries;const motion=s.motion||'full';
+    if(m.t==='refd'){const r=s.refs.find(x=>x.id===m.rid);if(r){Object.assign(v,{rf_bg:this.bg(r.hue),rf_name:r.name,rf_gname:(this.grp(r.gid)||{name:r.gid}).name,rf_used:'用于 '+(s.tasks.filter(t=>t.refId===r.name).length||r.used)+' 个任务',rf_works:s.works.filter(w=>w.ref===r.name).length+' 张通过作品',
+      rf_rows:s.groups.map(g=>({name:g.name,dot:'oklch(70% .1 '+g.hue+')',ck:r.gid===g.id?'on':'',pick:()=>{this.setState(st=>({refs:st.refs.map(x=>x.id===r.id?Object.assign({},x,{gid:g.id}):x)}));this.toast('已移动到「'+g.name+'」');}})),
+      rf_replaceFn:()=>this.toast('模拟 · 已更换图片文件，关联关系保持不变'),
+      rf_delFn:()=>this.openM({t:'confirm',title:'删除参考图 '+r.name+'？',desc:'历史任务与作品的关联记录保留；素材文件将被删除。',label:'删除',cls:'dng',yes:()=>{this.setState(st=>({refs:st.refs.filter(x=>x.id!==r.id)}));this.closeM();this.toast('已删除 '+r.name);}})});}}
+    if(m.t==='batch'){v.mb_rows=s.batches.map(b=>({label:'批次 #'+b.n+(b.cur?' · 进行中（当前）':' · 已完成 · '+b.done),cls:s.batchView===b.n?'on':'',pick:()=>{this.setState({batchView:b.n,tfilter:'all'});this.closeM();}}));}
+    return Object.assign(v,{m_refd:m.t==='refd',m_batch:m.t==='batch',m_key:m.t==='key',
+    ak_save:()=>{this.setState(st=>({keys:[...st.keys,{id:'K-'+String.fromCharCode(71+(st.keys.length%20)),alias:'新增 Key',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:2,on:true,hl:'ok',rate:0}]}));this.closeM();this.toast('已添加 Key · 并发默认 2，可在列表中调整');},
+    p_isPrm:s.route==='prompts',p_secs,p_q:s.pq||'',p_onQ:e=>this.setState({pq:e.target.value}),p_import:()=>this.gImport('lib'),p_total:String(s.groups.reduce((a,g)=>a+g.prompts.length,0)),
+    f_isRef:s.route==='refs',f_secs,f_total:String(s.refs.length),
+    f_import:()=>{this.setState(st=>({refs:[...st.refs,{id:'R'+Date.now(),name:'import_'+String(st.refs.length+1).padStart(2,'0'),gid:'DZ',hue:Math.floor(this.rnd()*360),used:0}]}));this.toast('模拟导入 · 已加入「电商主图 · 白底棚拍」分组');},
+    x_isTrash:s.route==='trash',x_rows,x_hasRows:x_rows.length>0,x_empty:x_rows.length===0,x_count:String(s.trash.length),x_hasSel:xsel.length>0,x_selN:String(xsel.length),
+    x_delSel:()=>this.openM({t:'confirm',title:'彻底删除所选 '+xsel.length+' 项？',desc:'相关缩略图与提示词记录将被删除，对应编号回收，不可恢复。',label:'彻底删除',cls:'dng',yes:()=>this.xDel(xsel)}),
+    x_clearAll:()=>this.openM({t:'confirm',title:'清空废纸篓？',desc:'全部 '+s.trash.length+' 项将被彻底删除，编号回收，不可恢复。',label:'清空废纸篓',cls:'dng',yes:()=>this.xDel(s.trash.map(x=>x.tid))}),
+    s_isSet:s.route==='settings',s_keys,s_keySum:s.keys.length+' 个 Key · '+s.keys.filter(k=>k.on).length+' 启用 · 并发上限 '+s.keys.filter(k=>k.on).reduce((a,k)=>a+k.cap,0),s_addFn:()=>this.openM({t:'key'}),
+    s_evenCls:strat==='even'?'on':'',s_rateCls:strat==='rate'?'on':'',s_setEven:()=>this.setState({strategy:'even'}),s_setRate:()=>this.setState({strategy:'rate'}),
+    s_retries:String(rt),s_rDec:()=>this.setState({retries:Math.max(0,rt-1)}),s_rInc:()=>this.setState({retries:Math.min(3,rt+1)}),
+    s_dir:'~/GenDesk/输出/批次_0'+s.batchView,s_dirFn:()=>this.toast('模拟 · 打开系统目录选择器'),s_nameEx:'productA_260708_DZ0001.JPG',
+    s_mFullCls:motion==='full'?'on':'',s_mRedCls:motion==='red'?'on':'',s_setMFull:()=>this.setState({motion:'full'}),s_setMRed:()=>this.setState({motion:'red'}),
+    s_ver:'v'+s.ver,s_checkFn:()=>this.checkUpdate()});
+  }
+  renderVals(){
+    return Object.assign({},this.shellVals(),this.genVals(),this.taskVals(),this.mdlVals(),this.palVals(),{ts_list:this.state.toasts},this.pg2Vals(),this.pg3Vals());
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+# lefthook pre-commit —— 秒级门禁子集（执行计划 §1.2）。
+# 完整门禁在 CI（check.yml）/ 本地 `pnpm check`。
+# 安装：pnpm dlx lefthook install
+pre-commit:
+  parallel: true
+  commands:
+    guardrails:
+      run: bash scripts/guardrails.sh
+    biome:
+      glob: "*.{ts,tsx,js,jsx,json,css}"
+      run: pnpm biome check --no-errors-on-unmatched {staged_files}
+    tsc:
+      glob: "*.{ts,tsx}"
+      run: pnpm tsc --noEmit
+    rustfmt:
+      root: "src-tauri/"
+      glob: "*.rs"
+      run: cargo fmt --check
+    clippy:
+      root: "src-tauri/"
+      glob: "*.rs"
+      run: cargo clippy --all-targets -- -D warnings

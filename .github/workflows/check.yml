@@ -1,0 +1,68 @@
+name: check
+
+# 每次 push / PR 全绿才可合并（main 分支保护，执行计划 §1）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: 前端门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: guardrails 架构铁律
+        run: bash scripts/guardrails.sh
+      - name: Biome ci
+        run: pnpm biome ci .
+      - name: TypeScript strict
+        run: pnpm tsc --noEmit
+      - name: 单元测试
+        run: pnpm vitest run
+      - name: 前端构建
+        run: pnpm vite build
+
+  rust:
+    name: Rust 门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装系统依赖（Tauri Linux）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --check
+      - name: cargo clippy -D warnings
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test（含绑定导出）
+        working-directory: src-tauri
+        run: cargo test
+      - name: bindings.ts 已同步
+        run: git diff --exit-code -- src/lib/ipc/bindings.ts
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check

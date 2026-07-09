@@ -1,0 +1,58 @@
+[package]
+name = "gendesk"
+version = "0.1.0"
+description = "GenDesk — 内部图片生产工具"
+authors = ["GenDesk"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# Tauri 需要 cdylib（移动端）+ staticlib，同时保留 rlib 供集成测试引用引擎逻辑。
+name = "gendesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# IPC 契约自动生成（specta + tauri-specta，禁手改 bindings.ts）
+specta = { version = "2.0.0-rc.22", features = ["derive"] }
+specta-typescript = "0.0.9"
+tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
+
+# 结构化日志滚动落盘
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+# --- Lints：机器强制铁律（执行计划 §1.2）。非测试代码禁 unwrap/expect/panic。---
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# 允许在测试中使用（通过 #[cfg(test)] 模块的 allow 局部放开）
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

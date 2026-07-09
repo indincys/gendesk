@@ -82,7 +82,8 @@ cargo test（含 bindings 同步）· cargo check。
 
 **数据层实现说明**：sqlx 采用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的
 `cargo test` 集成测试覆盖（比仅编译期检查更强）；故未接入 `cargo sqlx prepare --check`。
-`cargo llvm-cov`（engine/ids/importer ≥ 85%）待 M2 引擎落地后统一接入 CI。
+CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml）与每周 `cargo audit`
+（`--ignore` 无修复传递告警，audit.yml）。
 
 ## 里程碑进度
 
@@ -90,9 +91,14 @@ cargo test（含 bindings 同步）· cargo check。
 - [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api\_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
 - [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
   调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
-  域命令 + 4 事件(status/progress/summary/keyHealth)。**待做**：M2 出口 cargo-mutants + `/code-review ultra`（用户触发）。
+  域命令 + 4 事件(status/progress/summary/keyHealth)。M2 出口 cargo-mutants 已跑（见 M5）。
 - [x] **M3 业务页面** — 八大页面全部按原型实现（设置/生成/任务/验收/作品/提示词/参考图/废纸篓）；
   review/works/trash + 提示词库/参考图详情 后端域；前端引擎事件 store + 导航徽章(运行/验收/废纸篓) +
   ⌘K 操作补全 + 共享 UI。核心闭环「配 Key→生成→实时任务→验收→输出/废纸篓」端到端可用。
-- [ ] M4 更新发布链 · \[ ] M5 收尾质量关。
+- [x] **M4 更新发布链** — tauri-plugin-updater/process；minisign 密钥（公钥入 conf，私钥 `~/.tauri/`）；
+  createUpdaterArtifacts + NSIS per-user + WebView2 bootstrapper + macOS 12+；check/install 命令 +
+  `update://state` 事件 + 标题栏 pill + 设置手动检查 + 启动自动检查；release.yml（tag v* → 双端 + latest.json）。
+- [x] **M5 收尾质量关** — pnpm/cargo audit 清零（无修复传递告警书面豁免）；cargo-mutants(engine/+ids/)
+  存活体全部补测试或书面豁免（docs/mutants-exemptions.md）；八页 UI 冒烟 + reduced-motion；
+  §7 V2 预留自检 + V2 backlog（docs/V2-backlog.md）。**人工收尾清单**（AI 不可替代，交付前执行）见 V2-backlog.md。
 

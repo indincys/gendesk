@@ -4,8 +4,16 @@
 //! IPC 契约由 tauri-specta 在此集中登记，自动导出到 `src/lib/ipc/bindings.ts`。
 
 mod commands;
+mod db;
 mod error;
+mod files;
+mod ids;
+mod importer;
 mod logging;
+mod secrets;
+mod state;
+
+use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
@@ -17,7 +25,35 @@ pub use error::{AppError, AppResult};
 /// `run()` 与 `export_bindings` 测试共用它，保证「运行时挂载的契约」与
 /// 「导出给前端的绑定」永远同源（消除契约漂移，执行计划 §1.2）。
 fn specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![commands::misc::log_frontend_error])
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        commands::misc::log_frontend_error,
+        // settings 域
+        commands::settings::get_settings,
+        commands::settings::update_settings,
+        commands::settings::pick_output_dir,
+        commands::settings::open_logs_dir,
+        commands::settings::open_path_in_folder,
+        // api_keys 域
+        commands::api_keys::list_api_keys,
+        commands::api_keys::add_api_key,
+        commands::api_keys::update_api_key,
+        commands::api_keys::set_api_key_enabled,
+        commands::api_keys::delete_api_key,
+        // refs 域
+        commands::refs::import_ref_images,
+        commands::refs::list_ref_images,
+        commands::refs::set_ref_image_group,
+        // prompts 域
+        commands::prompts::parse_prompt_txt,
+        commands::prompts::commit_prompt_import,
+    ])
+}
+
+/// TS 导出配置：i64 → number（编号/计数均在 JS 安全整数范围内）。
+#[cfg(any(debug_assertions, test))]
+fn ts_config() -> specta_typescript::Typescript {
+    use specta_typescript::{BigIntExportBehavior, Typescript};
+    Typescript::default().bigint(BigIntExportBehavior::Number)
 }
 
 /// 应用主入口，由 `main.rs`（桌面）与移动端入口共同调用。
@@ -28,8 +64,7 @@ pub fn run() {
     // 开发构建时把最新绑定写出到前端；生产构建不含此步。
     #[cfg(debug_assertions)]
     {
-        use specta_typescript::Typescript;
-        if let Err(err) = builder.export(Typescript::default(), "../src/lib/ipc/bindings.ts") {
+        if let Err(err) = builder.export(ts_config(), "../src/lib/ipc/bindings.ts") {
             eprintln!("[specta] 导出 bindings.ts 失败: {err}");
         }
     }
@@ -50,11 +85,17 @@ pub fn run() {
             // 事件挂载（当前无事件；M1/M2 增加后由 builder 统一登记）。
             builder.mount_events(app);
 
-            // 日志初始化到 app_data/logs，guard 托管到应用状态保持存活。
-            if let Ok(data_dir) = app.path().app_data_dir() {
-                let guard = logging::init(&data_dir.join("logs"));
-                app.manage(guard);
-            }
+            // 数据目录 + 日志 + DB 池 + 密钥存储，装配为 AppState。
+            let data_dir = app.path().app_data_dir()?;
+            let dirs = files::DataDirs::new(&data_dir);
+            dirs.init()?;
+
+            let guard = logging::init(&dirs.logs());
+            app.manage(guard);
+
+            let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
+            let secrets: Arc<dyn secrets::SecretStore> = Arc::new(secrets::KeyringStore);
+            app.manage(state::AppState::new(pool, secrets, dirs));
 
             // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
             if let Some(window) = app.get_webview_window("main") {
@@ -83,10 +124,9 @@ mod tests {
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     #[test]
     fn export_bindings() {
-        use specta_typescript::Typescript;
         // 重新导出并写盘；CI 随后 `git diff --exit-code` 校验 bindings.ts 已同步。
         specta_builder()
-            .export(Typescript::default(), "../src/lib/ipc/bindings.ts")
+            .export(ts_config(), "../src/lib/ipc/bindings.ts")
             .expect("导出 TypeScript 绑定失败");
     }
 }

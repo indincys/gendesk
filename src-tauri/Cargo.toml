@@ -27,6 +27,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+# 异步运行时（调度循环、per-Key Semaphore；M1 起用于数据层测试）
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+
+# 数据层
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+
+# API Key 存系统钥匙串
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# 缩略图生成 / 格式转换（输出统一 JPG）
+image = "0.25"
+
+# 提示词 txt 导入：GBK/UTF-8 编码探测
+encoding_rs = "0.8"
+chardetng = "0.1"
+
 # IPC 契约自动生成（specta + tauri-specta，禁手改 bindings.ts）
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 specta-typescript = "0.0.9"
@@ -39,6 +55,8 @@ tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 # --- Lints：机器强制铁律（执行计划 §1.2）。非测试代码禁 unwrap/expect/panic。---
 [lints.rust]

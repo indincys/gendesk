@@ -5,10 +5,38 @@
 // - 提供事件订阅助手
 // guardrails 强制 `invoke(` / `listen(` 仅允许出现在 `src/lib/ipc/` 下。
 
-import { commands } from "./bindings";
+import { type AppError, type Result, commands } from "./bindings";
 
 export { commands };
-export type { FrontendErrorPayload } from "./bindings";
+export type {
+  AddApiKeyInput,
+  ApiKeyView,
+  AppError,
+  FrontendErrorPayload,
+  ImportPreview,
+  ImportPreviewGroup,
+  ImportResult,
+  RefImageView,
+  Result,
+  Settings,
+  SettingsPatch,
+  UpdateApiKeyPatch,
+} from "./bindings";
+
+/** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
+export class IpcError extends Error {
+  constructor(public readonly appError: AppError) {
+    super(`${appError.type}: ${appError.message}`);
+    this.name = "IpcError";
+  }
+}
+
+/** 解包 tauri-specta 的 Result：ok 返回数据，error 抛 [`IpcError`]。 */
+export async function unwrap<T>(promise: Promise<Result<T, AppError>>): Promise<T> {
+  const result = await promise;
+  if (result.status === "ok") return result.data;
+  throw new IpcError(result.error);
+}
 
 /**
  * 转发前端未捕获错误到 Rust 统一日志流。

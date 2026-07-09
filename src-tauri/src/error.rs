@@ -45,5 +45,29 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
+        AppError::Database(e.to_string())
+    }
+}
+
+impl From<sqlx::migrate::MigrateError> for AppError {
+    fn from(e: sqlx::migrate::MigrateError) -> Self {
+        AppError::Database(e.to_string())
+    }
+}
+
+impl From<keyring::Error> for AppError {
+    fn from(e: keyring::Error) -> Self {
+        AppError::Keyring(e.to_string())
+    }
+}
+
+impl From<image::ImageError> for AppError {
+    fn from(e: image::ImageError) -> Self {
+        AppError::Io(e.to_string())
+    }
+}
+
 /// 命令返回别名 —— 所有 `#[tauri::command]` 统一返回它。
 pub type AppResult<T> = Result<T, AppError>;

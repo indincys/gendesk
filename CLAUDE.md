@@ -78,11 +78,15 @@
 ## 提交前门禁清单（`pnpm check` 覆盖）
 
 guardrails · Biome ci · tsc strict · vitest · vite build · cargo fmt · clippy -D warnings ·
-cargo test（含 bindings 同步）· cargo check。M1 起追加 `cargo sqlx prepare --check` 与
-`cargo llvm-cov`（engine/ids/importer ≥ 85%）。
+cargo test（含 bindings 同步）· cargo check。
+
+**数据层实现说明**：sqlx 采用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的
+`cargo test` 集成测试覆盖（比仅编译期检查更强）；故未接入 `cargo sqlx prepare --check`。
+`cargo llvm-cov`（engine/ids/importer ≥ 85%）待 M2 引擎落地后统一接入 CI。
 
 ## 里程碑进度
 
 - [x] **M0 骨架与门禁** — Tauri2+React19 骨架、设计 tokens、窗口壳、命令面板、质量门禁全套。
-- [ ] M1 数据层与基础域 · \[ ] M2 任务引擎 · \[ ] M3 业务页面 · \[ ] M4 更新发布链 · \[ ] M5 收尾质量关。
+- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
+- [ ] M2 任务引擎 · [ ] M3 业务页面 · [ ] M4 更新发布链 · [ ] M5 收尾质量关。
 

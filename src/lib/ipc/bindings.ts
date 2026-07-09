@@ -15,6 +15,150 @@ async logFrontendError(payload: FrontendErrorPayload) : Promise<Result<null, App
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getSettings() : Promise<Result<Settings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateSettings(patch: SettingsPatch) : Promise<Result<Settings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_settings", { patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选择输出根目录（返回所选路径；取消返回 None）。
+ */
+async pickOutputDir() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_output_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器中打开日志目录。
+ */
+async openLogsDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_logs_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器中显示指定路径（打开所在文件夹）。
+ */
+async openPathInFolder(path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_path_in_folder", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listApiKeys() : Promise<Result<ApiKeyView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_api_keys") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async addApiKey(input: AddApiKeyInput) : Promise<Result<ApiKeyView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_api_key", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateApiKey(id: number, patch: UpdateApiKeyPatch) : Promise<Result<ApiKeyView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_api_key", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setApiKeyEnabled(id: number, enabled: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_api_key_enabled", { id, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteApiKey(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_api_key", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导入参考图：拷入库、生成缩略图、写记录，返回视图列表。
+ */
+async importRefImages(paths: string[], groupId: number | null) : Promise<Result<RefImageView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出全部未删除参考图（供参考图库/生成页选择）。
+ */
+async listRefImages() : Promise<Result<RefImageView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_ref_images") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 调整参考图分组。
+ */
+async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_ref_image_group", { id, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 第一步：解析 txt，构建预览（不落库）。
+ */
+async parsePromptTxt(path: string) : Promise<Result<ImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("parse_prompt_txt", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 第二步：落库（ctx=generate 时建临时分组）。号池发放与写入同事务。
+ */
+async commitPromptImport(preview: ImportPreview, ctx: string) : Promise<Result<ImportResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("commit_prompt_import", { preview, ctx }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -28,6 +172,27 @@ async logFrontendError(payload: FrontendErrorPayload) : Promise<Result<null, App
 
 /** user-defined types **/
 
+export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number }
+/**
+ * API Key 脱敏视图（Key 本体永不出 Rust）。
+ */
+export type ApiKeyView = { id: number; name: string; 
+/**
+ * 脱敏 Key：`****后4位`
+ */
+maskedKey: string; baseUrl: string; model: string; concurrencyLimit: number; enabled: boolean; 
+/**
+ * 近 50 次成功率（0.0–1.0）
+ */
+successRate: number; 
+/**
+ * 成功率样本量
+ */
+sampleCount: number; 
+/**
+ * 当前占用并发（运行时；M2 引擎接入后填充，M1 恒为 0）
+ */
+usedConcurrency: number }
 /**
  * 应用级错误。`type` 字段作为前端可判别的分类标签。
  */
@@ -72,6 +237,54 @@ source: string | null;
  * 关联任务 ID（若发生在任务上下文），用于全链路贯穿。
  */
 taskId: string | null }
+/**
+ * 导入预览（parse 阶段产物，不落库）。
+ */
+export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number }
+export type ImportPreviewGroup = { name: string; prefix: string; scene: string; tags: string[]; count: number; 
+/**
+ * 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
+ */
+codeRange: string; isNewGroup: boolean; 
+/**
+ * 提示词正文（commit 阶段回传落库；UI 列表不展示）
+ */
+prompts: string[] }
+export type ImportResult = { groupIds: number[]; inserted: number; 
+/**
+ * 是否新建了临时分组（ctx=generate）
+ */
+temp: boolean }
+export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number }
+/**
+ * 应用设置（单行 JSON 持久化）。
+ */
+export type Settings = { 
+/**
+ * 调度策略："round_robin" | "success_rate"
+ */
+scheduleStrategy: string; 
+/**
+ * 失败重试次数（0–3）
+ */
+retryCount: number; 
+/**
+ * 输出根目录
+ */
+outputDir: string; 
+/**
+ * 动效偏好："standard" | "reduced"
+ */
+motion: string; 
+/**
+ * 队列暂停态
+ */
+paused: boolean }
+/**
+ * 设置补丁（部分更新）。
+ */
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null }
+export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
 
 /** tauri-specta globals **/
 

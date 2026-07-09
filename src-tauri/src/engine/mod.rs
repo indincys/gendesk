@@ -198,3 +198,96 @@ impl Engine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::*;
+    use crate::db::repo::api_keys::ApiKeyRow;
+    use crate::db::repo::prompts as prompt_repo;
+    use crate::db::repo::refs as ref_repo;
+    use crate::db::test_support::test_pool;
+    use crate::secrets::MemoryStore;
+
+    fn row(id: i64, account: &str, enabled: i64, concurrency: i64) -> ApiKeyRow {
+        ApiKeyRow {
+            id,
+            name: format!("k{id}"),
+            keyring_account: account.into(),
+            base_url: "http://x/v1".into(),
+            model: "m".into(),
+            concurrency_limit: concurrency,
+            enabled,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn load_key_configs_maps_enabled_and_skips_secretless() {
+        let store = MemoryStore::default();
+        store.set("a-en", "sk-1").unwrap();
+        store.set("a-dis", "sk-2").unwrap();
+        // 第三个无密钥 → 应跳过
+        let rows = [
+            row(1, "a-en", 1, 5),
+            row(2, "a-dis", 0, 3),
+            row(3, "a-nosecret", 1, 2),
+        ];
+        let cfgs = load_key_configs(&rows, &store);
+        assert_eq!(cfgs.len(), 2, "无密钥的 Key 应被跳过");
+        let en = cfgs.iter().find(|c| c.id == 1).unwrap();
+        assert!(en.enabled, "enabled=1 → true");
+        assert_eq!(en.concurrency_limit, 5);
+        let dis = cfgs.iter().find(|c| c.id == 2).unwrap();
+        assert!(!dis.enabled, "enabled=0 → false");
+    }
+
+    #[tokio::test]
+    async fn create_batch_expands_task_count_correctly() {
+        let (pool, _d) = test_pool().await;
+        // 1 参考图 + 1 组(3 提示词)
+        let rid = ref_repo::insert(
+            &pool,
+            &ref_repo::NewRefImage {
+                name: "r".into(),
+                group_id: None,
+                file_path: "/r".into(),
+                thumb_path: "/t".into(),
+                width: 1,
+                height: 1,
+                file_size: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let gid = prompt_repo::create_group(&mut tx, "g", "GG", "", false)
+            .await
+            .unwrap();
+        for i in 1..=3 {
+            prompt_repo::insert_prompt(&mut tx, gid, &format!("GG-000{i}"), "t", "library")
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let (batch_id, count) = create_batch(
+            &pool,
+            "/out",
+            "{}",
+            &[RefMapping {
+                ref_image_id: rid,
+                prompt_group_id: gid,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 3, "1 参考图 × 3 提示词 = 3 任务");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
+            .bind(batch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 3);
+    }
+}

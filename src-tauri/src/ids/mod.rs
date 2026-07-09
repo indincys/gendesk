@@ -110,6 +110,20 @@ mod tests {
         assert_eq!(format_code("CJ", 12345), "CJ-12345");
     }
 
+    #[tokio::test]
+    async fn peek_next_reflects_pool_without_consuming() {
+        let (pool, _dir) = test_pool().await;
+        // 未初始化前缀 → 1
+        assert_eq!(peek_next(&pool, "DZ").await.unwrap(), 1);
+        let mut conn = pool.acquire().await.unwrap();
+        allocate(&mut conn, "DZ").await.unwrap(); // 1
+        allocate(&mut conn, "DZ").await.unwrap(); // 2
+        drop(conn);
+        // 已发放到 2，下一个是 3；peek 不消费，连续两次相同
+        assert_eq!(peek_next(&pool, "DZ").await.unwrap(), 3);
+        assert_eq!(peek_next(&pool, "DZ").await.unwrap(), 3);
+    }
+
     // 操作序列：分配 / 回收一个当前占用号。
     #[derive(Debug, Clone)]
     enum Op {

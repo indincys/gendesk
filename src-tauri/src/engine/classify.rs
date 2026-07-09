@@ -169,6 +169,27 @@ mod tests {
     }
 
     #[test]
+    fn only_auth_suggests_disabling_key() {
+        assert!(ErrorType::Auth.suggests_disable_key());
+        for e in [
+            ErrorType::Timeout,
+            ErrorType::RateLimited,
+            ErrorType::ContentPolicy,
+            ErrorType::Interrupted,
+            ErrorType::Other,
+        ] {
+            assert!(!e.suggests_disable_key(), "{e:?} 不应建议停用 Key");
+        }
+    }
+
+    #[test]
+    fn error_type_str_roundtrip() {
+        assert_eq!(ErrorType::Timeout.as_str(), "Timeout");
+        assert_eq!(ErrorType::Auth.as_str(), "Auth");
+        assert_eq!(ErrorType::Interrupted.as_str(), "Interrupted");
+    }
+
+    #[test]
     fn other_follows_user_retry_count() {
         assert!(decide(ErrorType::Other, 0, 2).retry);
         assert!(decide(ErrorType::Other, 1, 2).retry);

@@ -28,9 +28,9 @@
 1. **业务真相只在 Rust**：任务状态、编号发放、文件操作、DB 读写全部经 Rust 命令；
    前端不持有可变业务状态，Zustand 只做事件镜像与 UI 态。
 2. **单写者事务**：所有状态迁移由调度器串行提交；配合 single-instance 禁双开。
-3. **前端只经&#x20;********`src/lib/ipc/`********\*\*\*\*\*\*\*\*\*\*\*\* 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
+3. **前端只经&#x20;********`src/lib/ipc/`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\* 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
 4. **事件驱动不轮询**：进度/汇总/健康经 Tauri 事件推送，250ms 节流；导航徽章由事件驱动。
-5. **token 只从&#x20;********`src/styles/globals.css`********\*\*\*\*\*\*\*\*\*\*\*\* 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
+5. **token 只从&#x20;********`src/styles/globals.css`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\* 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
 6. **视觉以原型 HTML 源码为准**（读源码，不截图猜测）。
 
 ## IPC 约定
@@ -45,7 +45,7 @@
 ## 错误处理规范
 
 - 统一 `thiserror` 错误类型（`src-tauri/src/error.rs`）经 IPC 序列化给前端。
-- **非测试代码禁&#x20;********`unwrap`********\*\*\*\*\*\*\*\*\*\*\*\*/********`expect`************/\*\*\*\*\*\*\*\*********`panic`** → Cargo `[lints.clippy]` 强制（deny）。
+- **非测试代码禁&#x20;********`unwrap`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*/********`expect`************/\*\*\*\*\*\*\*\*********\*\*\*\*****`panic`** → Cargo `[lints.clippy]` 强制（deny）。
   测试内允许，但须以带说明注释的 `#[allow(...)]` 局部放开（guardrails 校验说明）。
 - 前端未捕获错误经 `reportFrontendError` → `log_frontend_error` 命令汇入统一 tracing 日志。
 - 业务错误六类：Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other（技术文档 4.2）。
@@ -94,9 +94,5 @@ cargo test（含 bindings 同步）· cargo check。
 - [x] **M3 业务页面** — 八大页面全部按原型实现（设置/生成/任务/验收/作品/提示词/参考图/废纸篓）；
   review/works/trash + 提示词库/参考图详情 后端域；前端引擎事件 store + 导航徽章(运行/验收/废纸篓) +
   ⌘K 操作补全 + 共享 UI。核心闭环「配 Key→生成→实时任务→验收→输出/废纸篓」端到端可用。
-- [x] **M4 更新发布链** — tauri-plugin-updater + process；minisign 密钥（公钥入 conf，私钥备份
-  `~/.tauri/gendesk-signing.key`）；`createUpdaterArtifacts` + NSIS per-user + WebView2 bootstrapper +
-  macOS 12+；check_update_now/install_update 命令 + `update://state` 事件；标题栏 pill「已就绪·重启安装」+
-  设置页手动检查 + 启动自动检查；release.yml（tag v* → 双端产物 + latest.json）。真机演练(4.4)为人工环节。
-- [ ] M5 收尾质量关。
+- [ ] M4 更新发布链 · \[ ] M5 收尾质量关。
 

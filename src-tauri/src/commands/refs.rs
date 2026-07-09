@@ -139,3 +139,103 @@ pub async fn set_ref_image_group(
     repo::set_group(&state.db, id, group_id).await?;
     Ok(())
 }
+
+/// 参考图详情（含使用统计）。
+#[derive(Debug, Clone, serde::Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RefImageDetail {
+    pub id: i64,
+    pub name: String,
+    pub group_id: Option<i64>,
+    pub file_path: String,
+    pub thumb_path: String,
+    pub width: i64,
+    pub height: i64,
+    pub used_count: i64,
+    pub works_count: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<RefImageDetail> {
+    let r = repo::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("参考图不存在".into()))?;
+    let (used, works) = repo::usage_stats(&state.db, id).await?;
+    Ok(RefImageDetail {
+        id: r.id,
+        name: r.name,
+        group_id: r.group_id,
+        file_path: r.file_path,
+        thumb_path: r.thumb_path,
+        width: r.width,
+        height: r.height,
+        used_count: used,
+        works_count: works,
+    })
+}
+
+/// 更换参考图文件（保留 id 与关联）。
+#[tauri::command]
+#[specta::specta]
+pub async fn replace_ref_image_file(
+    state: State<'_, AppState>,
+    id: i64,
+    path: String,
+) -> AppResult<()> {
+    state.dirs.init()?;
+    let src = PathBuf::from(&path);
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(files::sanitize_filename)
+        .ok_or_else(|| AppError::InvalidInput("无效文件路径".into()))?;
+    let ext = src
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+    let dest = unique_path(&state.dirs.refs(), &stem, &ext);
+    std::fs::copy(&src, &dest)?;
+    let thumb = unique_path(&state.dirs.thumbs(), &stem, "jpg");
+    let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
+    let size = std::fs::metadata(&dest)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    repo::update_file(
+        &state.db,
+        id,
+        &dest.to_string_lossy(),
+        &thumb.to_string_lossy(),
+        w as i64,
+        h as i64,
+        size,
+    )
+    .await?;
+    Ok(())
+}
+
+/// 删除参考图 → 进废纸篓。
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let Some(row) = repo::soft_delete(&state.db, id).await? else {
+        return Ok(());
+    };
+    let mut tx = state.db.begin().await?;
+    crate::db::repo::trash::insert(
+        &mut tx,
+        &crate::db::repo::trash::NewTrashItem {
+            entity_type: "ref".into(),
+            ref_id: Some(row.id),
+            thumb_path: Some(row.thumb_path.clone()),
+            prompt_text: None,
+            code: None,
+            source_label: "手动删除".into(),
+            file_paths: vec![row.file_path, row.thumb_path],
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}

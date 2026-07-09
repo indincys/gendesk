@@ -127,6 +127,58 @@ pub async fn promote_group(pool: &SqlitePool, group_id: i64) -> Result<bool, sql
     Ok(affected > 0)
 }
 
+pub async fn list_by_group(
+    pool: &SqlitePool,
+    group_id: i64,
+) -> Result<Vec<PromptRow>, sqlx::Error> {
+    sqlx::query_as::<_, PromptRow>(
+        "SELECT * FROM prompts WHERE group_id = ?1 AND status = 'active' ORDER BY id ASC",
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn search(pool: &SqlitePool, query: &str) -> Result<Vec<PromptRow>, sqlx::Error> {
+    let like = format!("%{query}%");
+    sqlx::query_as::<_, PromptRow>(
+        "SELECT * FROM prompts WHERE status = 'active' AND (code LIKE ?1 OR text LIKE ?1)
+         ORDER BY id ASC LIMIT 300",
+    )
+    .bind(like)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<PromptRow>, sqlx::Error> {
+    sqlx::query_as::<_, PromptRow>("SELECT * FROM prompts WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn toggle_favorite(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE prompts SET favorite = 1 - favorite WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 置 trash 状态，返回 (code, group_id) 供废纸篓编号回收。
+pub async fn set_trash(pool: &SqlitePool, id: i64) -> Result<Option<(String, i64)>, sqlx::Error> {
+    let row = get(pool, id).await?;
+    if let Some(r) = &row {
+        sqlx::query("UPDATE prompts SET status = 'trash', updated_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(crate::db::now_unix())
+            .execute(pool)
+            .await?;
+        return Ok(Some((r.code.clone(), r.group_id)));
+    }
+    Ok(None)
+}
+
 pub async fn count_in_group(pool: &SqlitePool, group_id: i64) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM prompts WHERE group_id = ?1 AND status = 'active'",

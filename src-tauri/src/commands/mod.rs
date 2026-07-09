@@ -8,5 +8,8 @@ pub mod batches;
 pub mod misc;
 pub mod prompts;
 pub mod refs;
+pub mod review;
 pub mod settings;
 pub mod tasks;
+pub mod trash;
+pub mod works;

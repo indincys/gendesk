@@ -160,12 +160,93 @@ async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null
     else return { status: "error", error: e  as any };
 }
 },
+async getRefImage(id: number) : Promise<Result<RefImageDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_ref_image", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 更换参考图文件（保留 id 与关联）。
+ */
+async replaceRefImageFile(id: number, path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("replace_ref_image_file", { id, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除参考图 → 进废纸篓。
+ */
+async trashRefImage(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_ref_image", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 列出全部提示词分组（含 active 提示词数）。
  */
 async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_prompt_groups") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listPrompts(groupId: number) : Promise<Result<PromptView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_prompts", { groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async searchPrompts(query: string) : Promise<Result<PromptView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_prompts", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getPrompt(id: number) : Promise<Result<PromptView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_prompt", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updatePromptText(id: number, text: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_prompt_text", { id, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async togglePromptFavorite(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("toggle_prompt_favorite", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除提示词 → 进废纸篓（编号在清理时回收）。
+ */
+async trashPrompt(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_prompt", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -290,6 +371,103 @@ async countInterrupted() : Promise<Result<number, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async listPendingReview(batchId: number | null) : Promise<Result<ReviewItemView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_pending_review", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)，单事务。
+ */
+async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("accept_tasks", { taskIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 不通过所选：置 rej + 原图删除（留缩略图）+ 进废纸篓，单事务。
+ */
+async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reject_tasks", { taskIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listWorks(filter: WorkFilter, page: number | null) : Promise<Result<WorkView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_works", { filter, page }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getWork(id: number) : Promise<Result<WorkView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async toggleWorkFavorite(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("toggle_work_favorite", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除作品 → 进废纸篓（记录删除，文件待清理时物理删）。
+ */
+async trashWork(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listTrash() : Promise<Result<TrashItemView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_trash") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async purgeTrashItems(ids: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("purge_trash_items", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async purgeAllTrash() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("purge_all_trash") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async countTrash() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("count_trash") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -314,6 +492,14 @@ taskStatusChanged: "task-status-changed"
 
 /** user-defined types **/
 
+/**
+ * 验收结果。
+ */
+export type AcceptResult = { accepted: number; 
+/**
+ * 本次因验收通过而转正的临时分组名（前端 toast）
+ */
+promotedGroups: string[] }
 export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
@@ -420,8 +606,20 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
+/**
+ * 提示词视图（编号网格 / 详情）。
+ */
+export type PromptView = { id: number; groupId: number; code: string; text: string; favorite: boolean; edited: boolean }
+/**
+ * 参考图详情（含使用统计）。
+ */
+export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
 export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
+/**
+ * 待验收项视图。
+ */
+export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string }
 /**
  * 应用设置（单行 JSON 持久化）。
  */
@@ -519,7 +717,10 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
+export type TrashItemView = { id: number; entityType: string; code: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
+export type WorkFilter = { groupId: number | null; favoriteOnly: boolean }
+export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string }
 
 /** tauri-specta globals **/
 

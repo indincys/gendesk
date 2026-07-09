@@ -48,8 +48,17 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::refs::import_ref_images,
             commands::refs::list_ref_images,
             commands::refs::set_ref_image_group,
+            commands::refs::get_ref_image,
+            commands::refs::replace_ref_image_file,
+            commands::refs::trash_ref_image,
             // prompts 域
             commands::prompts::list_prompt_groups,
+            commands::prompts::list_prompts,
+            commands::prompts::search_prompts,
+            commands::prompts::get_prompt,
+            commands::prompts::update_prompt_text,
+            commands::prompts::toggle_prompt_favorite,
+            commands::prompts::trash_prompt,
             commands::prompts::parse_prompt_txt,
             commands::prompts::commit_prompt_import,
             // batches / tasks 域（引擎）
@@ -63,6 +72,20 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::tasks::retry_failed_tasks,
             commands::tasks::retry_interrupted_tasks,
             commands::tasks::count_interrupted,
+            // review 域
+            commands::review::list_pending_review,
+            commands::review::accept_tasks,
+            commands::review::reject_tasks,
+            // works 域
+            commands::works::list_works,
+            commands::works::get_work,
+            commands::works::toggle_work_favorite,
+            commands::works::trash_work,
+            // trash 域
+            commands::trash::list_trash,
+            commands::trash::purge_trash_items,
+            commands::trash::purge_all_trash,
+            commands::trash::count_trash,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,

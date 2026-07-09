@@ -69,3 +69,60 @@ pub async fn set_group(
         .await?;
     Ok(())
 }
+
+pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<RefImageRow>, sqlx::Error> {
+    sqlx::query_as::<_, RefImageRow>("SELECT * FROM ref_images WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 软删除（deleted_at），返回原行供搬运文件进废纸篓。
+pub async fn soft_delete(pool: &SqlitePool, id: i64) -> Result<Option<RefImageRow>, sqlx::Error> {
+    let row = get(pool, id).await?;
+    if row.is_some() {
+        sqlx::query("UPDATE ref_images SET deleted_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(now_unix())
+            .execute(pool)
+            .await?;
+    }
+    Ok(row)
+}
+
+pub async fn update_file(
+    pool: &SqlitePool,
+    id: i64,
+    file_path: &str,
+    thumb_path: &str,
+    width: i64,
+    height: i64,
+    file_size: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE ref_images SET file_path = ?2, thumb_path = ?3, width = ?4, height = ?5, file_size = ?6 WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(file_path)
+    .bind(thumb_path)
+    .bind(width)
+    .bind(height)
+    .bind(file_size)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 使用次数（batch_refs）与产出通过作品数（accepted_works）。
+pub async fn usage_stats(pool: &SqlitePool, id: i64) -> Result<(i64, i64), sqlx::Error> {
+    let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM batch_refs WHERE ref_image_id = ?1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    let works: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works WHERE ref_image_id = ?1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    Ok((used, works))
+}

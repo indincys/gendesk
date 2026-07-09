@@ -60,6 +60,97 @@ fn gen_prefix_from_name(name: &str) -> String {
     }
 }
 
+/// 提示词视图（编号网格 / 详情）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptView {
+    pub id: i64,
+    pub group_id: i64,
+    pub code: String,
+    pub text: String,
+    pub favorite: bool,
+    pub edited: bool,
+}
+
+fn to_prompt_view(r: repo::PromptRow) -> PromptView {
+    PromptView {
+        id: r.id,
+        group_id: r.group_id,
+        code: r.code,
+        text: r.text,
+        favorite: r.favorite != 0,
+        edited: r.edited != 0,
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_prompts(state: State<'_, AppState>, group_id: i64) -> AppResult<Vec<PromptView>> {
+    let rows = repo::list_by_group(&state.db, group_id).await?;
+    Ok(rows.into_iter().map(to_prompt_view).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn search_prompts(
+    state: State<'_, AppState>,
+    query: String,
+) -> AppResult<Vec<PromptView>> {
+    let rows = repo::search(&state.db, query.trim()).await?;
+    Ok(rows.into_iter().map(to_prompt_view).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_prompt(state: State<'_, AppState>, id: i64) -> AppResult<PromptView> {
+    let row = repo::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("提示词不存在".into()))?;
+    Ok(to_prompt_view(row))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_prompt_text(
+    state: State<'_, AppState>,
+    id: i64,
+    text: String,
+) -> AppResult<()> {
+    repo::apply_edit(&state.db, id, &text).await?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn toggle_prompt_favorite(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    repo::toggle_favorite(&state.db, id).await?;
+    Ok(())
+}
+
+/// 删除提示词 → 进废纸篓（编号在清理时回收）。
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_prompt(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    if let Some((code, _gid)) = repo::set_trash(&state.db, id).await? {
+        let mut tx = state.db.begin().await?;
+        crate::db::repo::trash::insert(
+            &mut tx,
+            &crate::db::repo::trash::NewTrashItem {
+                entity_type: "prompt".into(),
+                ref_id: Some(id),
+                thumb_path: None,
+                prompt_text: None,
+                code: Some(code),
+                source_label: "手动删除".into(),
+                file_paths: Vec::new(),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
 /// 分组视图（生成页 / 提示词库列表）。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

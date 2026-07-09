@@ -1,6 +1,7 @@
 import { CommandPalette } from "@/components/CommandPalette";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
+import { commands, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
@@ -16,12 +17,13 @@ export function AppShell() {
   const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
   const ActivePage = ROUTE_BY_KEY[route].component;
 
-  // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）。
+  // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）；启动检查更新一次。
   useEffect(() => {
     let cleanup: (() => void) | undefined;
     void initEngine().then((fn) => {
       cleanup = fn;
     });
+    void unwrap(commands.checkUpdateNow()).catch(() => {}); // 启动后台检查
     return () => cleanup?.();
   }, [initEngine]);
 

@@ -1,4 +1,6 @@
+import { commands, unwrap } from "@/lib/ipc";
 import { windowControls } from "@/lib/window";
+import { useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { Search } from "lucide-react";
 
@@ -6,6 +8,8 @@ import { Search } from "lucide-react";
 export function TitleBar() {
   const platform = useUiStore((s) => s.platform);
   const openPalette = useUiStore((s) => s.openPalette);
+  const updateReady = useEngineStore((s) => s.updateReady);
+  const updateVersion = useEngineStore((s) => s.updateVersion);
   const mod = modKeyLabel(platform);
   const isMac = platform === "mac";
   const isWin = platform === "win";
@@ -34,6 +38,17 @@ export function TitleBar() {
       </div>
 
       <div className="f1" />
+
+      {updateReady && (
+        <button
+          type="button"
+          className="pill"
+          onClick={() => void unwrap(commands.installUpdate()).catch(() => {})}
+        >
+          <span className="pdot" />
+          {updateVersion ? `v${updateVersion} ` : ""}已就绪 · 重启安装
+        </button>
+      )}
 
       <button type="button" className="tbtn" onClick={openPalette}>
         <Search className="ic12" />

@@ -468,6 +468,28 @@ async countTrash() : Promise<Result<number, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * 手动/启动检查更新：有新版则后台下载并暂存，emit ready。
+ */
+async checkUpdateNow() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_update_now") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 安装已下载的更新并重启（用户确认「重启安装」时调用）。
+ */
+async installUpdate() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_update") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -478,12 +500,14 @@ export const events = __makeEvents__<{
 batchSummary: BatchSummary,
 keyHealth: KeyHealth,
 taskProgress: TaskProgress,
-taskStatusChanged: TaskStatusChanged
+taskStatusChanged: TaskStatusChanged,
+updateStateChanged: UpdateStateChanged
 }>({
 batchSummary: "batch-summary",
 keyHealth: "key-health",
 taskProgress: "task-progress",
-taskStatusChanged: "task-status-changed"
+taskStatusChanged: "task-status-changed",
+updateStateChanged: "update-state-changed"
 })
 
 /** user-defined constants **/
@@ -719,6 +743,14 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
 export type TrashItemView = { id: number; entityType: string; code: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
+/**
+ * `update://state`
+ */
+export type UpdateStateChanged = { 
+/**
+ * checking / downloading / ready / uptodate / error
+ */
+state: string; version: string | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean }
 export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string }
 

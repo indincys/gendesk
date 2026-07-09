@@ -1,0 +1,53 @@
+name: release
+
+# 推送 tag v* 触发：双端构建 + minisign 签名 + 上传产物与 latest.json（执行计划 4.3）。
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # Apple Silicon + Intel（universal）
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest # x64 NSIS per-user
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # minisign 私钥与密码存于仓库 Secrets（私钥丢失 = 更新链断裂，另做离线备份）。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "GenDesk ${{ github.ref_name }}"
+          releaseBody: "详见 CHANGELOG。首次运行的 SmartScreen / Gatekeeper 放行指引见 README。"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

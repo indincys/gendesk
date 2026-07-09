@@ -86,12 +86,16 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::trash::purge_trash_items,
             commands::trash::purge_all_trash,
             commands::trash::count_trash,
+            // updater 域
+            commands::updater::check_update_now,
+            commands::updater::install_update,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,
             engine::events::TaskProgress,
             engine::events::BatchSummary,
             engine::events::KeyHealth,
+            commands::updater::UpdateStateChanged,
         ])
 }
 
@@ -126,6 +130,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(commands::updater::PendingUpdate::default())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             // 事件挂载（当前无事件；M1/M2 增加后由 builder 统一登记）。

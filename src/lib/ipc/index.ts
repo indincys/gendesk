@@ -62,6 +62,7 @@ export async function subscribeEngine(handlers: {
   onProgress?: (e: import("./bindings").TaskProgress) => void;
   onStatus?: (e: import("./bindings").TaskStatusChanged) => void;
   onKeyHealth?: (e: import("./bindings").KeyHealth) => void;
+  onUpdateState?: (e: import("./bindings").UpdateStateChanged) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const unlisteners = await Promise.all([
@@ -69,6 +70,7 @@ export async function subscribeEngine(handlers: {
     events.taskProgress.listen((e) => handlers.onProgress?.(e.payload)),
     events.taskStatusChanged.listen((e) => handlers.onStatus?.(e.payload)),
     events.keyHealth.listen((e) => handlers.onKeyHealth?.(e.payload)),
+    events.updateStateChanged.listen((e) => handlers.onUpdateState?.(e.payload)),
   ]);
   return () => {
     for (const un of unlisteners) un();

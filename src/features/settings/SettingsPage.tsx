@@ -288,7 +288,12 @@ export function SettingsPage() {
             <button
               type="button"
               className="btn sm"
-              onClick={() => toast("应用内更新将在发布链接入（M4）")}
+              onClick={async () => {
+                toast("正在检查更新…");
+                const v = await unwrap(commands.checkUpdateNow()).catch(() => undefined);
+                if (v) toast.success(`发现 v${v} · 已在后台下载完成`);
+                else if (v === null) toast("已是最新版本");
+              }}
             >
               检查更新
             </button>

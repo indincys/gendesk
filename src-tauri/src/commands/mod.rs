@@ -12,4 +12,5 @@ pub mod review;
 pub mod settings;
 pub mod tasks;
 pub mod trash;
+pub mod updater;
 pub mod works;

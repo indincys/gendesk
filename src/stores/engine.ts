@@ -25,6 +25,11 @@ interface EngineState {
   paused: boolean;
   trashCount: number;
 
+  /** 应用内更新态 */
+  updateReady: boolean;
+  updateVersion: string | null;
+  updateChecking: boolean;
+
   currentBatchId: number | null;
   tasks: TaskView[];
 
@@ -42,6 +47,9 @@ export const useEngineStore = create<EngineState>((set) => ({
   keyHealth: {},
   paused: false,
   trashCount: 0,
+  updateReady: false,
+  updateVersion: null,
+  updateChecking: false,
   currentBatchId: null,
   tasks: [],
 
@@ -80,6 +88,12 @@ export const useEngineStore = create<EngineState>((set) => ({
           };
         }),
       onKeyHealth: (p) => set((s) => ({ keyHealth: { ...s.keyHealth, [p.keyId]: p.state } })),
+      onUpdateState: (p) =>
+        set({
+          updateChecking: p.state === "checking" || p.state === "downloading",
+          updateReady: p.state === "ready",
+          updateVersion: p.version,
+        }),
     }),
 
   setCurrentBatch: (batchId) => set({ currentBatchId: batchId }),

@@ -35,13 +35,33 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "dmg", "app"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQjc0RDlERTFCRjM3MTcKUldRWE43L2huVTIzL3FNME0yZDFzYURSeVdEdnVKckkzNlVudGw4eksvNmlaSzhzb3NjK3BtWEUK",
+      "endpoints": [
+        "https://github.com/gendesk/gendesk-releases/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

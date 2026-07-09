@@ -25,7 +25,9 @@ export function Sidebar() {
         ? { cls: "nb-run", n: badges.running, spin: true }
         : r.key === "review" && badges.review > 0
           ? { cls: "nb-amb", n: badges.review, spin: false }
-          : null;
+          : r.key === "trash" && badges.trash > 0
+            ? { cls: "", n: badges.trash, spin: false }
+            : null;
     return (
       <div
         className={cn("nv", route === r.key && "on")}

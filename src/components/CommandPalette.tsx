@@ -1,5 +1,7 @@
+import { commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { ROUTES, type RouteKey } from "@/routes";
+import { useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,13 +34,17 @@ export function CommandPalette() {
       shortcut: `${mod}${r.shortcut}`,
       run: () => go(r.key as RouteKey),
     }));
+    const paused = useEngineStore.getState().paused;
     const actions: PaletteItem[] = [
+      { cat: "操作", label: "导入提示词 .txt", run: () => go("prompts") },
       {
         cat: "操作",
-        label: "导入提示词 .txt",
-        run: () => toast("提示词导入将在提示词库页接入（M3）"),
+        label: paused ? "继续队列" : "暂停队列",
+        run: () => {
+          void unwrap(paused ? commands.resumeQueue() : commands.pauseQueue()).catch(() => {});
+          toast(paused ? "已继续队列" : "已暂停队列");
+        },
       },
-      { cat: "操作", label: "暂停 / 继续队列", run: () => toast("队列控制将在任务引擎接入（M2）") },
       { cat: "操作", label: "检查更新", run: () => toast("应用内更新将在发布链接入（M4）") },
     ];
     const q = query.trim().toLowerCase();

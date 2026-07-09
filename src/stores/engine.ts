@@ -23,6 +23,7 @@ interface EngineState {
   progress: Record<number, TaskProgressState>;
   keyHealth: Record<number, string>;
   paused: boolean;
+  trashCount: number;
 
   currentBatchId: number | null;
   tasks: TaskView[];
@@ -31,6 +32,8 @@ interface EngineState {
   init: () => Promise<() => void>;
   setCurrentBatch: (batchId: number | null) => void;
   loadBatchTasks: (batchId: number, statusGroup?: string | null) => Promise<void>;
+  /** 刷新废纸篓徽章计数（切页/清理后调用；非轮询）。 */
+  refreshBadgeCounts: () => Promise<void>;
 }
 
 export const useEngineStore = create<EngineState>((set) => ({
@@ -38,6 +41,7 @@ export const useEngineStore = create<EngineState>((set) => ({
   progress: {},
   keyHealth: {},
   paused: false,
+  trashCount: 0,
   currentBatchId: null,
   tasks: [],
 
@@ -84,15 +88,23 @@ export const useEngineStore = create<EngineState>((set) => ({
     const tasks = await unwrap(commands.listTasks(batchId, statusGroup ?? null, null));
     set({ currentBatchId: batchId, tasks });
   },
+
+  refreshBadgeCounts: async () => {
+    try {
+      set({ trashCount: await unwrap(commands.countTrash()) });
+    } catch {
+      // 忽略：徽章计数失败不影响主流程
+    }
+  },
 }));
 
-/** 导航徽章计数（事件驱动，不轮询）。 */
-export function navBadges(state: EngineState): { running: number; review: number } {
+/** 导航徽章计数（事件驱动 + 切页刷新，不轮询）。 */
+export function navBadges(state: EngineState): { running: number; review: number; trash: number } {
   let running = 0;
   let review = 0;
   for (const s of Object.values(state.summaries)) {
     running += s.running;
     review += s.review;
   }
-  return { running, review };
+  return { running, review, trash: state.trashCount };
 }

@@ -13,6 +13,7 @@ export function AppShell() {
   const route = useUiStore((s) => s.route);
   const platform = useUiStore((s) => s.platform);
   const initEngine = useEngineStore((s) => s.init);
+  const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
   const ActivePage = ROUTE_BY_KEY[route].component;
 
   // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）。
@@ -23,6 +24,11 @@ export function AppShell() {
     });
     return () => cleanup?.();
   }, [initEngine]);
+
+  // 切页刷新废纸篓徽章（清理/删除后即时反映，非定时轮询）。
+  useEffect(() => {
+    void refreshBadges();
+  }, [route, refreshBadges]);
 
   return (
     <div className={`app ${platform === "win" ? "win" : "mac"}`}>

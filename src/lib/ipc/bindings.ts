@@ -478,7 +478,10 @@ export type TaskStatus =
  * `task://status-changed`
  */
 export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskStatus; errorType: ErrorType | null; errorMessage: string | null; retryCount: number; apiKeyId: number | null }
-export type TaskView = { id: number; batchId: number; status: string; refImageId: number; promptId: number; apiKeyId: number | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
+/**
+ * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
+ */
+export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
 
 /** tauri-specta globals **/

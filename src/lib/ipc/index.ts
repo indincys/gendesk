@@ -48,6 +48,28 @@ export async function unwrap<T>(promise: Promise<Result<T, AppError>>): Promise<
 }
 
 /**
+ * 订阅引擎事件（唯一的 `listen` 出入口，铁律：只在 lib/ipc 内）。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribeEngine(handlers: {
+  onSummary?: (e: import("./bindings").BatchSummary) => void;
+  onProgress?: (e: import("./bindings").TaskProgress) => void;
+  onStatus?: (e: import("./bindings").TaskStatusChanged) => void;
+  onKeyHealth?: (e: import("./bindings").KeyHealth) => void;
+}): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisteners = await Promise.all([
+    events.batchSummary.listen((e) => handlers.onSummary?.(e.payload)),
+    events.taskProgress.listen((e) => handlers.onProgress?.(e.payload)),
+    events.taskStatusChanged.listen((e) => handlers.onStatus?.(e.payload)),
+    events.keyHealth.listen((e) => handlers.onKeyHealth?.(e.payload)),
+  ]);
+  return () => {
+    for (const un of unlisteners) un();
+  };
+}
+
+/**
  * 转发前端未捕获错误到 Rust 统一日志流。
  * 本函数自身绝不抛错（避免错误处理链再次崩溃）。
  */

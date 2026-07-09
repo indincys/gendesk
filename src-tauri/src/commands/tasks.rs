@@ -8,15 +8,20 @@ use crate::db::repo::tasks as repo;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-#[derive(Debug, Clone, Serialize, Type)]
+/// 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
+#[derive(Debug, Clone, Serialize, Type, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
     pub id: i64,
     pub batch_id: i64,
     pub status: String,
     pub ref_image_id: i64,
+    pub ref_name: String,
     pub prompt_id: i64,
+    pub prompt_code: String,
+    pub group_name: String,
     pub api_key_id: Option<i64>,
+    pub key_alias: Option<String>,
     pub error_type: Option<String>,
     pub error_message: Option<String>,
     pub retry_count: i64,
@@ -24,23 +29,16 @@ pub struct TaskView {
     pub prompt_text_snapshot: String,
 }
 
-impl From<repo::TaskRow> for TaskView {
-    fn from(r: repo::TaskRow) -> Self {
-        Self {
-            id: r.id,
-            batch_id: r.batch_id,
-            status: r.status,
-            ref_image_id: r.ref_image_id,
-            prompt_id: r.prompt_id,
-            api_key_id: r.api_key_id,
-            error_type: r.error_type,
-            error_message: r.error_message,
-            retry_count: r.retry_count,
-            result_thumb_path: r.result_thumb_path,
-            prompt_text_snapshot: r.prompt_text_snapshot,
-        }
-    }
-}
+const TASK_SELECT: &str = "SELECT t.id, t.batch_id, t.status, t.ref_image_id,
+        COALESCE(r.name, '') AS ref_name, t.prompt_id,
+        COALESCE(p.code, '') AS prompt_code, COALESCE(g.name, '') AS group_name,
+        t.api_key_id, k.name AS key_alias, t.error_type, t.error_message,
+        t.retry_count, t.result_thumb_path, t.prompt_text_snapshot
+    FROM tasks t
+    LEFT JOIN ref_images r ON r.id = t.ref_image_id
+    LEFT JOIN prompts p ON p.id = t.prompt_id
+    LEFT JOIN prompt_groups g ON g.id = p.group_id
+    LEFT JOIN api_keys k ON k.id = t.api_key_id";
 
 /// 列出某批次任务，可按 5 视觉组筛选：all/pending/running/failed/review/done。
 #[tauri::command]
@@ -63,24 +61,26 @@ pub async fn list_tasks(
     let limit = 500i64;
     let offset = page.unwrap_or(0).max(0) * limit;
     let sql = format!(
-        "SELECT * FROM tasks WHERE batch_id = ? AND status IN ({placeholders})
-         ORDER BY id ASC LIMIT ? OFFSET ?"
+        "{TASK_SELECT} WHERE t.batch_id = ? AND t.status IN ({placeholders})
+         ORDER BY t.id ASC LIMIT ? OFFSET ?"
     );
-    let mut q = sqlx::query_as::<_, repo::TaskRow>(&sql).bind(batch_id);
+    let mut q = sqlx::query_as::<_, TaskView>(&sql).bind(batch_id);
     for s in statuses {
         q = q.bind(*s);
     }
     let rows = q.bind(limit).bind(offset).fetch_all(&state.db).await?;
-    Ok(rows.into_iter().map(TaskView::from).collect())
+    Ok(rows)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn get_task(state: State<'_, AppState>, id: i64) -> AppResult<TaskView> {
-    let row = repo::get_task(&state.db, id)
+    let sql = format!("{TASK_SELECT} WHERE t.id = ?");
+    sqlx::query_as::<_, TaskView>(&sql)
+        .bind(id)
+        .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::InvalidInput("任务不存在".into()))?;
-    Ok(TaskView::from(row))
+        .ok_or_else(|| AppError::InvalidInput("任务不存在".into()))
 }
 
 /// 手动重试单个失败任务（可携带微调提示词写入快照，R8）。

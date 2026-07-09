@@ -3,6 +3,7 @@ import { ROUTES, type RouteDef } from "@/routes";
 import { navBadges, useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { Search } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 
 /** 212px 侧栏导航（执行计划 0.4）。制作 / 资产两组 + 底部废纸篓/设置。 */
 export function Sidebar() {
@@ -11,7 +12,7 @@ export function Sidebar() {
   const openPalette = useUiStore((s) => s.openPalette);
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
-  const badges = useEngineStore(navBadges);
+  const badges = useEngineStore(useShallow(navBadges));
 
   const make = ROUTES.filter((r) => r.group === "make");
   const asset = ROUTES.filter((r) => r.group === "asset");

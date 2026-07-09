@@ -1,4 +1,4 @@
-import { events, type TaskView, commands, isTauri, unwrap } from "@/lib/ipc";
+import { type TaskView, commands, subscribeEngine, unwrap } from "@/lib/ipc";
 import { create } from "zustand";
 
 interface BatchSummaryState {
@@ -41,11 +41,9 @@ export const useEngineStore = create<EngineState>((set) => ({
   currentBatchId: null,
   tasks: [],
 
-  init: async () => {
-    if (!isTauri()) return () => {};
-    const unlisteners = await Promise.all([
-      events.batchSummary.listen((e) => {
-        const p = e.payload;
+  init: () =>
+    subscribeEngine({
+      onSummary: (p) =>
         set((s) => ({
           summaries: {
             ...s.summaries,
@@ -56,14 +54,10 @@ export const useEngineStore = create<EngineState>((set) => ({
             },
           },
           paused: p.paused,
-        }));
-      }),
-      events.taskProgress.listen((e) => {
-        const p = e.payload;
-        set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } }));
-      }),
-      events.taskStatusChanged.listen((e) => {
-        const p = e.payload;
+        })),
+      onProgress: (p) =>
+        set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } })),
+      onStatus: (p) =>
         set((s) => {
           if (p.batchId !== s.currentBatchId) return {};
           return {
@@ -80,17 +74,9 @@ export const useEngineStore = create<EngineState>((set) => ({
                 : t,
             ),
           };
-        });
-      }),
-      events.keyHealth.listen((e) => {
-        const p = e.payload;
-        set((s) => ({ keyHealth: { ...s.keyHealth, [p.keyId]: p.state } }));
-      }),
-    ]);
-    return () => {
-      for (const un of unlisteners) un();
-    };
-  },
+        }),
+      onKeyHealth: (p) => set((s) => ({ keyHealth: { ...s.keyHealth, [p.keyId]: p.state } })),
+    }),
 
   setCurrentBatch: (batchId) => set({ currentBatchId: batchId }),
 

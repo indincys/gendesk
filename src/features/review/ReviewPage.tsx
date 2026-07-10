@@ -1,8 +1,9 @@
+import { Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Check, Maximize2, X } from "lucide-react";
+import { Check, Maximize2, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -12,6 +13,9 @@ export function ReviewPage() {
   const [cols, setCols] = useState(5);
   const [zoom, setZoom] = useState<number | null>(null); // index into items
   const [processed, setProcessed] = useState(0);
+  // 「重试 + 微调提示词」目标（E01）：打开编辑框，确认后微调写快照并回队。
+  const [retryTarget, setRetryTarget] = useState<ReviewItemView | null>(null);
+  const [retryText, setRetryText] = useState("");
   // 正在处理中的任务 id（防长按 ⏎ / 连点重复提交同一任务，后端另有幂等守卫兜底）。
   const inFlight = useRef<Set<number>>(new Set());
 
@@ -63,10 +67,36 @@ export function ReviewPage() {
     }
   }, []);
 
+  const openRetry = useCallback((it: ReviewItemView) => {
+    setRetryTarget(it);
+    setRetryText(it.promptText);
+  }, []);
+
+  const submitRetry = useCallback(async () => {
+    const it = retryTarget;
+    if (!it) return;
+    if (inFlight.current.has(it.id)) return;
+    inFlight.current.add(it.id);
+    // 仅在提示词实际改动时传微调文本（否则传 null，避免无谓写快照）。
+    const edited = retryText.trim() !== it.promptText.trim() ? retryText : null;
+    try {
+      await unwrap(commands.retryTask(it.id, edited));
+      removeIds([it.id]);
+      setRetryTarget(null);
+      toast(edited ? "已按微调提示词重新生成" : "已重新生成");
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    } finally {
+      inFlight.current.delete(it.id);
+    }
+  }, [retryTarget, retryText]);
+
   // 大图逐张模式键盘
   useEffect(() => {
     if (zoom === null) return;
     const onKey = (e: KeyboardEvent) => {
+      // 重试编辑框打开时让位给输入，Modal 自行处理 Esc。
+      if (retryTarget) return;
       if (e.key === "Escape") return setZoom(null);
       if (e.key === "ArrowLeft") setZoom((z) => (z === null ? null : Math.max(0, z - 1)));
       else if (e.key === "ArrowRight")
@@ -77,11 +107,14 @@ export function ReviewPage() {
       } else if (e.key === "Backspace") {
         const it = items[zoom];
         if (it) void reject([it.id]);
+      } else if (e.key === "r" || e.key === "R") {
+        const it = items[zoom];
+        if (it) openRetry(it);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, items, accept, reject]);
+  }, [zoom, items, accept, reject, retryTarget, openRetry]);
 
   // 大图模式下 items 变化后修正索引
   useEffect(() => {
@@ -175,6 +208,17 @@ export function ReviewPage() {
                   <button
                     type="button"
                     className="hbtn"
+                    title="重试（可微调提示词）"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openRetry(it);
+                    }}
+                  >
+                    <RotateCcw className="ic12" />
+                  </button>
+                  <button
+                    type="button"
+                    className="hbtn"
                     title="大图逐张"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -204,6 +248,9 @@ export function ReviewPage() {
           </span>
           <span className="fx ac gap6">
             <span className="kbd">⌫</span>不通过
+          </span>
+          <span className="fx ac gap6">
+            <span className="kbd">R</span>重试微调
           </span>
           <span className="fx ac gap6">
             <span className="kbd">←</span>
@@ -264,6 +311,9 @@ export function ReviewPage() {
                 ›
               </button>
               <div className="f1" />
+              <button type="button" className="btn sm gho" onClick={() => openRetry(zoomItem)}>
+                重试 R
+              </button>
               <button
                 type="button"
                 className="btn sm gho dng"
@@ -277,6 +327,44 @@ export function ReviewPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {retryTarget && (
+        <Modal
+          title="重试并微调提示词"
+          width="w420"
+          onClose={() => setRetryTarget(null)}
+          footer={
+            <>
+              <div className="f1" />
+              <button type="button" className="btn sm" onClick={() => setRetryTarget(null)}>
+                取消
+              </button>
+              <button type="button" className="btn pri sm" onClick={() => void submitRetry()}>
+                重新生成
+              </button>
+            </>
+          }
+        >
+          <div className="fx ac gap6 wrap" style={{ marginBottom: 10 }}>
+            <span className="pid">{retryTarget.promptCode}</span>
+            <span className="chip">{retryTarget.refName}</span>
+          </div>
+          <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+            提示词（可修改后重试）
+          </div>
+          <textarea
+            className="ta"
+            style={{ width: "100%", minHeight: 140, resize: "vertical" }}
+            value={retryText}
+            onChange={(e) => setRetryText(e.target.value)}
+            // biome-ignore lint/a11y/noAutofocus: 弹窗即为微调提示词而生，聚焦符合预期
+            autoFocus
+          />
+          <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
+            确认后该任务回到生成队列重新出图；未改动提示词则按原文重试。通过验收后微调版本会写回提示词库。
+          </div>
+        </Modal>
       )}
     </PageScaffold>
   );

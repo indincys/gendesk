@@ -66,6 +66,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // batches / tasks 域（引擎）
             commands::batches::create_batch,
             commands::batches::estimate_task_seconds,
+            commands::batches::cancel_batch_pending,
             commands::batches::list_batches,
             commands::batches::pause_queue,
             commands::batches::resume_queue,

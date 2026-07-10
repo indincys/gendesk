@@ -83,6 +83,8 @@ export function GeneratePage() {
   }, 0);
   const taskTotal = combos * draws;
   const enabledKeys = keys.filter((k) => k.enabled);
+  // E12：有可用 Key = 至少一个启用且并发合计 > 0。
+  const hasUsableKey = enabledKeys.reduce((s, k) => s + k.concurrencyLimit, 0) > 0;
 
   const importTxt = async () => {
     try {
@@ -315,10 +317,21 @@ export function GeneratePage() {
             每张参考图需指定一个提示词组
           </span>
         )}
+        {/* E12：无启用 Key（或并发合计为 0）时禁用并引导去设置 */}
+        {!hasUsableKey && (
+          <button
+            type="button"
+            className="fs12 nowrap"
+            style={{ color: "var(--wr)", textDecoration: "underline" }}
+            onClick={() => go("settings")}
+          >
+            无可用 API Key · 去设置
+          </button>
+        )}
         <button
           type="button"
           className="btn pri"
-          disabled={!allMapped || starting}
+          disabled={!allMapped || starting || !hasUsableKey}
           onClick={openConfirm}
         >
           <Play className="ic12" />

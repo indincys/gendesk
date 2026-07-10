@@ -1,3 +1,4 @@
+import { ConfirmModal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type BatchView, type TaskView, commands, unwrap } from "@/lib/ipc";
@@ -32,6 +33,8 @@ export function TasksPage() {
   const [showBatchPicker, setShowBatchPicker] = useState(false);
   const [interrupted, setInterrupted] = useState(0);
   const [intDismissed, setIntDismissed] = useState(false);
+  // E03：取消剩余任务确认框。
+  const [cancelConfirm, setCancelConfirm] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -101,6 +104,13 @@ export function TasksPage() {
     await loadBatchTasks(currentBatchId, null);
   };
 
+  const cancelPending = async () => {
+    if (currentBatchId == null) return;
+    const n = await unwrap(commands.cancelBatchPending(currentBatchId));
+    toast(`已取消 ${n} 个排队任务 · 在途任务将继续跑完`);
+    await loadBatchTasks(currentBatchId, null);
+  };
+
   const deleteOne = async (t: TaskView) => {
     try {
       await unwrap(commands.deleteTask(t.id));
@@ -137,6 +147,11 @@ export function TasksPage() {
           <SumBadge cls="b-green" n={counts.done} label="已完成" />
         </div>
         <div className="f1" />
+        {counts.q > 0 && (
+          <button type="button" className="btn sm gho dng" onClick={() => setCancelConfirm(true)}>
+            取消剩余任务 · {counts.q}
+          </button>
+        )}
         {failedCount > 0 && (
           <>
             <button type="button" className="btn sm gho" onClick={retryAllFailed}>
@@ -268,6 +283,17 @@ export function TasksPage() {
           </div>
         )}
       </div>
+
+      {cancelConfirm && (
+        <ConfirmModal
+          title="取消剩余任务"
+          desc={`将删除本批次 ${counts.q} 个尚未开始的排队任务。正在生成中的任务会继续跑完，不受影响；作品与已完成任务不变。此操作不可撤销。`}
+          confirmLabel="取消剩余任务"
+          danger
+          onConfirm={() => void cancelPending()}
+          onClose={() => setCancelConfirm(false)}
+        />
+      )}
 
       {showBatchPicker && (
         <div className="ovl" onClick={() => setShowBatchPicker(false)}>

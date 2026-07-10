@@ -106,6 +106,20 @@ pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView
     Ok(out)
 }
 
+/// 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。
+/// 在途（run/retry）任务不受影响，会自行跑完。返回取消数。
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_batch_pending(state: State<'_, AppState>, batch_id: i64) -> AppResult<i64> {
+    let n = repo::cancel_pending(&state.db, batch_id).await?;
+    if n > 0 {
+        // 剩余若全为终态则归档；补发汇总驱动前端进度/徽章即时更新。
+        let _ = repo::archive_if_all_terminal(&state.db, batch_id).await;
+        state.engine.emit_summary(batch_id).await;
+    }
+    Ok(n)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn pause_queue(state: State<'_, AppState>) -> AppResult<()> {

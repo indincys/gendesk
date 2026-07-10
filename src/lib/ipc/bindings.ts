@@ -320,6 +320,18 @@ async estimateTaskSeconds() : Promise<Result<number | null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。
+ * 在途（run/retry）任务不受影响，会自行跑完。返回取消数。
+ */
+async cancelBatchPending(batchId: number) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_batch_pending", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listBatches() : Promise<Result<BatchView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_batches") };

@@ -278,6 +278,17 @@ pub async fn delete_failed(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx
     Ok(n as i64)
 }
 
+/// 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务。只删排队态，
+/// 在途（run/retry）与终态任务不受影响。返回删除数。
+pub async fn cancel_pending(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx::Error> {
+    let n = sqlx::query("DELETE FROM tasks WHERE batch_id = ?1 AND status = 'q'")
+        .bind(batch_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n as i64)
+}
+
 /// 五视觉组计数（批次汇总）。
 pub async fn counts_for_batch(
     pool: &SqlitePool,
@@ -407,6 +418,37 @@ mod tests {
         }
         tx.commit().await.unwrap();
         (bid, ids)
+    }
+
+    // E03：取消剩余只删 'q' 态，在途 run/retry 与终态 pass 不受影响。
+    #[tokio::test]
+    async fn cancel_pending_deletes_only_queued() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 5).await;
+        // ids: 0=run(在途) 1=retry(在途) 2=pass(终态) 3,4=q(排队)
+        set_status(&pool, ids[0], "run").await.unwrap();
+        set_status(&pool, ids[1], "retry").await.unwrap();
+        set_status(&pool, ids[2], "pass").await.unwrap();
+
+        let n = cancel_pending(&pool, bid).await.unwrap();
+        assert_eq!(n, 2, "仅取消 2 个排队任务");
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 3, "run/retry/pass 三个任务保留");
+        let q_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1 AND status = 'q'")
+                .bind(bid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(q_left, 0, "排队任务全部清空");
+        // 在途任务仍在，不被误删。
+        assert!(get_task(&pool, ids[0]).await.unwrap().is_some());
+        assert!(get_task(&pool, ids[1]).await.unwrap().is_some());
     }
 
     #[tokio::test]

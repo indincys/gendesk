@@ -220,7 +220,47 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         {
             let _ = window.set_decorations(false);
         }
-        let _ = window;
+
+        // E26：关闭窗口拦截——有未完成任务（排队/生成中/重试中）时先确认，
+        // 避免误退中断跑批；空闲时直接关闭无打扰。确认退出走既有中断恢复路径
+        // （下次启动 run/retry → Interrupted，可一键继续）。
+        let handle = window.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = handle.app_handle();
+                let state = app.state::<state::AppState>();
+                let pending: i64 = tauri::async_runtime::block_on(async {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM tasks WHERE status IN ('q','run','retry')",
+                    )
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or(0)
+                });
+                if pending == 0 {
+                    return; // 空闲：不拦截
+                }
+                api.prevent_close();
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                let win = handle.clone();
+                handle
+                    .dialog()
+                    .message(format!(
+                        "仍有 {pending} 个任务未完成，退出将中断当前生成。\
+                         下次启动可继续未完成的任务。确定退出吗？"
+                    ))
+                    .title("确认退出")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "退出".into(),
+                        "取消".into(),
+                    ))
+                    .show(move |confirmed| {
+                        if confirmed {
+                            let _ = win.destroy();
+                        }
+                    });
+            }
+        });
     }
 
     Ok(())

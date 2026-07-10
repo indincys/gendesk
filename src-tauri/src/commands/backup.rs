@@ -62,7 +62,10 @@ pub async fn open_data_dir(state: State<'_, AppState>, app: AppHandle) -> AppRes
 /// 返回所选路径；用户取消返回 None。
 #[tauri::command]
 #[specta::specta]
-pub async fn export_backup(state: State<'_, AppState>, app: AppHandle) -> AppResult<Option<String>> {
+pub async fn export_backup(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<Option<String>> {
     // 队列运行中拒绝（前端亦禁用按钮，双保险）。
     let active: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status IN ('run','retry')")
@@ -74,7 +77,7 @@ pub async fn export_backup(state: State<'_, AppState>, app: AppHandle) -> AppRes
         ));
     }
 
-    let default_name = format!("gendesk-backup-{}.zip", files::date_yymmdd(now_unix()));
+    let default_name = format!("gendesk_backup_{}.zip", files::date_yymmdd(now_unix()));
     let picked = app
         .dialog()
         .file()
@@ -171,7 +174,10 @@ mod tests {
 
         let dest = root.join("backup.zip");
         let last = Cell::new((0u64, 0u64));
-        zip_dir(root, &logs, &dest, &|done, total, _| last.set((done, total))).unwrap();
+        zip_dir(root, &logs, &dest, &|done, total, _| {
+            last.set((done, total))
+        })
+        .unwrap();
 
         // 进度终值：done == total == 2（db + refs/a.jpg，logs 不计）。
         assert_eq!(last.get(), (2, 2));

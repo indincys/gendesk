@@ -71,3 +71,49 @@ impl From<image::ImageError> for AppError {
 
 /// 命令返回别名 —— 所有 `#[tauri::command]` 统一返回它。
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 五个变体的 Display（`#[error]`）均非空，且各带自身中文前缀，
+    /// 保证前端错误分级展示不落到空串。
+    #[test]
+    fn display_covers_every_variant() {
+        let cases = [
+            (AppError::Database("x".into()), "数据库错误"),
+            (AppError::Io("x".into()), "文件错误"),
+            (AppError::InvalidInput("x".into()), "参数错误"),
+            (AppError::Keyring("x".into()), "凭据存储错误"),
+            (AppError::Internal("x".into()), "内部错误"),
+        ];
+        for (err, prefix) in cases {
+            let text = err.to_string();
+            assert!(text.starts_with(prefix), "{text} 应以 {prefix} 开头");
+        }
+    }
+
+    /// 每个 `From` 转换都落到预期分类，覆盖 IPC 错误收敛的全部入口。
+    // 测试内允许 unwrap_err：构造样本错误，转换失败即测试失败，是期望行为。
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    #[test]
+    fn from_conversions_map_to_expected_categories() {
+        let io: AppError = std::io::Error::other("boom").into();
+        assert!(matches!(io, AppError::Io(_)));
+
+        let json: AppError = serde_json::from_str::<i32>("[").unwrap_err().into();
+        assert!(matches!(json, AppError::Internal(_)));
+
+        let db: AppError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(db, AppError::Database(_)));
+
+        let migrate: AppError = sqlx::migrate::MigrateError::VersionMissing(2).into();
+        assert!(matches!(migrate, AppError::Database(_)));
+
+        let img: AppError = image::load_from_memory(&[0, 1, 2, 3]).unwrap_err().into();
+        assert!(matches!(img, AppError::Io(_)));
+
+        let key: AppError = keyring::Error::NoEntry.into();
+        assert!(matches!(key, AppError::Keyring(_)));
+    }
+}

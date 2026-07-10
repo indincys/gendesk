@@ -1013,6 +1013,32 @@ a:hover {
   box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
   transform: scale(0.99);
 }
+/* E09：键盘焦点环（与选中区分——虚线 + 强调色）。 */
+.rcard.focus .rcimg {
+  outline: 2px dashed var(--acc2);
+  outline-offset: 2px;
+}
+/* E38：待定角标 + 卡片降饱和沉底提示。 */
+.rcard.pend .rcimg {
+  opacity: 0.72;
+}
+.rpend {
+  position: absolute;
+  bottom: 34px;
+  left: 7px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--wr);
+  color: #fff;
+  box-shadow: var(--sh1);
+  z-index: 2;
+}
+.hbtn.on {
+  color: var(--acc2);
+  background: #fff;
+}
 .rck {
   position: absolute;
   top: 7px;

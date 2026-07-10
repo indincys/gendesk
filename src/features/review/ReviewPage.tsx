@@ -3,14 +3,21 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type BatchView, type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Check, ChevronDown, Maximize2, RotateCcw, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Clock, Maximize2, RotateCcw, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function ReviewPage() {
   const [items, setItems] = useState<ReviewItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cols, setCols] = useState(5);
+  // E09：网格键盘焦点（索引进 displayed）。
+  const [focus, setFocus] = useState(0);
+  // E38：待定标记（纯 UI 态，不入库）——沉底 + 角标 + 可筛选。
+  const [pending, setPending] = useState<Set<number>>(new Set());
+  const [onlyPending, setOnlyPending] = useState(false);
+  // E38：shift 范围多选锚点（索引进 displayed）。
+  const lastClicked = useRef<number | null>(null);
   // E29：按批次筛选（null = 全部批次混排）。
   const [batches, setBatches] = useState<BatchView[]>([]);
   const [batchFilter, setBatchFilter] = useState<number | null>(null);
@@ -106,6 +113,28 @@ export function ReviewPage() {
     }
   }, [retryTarget, retryText]);
 
+  const toggleSel = (id: number) =>
+    setSel((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  const togglePending = (id: number) =>
+    setPending((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  // E38：显示序——「仅看待定」筛选；否则待定项稳定沉底（保留原相对序）。
+  const displayed = useMemo(() => {
+    if (onlyPending) return items.filter((i) => pending.has(i.id));
+    return [...items].sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
+  }, [items, pending, onlyPending]);
+
   // 大图逐张模式键盘
   useEffect(() => {
     if (zoom === null) return;
@@ -115,36 +144,105 @@ export function ReviewPage() {
       if (e.key === "Escape") return setZoom(null);
       if (e.key === "ArrowLeft") setZoom((z) => (z === null ? null : Math.max(0, z - 1)));
       else if (e.key === "ArrowRight")
-        setZoom((z) => (z === null ? null : Math.min(items.length - 1, z + 1)));
+        setZoom((z) => (z === null ? null : Math.min(displayed.length - 1, z + 1)));
       else if (e.key === "Enter") {
-        const it = items[zoom];
+        const it = displayed[zoom];
         if (it) void accept([it.id]);
       } else if (e.key === "Backspace") {
-        const it = items[zoom];
+        const it = displayed[zoom];
         if (it) void reject([it.id]);
       } else if (e.key === "r" || e.key === "R") {
-        const it = items[zoom];
+        const it = displayed[zoom];
         if (it) openRetry(it);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, items, accept, reject, retryTarget, openRetry]);
+  }, [zoom, displayed, accept, reject, retryTarget, openRetry]);
 
-  // 大图模式下 items 变化后修正索引
+  // 大图模式下列表变化后修正索引
   useEffect(() => {
-    if (zoom !== null && zoom >= items.length) setZoom(items.length > 0 ? items.length - 1 : null);
-  }, [items, zoom]);
+    if (zoom !== null && zoom >= displayed.length)
+      setZoom(displayed.length > 0 ? displayed.length - 1 : null);
+  }, [displayed, zoom]);
 
-  const toggleSel = (id: number) =>
-    setSel((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
+  // E09：网格模式键盘流（大图/重试框打开时让位）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: toggleSel/togglePending 为稳定内联 setter，无需入依赖
+  useEffect(() => {
+    if (zoom !== null || retryTarget) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const n = displayed.length;
+      if (n === 0) return;
+      if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        setSel(new Set(displayed.map((i) => i.id)));
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setFocus((f) => Math.min(n - 1, f + 1));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setFocus((f) => Math.max(0, f - 1));
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFocus((f) => Math.min(n - 1, f + cols));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFocus((f) => Math.max(0, f - cols));
+      } else if (e.key === " ") {
+        e.preventDefault();
+        const it = displayed[focus];
+        if (it) toggleSel(it.id);
+      } else if (e.key === "Enter") {
+        const ids = sel.size > 0 ? [...sel] : displayed[focus] ? [displayed[focus].id] : [];
+        if (ids.length) void accept(ids);
+      } else if (e.key === "Backspace") {
+        const it = displayed[focus];
+        if (it) void reject([it.id]);
+      } else if (e.key === "z" || e.key === "Z") {
+        if (displayed[focus]) setZoom(focus);
+      } else if (e.key === "s" || e.key === "S") {
+        const it = displayed[focus];
+        if (it) togglePending(it.id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom, retryTarget, displayed, focus, cols, sel, accept, reject]);
 
-  const zoomItem = zoom !== null ? items[zoom] : undefined;
+  // E09：焦点越界修正 + 滚动进视野。
+  useEffect(() => {
+    if (focus >= displayed.length) setFocus(Math.max(0, displayed.length - 1));
+  }, [displayed, focus]);
+  useEffect(() => {
+    document.querySelector(`[data-ridx="${focus}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [focus]);
+
+  // E38：网格点选——shift 从锚点范围加选，否则切换单项并设锚点。
+  const onCardClick = (idx: number, shift: boolean) => {
+    setFocus(idx);
+    if (shift && lastClicked.current !== null) {
+      const a = Math.min(lastClicked.current, idx);
+      const b = Math.max(lastClicked.current, idx);
+      setSel((s) => {
+        const n = new Set(s);
+        for (let i = a; i <= b; i++) {
+          const it = displayed[i];
+          if (it) n.add(it.id);
+        }
+        return n;
+      });
+    } else {
+      const it = displayed[idx];
+      if (it) toggleSel(it.id);
+      lastClicked.current = idx;
+    }
+  };
+
+  const zoomItem = zoom !== null ? displayed[zoom] : undefined;
 
   return (
     <PageScaffold title="图片验收" caption="网格粗筛 · 大图逐张精审">
@@ -155,6 +253,16 @@ export function ReviewPage() {
         </button>
         <span className="cnt">{items.length} 待验收</span>
         {processed > 0 && <span className="pcap">本批已处理 {processed}</span>}
+        {pending.size > 0 && (
+          <button
+            type="button"
+            className={cn("btn sm gho", onlyPending && "on")}
+            onClick={() => setOnlyPending((v) => !v)}
+            title="仅看标记为待定的图片"
+          >
+            {onlyPending ? "显示全部" : `仅看待定 · ${pending.size}`}
+          </button>
+        )}
         <div className="f1" />
         {sel.size > 0 && (
           <>
@@ -190,17 +298,24 @@ export function ReviewPage() {
       ) : (
         <div className="pbody">
           <div className="rgrid" style={{ gridTemplateColumns: `repeat(${cols},1fr)` }}>
-            {items.map((it, idx) => (
+            {displayed.map((it, idx) => (
               <div
                 key={it.id}
-                className={cn("rcard", sel.has(it.id) && "sel")}
-                onClick={() => toggleSel(it.id)}
+                data-ridx={idx}
+                className={cn(
+                  "rcard",
+                  sel.has(it.id) && "sel",
+                  idx === focus && "focus",
+                  pending.has(it.id) && "pend",
+                )}
+                onClick={(e) => onCardClick(idx, e.shiftKey)}
                 onDoubleClick={() => setZoom(idx)}
               >
                 <div className="ph rcimg" style={bg(it.resultThumbPath)} />
                 <span className={cn("rck", sel.has(it.id) && "on")}>
                   <Check className="ic12" />
                 </span>
+                {pending.has(it.id) && <span className="rpend">待定</span>}
                 <div className="hacts">
                   <button
                     type="button"
@@ -237,6 +352,17 @@ export function ReviewPage() {
                   </button>
                   <button
                     type="button"
+                    className={cn("hbtn", pending.has(it.id) && "on")}
+                    title="标记待定（稍后再定）"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePending(it.id);
+                    }}
+                  >
+                    <Clock className="ic12" />
+                  </button>
+                  <button
+                    type="button"
                     className="hbtn"
                     title="大图逐张"
                     onClick={(e) => {
@@ -260,20 +386,28 @@ export function ReviewPage() {
       {items.length > 0 && (
         <div className="hintbar">
           <span className="fx ac gap6">
-            <span className="kbd">双击</span>大图
+            <span className="kbd">↑</span>
+            <span className="kbd">↓</span>
+            <span className="kbd">←</span>
+            <span className="kbd">→</span>移动焦点
           </span>
           <span className="fx ac gap6">
-            <span className="kbd">⏎</span>通过
+            <span className="kbd">空格</span>选中
+          </span>
+          <span className="fx ac gap6">
+            <span className="kbd">⏎</span>通过焦点/所选
           </span>
           <span className="fx ac gap6">
             <span className="kbd">⌫</span>不通过
           </span>
           <span className="fx ac gap6">
-            <span className="kbd">R</span>重试微调
+            <span className="kbd">S</span>待定
           </span>
           <span className="fx ac gap6">
-            <span className="kbd">←</span>
-            <span className="kbd">→</span>切换
+            <span className="kbd">Z</span>大图
+          </span>
+          <span className="fx ac gap6">
+            <span className="kbd">⌘A</span>全选 · <span className="kbd">⇧</span>点选范围
           </span>
         </div>
       )}

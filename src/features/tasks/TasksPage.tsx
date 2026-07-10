@@ -25,6 +25,7 @@ export function TasksPage() {
   const currentBatchId = useEngineStore((s) => s.currentBatchId);
   const progress = useEngineStore((s) => s.progress);
   const paused = useEngineStore((s) => s.paused);
+  const autoPauseReason = useEngineStore((s) => s.autoPauseReason);
   const setPaused = useEngineStore((s) => s.setPaused);
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
 
@@ -70,7 +71,20 @@ export function TasksPage() {
     return tasks.filter((t) => match(t.status));
   }, [tasks, filter]);
 
+  // E06：失败任务按错误类型分组计数。
+  const failByType = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of tasks) {
+      if (t.status !== "fail") continue;
+      const k = t.errorType ?? "Other";
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  }, [tasks]);
+
   const failedCount = counts.fail;
+  const violationCount = failByType.get("ContentPolicy") ?? 0;
+  const retryableFailed = failedCount - violationCount;
   const curBatch = batches.find((b) => b.id === currentBatchId);
 
   const switchBatch = async (id: number) => {
@@ -154,8 +168,17 @@ export function TasksPage() {
         )}
         {failedCount > 0 && (
           <>
-            <button type="button" className="btn sm gho" onClick={retryAllFailed}>
-              重试全部失败 · {failedCount}
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={retryAllFailed}
+              disabled={retryableFailed === 0}
+              title={
+                violationCount > 0 ? "违规任务不会被批量重试，请对其单独「改词重试」" : undefined
+              }
+            >
+              重试全部失败 · {retryableFailed}
+              {violationCount > 0 && <span className="fs10 t3">（不含违规 {violationCount}）</span>}
             </button>
             <button type="button" className="btn sm gho" onClick={deleteAllFailed}>
               删除全部失败 · {failedCount}
@@ -166,6 +189,35 @@ export function TasksPage() {
           {paused ? "继续队列" : "暂停队列"}
         </button>
       </div>
+
+      {failedCount > 0 && (
+        <div className="fx ac gap6 wrap" style={{ padding: "8px 14px 0" }}>
+          <span className="fs11 t3 nowrap">失败分类</span>
+          {[...failByType.entries()].map(([type, n]) => (
+            <span
+              key={type}
+              className={cn("chip", type === "ContentPolicy" && "dng")}
+              title={
+                type === "ContentPolicy" ? "违规任务请「改词重试」，不参与批量重试" : undefined
+              }
+            >
+              {errorLabel(type)} · {n}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {autoPauseReason && paused && (
+        <div className="ban dng">
+          <span className="f1">已自动暂停：{autoPauseReason}。请检查 API Key 与网络后再继续。</span>
+          <button type="button" className="btn sm gho" onClick={() => go("settings")}>
+            检查设置
+          </button>
+          <button type="button" className="btn sm" onClick={togglePause}>
+            继续队列
+          </button>
+        </div>
+      )}
 
       {interrupted > 0 && !intDismissed && (
         <div className="ban">

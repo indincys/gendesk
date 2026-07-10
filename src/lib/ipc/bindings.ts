@@ -729,7 +729,11 @@ phase: string }
 /**
  * `batch://summary`（250ms 节流）
  */
-export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean }
+export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean; 
+/**
+ * 自动暂停原因（E05 全局熔断）；None = 非自动暂停或运行中。
+ */
+autoPauseReason: string | null }
 export type BatchView = { id: number; createdAt: number; status: string; taskCount: number; 
 /**
  * 批次生效的生成参数快照（E16 / D1），任务页可回查。
@@ -840,11 +844,15 @@ motion: string;
 /**
  * 队列暂停态
  */
-paused: boolean }
+paused: boolean; 
+/**
+ * 全局熔断阈值（E05）：跨 Key 连续失败达此数自动暂停队列；0 = 关闭。
+ */
+globalFailThreshold?: number }
 /**
  * 设置补丁（部分更新）。
  */
-export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null }
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null }
 /**
  * 5 视觉组计数。
  */

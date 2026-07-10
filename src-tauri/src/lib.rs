@@ -209,6 +209,7 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings.paused,
         secrets.clone(),
     ))?;
+    engine.set_global_fail_threshold(settings.global_fail_threshold.max(0) as u32);
 
     app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
 

@@ -197,6 +197,10 @@ impl Engine {
     pub fn set_user_retry(&self, n: u32) {
         self.scheduler.set_user_retry(n);
     }
+    /// 设置全局熔断阈值（E05；0 = 关闭）。
+    pub fn set_global_fail_threshold(&self, n: u32) {
+        self.scheduler.set_global_fail_threshold(n);
+    }
     /// 新任务入队后唤醒调度。
     pub fn kick(&self) {
         self.scheduler.notify();

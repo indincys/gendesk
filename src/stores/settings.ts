@@ -7,8 +7,18 @@ interface SettingsState {
   loading: boolean;
   error: string | null;
   load: () => Promise<void>;
-  update: (patch: SettingsPatch) => Promise<void>;
+  update: (patch: Partial<SettingsPatch>) => Promise<void>;
 }
+
+/** 全字段 null 的补丁基底：仅传入变更字段即可，其余保持不变。 */
+const EMPTY_PATCH: SettingsPatch = {
+  scheduleStrategy: null,
+  retryCount: null,
+  outputDir: null,
+  motion: null,
+  paused: null,
+  globalFailThreshold: null,
+};
 
 export const useSettingsStore = create<SettingsState>((set) => ({
   settings: null,
@@ -28,7 +38,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   update: async (patch) => {
     // 乐观：以 Rust 返回的规整后设置为准（含 clamp / 枚举纠偏）。
     try {
-      const settings = await unwrap(commands.updateSettings(patch));
+      const settings = await unwrap(commands.updateSettings({ ...EMPTY_PATCH, ...patch }));
       set({ settings });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });

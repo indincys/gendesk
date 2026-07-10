@@ -283,6 +283,29 @@ export function SettingsPage() {
               超时 / 限流 / 违规默认各自动重试 1 次并切换可用 Key；再次失败则中断并保留错误原因
             </span>
           </div>
+          <div className="fx ac gap10 mt14 wrap">
+            <span className="fs12 t2 nowrap">连续失败自动暂停</span>
+            <Toggle
+              on={(settings?.globalFailThreshold ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  globalFailThreshold: (settings?.globalFailThreshold ?? 0) > 0 ? 0 : 10,
+                })
+              }
+            />
+            {(settings?.globalFailThreshold ?? 0) > 0 && (
+              <Stepper
+                value={settings?.globalFailThreshold ?? 10}
+                min={3}
+                max={50}
+                onChange={(v) => updateSettings({ globalFailThreshold: v })}
+              />
+            )}
+            <span className="fs11 t3">
+              跨全部 Key
+              连续这么多个任务失败即自动暂停队列并系统通知，避免无人值守时烧完额度；关闭则不熔断
+            </span>
+          </div>
         </section>
 
         {/* ---------------- 输出与归档 ---------------- */}

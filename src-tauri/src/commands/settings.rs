@@ -24,6 +24,14 @@ pub struct Settings {
     pub motion: String,
     /// 队列暂停态
     pub paused: bool,
+    /// 全局熔断阈值（E05）：跨 Key 连续失败达此数自动暂停队列；0 = 关闭。
+    #[serde(default = "default_global_fail_threshold")]
+    pub global_fail_threshold: i64,
+}
+
+/// 全局熔断默认阈值（连续失败 10 次）。
+fn default_global_fail_threshold() -> i64 {
+    10
 }
 
 impl Settings {
@@ -34,6 +42,7 @@ impl Settings {
             output_dir,
             motion: "standard".to_string(),
             paused: false,
+            global_fail_threshold: default_global_fail_threshold(),
         }
     }
 
@@ -45,6 +54,10 @@ impl Settings {
             self.motion = "standard".to_string();
         }
         self.retry_count = self.retry_count.clamp(0, 3);
+        // 0 = 关闭；否则至少 3 起（太低会误伤偶发失败），上限 100。
+        if self.global_fail_threshold != 0 {
+            self.global_fail_threshold = self.global_fail_threshold.clamp(3, 100);
+        }
     }
 }
 
@@ -57,6 +70,7 @@ pub struct SettingsPatch {
     pub output_dir: Option<String>,
     pub motion: Option<String>,
     pub paused: Option<bool>,
+    pub global_fail_threshold: Option<i64>,
 }
 
 /// 从连接池加载设置（供引擎启动读取策略/重试/暂停态）。
@@ -114,6 +128,9 @@ pub async fn update_settings(
     if let Some(v) = patch.paused {
         s.paused = v;
     }
+    if let Some(v) = patch.global_fail_threshold {
+        s.global_fail_threshold = v;
+    }
     s.sanitize();
     save(&state, &s).await?;
 
@@ -124,6 +141,9 @@ pub async fn update_settings(
             &s.schedule_strategy,
         ));
     state.engine.set_user_retry(s.retry_count.max(0) as u32);
+    state
+        .engine
+        .set_global_fail_threshold(s.global_fail_threshold.max(0) as u32);
     if s.paused {
         state.engine.pause();
     } else {

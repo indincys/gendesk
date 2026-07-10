@@ -62,6 +62,8 @@ pub struct BatchSummary {
     pub counts: SummaryCounts,
     pub active_concurrency: i64,
     pub paused: bool,
+    /// 自动暂停原因（E05 全局熔断）；None = 非自动暂停或运行中。
+    pub auto_pause_reason: Option<String>,
 }
 
 /// Key 健康状态。

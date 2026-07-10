@@ -23,6 +23,8 @@ interface EngineState {
   progress: Record<number, TaskProgressState>;
   keyHealth: Record<number, string>;
   paused: boolean;
+  /** 自动暂停原因（E05 全局熔断）；null = 非自动暂停。 */
+  autoPauseReason: string | null;
   trashCount: number;
 
   /** 应用内更新态 */
@@ -48,6 +50,7 @@ export const useEngineStore = create<EngineState>((set) => ({
   progress: {},
   keyHealth: {},
   paused: false,
+  autoPauseReason: null,
   trashCount: 0,
   updateReady: false,
   updateVersion: null,
@@ -76,6 +79,7 @@ export const useEngineStore = create<EngineState>((set) => ({
             },
           },
           paused: p.paused,
+          autoPauseReason: p.autoPauseReason,
         })),
       onProgress: (p) =>
         set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } })),
@@ -107,7 +111,8 @@ export const useEngineStore = create<EngineState>((set) => ({
     });
   },
 
-  setPaused: (paused) => set({ paused }),
+  // 继续队列即消费自动暂停：乐观清除原因（后端 resume 同步清除并回推 summary）。
+  setPaused: (paused) => set(paused ? { paused } : { paused, autoPauseReason: null }),
 
   setCurrentBatch: (batchId) => set({ currentBatchId: batchId }),
 

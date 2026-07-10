@@ -936,6 +936,12 @@ a:hover {
   font-size: 12px;
   color: oklch(40% 0.09 70);
 }
+/* E05 全局熔断：危险态 banner。 */
+.ban.dng {
+  border-color: var(--er);
+  background: var(--erbg);
+  color: var(--er);
+}
 .seg {
   display: inline-flex;
   background: var(--inset);

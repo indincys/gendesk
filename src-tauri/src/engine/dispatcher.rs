@@ -81,11 +81,19 @@ pub struct Scheduler {
     active: AtomicI64,
     /// Key 退避冷却基数（ms）；生产 30s，测试可调小。
     cooldown_base_ms: AtomicU64,
+    /// 跨 Key 连续任务失败计数（E05 全局熔断）。任一任务成功即清零。
+    global_fail_streak: AtomicU32,
+    /// 全局熔断阈值（连续失败达此数自动暂停队列）。0 = 关闭。
+    global_fail_threshold: AtomicU32,
+    /// 自动暂停原因（E05）；None = 非自动暂停。手动继续队列时清空。
+    auto_pause_reason: Mutex<Option<String>>,
     notify: Arc<Notify>,
 }
 
 /// 生产默认 Key 冷却基数（对应 strategy::backoff 的 30s 起点）。
 const DEFAULT_COOLDOWN_BASE_MS: u64 = 30_000;
+/// 全局熔断默认阈值（跨 Key 连续失败 10 次自动暂停）。
+const DEFAULT_GLOBAL_FAIL_THRESHOLD: u32 = 10;
 
 impl Scheduler {
     pub fn new(
@@ -110,8 +118,21 @@ impl Scheduler {
             user_retry: AtomicU32::new(user_retry),
             active: AtomicI64::new(0),
             cooldown_base_ms: AtomicU64::new(DEFAULT_COOLDOWN_BASE_MS),
+            global_fail_streak: AtomicU32::new(0),
+            global_fail_threshold: AtomicU32::new(DEFAULT_GLOBAL_FAIL_THRESHOLD),
+            auto_pause_reason: Mutex::new(None),
             notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// 设置全局熔断阈值（E05；0 = 关闭）。
+    pub fn set_global_fail_threshold(&self, n: u32) {
+        self.global_fail_threshold.store(n, Ordering::SeqCst);
+    }
+
+    /// 当前自动暂停原因（None = 非自动暂停）。
+    pub fn auto_pause_reason(&self) -> Option<String> {
+        lock(&self.auto_pause_reason).clone()
     }
 
     /// 调小 Key 退避冷却基数（测试用，避免真实时钟长等待）。
@@ -160,6 +181,9 @@ impl Scheduler {
         self.paused.store(true, Ordering::SeqCst);
     }
     pub fn resume(&self) {
+        // 手动继续队列即消费掉自动暂停：清原因 + 重置连续失败计数，避免立刻再次熔断。
+        *lock(&self.auto_pause_reason) = None;
+        self.global_fail_streak.store(0, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
         self.notify();
     }
@@ -448,6 +472,10 @@ impl Scheduler {
                 task_repo::mark_fail(&self.pool, task.id, ErrorType::Other.as_str(), &msg).await;
             // API 调用本身成功，不惩罚该 Key。
             self.on_key_result(key_id, true);
+            // E05：写盘失败也是终态失败，计入全局熔断（磁盘满会连续触发）。
+            if self.note_global_outcome(false) {
+                self.trip_global_breaker(self.global_fail_threshold.load(Ordering::SeqCst));
+            }
             self.emit_status(
                 task,
                 TaskStatus::Fail,
@@ -487,6 +515,8 @@ impl Scheduler {
             .await;
         }
         self.on_key_result(key_id, true);
+        // E05：一次成功清零跨 Key 连续失败计数。
+        self.note_global_outcome(true);
         self.sink.progress(TaskProgress {
             task_id: task.id,
             pct: 100,
@@ -555,6 +585,10 @@ impl Scheduler {
                 Some(et),
                 Some(&perr.message),
             );
+            // E05：终态失败计入全局熔断（重试态不计，尚未失败）。
+            if self.note_global_outcome(false) {
+                self.trip_global_breaker(self.global_fail_threshold.load(Ordering::SeqCst));
+            }
         }
         self.on_key_result(key_id, false);
         if et.suggests_disable_key() {
@@ -677,6 +711,35 @@ impl Scheduler {
         );
     }
 
+    /// 记录一次终态任务结果用于 E05 全局熔断：成功清零跨 Key 连续失败计数；
+    /// 终态失败累加，达阈值（>0）返回 true 表示应触发全局熔断。
+    fn note_global_outcome(&self, success: bool) -> bool {
+        if success {
+            self.global_fail_streak.store(0, Ordering::SeqCst);
+            return false;
+        }
+        let threshold = self.global_fail_threshold.load(Ordering::SeqCst);
+        let streak = self.global_fail_streak.fetch_add(1, Ordering::SeqCst) + 1;
+        threshold > 0 && streak >= threshold
+    }
+
+    /// 全局熔断（E05）：跨 Key 连续失败达阈值 → 自动暂停队列 + 记原因 + 系统通知。
+    /// 已处于自动暂停态则跳过，避免重复通知。
+    fn trip_global_breaker(&self, threshold: u32) {
+        {
+            let mut reason = lock(&self.auto_pause_reason);
+            if reason.is_some() {
+                return;
+            }
+            *reason = Some(format!("连续 {threshold} 个任务失败，已自动暂停队列"));
+        }
+        self.paused.store(true, Ordering::SeqCst);
+        self.sink.notify(
+            "队列已自动暂停".into(),
+            format!("连续 {threshold} 个任务失败，队列已自动暂停以防继续消耗额度。请检查设置后继续队列。"),
+        );
+    }
+
     fn spawn_progress_ticker(
         &self,
         task_id: i64,
@@ -749,6 +812,7 @@ impl Scheduler {
                 counts,
                 active_concurrency: self.active.load(Ordering::SeqCst),
                 paused: self.paused.load(Ordering::SeqCst),
+                auto_pause_reason: self.auto_pause_reason(),
             });
         }
     }
@@ -905,6 +969,7 @@ mod tests {
             })
             .collect();
         sched.set_cooldown_base_ms(2); // 测试用极短冷却，避免真实时钟等待
+        sched.set_global_fail_threshold(0); // 默认关闭全局熔断，E05 用例单独打开
         sched.set_keys(configs);
         Harness {
             sched,
@@ -1038,14 +1103,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn batch_archived_when_all_terminal() {
-        // 全部 Auth 失败（不重试）→ 全 fail → 批次归档
+        // 全部 ContentPolicy 失败（user_retry=0 → 首次即终态，且不触发 E18 Key 熔断）
+        // → 全 fail → 批次归档。
+        // 注：原用 Auth 注入，E18（单 Key 连续 3 次 Auth 熔断停用）落地后会把第 4 个任务
+        // 卡在 q（无可用 Key），批次不再全终态。本测试意在验「全终态即归档」，改用不触发
+        // 熔断的终态错误以隔离该无关特性；断言（4 fail + archived）保持不变。
         let h = setup(
             4,
             &[(1, 2)],
             Duration::from_millis(10),
-            Arc::new(|_| Err(ProviderErrorKind::Auth)),
+            Arc::new(|_| Err(ProviderErrorKind::ContentPolicy)),
             Strategy::RoundRobin,
-            1,
+            0,
         )
         .await;
         h.sched.drive_to_idle().await;
@@ -1096,6 +1165,50 @@ mod tests {
             .await
             .unwrap();
         assert!(revs > 0, "任务应能切到其它 Key 完成，实际 rev={revs}");
+    }
+
+    // E05：跨 Key 连续失败达阈值 → 自动暂停队列（在烧完前停住），记录原因，
+    // 剩余 q 任务不再派发；resume 后清原因并可继续。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn global_breaker_pauses_queue_before_burning_all() {
+        // 30 任务全部 ContentPolicy（非重试、不停用 Key），阈值 5。
+        let h = setup(
+            30,
+            &[(1, 2)],
+            Duration::from_millis(5),
+            Arc::new(|_| Err(ProviderErrorKind::ContentPolicy)),
+            Strategy::RoundRobin,
+            0, // user_retry=0：ContentPolicy 首次即终态失败
+        )
+        .await;
+        h.sched.set_global_fail_threshold(5);
+
+        // 驱动直到自动暂停或超时（避免 drive_to_idle 在暂停态死循环）。
+        let mut tripped = false;
+        for _ in 0..300 {
+            h.sched.dispatch_once().await;
+            if h.sched.is_paused() {
+                tripped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(tripped, "连续失败达阈值应自动暂停队列");
+        assert!(
+            h.sched.is_paused() && h.sched.auto_pause_reason().is_some(),
+            "自动暂停应记录原因"
+        );
+        // 停在烧完之前：仍有排队任务。
+        let remaining_q: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status='q'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert!(remaining_q > 0, "应在烧完 30 任务前停住，实际剩余 q={remaining_q}");
+
+        // 恢复队列：清原因、重置计数。
+        h.sched.resume();
+        assert!(h.sched.auto_pause_reason().is_none(), "resume 应清空自动暂停原因");
+        assert!(!h.sched.is_paused());
     }
 
     // E18：RPM 滑动窗口——达到上限即拒派，窗口滑过后恢复。

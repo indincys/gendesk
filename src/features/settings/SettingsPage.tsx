@@ -479,6 +479,34 @@ export function SettingsPage() {
               批次完成、失败达阈值、Key 熔断时发系统通知；Dock/任务栏角标显示待验收任务数
             </span>
           </div>
+          <div className="fx ac gap10 mt14">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              诊断
+            </span>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => void unwrap(commands.openLogsDir()).catch(() => {})}
+            >
+              打开日志目录
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={async () => {
+                try {
+                  const info = await unwrap(commands.diagnosticsInfo());
+                  await navigator.clipboard.writeText(info);
+                  toast.success("诊断信息已复制到剪贴板");
+                } catch (e) {
+                  if (e instanceof Error) toast.error(e.message);
+                }
+              }}
+            >
+              复制诊断信息
+            </button>
+            <span className="fs11 t3">版本 / 系统 / Key 状态 / 最近错误（不含密钥）</span>
+          </div>
         </section>
 
         <section className="sec">

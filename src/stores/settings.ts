@@ -20,6 +20,7 @@ const EMPTY_PATCH: SettingsPatch = {
   globalFailThreshold: null,
   trashRetentionDays: null,
   batchRetentionDays: null,
+  onboarded: null,
 };
 
 export const useSettingsStore = create<SettingsState>((set) => ({

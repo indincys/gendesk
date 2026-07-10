@@ -1112,6 +1112,54 @@ a:hover {
   margin-top: 6px;
   min-width: 0;
 }
+/* E13 首次引导浮层（右下角卡片，非模态遮挡）。 */
+.onbwrap {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  animation: fin 0.2s;
+}
+.onbcard {
+  width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 14px;
+  box-shadow: var(--sh3);
+  padding: 14px;
+}
+.onbstep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--sub);
+  cursor: pointer;
+}
+.onbstep:hover {
+  border-color: var(--accln);
+}
+.onbtick {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--line2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--t3);
+}
+.onbtick.done {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+}
+
 /* E24 验收聚类分段小标题（跨整行）。 */
 .rclhead {
   display: flex;

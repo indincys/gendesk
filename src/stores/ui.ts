@@ -18,12 +18,16 @@ interface UiState {
   /** 命令面板开关 */
   paletteOpen: boolean;
   paletteQuery: string;
+  /** 快捷键速查面板开关（E39） */
+  helpOpen: boolean;
 
   go: (route: RouteKey) => void;
   openPalette: () => void;
   closePalette: () => void;
   togglePalette: () => void;
   setPaletteQuery: (q: string) => void;
+  toggleHelp: () => void;
+  closeHelp: () => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -31,12 +35,15 @@ export const useUiStore = create<UiState>((set) => ({
   platform: detectPlatform(),
   paletteOpen: false,
   paletteQuery: "",
+  helpOpen: false,
 
   go: (route) => set({ route, paletteOpen: false, paletteQuery: "" }),
   openPalette: () => set({ paletteOpen: true, paletteQuery: "" }),
   closePalette: () => set({ paletteOpen: false, paletteQuery: "" }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen, paletteQuery: "" })),
   setPaletteQuery: (q) => set({ paletteQuery: q }),
+  toggleHelp: () => set((s) => ({ helpOpen: !s.helpOpen })),
+  closeHelp: () => set({ helpOpen: false }),
 }));
 
 /** 当前平台的修饰键符号（⌘ / Ctrl）。 */

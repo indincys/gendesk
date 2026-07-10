@@ -33,6 +33,9 @@ pub struct Settings {
     /// 归档批次保留天数（E22 / D3）：批次归档满此天数后启动时自动删除（作品不受影响）；0 = 不自动删除。
     #[serde(default = "default_retention_days")]
     pub batch_retention_days: i64,
+    /// 首次使用引导是否已完成（E13）：四步齐备后置 true，引导永久消失。
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 /// 全局熔断默认阈值（连续失败 10 次）。
@@ -56,6 +59,7 @@ impl Settings {
             global_fail_threshold: default_global_fail_threshold(),
             trash_retention_days: default_retention_days(),
             batch_retention_days: default_retention_days(),
+            onboarded: false,
         }
     }
 
@@ -93,6 +97,7 @@ pub struct SettingsPatch {
     pub global_fail_threshold: Option<i64>,
     pub trash_retention_days: Option<i64>,
     pub batch_retention_days: Option<i64>,
+    pub onboarded: Option<bool>,
 }
 
 /// 从连接池加载设置（供引擎启动读取策略/重试/暂停态）。
@@ -159,6 +164,9 @@ pub async fn update_settings(
     if let Some(v) = patch.batch_retention_days {
         s.batch_retention_days = v;
     }
+    if let Some(v) = patch.onboarded {
+        s.onboarded = v;
+    }
     s.sanitize();
     save(&state, &s).await?;
 
@@ -221,6 +229,50 @@ pub async fn pick_image_files(app: AppHandle) -> AppResult<Vec<String>> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// 复制诊断信息（E27）：版本 / OS / Key 数量与状态 / 最近 5 条错误摘要。
+/// 明确不含 Key 明文（仅计数与启用/熔断状态），可安全粘贴给支持者。
+#[tauri::command]
+#[specta::specta]
+pub async fn diagnostics_info(state: State<'_, AppState>) -> AppResult<String> {
+    let version = env!("CARGO_PKG_VERSION");
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    let (total, enabled, broken): (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                COALESCE(SUM(enabled), 0),
+                COALESCE(SUM(circuit_broken), 0)
+         FROM api_keys",
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    // 最近 5 条错误摘要（类型 + 截断消息，不含敏感内容）。
+    let errs: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT error_type, error_message FROM task_attempts
+         WHERE outcome = 'error' ORDER BY id DESC LIMIT 5",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut out = format!(
+        "GenDesk 诊断信息\n版本: v{version}\n系统: {os}/{arch}\nAPI Key: 共 {total} · 启用 {enabled} · 已熔断 {broken}\n最近错误:\n"
+    );
+    if errs.is_empty() {
+        out.push_str("  （无）\n");
+    } else {
+        for (et, msg) in errs {
+            let et = et.unwrap_or_else(|| "Other".into());
+            let mut m = msg.unwrap_or_default();
+            if m.chars().count() > 80 {
+                m = m.chars().take(80).collect::<String>() + "…";
+            }
+            out.push_str(&format!("  [{et}] {m}\n"));
+        }
+    }
+    Ok(out)
 }
 
 /// 在系统文件管理器中打开日志目录。

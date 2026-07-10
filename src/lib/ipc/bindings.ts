@@ -99,6 +99,18 @@ async openPathInFolder(path: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 复制诊断信息（E27）：版本 / OS / Key 数量与状态 / 最近 5 条错误摘要。
+ * 明确不含 Key 明文（仅计数与启用/熔断状态），可安全粘贴给支持者。
+ */
+async diagnosticsInfo() : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("diagnostics_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listApiKeys() : Promise<Result<ApiKeyView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_api_keys") };
@@ -908,11 +920,15 @@ trashRetentionDays?: number;
 /**
  * 归档批次保留天数（E22 / D3）：批次归档满此天数后启动时自动删除（作品不受影响）；0 = 不自动删除。
  */
-batchRetentionDays?: number }
+batchRetentionDays?: number; 
+/**
+ * 首次使用引导是否已完成（E13）：四步齐备后置 true，引导永久消失。
+ */
+onboarded?: boolean }
 /**
  * 设置补丁（部分更新）。
  */
-export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null }
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
 /**
  * 5 视觉组计数。
  */

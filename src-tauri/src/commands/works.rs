@@ -22,6 +22,10 @@ pub struct WorkView {
     pub image_path: String,
     pub thumb_path: String,
     pub prompt_text: String,
+    /// 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。
+    pub ref_image_id: Option<i64>,
+    pub group_id: Option<i64>,
+    pub task_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -33,7 +37,8 @@ pub struct WorkFilter {
 
 const WORK_SELECT: &str = "SELECT w.id, COALESCE(p.code,'') AS prompt_code,
         COALESCE(g.name,'') AS group_name, COALESCE(r.name,'') AS ref_name,
-        w.batch_id, w.favorite, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text
+        w.batch_id, w.favorite, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text,
+        w.ref_image_id, w.group_id, w.task_id
     FROM accepted_works w
     LEFT JOIN prompts p ON p.id = w.prompt_id
     LEFT JOIN prompt_groups g ON g.id = w.group_id
@@ -105,10 +110,50 @@ pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
             code: None,
             title: None,
             source_label: "手动删除".into(),
-            file_paths: vec![row.image_path, row.thumb_path],
+            // E21 决策：默认**不**物理删除外部输出文件（用户可能已发布/引用）；仅清缩略图。
+            file_paths: vec![row.thumb_path],
         },
     )
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// 文件是否存在（E21 作品源文件缺失懒检测）。
+#[tauri::command]
+#[specta::specta]
+pub async fn file_exists(path: String) -> AppResult<bool> {
+    Ok(std::path::Path::new(&path).is_file())
+}
+
+/// 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.jpg`。
+/// 批次已删除（task_id 为空）或快照已随清理消失时报可读错误。
+#[tauri::command]
+#[specta::specta]
+pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let row: Option<(Option<i64>, String)> =
+        sqlx::query_as("SELECT task_id, image_path FROM accepted_works WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((task_id, image_path)) = row else {
+        return Err(AppError::InvalidInput("作品不存在".into()));
+    };
+    let Some(task_id) = task_id else {
+        return Err(AppError::InvalidInput(
+            "该作品所属批次已清理，源快照不存在，无法重新导出".into(),
+        ));
+    };
+    let src = state.dirs.results().join(format!("{task_id}.jpg"));
+    if !src.is_file() {
+        return Err(AppError::InvalidInput(
+            "资产区源快照已不存在（可能随批次清理删除），无法重新导出".into(),
+        ));
+    }
+    let dst = std::path::PathBuf::from(&image_path);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::Io(e.to_string()))?;
+    }
+    std::fs::copy(&src, &dst).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(())
 }

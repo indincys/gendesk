@@ -3,16 +3,22 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type GroupView, type WorkView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { FolderOpen, Star } from "lucide-react";
+import { useGenerateStore } from "@/stores/generate";
+import { useUiStore } from "@/stores/ui";
+import { Copy, FolderOpen, ImageIcon, RefreshCw, Star, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 export function WorksPage() {
+  const go = useUiStore((s) => s.go);
+  const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
   const [works, setWorks] = useState<WorkView[]>([]);
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [filter, setFilter] = useState<"all" | "fav" | number>("all");
   const [detail, setDetail] = useState<WorkView | null>(null);
   const [confirmDel, setConfirmDel] = useState<WorkView | null>(null);
+  // E21：源输出文件是否缺失（懒检测：打开详情时校验）。
+  const [sourceMissing, setSourceMissing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -40,6 +46,68 @@ export function WorksPage() {
     setDetail(null);
     void load();
     toast("已移入废纸篓");
+  };
+
+  // E21：打开详情时懒检测源输出文件是否仍在。
+  useEffect(() => {
+    if (!detail) return;
+    setSourceMissing(false);
+    void unwrap(commands.fileExists(detail.imagePath))
+      .then((ok) => setSourceMissing(!ok))
+      .catch(() => {});
+  }, [detail]);
+
+  // E21：从资产区快照重新导出输出文件。
+  const reexport = async (w: WorkView) => {
+    try {
+      await unwrap(commands.reexportWork(w.id));
+      setSourceMissing(false);
+      toast.success("已重新导出到原输出路径");
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
+
+  // E33：复制提示词原文。
+  const copyPrompt = async (w: WorkView) => {
+    await navigator.clipboard.writeText(w.promptText);
+    toast.success("提示词已复制");
+  };
+
+  // E33：复制图片到系统剪贴板（jpg → png 经 canvas 转换，兼容剪贴板）。
+  const copyImage = async (w: WorkView) => {
+    try {
+      const src = assetSrc(w.imagePath) ?? assetSrc(w.thumbPath);
+      if (!src) throw new Error("图片不可读");
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("图片加载失败"));
+        img.src = src;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext("2d")?.drawImage(img, 0, 0);
+      const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, "image/png"));
+      if (!blob) throw new Error("转换失败");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast.success("图片已复制到剪贴板");
+    } catch (e) {
+      if (e instanceof Error) toast.error(`复制图片失败：${e.message}`);
+    }
+  };
+
+  // E33：用此作品的提示词 + 参考图预填生成页。
+  const remix = (w: WorkView) => {
+    if (w.refImageId == null || w.groupId == null) {
+      toast.error("该作品的参考图或分组已删除，无法一键再生成");
+      return;
+    }
+    restoreFromBatch([{ refImageId: w.refImageId, promptGroupId: w.groupId }], {});
+    setDetail(null);
+    go("generate");
   };
 
   return (
@@ -104,7 +172,12 @@ export function WorksPage() {
           title={detail.promptCode}
           width="w700"
           onClose={() => setDetail(null)}
-          headerExtra={<span className="bdg b-green">已通过</span>}
+          headerExtra={
+            <>
+              <span className="bdg b-green">已通过</span>
+              {sourceMissing && <span className="bdg b-red">源文件缺失</span>}
+            </>
+          }
           footer={
             <>
               <span className="fs11 t3">作品与提示词、参考图长期关联，可追溯</span>
@@ -145,19 +218,55 @@ export function WorksPage() {
                 className="btn sm mt10 w100"
                 style={{ justifyContent: "center" }}
                 onClick={() =>
-                  void unwrap(commands.openPathInFolder(detail.imagePath)).catch(() => {})
+                  void unwrap(commands.openPathInFolder(detail.imagePath)).catch(() =>
+                    toast.error("打开失败：文件可能已被移动或删除"),
+                  )
                 }
               >
                 <FolderOpen className="ic12" />
                 打开所在文件夹
               </button>
+              {sourceMissing && (
+                <button
+                  type="button"
+                  className="btn sm mt6 w100"
+                  style={{ justifyContent: "center" }}
+                  onClick={() => void reexport(detail)}
+                >
+                  <RefreshCw className="ic12" />
+                  重新导出
+                </button>
+              )}
             </div>
             <div className="f1" style={{ minWidth: 0 }}>
               <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
                 对应提示词
               </div>
-              <div className="ptext mt6" style={{ maxHeight: 340, overflow: "auto" }}>
+              <div className="ptext mt6" style={{ maxHeight: 260, overflow: "auto" }}>
                 {detail.promptText}
+              </div>
+              <div className="fx ac gap8 mt14 wrap">
+                <button
+                  type="button"
+                  className="btn sm gho"
+                  onClick={() => void copyPrompt(detail)}
+                >
+                  <Copy className="ic12" />
+                  复制提示词
+                </button>
+                <button type="button" className="btn sm gho" onClick={() => void copyImage(detail)}>
+                  <ImageIcon className="ic12" />
+                  复制图片
+                </button>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => remix(detail)}
+                  title="带此提示词与参考图预填生成页"
+                >
+                  <Wand2 className="ic12" />
+                  用此配置再生成
+                </button>
               </div>
             </div>
           </div>
@@ -167,7 +276,7 @@ export function WorksPage() {
       {confirmDel && (
         <ConfirmModal
           title="删除作品"
-          desc="删除后进入废纸篓，清理后不可恢复。"
+          desc="删除后作品记录进入废纸篓，清理后不可恢复；已导出到本地文件夹的图片文件不会被删除（需自行清理）。"
           confirmLabel="删除"
           danger
           onConfirm={() => del(confirmDel)}

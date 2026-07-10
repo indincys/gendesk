@@ -576,6 +576,29 @@ async trashWork(id: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 文件是否存在（E21 作品源文件缺失懒检测）。
+ */
+async fileExists(path: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_exists", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.jpg`。
+ * 批次已删除（task_id 为空）或快照已随清理消失时报可读错误。
+ */
+async reexportWork(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reexport_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listTrash() : Promise<Result<TrashItemView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_trash") };
@@ -1017,7 +1040,11 @@ export type UpdateStateChanged = {
  */
 state: string; version: string | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean }
-export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string }
+export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
+/**
+ * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。
+ */
+refImageId: number | null; groupId: number | null; taskId: number | null }
 
 /** tauri-specta globals **/
 

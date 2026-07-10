@@ -93,6 +93,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::get_work,
             commands::works::toggle_work_favorite,
             commands::works::trash_work,
+            commands::works::file_exists,
+            commands::works::reexport_work,
             // trash 域
             commands::trash::list_trash,
             commands::trash::purge_trash_items,

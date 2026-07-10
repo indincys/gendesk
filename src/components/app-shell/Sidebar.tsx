@@ -1,3 +1,4 @@
+import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
 import { ROUTES, type RouteDef } from "@/routes";
 import { navBadges, useEngineStore } from "@/stores/engine";
@@ -13,6 +14,9 @@ export function Sidebar() {
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
+  const version = useAppVersion();
+  const updateReady = useEngineStore((s) => s.updateReady);
+  const updateVersion = useEngineStore((s) => s.updateVersion);
 
   const make = ROUTES.filter((r) => r.group === "make");
   const asset = ROUTES.filter((r) => r.group === "asset");
@@ -80,7 +84,17 @@ export function Sidebar() {
         <NavItem key={r.key} r={r} />
       ))}
 
-      <div className="sfoot">GenDesk v0.1.0 · 本地</div>
+      <div className="sfoot">
+        GenDesk{version ? ` v${version}` : ""} · 本地
+        {updateReady && (
+          <span
+            className="verup"
+            title={updateVersion ? `新版本 v${updateVersion} 待安装` : undefined}
+          >
+            有新版{updateVersion ? ` v${updateVersion}` : ""}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

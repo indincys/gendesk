@@ -19,6 +19,14 @@ pub struct FrontendErrorPayload {
     pub task_id: Option<String>,
 }
 
+/// 返回应用当前版本（取自 tauri.conf 的 package 版本，与 updater 比对同源，随发布 tag 同步）。
+/// 前端页脚/设置页展示真实版本，避免硬编码漂移；「是否有新版」由 updater 域另行驱动。
+#[tauri::command]
+#[specta::specta]
+pub fn app_version(app: tauri::AppHandle) -> AppResult<String> {
+    Ok(app.package_info().version.to_string())
+}
+
 /// 将前端错误写入统一 tracing 日志流（AI 修 bug 的输入就是这份日志）。
 #[tauri::command]
 #[specta::specta]

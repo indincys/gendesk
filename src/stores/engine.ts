@@ -35,6 +35,8 @@ interface EngineState {
 
   /** 订阅引擎事件（仅 Tauri 环境）。返回反订阅函数。 */
   init: () => Promise<() => void>;
+  /** 乐观设置暂停态（暂停/继续命令不会立即回推汇总事件，需前端即时反映）。 */
+  setPaused: (paused: boolean) => void;
   setCurrentBatch: (batchId: number | null) => void;
   loadBatchTasks: (batchId: number, statusGroup?: string | null) => Promise<void>;
   /** 刷新废纸篓徽章计数（切页/清理后调用；非轮询）。 */
@@ -53,8 +55,16 @@ export const useEngineStore = create<EngineState>((set) => ({
   currentBatchId: null,
   tasks: [],
 
-  init: () =>
-    subscribeEngine({
+  init: async () => {
+    // 启动时同步持久化的暂停态：暂停下引擎不派发、不回推汇总事件，若不主动拉取，
+    // 页脚/工具栏按钮会一直显示为「运行中」，用户新建批次也不会跑却毫无提示。
+    try {
+      const s = await unwrap(commands.getSettings());
+      set({ paused: s.paused });
+    } catch {
+      // 忽略：拉取失败不阻断事件订阅
+    }
+    return subscribeEngine({
       onSummary: (p) =>
         set((s) => ({
           summaries: {
@@ -94,7 +104,10 @@ export const useEngineStore = create<EngineState>((set) => ({
           updateReady: p.state === "ready",
           updateVersion: p.version,
         }),
-    }),
+    });
+  },
+
+  setPaused: (paused) => set({ paused }),
 
   setCurrentBatch: (batchId) => set({ currentBatchId: batchId }),
 

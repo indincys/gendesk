@@ -30,6 +30,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             commands::misc::log_frontend_error,
+            commands::misc::app_version,
             // settings 域
             commands::settings::get_settings,
             commands::settings::update_settings,
@@ -70,6 +71,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::tasks::get_task,
             commands::tasks::retry_task,
             commands::tasks::retry_failed_tasks,
+            commands::tasks::delete_task,
+            commands::tasks::delete_failed_tasks,
             commands::tasks::retry_interrupted_tasks,
             commands::tasks::count_interrupted,
             // review 域

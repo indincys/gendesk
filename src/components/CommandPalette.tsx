@@ -41,7 +41,9 @@ export function CommandPalette() {
         cat: "操作",
         label: paused ? "继续队列" : "暂停队列",
         run: () => {
-          void unwrap(paused ? commands.resumeQueue() : commands.pauseQueue()).catch(() => {});
+          void unwrap(paused ? commands.resumeQueue() : commands.pauseQueue())
+            .then(() => useEngineStore.getState().setPaused(!paused))
+            .catch(() => {});
           toast(paused ? "已继续队列" : "已暂停队列");
         },
       },

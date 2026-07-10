@@ -1,9 +1,9 @@
 import { Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
-import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
+import { type BatchView, type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Check, Maximize2, RotateCcw, X } from "lucide-react";
+import { Check, ChevronDown, Maximize2, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,6 +11,10 @@ export function ReviewPage() {
   const [items, setItems] = useState<ReviewItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cols, setCols] = useState(5);
+  // E29：按批次筛选（null = 全部批次混排）。
+  const [batches, setBatches] = useState<BatchView[]>([]);
+  const [batchFilter, setBatchFilter] = useState<number | null>(null);
+  const [showBatchPicker, setShowBatchPicker] = useState(false);
   const [zoom, setZoom] = useState<number | null>(null); // index into items
   const [processed, setProcessed] = useState(0);
   // 「重试 + 微调提示词」目标（E01）：打开编辑框，确认后微调写快照并回队。
@@ -21,14 +25,25 @@ export function ReviewPage() {
 
   const load = useCallback(async () => {
     try {
-      setItems(await unwrap(commands.listPendingReview(null)));
+      setItems(await unwrap(commands.listPendingReview(batchFilter)));
+      setSel(new Set());
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, []);
+  }, [batchFilter]);
   useEffect(() => {
     void load();
   }, [load]);
+  // 批次列表用于筛选器（仅需展示存在待验收项的批次即可，这里取全部批次）。
+  useEffect(() => {
+    void (async () => {
+      try {
+        setBatches(await unwrap(commands.listBatches()));
+      } catch {
+        /* 筛选器可用性非关键，静默 */
+      }
+    })();
+  }, []);
 
   const removeIds = (ids: number[]) => {
     setItems((cur) => cur.filter((i) => !ids.includes(i.id)));
@@ -134,6 +149,10 @@ export function ReviewPage() {
   return (
     <PageScaffold title="图片验收" caption="网格粗筛 · 大图逐张精审">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
+        <button type="button" className="btn sm gho" onClick={() => setShowBatchPicker(true)}>
+          {batchFilter == null ? "全部批次" : `批次 #${batchFilter}`}
+          <ChevronDown className="ic12" />
+        </button>
         <span className="cnt">{items.length} 待验收</span>
         {processed > 0 && <span className="pcap">本批已处理 {processed}</span>}
         <div className="f1" />
@@ -322,6 +341,50 @@ export function ReviewPage() {
               <button type="button" className="btn pri sm" onClick={() => accept([zoomItem.id])}>
                 通过 ⏎
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatchPicker && (
+        <div className="ovl" onClick={() => setShowBatchPicker(false)}>
+          <div className="mdl w420" onClick={(e) => e.stopPropagation()}>
+            <div className="mhead">
+              <span className="fw6 fs13">按批次筛选</span>
+              <div className="f1" />
+            </div>
+            <div className="mlist">
+              <div
+                className="pickrow"
+                onClick={() => {
+                  setBatchFilter(null);
+                  setShowBatchPicker(false);
+                }}
+              >
+                <span className={cn("ckb", batchFilter == null && "on")} />
+                <span className="fs12 f1">全部批次</span>
+              </div>
+              {batches.map((b) => (
+                <div
+                  key={b.id}
+                  className="pickrow"
+                  onClick={() => {
+                    setBatchFilter(b.id);
+                    setShowBatchPicker(false);
+                  }}
+                >
+                  <span className={cn("ckb", b.id === batchFilter && "on")} />
+                  <span className="fs12 f1">
+                    批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
+                    任务
+                  </span>
+                </div>
+              ))}
+              {batches.length === 0 && (
+                <div className="fs12 t3" style={{ padding: 12 }}>
+                  暂无批次
+                </div>
+              )}
             </div>
           </div>
         </div>

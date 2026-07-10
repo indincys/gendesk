@@ -194,6 +194,39 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
     Ok(out)
 }
 
+/// 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
+/// 自动从分组名生成唯一前缀（号池按前缀发放）。
+#[tauri::command]
+#[specta::specta]
+pub async fn create_prompt_group(state: State<'_, AppState>, name: String) -> AppResult<GroupView> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput("分组名不能为空".into()));
+    }
+    // 生成唯一前缀：与导入 resolve_prefix 同规则（name 首两位 ASCII，冲突追加序号）。
+    let base = gen_prefix_from_name(trimmed);
+    let mut candidate = base.clone();
+    let mut n = 1;
+    while repo::find_group_by_prefix(&state.db, &candidate)
+        .await?
+        .is_some()
+    {
+        n += 1;
+        candidate = format!("{base}{n}");
+    }
+    let mut tx = state.db.begin().await?;
+    let id = repo::create_group(&mut tx, trimmed, &candidate, "", false).await?;
+    tx.commit().await?;
+    Ok(GroupView {
+        id,
+        name: trimmed.to_string(),
+        prefix: candidate,
+        scene: String::new(),
+        is_temp: false,
+        count: 0,
+    })
+}
+
 /// 第一步：解析 txt，构建预览（不落库）。
 #[tauri::command]
 #[specta::specta]

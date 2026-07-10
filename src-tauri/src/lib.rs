@@ -54,6 +54,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::refs::trash_ref_image,
             // prompts 域
             commands::prompts::list_prompt_groups,
+            commands::prompts::create_prompt_group,
             commands::prompts::list_prompts,
             commands::prompts::search_prompts,
             commands::prompts::get_prompt,

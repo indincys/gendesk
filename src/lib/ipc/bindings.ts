@@ -213,6 +213,18 @@ async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
+ * 自动从分组名生成唯一前缀（号池按前缀发放）。
+ */
+async createPromptGroup(name: string) : Promise<Result<GroupView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_prompt_group", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listPrompts(groupId: number) : Promise<Result<PromptView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_prompts", { groupId }) };

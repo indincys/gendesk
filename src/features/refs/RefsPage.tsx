@@ -18,6 +18,10 @@ export function RefsPage() {
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [detail, setDetail] = useState<RefImageDetail | null>(null);
   const [confirmDel, setConfirmDel] = useState<RefImageDetail | null>(null);
+  // E30a：导入时先选分组。pendingPaths 非空即展示选组弹窗。
+  const [pendingPaths, setPendingPaths] = useState<string[] | null>(null);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -31,12 +35,42 @@ export function RefsPage() {
     void load();
   }, [load]);
 
+  // 第一步：选文件；有文件则弹出选组弹窗（E30a）。
   const importRefs = async () => {
     const paths = await unwrap(commands.pickImageFiles()).catch(() => [] as string[]);
     if (paths.length === 0) return;
-    await unwrap(commands.importRefImages(paths, null)).catch((e) => toast.error(String(e)));
-    toast(`已导入 ${paths.length} 张参考图`);
-    void load();
+    setNewGroupName("");
+    setPendingPaths(paths);
+  };
+
+  // 第二步：带选定分组导入。gid=null 为未分组。
+  const doImport = async (gid: number | null) => {
+    const paths = pendingPaths;
+    if (!paths || importing) return;
+    setImporting(true);
+    try {
+      await unwrap(commands.importRefImages(paths, gid));
+      toast(`已导入 ${paths.length} 张参考图`);
+      setPendingPaths(null);
+      void load();
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // 新建分组后立即用它导入。
+  const importIntoNewGroup = async () => {
+    const name = newGroupName.trim();
+    if (!name || importing) return;
+    try {
+      const g = await unwrap(commands.createPromptGroup(name));
+      setGroups((gs) => [...gs, g]);
+      await doImport(g.id);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
   };
 
   const openDetail = async (id: number) => {
@@ -175,6 +209,51 @@ export function RefsPage() {
                 参考图与提示词库共用分组体系；调整分组不影响历史任务与作品的关联。
               </div>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {pendingPaths && (
+        <Modal
+          title={`导入 ${pendingPaths.length} 张参考图 · 选择分组`}
+          width="w420"
+          onClose={() => setPendingPaths(null)}
+        >
+          <div className="mlist" style={{ maxHeight: 300, overflow: "auto" }}>
+            <div className="pickrow" onClick={() => void doImport(null)}>
+              <span className="ckb" />
+              <span className="fw5 f1 nowrap ohide">未分组</span>
+            </div>
+            {groups.map((g) => (
+              <div key={g.id} className="pickrow" onClick={() => void doImport(g.id)}>
+                <span className="ckb" />
+                <i className="gdot" style={{ background: "var(--acc)" }} />
+                <span className="fw5 f1 nowrap ohide">{g.name}</span>
+                <span className="fs11 t3">{g.prefix}</span>
+              </div>
+            ))}
+          </div>
+          <div className="fx ac gap8 mt10">
+            <input
+              className="inp f1"
+              placeholder="新建分组名…"
+              value={newGroupName}
+              onChange={(e) => setNewGroupName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void importIntoNewGroup();
+              }}
+            />
+            <button
+              type="button"
+              className="btn sm"
+              disabled={!newGroupName.trim() || importing}
+              onClick={() => void importIntoNewGroup()}
+            >
+              新建并导入
+            </button>
+          </div>
+          <div className="fs11 t3 mt10" style={{ lineHeight: 1.7 }}>
+            参考图与提示词库共用分组体系；点分组即导入，也可先新建分组。
           </div>
         </Modal>
       )}

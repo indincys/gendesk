@@ -284,6 +284,7 @@ export function TasksPage() {
                     批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
                     任务
                   </span>
+                  <span className="fs11 t3 nowrap">{paramsLabel(b.paramsJson)}</span>
                 </div>
               ))}
               {batches.length === 0 && (
@@ -301,6 +302,19 @@ export function TasksPage() {
 
 function visibleCount(tasks: TaskView[], f: { match: (s: string) => boolean }): number {
   return tasks.filter((t) => f.match(t.status)).length;
+}
+
+/** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。 */
+function paramsLabel(json: string): string {
+  try {
+    const p = JSON.parse(json) as { size?: string; quality?: string };
+    const parts: string[] = [];
+    if (p.size) parts.push(p.size);
+    if (p.quality) parts.push(`质量 ${p.quality}`);
+    return parts.length > 0 ? parts.join(" · ") : "跟随提示词";
+  } catch {
+    return "跟随提示词";
+  }
 }
 
 function SumBadge({ cls, n, label }: { cls: string; n: number; label: string }) {

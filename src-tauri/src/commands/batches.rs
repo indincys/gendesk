@@ -30,6 +30,8 @@ pub struct BatchView {
     pub created_at: i64,
     pub status: String,
     pub task_count: i64,
+    /// 批次生效的生成参数快照（E16 / D1），任务页可回查。
+    pub params_json: String,
 }
 
 /// 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
@@ -63,6 +65,7 @@ pub async fn create_batch(
         created_at: crate::db::now_unix(),
         status: "running".into(),
         task_count: count,
+        params_json: input.params_json.clone(),
     })
 }
 
@@ -78,6 +81,7 @@ pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView
             created_at: b.created_at,
             status: b.status,
             task_count: counts.total,
+            params_json: b.params_json,
         });
     }
     Ok(out)

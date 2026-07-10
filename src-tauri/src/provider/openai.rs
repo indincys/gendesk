@@ -157,11 +157,18 @@ impl ImageProvider for OpenAiCompatible {
             .to_string();
 
         let part = reqwest::multipart::Part::bytes(image_bytes).file_name(file_name);
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("image", part)
             .text("prompt", req.prompt)
             .text("model", req.model)
             .text("n", "1");
+        // E16 / D1：仅透传显式设置的参数；未设置不带该字段（跟随提示词/模型默认）。
+        if let Some(size) = req.params.size {
+            form = form.text("size", size);
+        }
+        if let Some(quality) = req.params.quality {
+            form = form.text("quality", quality);
+        }
 
         let resp = self
             .client
@@ -322,6 +329,7 @@ mod tests {
             prompt: "a".into(),
             image_path: p,
             model: "gpt-image-2".into(),
+            params: crate::provider::GenParams::default(),
         }
     }
 
@@ -343,6 +351,54 @@ mod tests {
             .unwrap();
         // 应为合法 JPEG
         assert!(image::load_from_memory(&out.jpeg).is_ok());
+    }
+
+    // 挂一个恒定成功的 /images/edits mock，返回该 server。
+    async fn ok_server() -> MockServer {
+        let server = MockServer::start().await;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(tiny_png());
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "b64_json": b64 }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    // E16 / D1：未设置生成参数时，请求体不得带 size / quality 字段。
+    #[tokio::test]
+    async fn params_omitted_when_unset() {
+        let server = ok_server().await;
+        let (_d, rp) = ref_file().await;
+        provider(&server.uri()).generate(req(rp), None).await.unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(!body.contains("name=\"size\""), "未设置时请求体不应带 size");
+        assert!(
+            !body.contains("name=\"quality\""),
+            "未设置时请求体不应带 quality"
+        );
+    }
+
+    // E16 / D1：显式设置的参数须透传到请求体。
+    #[tokio::test]
+    async fn params_passed_through_when_set() {
+        let server = ok_server().await;
+        let (_d, rp) = ref_file().await;
+        let mut r = req(rp);
+        r.params = crate::provider::GenParams {
+            size: Some("1024x1024".into()),
+            quality: Some("high".into()),
+        };
+        provider(&server.uri()).generate(r, None).await.unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(body.contains("name=\"size\""), "设置后应带 size 字段");
+        assert!(body.contains("1024x1024"), "应透传 size 值");
+        assert!(body.contains("name=\"quality\""), "设置后应带 quality 字段");
+        assert!(body.contains("high"), "应透传 quality 值");
     }
 
     #[tokio::test]

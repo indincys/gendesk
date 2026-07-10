@@ -340,10 +340,13 @@ impl Scheduler {
         let outcome = match (self.ref_path(task.ref_image_id).await, key_cfg.clone()) {
             (Some(image_path), Some(cfg)) => {
                 let provider = self.factory.build(&cfg);
+                // E16 / D1：取批次生成参数快照，仅透传显式设置项。
+                let params = self.batch_params(task.batch_id).await;
                 let req = GenRequest {
                     prompt: task.prompt_text_snapshot.clone(),
                     image_path,
                     model: cfg.model.clone(),
+                    params,
                 };
                 let progress = self.download_progress_cb(task.id);
                 provider.generate(req, Some(progress)).await
@@ -547,6 +550,18 @@ impl Scheduler {
             .ok()
             .flatten()
             .map(std::path::PathBuf::from)
+    }
+
+    /// 批次生成参数快照（E16 / D1）。查不到或解析失败退化为「全部空」（不传参）。
+    async fn batch_params(&self, batch_id: i64) -> crate::provider::GenParams {
+        let json = sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
+            .bind(batch_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "{}".into());
+        crate::provider::GenParams::from_json(&json)
     }
 
     /// 更新 Key 连续失败/冷却，并推送健康事件。

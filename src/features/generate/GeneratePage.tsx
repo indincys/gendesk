@@ -17,6 +17,9 @@ export function GeneratePage() {
   const [selGroupIds, setSelGroupIds] = useState<number[]>([]);
   const [selRefIds, setSelRefIds] = useState<number[]>([]);
   const [mapping, setMapping] = useState<Record<number, number>>({});
+  // E16 / D1：生成参数，null = 未设置（不传该参数，跟随提示词）。
+  const [size, setSize] = useState<string | null>(null);
+  const [quality, setQuality] = useState<string | null>(null);
   const [modal, setModal] = useState<null | "groups" | "refs" | { assign: number }>(null);
   const [starting, setStarting] = useState(false);
   // 已展开查看提示词原文的分组 + 其提示词缓存（按需加载）。
@@ -90,13 +93,21 @@ export function GeneratePage() {
     }
   };
 
+  // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
+  const buildParamsJson = () => {
+    const p: Record<string, string> = {};
+    if (size) p.size = size;
+    if (quality) p.quality = quality;
+    return JSON.stringify(p);
+  };
+
   const start = async () => {
     setStarting(true);
     try {
       const batch = await unwrap(
         commands.createBatch({
           refs: selRefs.map((r) => ({ refImageId: r.id, promptGroupId: mapping[r.id] as number })),
-          paramsJson: "{}",
+          paramsJson: buildParamsJson(),
         }),
       );
       toast(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`);
@@ -228,6 +239,18 @@ export function GeneratePage() {
                 })}
               </div>
             )}
+          </div>
+
+          {/* 生成参数卡（E16 / D1：默认跟随提示词，显式设置才透传） */}
+          <div className="card mt14">
+            <div className="chead">
+              <span className="fw6 fs13">生成参数</span>
+              <span className="fs11 t3">未设置 = 不传该参数，以提示词与模型默认为准</span>
+            </div>
+            <ParamRow label="尺寸 / 比例" value={size} onChange={setSize} options={SIZE_OPTS} />
+            <div className="mt10">
+              <ParamRow label="质量" value={quality} onChange={setQuality} options={QUALITY_OPTS} />
+            </div>
           </div>
         </div>
       </div>
@@ -470,6 +493,60 @@ function GroupPromptList({ prompts }: { prompts: PromptView[] | undefined }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+type ParamOpt = { v: string | null; label: string };
+const SIZE_OPTS: ParamOpt[] = [
+  { v: null, label: "跟随提示词" },
+  { v: "1024x1024", label: "1:1" },
+  { v: "1536x1024", label: "3:2 横" },
+  { v: "1024x1536", label: "2:3 竖" },
+  { v: "auto", label: "自动" },
+];
+const QUALITY_OPTS: ParamOpt[] = [
+  { v: null, label: "跟随提示词" },
+  { v: "low", label: "低" },
+  { v: "medium", label: "中" },
+  { v: "high", label: "高" },
+  { v: "auto", label: "自动" },
+];
+
+/** 生成参数单行：分段控件，第一项「跟随提示词」为未设置态（虚线占位强调，D1）。 */
+function ParamRow({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string | null;
+  onChange: (v: string | null) => void;
+  options: ParamOpt[];
+}) {
+  return (
+    <div className="fx ac gap10">
+      <span className="fs12 t2" style={{ width: 76 }}>
+        {label}
+      </span>
+      <div className="seg">
+        {options.map((o) => {
+          const active = value === o.v;
+          const isUnset = o.v === null;
+          return (
+            <span
+              key={o.label}
+              className={cn("sgi", active && "on")}
+              // 未设置态用虚线边框区分「跟随提示词」与已设置项（D1）。
+              style={isUnset && active ? { borderStyle: "dashed" } : undefined}
+              onClick={() => onChange(o.v)}
+            >
+              {o.label}
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }

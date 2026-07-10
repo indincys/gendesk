@@ -662,7 +662,11 @@ phase: string }
  * `batch://summary`（250ms 节流）
  */
 export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean }
-export type BatchView = { id: number; createdAt: number; status: string; taskCount: number }
+export type BatchView = { id: number; createdAt: number; status: string; taskCount: number; 
+/**
+ * 批次生效的生成参数快照（E16 / D1），任务页可回查。
+ */
+paramsJson: string }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
 /**
  * 数据目录信息（E19：暴露落盘位置）。

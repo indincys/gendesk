@@ -137,51 +137,13 @@ pub fn run() {
             // 事件挂载（当前无事件；M1/M2 增加后由 builder 统一登记）。
             builder.mount_events(app);
 
-            // 数据目录 + 日志 + DB 池 + 密钥存储 + 引擎，装配为 AppState。
-            let data_dir = app.path().app_data_dir()?;
-            let dirs = Arc::new(files::DataDirs::new(&data_dir));
-            dirs.init()?;
-
-            let guard = logging::init(&dirs.logs());
-            app.manage(guard);
-
-            let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
-            let secrets: Arc<dyn secrets::SecretStore> = Arc::new(secrets::KeyringStore);
-
-            // 读设置 → 启动引擎（中断恢复 + 调度循环）。
-            let default_out = dirs.outputs().to_string_lossy().to_string();
-            let settings = tauri::async_runtime::block_on(commands::settings::load_settings(
-                &pool,
-                &default_out,
-            ))?;
-            let strategy =
-                engine::strategy::Strategy::from_str_or_default(&settings.schedule_strategy);
-            let factory: Arc<dyn engine::ProviderFactory> = Arc::new(engine::OpenAiFactory::new(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(180),
-            ));
-            let sink: engine::events::SharedSink =
-                Arc::new(engine::events::TauriSink::new(app.handle().clone()));
-            let engine = tauri::async_runtime::block_on(engine::Engine::start(
-                pool.clone(),
-                dirs.clone(),
-                factory,
-                sink,
-                strategy,
-                settings.retry_count.max(0) as u32,
-                settings.paused,
-                secrets.clone(),
-            ))?;
-
-            app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
-
-            // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(windows)]
-                {
-                    let _ = window.set_decorations(false);
-                }
-                let _ = window;
+            // 初始化失败（数据库 schema 版本高于当前应用/降级、目录不可写等）不再
+            // 让 Tauri 在 setup 返回 Err 时内部 panic → SIGABRT 崩溃弹窗；改为记录后
+            // 干净退出（退出码 1），原因落入日志文件供排查。
+            if let Err(err) = setup_app(app) {
+                tracing::error!(error = %err, "应用初始化失败，退出");
+                eprintln!("[gendesk] 应用初始化失败: {err}");
+                std::process::exit(1);
             }
 
             Ok(())
@@ -192,6 +154,59 @@ pub fn run() {
             eprintln!("[gendesk] 应用启动失败: {e}");
             std::process::exit(1);
         });
+}
+
+/// setup 钩子中所有可失败的初始化步骤。抽出为独立函数，使调用方能把失败
+/// 转成干净退出，而非让 Tauri 在 setup 返回 `Err` 时内部 panic（abort → 崩溃弹窗）。
+///
+/// 典型失败：数据库 schema 版本高于当前应用（旧包对新库 / 降级），sqlx 迁移会
+/// 报 `VersionMissing`；此前该错误经 `?` 上抛 → Tauri panic → SIGABRT。
+fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // 数据目录 + 日志 + DB 池 + 密钥存储 + 引擎，装配为 AppState。
+    let data_dir = app.path().app_data_dir()?;
+    let dirs = Arc::new(files::DataDirs::new(&data_dir));
+    dirs.init()?;
+
+    let guard = logging::init(&dirs.logs());
+    app.manage(guard);
+
+    let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
+    let secrets: Arc<dyn secrets::SecretStore> = Arc::new(secrets::KeyringStore);
+
+    // 读设置 → 启动引擎（中断恢复 + 调度循环）。
+    let default_out = dirs.outputs().to_string_lossy().to_string();
+    let settings =
+        tauri::async_runtime::block_on(commands::settings::load_settings(&pool, &default_out))?;
+    let strategy = engine::strategy::Strategy::from_str_or_default(&settings.schedule_strategy);
+    let factory: Arc<dyn engine::ProviderFactory> = Arc::new(engine::OpenAiFactory::new(
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(180),
+    ));
+    let sink: engine::events::SharedSink =
+        Arc::new(engine::events::TauriSink::new(app.handle().clone()));
+    let engine = tauri::async_runtime::block_on(engine::Engine::start(
+        pool.clone(),
+        dirs.clone(),
+        factory,
+        sink,
+        strategy,
+        settings.retry_count.max(0) as u32,
+        settings.paused,
+        secrets.clone(),
+    ))?;
+
+    app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
+
+    // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(windows)]
+        {
+            let _ = window.set_decorations(false);
+        }
+        let _ = window;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

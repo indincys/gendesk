@@ -48,6 +48,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "GenDesk ${{ github.ref_name }}"
           releaseBody: "详见 CHANGELOG。首次运行的 SmartScreen / Gatekeeper 放行指引见 README。"
-          releaseDraft: true
+          # 必须直接发布（非草稿）：updater endpoint 仅解析已发布 release，
+          # 草稿会导致 releases/latest/download/latest.json 404，自动更新链断裂。
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

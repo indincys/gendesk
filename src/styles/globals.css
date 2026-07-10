@@ -1112,6 +1112,19 @@ a:hover {
   margin-top: 6px;
   min-width: 0;
 }
+/* E24 验收聚类分段小标题（跨整行）。 */
+.rclhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--t2);
+  letter-spacing: 0.03em;
+  padding: 6px 2px 2px;
+  border-bottom: 1px solid var(--line);
+  margin-top: 4px;
+}
 .rdet {
   position: absolute;
   inset: 0;

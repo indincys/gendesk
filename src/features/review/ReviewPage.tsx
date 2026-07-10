@@ -4,7 +4,7 @@ import { assetSrc } from "@/lib/img";
 import { type BatchView, type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Check, ChevronDown, Clock, Maximize2, RotateCcw, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function ReviewPage() {
@@ -16,6 +16,8 @@ export function ReviewPage() {
   // E38：待定标记（纯 UI 态，不入库）——沉底 + 角标 + 可筛选。
   const [pending, setPending] = useState<Set<number>>(new Set());
   const [onlyPending, setOnlyPending] = useState(false);
+  // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
+  const [sortMode, setSortMode] = useState<"time" | "ref" | "group">("time");
   // E38：shift 范围多选锚点（索引进 displayed）。
   const lastClicked = useRef<number | null>(null);
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
@@ -132,11 +134,23 @@ export function ReviewPage() {
       return n;
     });
 
-  // E38：显示序——「仅看待定」筛选；否则待定项稳定沉底（保留原相对序）。
+  // E38/E24：显示序——「仅看待定」筛选；按排序模式聚类；时间序下待定项稳定沉底。
   const displayed = useMemo(() => {
-    if (onlyPending) return items.filter((i) => pending.has(i.id));
-    return [...items].sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
-  }, [items, pending, onlyPending]);
+    const arr = onlyPending ? items.filter((i) => pending.has(i.id)) : [...items];
+    if (sortMode === "ref") {
+      arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
+    } else if (sortMode === "group") {
+      arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
+    } else if (!onlyPending) {
+      // 时间序（后端已按 id 升序）：仅让待定项稳定沉底。
+      arr.sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
+    }
+    return arr;
+  }, [items, pending, onlyPending, sortMode]);
+
+  // E24：聚类模式下某项所属的分段键（时间序无分段）。
+  const clusterKey = (it: ReviewItemView): string | null =>
+    sortMode === "ref" ? it.refName : sortMode === "group" ? it.groupName : null;
 
   // 大图逐张模式键盘
   useEffect(() => {
@@ -308,6 +322,26 @@ export function ReviewPage() {
             <span style={{ width: 1, height: 16, background: "var(--line2)" }} />
           </>
         )}
+        <div className="seg">
+          <span
+            className={cn("sgi", sortMode === "time" && "on")}
+            onClick={() => setSortMode("time")}
+          >
+            时间
+          </span>
+          <span
+            className={cn("sgi", sortMode === "ref" && "on")}
+            onClick={() => setSortMode("ref")}
+          >
+            按参考图
+          </span>
+          <span
+            className={cn("sgi", sortMode === "group" && "on")}
+            onClick={() => setSortMode("group")}
+          >
+            按提示词组
+          </span>
+        </div>
         <span className="fs11 t3 nowrap">每行</span>
         <input
           type="range"
@@ -327,87 +361,98 @@ export function ReviewPage() {
       ) : (
         <div className="pbody">
           <div className="rgrid" style={{ gridTemplateColumns: `repeat(${cols},1fr)` }}>
-            {displayed.map((it, idx) => (
-              <div
-                key={it.id}
-                data-ridx={idx}
-                className={cn(
-                  "rcard",
-                  sel.has(it.id) && "sel",
-                  idx === focus && "focus",
-                  pending.has(it.id) && "pend",
-                )}
-                onClick={(e) => onCardClick(idx, e.shiftKey)}
-                onDoubleClick={() => setZoom(idx)}
-              >
-                <div className="ph rcimg" style={bg(it.resultThumbPath)} />
-                <span className={cn("rck", sel.has(it.id) && "on")}>
-                  <Check className="ic12" />
-                </span>
-                {pending.has(it.id) && <span className="rpend">待定</span>}
-                <div className="hacts">
-                  <button
-                    type="button"
-                    className="hbtn"
-                    title="通过"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void accept([it.id]);
-                    }}
+            {displayed.map((it, idx) => {
+              const ck = clusterKey(it);
+              const prev = idx > 0 ? displayed[idx - 1] : undefined;
+              const showHeader = ck !== null && (!prev || clusterKey(prev) !== ck);
+              return (
+                <Fragment key={it.id}>
+                  {showHeader && (
+                    <div className="rclhead" style={{ gridColumn: "1 / -1" }}>
+                      {sortMode === "ref" ? "参考图" : "提示词组"} · {ck}
+                    </div>
+                  )}
+                  <div
+                    data-ridx={idx}
+                    className={cn(
+                      "rcard",
+                      sel.has(it.id) && "sel",
+                      idx === focus && "focus",
+                      pending.has(it.id) && "pend",
+                    )}
+                    onClick={(e) => onCardClick(idx, e.shiftKey)}
+                    onDoubleClick={() => setZoom(idx)}
                   >
-                    <Check className="ic12" />
-                  </button>
-                  <button
-                    type="button"
-                    className="hbtn"
-                    title="不通过"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void reject([it.id]);
-                    }}
-                  >
-                    <X className="ic12" />
-                  </button>
-                  <button
-                    type="button"
-                    className="hbtn"
-                    title="重试（可微调提示词）"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openRetry(it);
-                    }}
-                  >
-                    <RotateCcw className="ic12" />
-                  </button>
-                  <button
-                    type="button"
-                    className={cn("hbtn", pending.has(it.id) && "on")}
-                    title="标记待定（稍后再定）"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      togglePending(it.id);
-                    }}
-                  >
-                    <Clock className="ic12" />
-                  </button>
-                  <button
-                    type="button"
-                    className="hbtn"
-                    title="大图逐张"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setZoom(idx);
-                    }}
-                  >
-                    <Maximize2 className="ic12" />
-                  </button>
-                </div>
-                <div className="rmeta">
-                  <span className="pid">{it.promptCode}</span>
-                  <span className="fs10 t3 mono nowrap ohide">{it.refName}</span>
-                </div>
-              </div>
-            ))}
+                    <div className="ph rcimg" style={bg(it.resultThumbPath)} />
+                    <span className={cn("rck", sel.has(it.id) && "on")}>
+                      <Check className="ic12" />
+                    </span>
+                    {pending.has(it.id) && <span className="rpend">待定</span>}
+                    <div className="hacts">
+                      <button
+                        type="button"
+                        className="hbtn"
+                        title="通过"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void accept([it.id]);
+                        }}
+                      >
+                        <Check className="ic12" />
+                      </button>
+                      <button
+                        type="button"
+                        className="hbtn"
+                        title="不通过"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void reject([it.id]);
+                        }}
+                      >
+                        <X className="ic12" />
+                      </button>
+                      <button
+                        type="button"
+                        className="hbtn"
+                        title="重试（可微调提示词）"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openRetry(it);
+                        }}
+                      >
+                        <RotateCcw className="ic12" />
+                      </button>
+                      <button
+                        type="button"
+                        className={cn("hbtn", pending.has(it.id) && "on")}
+                        title="标记待定（稍后再定）"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePending(it.id);
+                        }}
+                      >
+                        <Clock className="ic12" />
+                      </button>
+                      <button
+                        type="button"
+                        className="hbtn"
+                        title="大图逐张"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setZoom(idx);
+                        }}
+                      >
+                        <Maximize2 className="ic12" />
+                      </button>
+                    </div>
+                    <div className="rmeta">
+                      <span className="pid">{it.promptCode}</span>
+                      <span className="fs10 t3 mono nowrap ohide">{it.refName}</span>
+                    </div>
+                  </div>
+                </Fragment>
+              );
+            })}
           </div>
         </div>
       )}

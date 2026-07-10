@@ -1233,11 +1233,17 @@ mod tests {
             .fetch_one(&h.pool)
             .await
             .unwrap();
-        assert!(remaining_q > 0, "应在烧完 30 任务前停住，实际剩余 q={remaining_q}");
+        assert!(
+            remaining_q > 0,
+            "应在烧完 30 任务前停住，实际剩余 q={remaining_q}"
+        );
 
         // 恢复队列：清原因、重置计数。
         h.sched.resume();
-        assert!(h.sched.auto_pause_reason().is_none(), "resume 应清空自动暂停原因");
+        assert!(
+            h.sched.auto_pause_reason().is_none(),
+            "resume 应清空自动暂停原因"
+        );
         assert!(!h.sched.is_paused());
     }
 

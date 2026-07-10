@@ -98,10 +98,7 @@ pub struct RefMappingInput2 {
 /// 保证还原到生成页后可直接创建新批次。
 #[tauri::command]
 #[specta::specta]
-pub async fn get_batch_config(
-    state: State<'_, AppState>,
-    batch_id: i64,
-) -> AppResult<BatchConfig> {
+pub async fn get_batch_config(state: State<'_, AppState>, batch_id: i64) -> AppResult<BatchConfig> {
     let params_json: Option<String> =
         sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
             .bind(batch_id)

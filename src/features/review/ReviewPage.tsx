@@ -262,12 +262,10 @@ export function ReviewPage() {
       {zoomItem && (
         <div className="rdet">
           <div className="rdimgw">
-            <div
-              className="ph rdimg"
-              style={bg(zoomItem.resultImagePath ?? zoomItem.resultThumbPath)}
-            >
-              <span className="phl">GEN · {zoomItem.promptCode} · 1024×1024</span>
-            </div>
+            <BigImage
+              path={zoomItem.resultImagePath ?? zoomItem.resultThumbPath}
+              caption={`GEN · ${zoomItem.promptCode}`}
+            />
           </div>
           <div className="rdside">
             <div
@@ -375,4 +373,109 @@ function bg(path?: string | null): React.CSSProperties {
   return src
     ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
     : {};
+}
+
+/**
+ * 验收大图 1:1 查看（E23）：contain 完整显示（不裁剪），滚轮缩放 10%–400%、
+ * 拖拽平移、双击在「适应」与「100%（原始像素）」间切换。用于检查 AI 图高发的
+ * 手部/文字/边缘缺陷。
+ */
+function BigImage({ path, caption }: { path?: string | null; caption: string }) {
+  const src = assetSrc(path);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [scale, setScale] = useState(1); // 相对「适应」尺寸的倍数
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  // 自然像素 / 适应像素，用于双击 100% 与真实百分比显示。
+  const [fitRatio, setFitRatio] = useState(1);
+  const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+
+  // 切换图片时复位缩放/平移。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 仅在图源变化时复位视图
+  useEffect(() => {
+    setScale(1);
+    setPan({ x: 0, y: 0 });
+  }, [src]);
+
+  // 滚轮缩放：以非 passive 原生监听保证 preventDefault 生效。
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setScale((s) => {
+        const next = e.deltaY < 0 ? s * 1.15 : s / 1.15;
+        return Math.min(4, Math.max(0.1, next));
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // 拖拽平移：拖动期间挂 window 监听，松开即卸。
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => {
+      const d = drag.current;
+      if (!d) return;
+      setPan({ x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) });
+    };
+    const onUp = () => {
+      setDragging(false);
+      drag.current = null;
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging]);
+
+  const onDoubleClick = () => {
+    if (scale !== 1) {
+      setScale(1);
+      setPan({ x: 0, y: 0 });
+      return;
+    }
+    setScale(Math.min(4, Math.max(1, fitRatio))); // 适应 → 100% 原始像素
+  };
+
+  const onLoad = () => {
+    const img = imgRef.current;
+    if (!img || img.clientWidth === 0) return;
+    setFitRatio(img.naturalWidth / img.clientWidth);
+  };
+
+  // 真实百分比 = 当前显示像素 / 自然像素。
+  const percent = Math.round((scale / fitRatio) * 100);
+
+  return (
+    <div
+      ref={containerRef}
+      className={cn("rzoom", dragging && "drag")}
+      onMouseDown={(e) => {
+        drag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+        setDragging(true);
+      }}
+      onDoubleClick={onDoubleClick}
+    >
+      {src ? (
+        <img
+          ref={imgRef}
+          src={src}
+          alt={caption}
+          className="rzimg"
+          draggable={false}
+          onLoad={onLoad}
+          style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}
+        />
+      ) : (
+        <div className="ph rdimg" />
+      )}
+      <span className="rzbadge">{Number.isFinite(percent) ? percent : 100}%</span>
+      <span className="rzhint">滚轮缩放 · 拖拽平移 · 双击 100%</span>
+    </div>
+  );
 }

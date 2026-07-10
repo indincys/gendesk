@@ -30,15 +30,14 @@ pub fn init(logs_dir: &Path) -> WorkerGuard {
         .with_target(true)
         .with_writer(non_blocking);
 
-    // 开发模式同时输出到 stderr，便于 `tauri dev` 观察。
-    let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(true);
-
     let registry = tracing_subscriber::registry().with(filter).with(file_layer);
 
+    // 开发模式同时输出到 stderr，便于 `tauri dev` 观察。
     #[cfg(debug_assertions)]
-    let registry = registry.with(stderr_layer);
-    #[cfg(not(debug_assertions))]
-    let _ = stderr_layer;
+    let registry = {
+        let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(true);
+        registry.with(stderr_layer)
+    };
 
     // set_global_default 只会失败于「已初始化」，忽略以支持测试重复调用。
     let _ = registry.try_init();

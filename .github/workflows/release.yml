@@ -11,7 +11,13 @@ jobs:
     permissions:
       contents: write
     strategy:
+      # fail-fast: false → 一端失败不取消另一端（各自产物仍会上传，便于单端 rerun）。
       fail-fast: false
+      # max-parallel: 1 → 串行构建。两端并行时会各自「读取现有 release 的 latest.json →
+      # 合并本端平台 → 覆盖上传」，并发下互相覆盖会产出只含单端平台的半成品 latest.json
+      # （v0.2.2 首次发布即因此只含 windows，macOS 更新链断裂）。串行后第二端必然读到
+      # 第一端已写好的 latest.json 再合并，平台条目不会丢。代价：发版墙钟时间约翻倍，可接受。
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest # Apple Silicon + Intel（universal）
@@ -53,3 +59,39 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  # 发布后自检更新链：latest.json 必须含全部目标平台，且每个平台的更新产物可下载（HTTP 200）。
+  # 目的：把「半成品发布」（如 latest.json 缺 darwin）在 CI 层暴露成红叉，而不是等用户在
+  # 客户端点检查更新才发现更新不到。任一平台缺失或产物 404 → 本 job 失败，提示 rerun。
+  verify-updater:
+    needs: publish
+    if: always() # 即使某端构建失败也要跑：正是这种情况最需要暴露 latest.json 不完整
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 latest.json 平台完整且产物可下载
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${REPO}/releases/download/${TAG}/latest.json"
+          echo "拉取 $url"
+          json=$(curl -fsSL "$url")
+          echo "$json"
+          ver=$(echo "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
+          expected="${TAG#v}"
+          if [ "$ver" != "$expected" ]; then
+            echo "✗ latest.json version=$ver 与 tag=$expected 不一致"; exit 1
+          fi
+          for p in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            u=$(echo "$json" | python3 -c "import sys,json;d=json.load(sys.stdin)['platforms'];print(d['$p']['url'] if '$p' in d else '')")
+            if [ -z "$u" ]; then
+              echo "✗ latest.json 缺少平台 $p（更新链对该平台断裂，请 rerun 失败的构建）"; exit 1
+            fi
+            code=$(curl -sSL -o /dev/null -w '%{http_code}' "$u")
+            echo "  $p -> $u [$code]"
+            if [ "$code" != "200" ]; then
+              echo "✗ $p 更新产物不可下载（HTTP $code）"; exit 1
+            fi
+          done
+          echo "✓ latest.json 平台完整（darwin-aarch64/darwin-x86_64/windows-x86_64），更新产物均可下载"

@@ -13,7 +13,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
-use super::classify::{classify, decide};
+use super::classify::{classify, decide, ErrorType};
 use super::events::{
     BatchSummary, KeyHealth, KeyState, SharedSink, TaskProgress, TaskStatusChanged,
 };
@@ -390,7 +390,36 @@ impl Scheduler {
         let _ = tokio::fs::create_dir_all(&results).await;
         let full = results.join(format!("{}.jpg", task.id));
         let thumb = self.dirs.thumbs().join(format!("result_{}.jpg", task.id));
-        let _ = tokio::fs::write(&full, &img.jpeg).await;
+        // 写盘失败（磁盘满等）不能静默转 rev，否则用户在验收页看到空图；标失败让其可重试。
+        if let Err(e) = tokio::fs::write(&full, &img.jpeg).await {
+            tracing::error!(task_id = task.id, error = %e, "生成结果写盘失败，任务标记为失败");
+            let msg = format!("结果写盘失败：{e}");
+            if let Some(aid) = attempt_id {
+                let _ = task_repo::finish_attempt(
+                    &self.pool,
+                    aid,
+                    now_unix(),
+                    "error",
+                    Some(ErrorType::Other.as_str()),
+                    Some(&msg),
+                    None,
+                    duration_ms,
+                )
+                .await;
+            }
+            let _ =
+                task_repo::mark_fail(&self.pool, task.id, ErrorType::Other.as_str(), &msg).await;
+            // API 调用本身成功，不惩罚该 Key。
+            self.on_key_result(key_id, true);
+            self.emit_status(
+                task,
+                TaskStatus::Fail,
+                Some(key_id),
+                Some(ErrorType::Other),
+                Some(&msg),
+            );
+            return;
+        }
         let (full_c, thumb_c) = (full.clone(), thumb.clone());
         let thumb_ok = tokio::task::spawn_blocking(move || {
             crate::files::generate_thumbnail(&full_c, &thumb_c)
@@ -612,7 +641,8 @@ impl Scheduler {
         });
     }
 
-    async fn emit_summary(&self, batch_id: i64) {
+    /// 主动补发某批次汇总（供命令层在验收改动任务态后驱动徽章）。
+    pub async fn emit_summary(&self, batch_id: i64) {
         if let Ok(counts) = task_repo::counts_for_batch(&self.pool, batch_id).await {
             self.sink.batch_summary(BatchSummary {
                 batch_id,

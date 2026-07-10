@@ -190,6 +190,11 @@ impl Engine {
         self.scheduler.notify();
     }
 
+    /// 补发某批次汇总事件（验收等命令改动任务态后调用，驱动导航徽章）。
+    pub async fn emit_summary(&self, batch_id: i64) {
+        self.scheduler.emit_summary(batch_id).await;
+    }
+
     /// 重新加载 Key 运行时（增删改 Key 后调用）。
     pub async fn reload_keys(&self, pool: &SqlitePool, secrets: &dyn SecretStore) -> AppResult<()> {
         let rows = key_repo::list(pool).await?;

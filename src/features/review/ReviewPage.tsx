@@ -3,7 +3,7 @@ import { assetSrc } from "@/lib/img";
 import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Check, Maximize2, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function ReviewPage() {
@@ -12,6 +12,8 @@ export function ReviewPage() {
   const [cols, setCols] = useState(5);
   const [zoom, setZoom] = useState<number | null>(null); // index into items
   const [processed, setProcessed] = useState(0);
+  // 正在处理中的任务 id（防长按 ⏎ / 连点重复提交同一任务，后端另有幂等守卫兜底）。
+  const inFlight = useRef<Set<number>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -31,25 +33,33 @@ export function ReviewPage() {
   };
 
   const accept = useCallback(async (ids: number[]) => {
-    if (ids.length === 0) return;
+    const fresh = ids.filter((id) => !inFlight.current.has(id));
+    if (fresh.length === 0) return;
+    for (const id of fresh) inFlight.current.add(id);
     try {
-      const res = await unwrap(commands.acceptTasks(ids));
-      removeIds(ids);
+      const res = await unwrap(commands.acceptTasks(fresh));
+      removeIds(fresh);
       for (const g of res.promotedGroups) toast(`「${g}」已自动写入提示词库`);
       toast.success(`已通过 ${res.accepted} 张`);
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
+    } finally {
+      for (const id of fresh) inFlight.current.delete(id);
     }
   }, []);
 
   const reject = useCallback(async (ids: number[]) => {
-    if (ids.length === 0) return;
+    const fresh = ids.filter((id) => !inFlight.current.has(id));
+    if (fresh.length === 0) return;
+    for (const id of fresh) inFlight.current.add(id);
     try {
-      const n = await unwrap(commands.rejectTasks(ids));
-      removeIds(ids);
+      const n = await unwrap(commands.rejectTasks(fresh));
+      removeIds(fresh);
       toast(`${n} 张移入废纸篓`);
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
+    } finally {
+      for (const id of fresh) inFlight.current.delete(id);
     }
   }, []);
 

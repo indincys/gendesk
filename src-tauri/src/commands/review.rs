@@ -96,7 +96,7 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
-    WHERE t.id = ?";
+    WHERE t.id = ? AND t.status = 'rev'";
 
 /// 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)，单事务。
 #[tauri::command]
@@ -127,7 +127,8 @@ pub async fn accept_tasks(
         std::fs::create_dir_all(&out_dir)?;
         let filename = files::output_filename(&row.ref_name, &row.prompt_code, &date);
         let out_path = out_dir.join(&filename);
-        let _ = std::fs::copy(&src, &out_path);
+        // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
+        std::fs::copy(&src, &out_path)?;
 
         let thumb = row.result_thumb_path.clone().unwrap_or_else(|| src.clone());
 
@@ -168,8 +169,10 @@ pub async fn accept_tasks(
         }
     }
 
-    for b in batches {
-        let _ = task_repo::archive_if_all_terminal(&state.db, b).await;
+    for b in &batches {
+        let _ = task_repo::archive_if_all_terminal(&state.db, *b).await;
+        // 验收改变了任务态：补发批次汇总，驱动侧栏「待验收」徽章即时更新。
+        state.engine.emit_summary(*b).await;
     }
     promoted.dedup();
     Ok(AcceptResult {
@@ -221,8 +224,52 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
         }
     }
 
-    for b in batches {
-        let _ = task_repo::archive_if_all_terminal(&state.db, b).await;
+    for b in &batches {
+        let _ = task_repo::archive_if_all_terminal(&state.db, *b).await;
+        // 验收改变了任务态：补发批次汇总，驱动侧栏「待验收」徽章即时更新。
+        state.engine.emit_summary(*b).await;
     }
     Ok(rejected)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::*;
+    use crate::db::test_support::test_pool;
+    use sqlx::SqlitePool;
+
+    async fn seed_task(pool: &SqlitePool, status: &str) {
+        sqlx::query("INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (1,1,'GG-0001','t','active','library',0,0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/f','/t',1,1,1,0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO batches (id,created_at,output_dir,params_json,status) VALUES (1,0,'/out','{}','running')").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,result_image_path,result_thumb_path,created_at,updated_at) VALUES (1,1,1,1,'t',?1,'/img.jpg','/thumb.jpg',0,0)")
+            .bind(status).execute(pool).await.unwrap();
+    }
+
+    // 幂等守卫：验收命令只对 rev（待验收）任务生效。长按 ⏎ / 连点导致的重复提交，
+    // 第二次查询已是 pass/rej，ACCEPT_SELECT 返回 None → 不会重复输出/记账。
+    #[tokio::test]
+    async fn accept_select_only_matches_rev_tasks() {
+        let (pool, _d) = test_pool().await;
+        seed_task(&pool, "pass").await;
+        let row = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
+            .bind(1)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        assert!(row.is_none(), "已通过任务不应被验收命令再次选中");
+
+        sqlx::query("UPDATE tasks SET status='rev' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
+            .bind(1)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        assert!(row.is_some(), "rev 待验收任务应被选中");
+    }
 }

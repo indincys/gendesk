@@ -26,7 +26,7 @@ pnpm check              # 全门禁（提交前必跑，= CI 镜像）
     `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（本例为空字符串）。
   - **另做一份离线备份**：私钥丢失 = 更新链路永久断裂（已发布用户无法再收到更新）。
 - 更新 endpoint 指向公开发布仓库（`tauri.conf.json` 的 `plugins.updater.endpoints`，
-  当前为占位 `gendesk/gendesk-releases`，请改为真实仓库；该仓库必须公开以便匿名访问）。
+  当前为 `indincys/gendesk`，该仓库为公开仓库以便匿名访问）。
 
 ## 首次安装引导（未签名分发）
 

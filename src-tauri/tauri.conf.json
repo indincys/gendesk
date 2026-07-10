@@ -60,7 +60,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQjc0RDlERTFCRjM3MTcKUldRWE43L2huVTIzL3FNME0yZDFzYURSeVdEdnVKckkzNlVudGw4eksvNmlaSzhzb3NjK3BtWEUK",
       "endpoints": [
-        "https://github.com/gendesk/gendesk-releases/releases/latest/download/latest.json"
+        "https://github.com/indincys/gendesk/releases/latest/download/latest.json"
       ]
     }
   }

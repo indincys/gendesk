@@ -26,6 +26,7 @@ mod tests {
                 base_url: "https://api.example.com/v1".into(),
                 model: "gpt-image-2".into(),
                 concurrency_limit: 3,
+                rpm_limit: None,
             },
         )
         .await
@@ -35,12 +36,22 @@ mod tests {
         api_keys::set_enabled(&pool, id, false).await.unwrap();
         assert_eq!(api_keys::get(&pool, id).await.unwrap().unwrap().enabled, 0);
 
-        api_keys::update_fields(&pool, id, Some("改名"), None, None, Some(7))
+        // 改名 + 并发 + 设置 rpm_limit=30。
+        api_keys::update_fields(&pool, id, Some("改名"), None, None, Some(7), Some(Some(30)))
             .await
             .unwrap();
         let row = api_keys::get(&pool, id).await.unwrap().unwrap();
         assert_eq!(row.name, "改名");
         assert_eq!(row.concurrency_limit, 7);
+        assert_eq!(row.rpm_limit, Some(30));
+
+        // 熔断 → 恢复。
+        api_keys::trip_circuit(&pool, id).await.unwrap();
+        let row = api_keys::get(&pool, id).await.unwrap().unwrap();
+        assert_eq!((row.enabled, row.circuit_broken), (0, 1));
+        api_keys::recover_circuit(&pool, id).await.unwrap();
+        let row = api_keys::get(&pool, id).await.unwrap().unwrap();
+        assert_eq!((row.enabled, row.circuit_broken), (1, 0));
 
         // 无 attempts 时成功率样本为 0
         let (rate, n) = api_keys::success_rate(&pool, id, 50).await.unwrap();

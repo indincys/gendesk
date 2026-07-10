@@ -83,6 +83,7 @@ export function SettingsPage() {
           name: null,
           baseUrl: null,
           model: null,
+          rpmLimit: null,
         }),
       );
     } catch {
@@ -99,6 +100,13 @@ export function SettingsPage() {
     await unwrap(commands.deleteApiKey(k.id)).catch(() => {});
     void loadKeys();
     toast("已删除 API Key");
+  };
+
+  // E18：恢复被熔断的 Key。
+  const recoverKey = async (k: ApiKeyView) => {
+    await unwrap(commands.recoverApiKey(k.id)).catch((e) => toast.error(String(e)));
+    void loadKeys();
+    toast(`已恢复「${k.name || "未命名"}」`);
   };
 
   // E11：测试已保存 Key 的连接。
@@ -166,20 +174,38 @@ export function SettingsPage() {
                 <span className="mono fs11 t2">
                   {k.sampleCount > 0 ? `${Math.round(k.successRate * 100)}%` : "—"}
                 </span>
-                <span>
-                  <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
-                    {k.enabled ? "启用" : "停用"}
-                  </span>
+                <span className="fx ac gap6 ohide">
+                  {k.circuitBroken ? (
+                    <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
+                      已熔断
+                    </span>
+                  ) : (
+                    <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
+                      {k.enabled ? "启用" : "停用"}
+                    </span>
+                  )}
+                  {k.rpmLimit != null && <span className="fs10 t3 nowrap">{k.rpmLimit}/min</span>}
                 </span>
-                <button
-                  type="button"
-                  className="btn sm gho"
-                  disabled={testingId === k.id}
-                  onClick={() => testSaved(k)}
-                  title="测试连接"
-                >
-                  {testingId === k.id ? "测试中…" : "测试"}
-                </button>
+                {k.circuitBroken ? (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => recoverKey(k)}
+                    title="清除熔断并重新启用"
+                  >
+                    恢复
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    disabled={testingId === k.id}
+                    onClick={() => testSaved(k)}
+                    title="测试连接"
+                  >
+                    {testingId === k.id ? "测试中…" : "测试"}
+                  </button>
+                )}
                 <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
                 <button type="button" className="icb" onClick={() => setConfirmDel(k)} title="删除">
                   <Trash2 className="ic12" />
@@ -452,6 +478,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("gpt-image-2");
   const [concurrency, setConcurrency] = useState("2");
+  const [rpm, setRpm] = useState(""); // 空 = 不限速
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
 
@@ -485,6 +512,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
           baseUrl: baseUrl.trim(),
           model: model.trim() || "gpt-image-2",
           concurrencyLimit: Number(concurrency) || 2,
+          rpmLimit: rpm.trim() ? Number(rpm) : null,
         }),
       );
       toast("已添加 API Key");
@@ -549,6 +577,15 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
               className="inp mono"
               value={concurrency}
               onChange={(e) => setConcurrency(e.target.value)}
+            />
+          </div>
+          <div className="col gap4" style={{ width: 110 }}>
+            <span className="fs11 t3">RPM（可选）</span>
+            <input
+              className="inp mono"
+              placeholder="不限"
+              value={rpm}
+              onChange={(e) => setRpm(e.target.value)}
             />
           </div>
         </div>

@@ -38,6 +38,8 @@ pub struct KeyConfig {
     pub api_key: String,
     pub concurrency_limit: u32,
     pub enabled: bool,
+    /// 每分钟请求上限（E18）；None = 不限速。
+    pub rpm_limit: Option<u32>,
 }
 
 /// Provider 工厂（便于测试注入 FakeProvider）。
@@ -87,6 +89,10 @@ pub fn load_key_configs(rows: &[key_repo::ApiKeyRow], secrets: &dyn SecretStore)
                 api_key,
                 concurrency_limit: r.concurrency_limit.clamp(1, 10) as u32,
                 enabled: r.enabled != 0,
+                rpm_limit: r
+                    .rpm_limit
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0),
             })
         })
         .collect()
@@ -230,6 +236,8 @@ mod tests {
             concurrency_limit: concurrency,
             enabled,
             created_at: 0,
+            rpm_limit: None,
+            circuit_broken: 0,
         }
     }
 

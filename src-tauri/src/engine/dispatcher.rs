@@ -4,7 +4,7 @@
 //! 的 Semaphore 许可 → spawn worker。所有状态迁移由 worker 统一落库；task_attempts 全记录。
 //! 暂停 = 停派发；批次全终态自动归档。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -35,11 +35,36 @@ struct KeyRuntime {
     sem: Arc<Semaphore>,
     cooldown_until: Instant,
     consecutive_failures: u32,
+    /// 连续 Auth/欠费失败次数（E18 熔断计数，成功即清零）。
+    auth_failures: u32,
+    /// 近一分钟派发时刻（E18 RPM 滑动窗口）。
+    request_times: VecDeque<Instant>,
 }
+
+/// 连续 Auth/欠费失败达到此阈值即自动熔断该 Key（E18）。
+const CIRCUIT_BREAK_THRESHOLD: u32 = 3;
+/// RPM 滑动窗口长度。
+const RPM_WINDOW: Duration = Duration::from_secs(60);
 
 /// 防 Mutex 中毒导致 panic：取 into_inner。
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// RPM 滑动窗口检查（E18）：裁掉窗口外旧记录后，判断近一分钟派发数是否仍低于上限。
+/// 无 rpm_limit（None）恒放行。
+fn rpm_ok(k: &mut KeyRuntime, now: Instant) -> bool {
+    let Some(limit) = k.config.rpm_limit else {
+        return true;
+    };
+    while let Some(front) = k.request_times.front() {
+        if now.duration_since(*front) > RPM_WINDOW {
+            k.request_times.pop_front();
+        } else {
+            break;
+        }
+    }
+    (k.request_times.len() as u32) < limit
 }
 
 pub struct Scheduler {
@@ -119,6 +144,8 @@ impl Scheduler {
                 config: c,
                 cooldown_until: now,
                 consecutive_failures: 0,
+                auth_failures: 0,
+                request_times: VecDeque::new(),
             })
             .collect();
     }
@@ -208,13 +235,18 @@ impl Scheduler {
             return 0;
         }
 
-        // 1) 就绪 Key 快照（启用、未冷却），并克隆各自 Semaphore。
+        // 1) 就绪 Key 快照（启用、未冷却、未超 RPM），并克隆各自 Semaphore。
         let now = Instant::now();
         let eligible: Vec<(i64, Arc<Semaphore>)> = {
-            let keys = lock(&self.keys);
-            keys.iter()
-                .filter(|k| k.config.enabled && k.cooldown_until <= now)
-                .map(|k| (k.config.id, k.sem.clone()))
+            let mut keys = lock(&self.keys);
+            keys.iter_mut()
+                .filter_map(|k| {
+                    if k.config.enabled && k.cooldown_until <= now && rpm_ok(k, now) {
+                        Some((k.config.id, k.sem.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
         if eligible.is_empty() {
@@ -292,6 +324,8 @@ impl Scheduler {
             if from == TaskStatus::Retry {
                 lock(&self.ready_retry).remove(&task.id);
             }
+            // E18：记录本次派发时刻用于 RPM 滑动窗口。
+            self.record_request(key_id, Instant::now());
             self.emit_status(&task, TaskStatus::Run, Some(key_id), None, None);
             self.spawn_worker(task, key_id, permit);
             spawned += 1;
@@ -530,6 +564,10 @@ impl Scheduler {
                 used_concurrency: 0,
                 success_rate: 0.0,
             });
+            // E18：连续 Auth/欠费失败达阈值 → 自动熔断该 Key（停用 + 通知）。
+            if self.bump_auth_failure(key_id) {
+                self.trip_breaker(key_id).await;
+            }
         }
     }
 
@@ -564,7 +602,7 @@ impl Scheduler {
         crate::provider::GenParams::from_json(&json)
     }
 
-    /// 更新 Key 连续失败/冷却，并推送健康事件。
+    /// 更新 Key 连续失败/冷却，并推送健康事件。成功时同时清零熔断计数。
     fn on_key_result(&self, id: i64, success: bool) {
         let now = Instant::now();
         let mut state = KeyState::Ok;
@@ -573,6 +611,7 @@ impl Scheduler {
             if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
                 if success {
                     k.consecutive_failures = 0;
+                    k.auth_failures = 0;
                     k.cooldown_until = now;
                 } else {
                     k.consecutive_failures += 1;
@@ -590,6 +629,52 @@ impl Scheduler {
             used_concurrency: 0,
             success_rate: 0.0,
         });
+    }
+
+    /// 记录派发时刻（E18 RPM 滑动窗口）。
+    fn record_request(&self, id: i64, now: Instant) {
+        let mut keys = lock(&self.keys);
+        if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
+            k.request_times.push_back(now);
+            // 顺手裁掉窗口外的旧记录，避免无界增长。
+            while let Some(front) = k.request_times.front() {
+                if now.duration_since(*front) > RPM_WINDOW {
+                    k.request_times.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// 累加一次 Auth/欠费失败并返回是否达到熔断阈值（E18）。达阈值时同时把运行时
+    /// 该 Key 置为停用，避免后续轮次继续派发到它。
+    fn bump_auth_failure(&self, id: i64) -> bool {
+        let mut keys = lock(&self.keys);
+        if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
+            k.auth_failures += 1;
+            if k.auth_failures >= CIRCUIT_BREAK_THRESHOLD {
+                k.config.enabled = false; // 运行时立即停用
+                k.auth_failures = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 熔断 Key（E18）：落库停用 + 置熔断位，推健康事件与系统通知。
+    async fn trip_breaker(&self, id: i64) {
+        let _ = key_repo::trip_circuit(&self.pool, id).await;
+        self.sink.key_health(KeyHealth {
+            key_id: id,
+            state: KeyState::Disabled,
+            used_concurrency: 0,
+            success_rate: 0.0,
+        });
+        self.sink.notify(
+            "API Key 已熔断".into(),
+            format!("Key #{id} 连续鉴权/欠费失败已达 {CIRCUIT_BREAK_THRESHOLD} 次，已自动停用。请到设置检查并恢复。"),
+        );
     }
 
     fn spawn_progress_ticker(
@@ -816,6 +901,7 @@ mod tests {
                 api_key: "sk".into(),
                 concurrency_limit: *conc,
                 enabled: true,
+                rpm_limit: None,
             })
             .collect();
         sched.set_cooldown_base_ms(2); // 测试用极短冷却，避免真实时钟等待
@@ -973,6 +1059,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "archived");
+    }
+
+    // E18：连续 Auth 失败达阈值 → Key 自动熔断（DB enabled=0 + circuit_broken=1），
+    // 任务切到其它可用 Key 继续完成。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_circuit_breaks_and_tasks_fail_over() {
+        // key 1 恒 Auth 失败，key 2 恒成功。
+        let h = setup(
+            10,
+            &[(1, 1), (2, 1)],
+            Duration::from_millis(5),
+            Arc::new(|kid| {
+                if kid == 1 {
+                    Err(ProviderErrorKind::Auth)
+                } else {
+                    Ok(())
+                }
+            }),
+            Strategy::RoundRobin,
+            1,
+        )
+        .await;
+        h.sched.drive_to_idle().await;
+
+        let (enabled, broken): (i64, i64) =
+            sqlx::query_as("SELECT enabled, circuit_broken FROM api_keys WHERE id = 1")
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!((enabled, broken), (0, 1), "连续 Auth 失败后 key1 应被熔断");
+
+        // 熔断后剩余任务切到 key2 成功产出（至少有若干 rev）。
+        let revs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'rev'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert!(revs > 0, "任务应能切到其它 Key 完成，实际 rev={revs}");
+    }
+
+    // E18：RPM 滑动窗口——达到上限即拒派，窗口滑过后恢复。
+    #[test]
+    fn rpm_ok_enforces_limit_and_slides() {
+        let now = Instant::now();
+        let mut k = KeyRuntime {
+            config: KeyConfig {
+                id: 1,
+                base_url: "http://x/v1".into(),
+                model: "m".into(),
+                api_key: "sk".into(),
+                concurrency_limit: 1,
+                enabled: true,
+                rpm_limit: Some(2),
+            },
+            sem: Arc::new(Semaphore::new(1)),
+            cooldown_until: now,
+            consecutive_failures: 0,
+            auth_failures: 0,
+            request_times: VecDeque::new(),
+        };
+        assert!(rpm_ok(&mut k, now), "空窗口应放行");
+        k.request_times.push_back(now);
+        assert!(rpm_ok(&mut k, now), "1 < 2 放行");
+        k.request_times.push_back(now);
+        assert!(!rpm_ok(&mut k, now), "达上限 2 应拒派");
+        // 窗口滑过：旧记录被裁掉，恢复放行。
+        let later = now + RPM_WINDOW + Duration::from_secs(1);
+        assert!(rpm_ok(&mut k, later), "窗口外旧记录裁掉后应恢复放行");
+        assert!(k.request_times.is_empty(), "过期记录应已裁剪");
     }
 
     // 1→500 压测（执行计划 2.8）：500 任务 × 6 Key，注入 ~5% 超时/3% 违规/2% Auth。

@@ -131,6 +131,17 @@ async setApiKeyEnabled(id: number, enabled: boolean) : Promise<Result<null, AppE
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 恢复被熔断的 Key（E18）：清熔断位 + 重新启用 + 重载调度器。
+ */
+async recoverApiKey(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recover_api_key", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteApiKey(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_api_key", { id }) };
@@ -650,7 +661,11 @@ export type AcceptResult = { accepted: number;
  * 本次因验收通过而转正的临时分组名（前端 toast）
  */
 promotedGroups: string[] }
-export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number }
+export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number; 
+/**
+ * 每分钟请求上限（E18）；None/<=0 = 不限速。
+ */
+rpmLimit: number | null }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
  */
@@ -659,6 +674,14 @@ export type ApiKeyView = { id: number; name: string;
  * 脱敏 Key：`****后4位`
  */
 maskedKey: string; baseUrl: string; model: string; concurrencyLimit: number; enabled: boolean; 
+/**
+ * 每分钟请求上限（E18）；None = 不限速。
+ */
+rpmLimit: number | null; 
+/**
+ * 是否已被自动熔断（E18）：连续 Auth/欠费失败导致停用，可在设置页恢复。
+ */
+circuitBroken: boolean; 
 /**
  * 近 50 次成功率（0.0–1.0）
  */
@@ -896,7 +919,11 @@ export type TrashItemView = { id: number; entityType: string; code: string | nul
  * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
  */
 imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
-export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
+export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null; 
+/**
+ * None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。
+ */
+rpmLimit: number | null }
 /**
  * `update://state`
  */

@@ -372,7 +372,10 @@ mod tests {
     async fn params_omitted_when_unset() {
         let server = ok_server().await;
         let (_d, rp) = ref_file().await;
-        provider(&server.uri()).generate(req(rp), None).await.unwrap();
+        provider(&server.uri())
+            .generate(req(rp), None)
+            .await
+            .unwrap();
         let reqs = server.received_requests().await.unwrap();
         let body = String::from_utf8_lossy(&reqs[0].body);
         assert!(!body.contains("name=\"size\""), "未设置时请求体不应带 size");

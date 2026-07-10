@@ -44,6 +44,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::api_keys::add_api_key,
             commands::api_keys::update_api_key,
             commands::api_keys::set_api_key_enabled,
+            commands::api_keys::recover_api_key,
             commands::api_keys::delete_api_key,
             commands::api_keys::test_api_key,
             commands::api_keys::test_api_key_saved,
@@ -141,6 +142,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

@@ -17,6 +17,10 @@ pub struct ApiKeyRow {
     pub concurrency_limit: i64,
     pub enabled: i64,
     pub created_at: i64,
+    /// 每分钟请求上限（E18）；NULL = 不限速。
+    pub rpm_limit: Option<i64>,
+    /// 是否因连续鉴权/欠费失败被自动熔断（E18）。1 = 已熔断（同时 enabled=0）。
+    pub circuit_broken: i64,
 }
 
 pub struct NewApiKey {
@@ -25,6 +29,7 @@ pub struct NewApiKey {
     pub base_url: String,
     pub model: String,
     pub concurrency_limit: i64,
+    pub rpm_limit: Option<i64>,
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKeyRow>, sqlx::Error> {
@@ -42,14 +47,15 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<ApiKeyRow>, sqlx::
 
 pub async fn insert(pool: &SqlitePool, k: &NewApiKey) -> Result<i64, sqlx::Error> {
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO api_keys (name, keyring_account, base_url, model, concurrency_limit, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6) RETURNING id",
+        "INSERT INTO api_keys (name, keyring_account, base_url, model, concurrency_limit, rpm_limit, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7) RETURNING id",
     )
     .bind(&k.name)
     .bind(&k.keyring_account)
     .bind(&k.base_url)
     .bind(&k.model)
     .bind(k.concurrency_limit)
+    .bind(k.rpm_limit)
     .bind(now_unix())
     .fetch_one(pool)
     .await?;
@@ -63,14 +69,17 @@ pub async fn update_fields(
     base_url: Option<&str>,
     model: Option<&str>,
     concurrency_limit: Option<i64>,
+    rpm_limit: Option<Option<i64>>,
 ) -> Result<(), sqlx::Error> {
-    // 逐字段 COALESCE 更新，未提供的保持原值。
+    // 逐字段 COALESCE 更新，未提供的保持原值。rpm_limit 用 Option<Option>：
+    // 外层 None = 不改；Some(inner) = 改为 inner（inner None 即清除限速）。
     sqlx::query(
         "UPDATE api_keys SET
             name = COALESCE(?2, name),
             base_url = COALESCE(?3, base_url),
             model = COALESCE(?4, model),
-            concurrency_limit = COALESCE(?5, concurrency_limit)
+            concurrency_limit = COALESCE(?5, concurrency_limit),
+            rpm_limit = CASE WHEN ?6 = 1 THEN ?7 ELSE rpm_limit END
          WHERE id = ?1",
     )
     .bind(id)
@@ -78,6 +87,8 @@ pub async fn update_fields(
     .bind(base_url)
     .bind(model)
     .bind(concurrency_limit)
+    .bind(rpm_limit.is_some() as i64)
+    .bind(rpm_limit.flatten())
     .execute(pool)
     .await?;
     Ok(())
@@ -87,6 +98,24 @@ pub async fn set_enabled(pool: &SqlitePool, id: i64, enabled: bool) -> Result<()
     sqlx::query("UPDATE api_keys SET enabled = ?2 WHERE id = ?1")
         .bind(id)
         .bind(enabled as i64)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 熔断某 Key（E18）：停用 + 置熔断位，供调度器连续 Auth/欠费失败达阈值时调用。
+pub async fn trip_circuit(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE api_keys SET enabled = 0, circuit_broken = 1 WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 恢复被熔断的 Key（E18）：清熔断位 + 重新启用。
+pub async fn recover_circuit(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE api_keys SET enabled = 1, circuit_broken = 0 WHERE id = ?1")
+        .bind(id)
         .execute(pool)
         .await?;
     Ok(())

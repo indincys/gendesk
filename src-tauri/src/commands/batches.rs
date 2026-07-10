@@ -56,9 +56,14 @@ pub async fn create_batch(
         .collect();
 
     let output_dir = state.dirs.outputs().to_string_lossy().to_string();
-    let (batch_id, count) =
-        engine::create_batch(&state.db, &output_dir, &input.params_json, &mappings, input.draws)
-            .await?;
+    let (batch_id, count) = engine::create_batch(
+        &state.db,
+        &output_dir,
+        &input.params_json,
+        &mappings,
+        input.draws,
+    )
+    .await?;
 
     // 唤醒调度器开跑。
     state.engine.kick();

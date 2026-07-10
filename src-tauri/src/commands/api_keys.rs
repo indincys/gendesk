@@ -25,6 +25,10 @@ pub struct ApiKeyView {
     pub model: String,
     pub concurrency_limit: i64,
     pub enabled: bool,
+    /// 每分钟请求上限（E18）；None = 不限速。
+    pub rpm_limit: Option<i64>,
+    /// 是否已被自动熔断（E18）：连续 Auth/欠费失败导致停用，可在设置页恢复。
+    pub circuit_broken: bool,
     /// 近 50 次成功率（0.0–1.0）
     pub success_rate: f64,
     /// 成功率样本量
@@ -41,6 +45,8 @@ pub struct AddApiKeyInput {
     pub base_url: String,
     pub model: String,
     pub concurrency_limit: i64,
+    /// 每分钟请求上限（E18）；None/<=0 = 不限速。
+    pub rpm_limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -50,6 +56,8 @@ pub struct UpdateApiKeyPatch {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub concurrency_limit: Option<i64>,
+    /// None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。
+    pub rpm_limit: Option<i64>,
 }
 
 /// base_url 尾部 `/` 归一化（R6：约定已含 /v1）。
@@ -72,6 +80,8 @@ async fn to_view(state: &AppState, row: repo::ApiKeyRow) -> AppResult<ApiKeyView
         model: row.model,
         concurrency_limit: row.concurrency_limit,
         enabled: row.enabled != 0,
+        rpm_limit: row.rpm_limit,
+        circuit_broken: row.circuit_broken != 0,
         success_rate: rate,
         sample_count: count,
         used_concurrency: 0,
@@ -110,6 +120,7 @@ pub async fn add_api_key(
         base_url: normalize_base_url(&input.base_url),
         model: input.model.trim().to_string(),
         concurrency_limit: concurrency,
+        rpm_limit: input.rpm_limit.filter(|n| *n > 0),
     };
     let id = match repo::insert(&state.db, &new).await {
         Ok(id) => id,
@@ -140,6 +151,8 @@ pub async fn update_api_key(
 ) -> AppResult<ApiKeyView> {
     let base = patch.base_url.map(|u| normalize_base_url(&u));
     let concurrency = patch.concurrency_limit.map(|c| c.clamp(1, 10));
+    // rpm_limit：None 不改；Some(n>0) 设值；Some(n<=0) 清除。→ repo 的 Option<Option>。
+    let rpm: Option<Option<i64>> = patch.rpm_limit.map(|n| (n > 0).then_some(n));
     repo::update_fields(
         &state.db,
         id,
@@ -147,6 +160,7 @@ pub async fn update_api_key(
         base.as_deref(),
         patch.model.as_deref(),
         concurrency,
+        rpm,
     )
     .await?;
     let row = repo::get(&state.db, id)
@@ -158,6 +172,18 @@ pub async fn update_api_key(
         .reload_keys(&state.db, state.secrets.as_ref())
         .await;
     Ok(view)
+}
+
+/// 恢复被熔断的 Key（E18）：清熔断位 + 重新启用 + 重载调度器。
+#[tauri::command]
+#[specta::specta]
+pub async fn recover_api_key(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    repo::recover_circuit(&state.db, id).await?;
+    let _ = state
+        .engine
+        .reload_keys(&state.db, state.secrets.as_ref())
+        .await;
+    Ok(())
 }
 
 #[tauri::command]

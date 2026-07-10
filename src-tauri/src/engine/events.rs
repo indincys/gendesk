@@ -90,6 +90,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn progress(&self, e: TaskProgress);
     fn batch_summary(&self, e: BatchSummary);
     fn key_health(&self, e: KeyHealth);
+    /// 系统通知（E18 熔断 / E04 批次完成等无人值守事件）。默认无操作。
+    fn notify(&self, _title: String, _body: String) {}
 }
 
 /// 生产实现：经 tauri-specta 事件推送前端。
@@ -115,6 +117,16 @@ impl EventSink for TauriSink {
     }
     fn key_health(&self, e: KeyHealth) {
         let _ = e.emit(&self.app);
+    }
+    fn notify(&self, title: String, body: String) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
     }
 }
 

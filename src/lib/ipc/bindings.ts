@@ -373,6 +373,18 @@ async listBatches() : Promise<Result<BatchView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 读取某批次的挂靠与参数快照（E07 再来一批）。只返回未删除的参考图与仍存在的分组，
+ * 保证还原到生成页后可直接创建新批次。
+ */
+async getBatchConfig(batchId: number) : Promise<Result<BatchConfig, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_batch_config", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async pauseQueue() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pause_queue") };
@@ -420,7 +432,8 @@ async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, 
 }
 },
 /**
- * 重试某批次全部失败任务。
+ * 重试某批次全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
+ * 应走「改词重试」E34 单独处理）。
  */
 async retryFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
     try {
@@ -727,6 +740,14 @@ export type BackupProgress = { done: number; total: number;
  */
 phase: string }
 /**
+ * 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
+ */
+export type BatchConfig = { 
+/**
+ * 参考图 → 提示词组挂靠（仅保留当前仍存在的参考图与分组）。
+ */
+refs: RefMappingInput2[]; paramsJson: string }
+/**
  * `batch://summary`（250ms 节流）
  */
 export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean; 
@@ -815,8 +836,16 @@ export type PromptView = { id: number; groupId: number; code: string; title: str
  * 参考图详情（含使用统计）。
  */
 export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
-export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number }
+export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; 
+/**
+ * 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
+ */
+lastGroupId: number | null }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
+/**
+ * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
+ */
+export type RefMappingInput2 = { refImageId: number; promptGroupId: number }
 /**
  * 待验收项视图。
  */

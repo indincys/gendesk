@@ -11,6 +11,7 @@ import {
 } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
+import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
 import { ChevronDown, ChevronRight, FileUp, Play, Plus, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -22,14 +23,21 @@ export function GeneratePage() {
 
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [refs, setRefs] = useState<RefImageView[]>([]);
-  const [selGroupIds, setSelGroupIds] = useState<number[]>([]);
-  const [selRefIds, setSelRefIds] = useState<number[]>([]);
-  const [mapping, setMapping] = useState<Record<number, number>>({});
+  // E07：选择态持久化（切页/重启沿用）。
+  const selGroupIds = useGenerateStore((s) => s.selGroupIds);
+  const setSelGroupIds = useGenerateStore((s) => s.setSelGroupIds);
+  const selRefIds = useGenerateStore((s) => s.selRefIds);
+  const setSelRefIds = useGenerateStore((s) => s.setSelRefIds);
+  const mapping = useGenerateStore((s) => s.mapping);
+  const setMapping = useGenerateStore((s) => s.setMapping);
   // E16 / D1：生成参数，null = 未设置（不传该参数，跟随提示词）。
-  const [size, setSize] = useState<string | null>(null);
-  const [quality, setQuality] = useState<string | null>(null);
+  const size = useGenerateStore((s) => s.size);
+  const setSize = useGenerateStore((s) => s.setSize);
+  const quality = useGenerateStore((s) => s.quality);
+  const setQuality = useGenerateStore((s) => s.setQuality);
   // E17 / D2：抽卡次数 k（每组合独立生成 k 次），默认 1，上限 5。
-  const [draws, setDraws] = useState(1);
+  const draws = useGenerateStore((s) => s.draws);
+  const setDraws = useGenerateStore((s) => s.setDraws);
   // E31：启用 Key 快照（确认摘要展示 + ETA 估算并发）。
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   // E31：开始生成确认卡（null = 未打开）。
@@ -72,6 +80,24 @@ export function GeneratePage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // E32 挂靠记忆：选中的参考图若尚未挂靠、且其上次挂靠组在本次已选分组中，自动预填（可手动改）。
+  useEffect(() => {
+    if (refs.length === 0) return;
+    setMapping((m) => {
+      let changed = false;
+      const next = { ...m };
+      for (const rid of selRefIds) {
+        if (next[rid] != null) continue;
+        const last = refs.find((r) => r.id === rid)?.lastGroupId;
+        if (last != null && selGroupIds.includes(last)) {
+          next[rid] = last;
+          changed = true;
+        }
+      }
+      return changed ? next : m;
+    });
+  }, [selRefIds, selGroupIds, refs, setMapping]);
 
   const selGroups = groups.filter((g) => selGroupIds.includes(g.id));
   const selRefs = refs.filter((r) => selRefIds.includes(r.id));

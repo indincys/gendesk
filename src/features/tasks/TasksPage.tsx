@@ -5,8 +5,9 @@ import { type BatchView, type TaskView, commands, unwrap } from "@/lib/ipc";
 import { errorLabel, statusVisual } from "@/lib/status";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
+import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -28,6 +29,7 @@ export function TasksPage() {
   const autoPauseReason = useEngineStore((s) => s.autoPauseReason);
   const setPaused = useEngineStore((s) => s.setPaused);
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
+  const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
 
   const [batches, setBatches] = useState<BatchView[]>([]);
   const [filter, setFilter] = useState("all");
@@ -90,6 +92,25 @@ export function TasksPage() {
   const switchBatch = async (id: number) => {
     setShowBatchPicker(false);
     await loadBatchTasks(id, null);
+  };
+
+  // E07：按此批次配置再来一批——还原挂靠与参数到生成页。
+  const reuseBatch = async (id: number) => {
+    try {
+      const cfg = await unwrap(commands.getBatchConfig(id));
+      let params: { size?: string | null; quality?: string | null } = {};
+      try {
+        params = JSON.parse(cfg.paramsJson);
+      } catch {
+        // 参数快照损坏则仅还原挂靠
+      }
+      restoreFromBatch(cfg.refs, params);
+      setShowBatchPicker(false);
+      if (cfg.refs.length === 0) toast("该批次的参考图或分组已删除，仅还原了参数");
+      go("generate");
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
   };
 
   const togglePause = async () => {
@@ -363,6 +384,18 @@ export function TasksPage() {
                     任务
                   </span>
                   <span className="fs11 t3 nowrap">{paramsLabel(b.paramsJson)}</span>
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    title="按此批次的参考图挂靠与参数还原到生成页"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void reuseBatch(b.id);
+                    }}
+                  >
+                    <Repeat className="ic12" />
+                    再来一批
+                  </button>
                 </div>
               ))}
               {batches.length === 0 && (

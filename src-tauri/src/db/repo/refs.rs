@@ -19,6 +19,8 @@ pub struct RefImageRow {
     pub file_size: i64,
     pub created_at: i64,
     pub deleted_at: Option<i64>,
+    /// 最近一次挂靠的提示词组（E32 挂靠记忆）。
+    pub last_group_id: Option<i64>,
 }
 
 pub struct NewRefImage {
@@ -110,6 +112,20 @@ pub async fn update_file(
     .bind(file_size)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// 记录参考图最近一次挂靠的提示词组（E32）。批次创建时按挂靠更新。
+pub async fn set_last_group(
+    pool: &SqlitePool,
+    ref_id: i64,
+    group_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE ref_images SET last_group_id = ?2 WHERE id = ?1")
+        .bind(ref_id)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

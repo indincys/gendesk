@@ -134,6 +134,12 @@ pub async fn create_batch(
     let batch_id = task_repo::create_batch(&mut tx, output_dir, params_json).await?;
     for m in mappings {
         task_repo::add_batch_ref(&mut tx, batch_id, m.ref_image_id, m.prompt_group_id).await?;
+        // E32 挂靠记忆：记录该参考图本次挂靠的组，下批预填。
+        sqlx::query("UPDATE ref_images SET last_group_id = ?2 WHERE id = ?1")
+            .bind(m.ref_image_id)
+            .bind(m.prompt_group_id)
+            .execute(&mut *tx)
+            .await?;
     }
     // 每个组合展开 draws 个任务，draw_index ∈ 1..=draws（供输出命名去重）。
     for (ref_id, prompt_id, snapshot) in &combos {
@@ -313,6 +319,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 3);
+
+        // E32 挂靠记忆：创建批次后参考图应记录本次挂靠的组。
+        let last: Option<i64> =
+            sqlx::query_scalar("SELECT last_group_id FROM ref_images WHERE id = ?1")
+                .bind(rid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(last, Some(gid), "参考图应记住本次挂靠组");
 
         // E17 D2：抽卡次数展开。1 参考图 × 3 提示词 × 抽 2 = 6 任务，draw_index ∈ {1,2}。
         let (batch2, count2) = create_batch(

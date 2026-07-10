@@ -21,6 +21,8 @@ pub struct RefImageView {
     pub thumb_path: String,
     pub width: i64,
     pub height: i64,
+    /// 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
+    pub last_group_id: Option<i64>,
 }
 
 /// 在目录内生成不冲突的路径。
@@ -103,6 +105,7 @@ pub async fn import_ref_images(
             thumb_path: new.thumb_path,
             width: new.width,
             height: new.height,
+            last_group_id: None,
         });
     }
 
@@ -124,6 +127,7 @@ pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefIma
             thumb_path: r.thumb_path,
             width: r.width,
             height: r.height,
+            last_group_id: r.last_group_id,
         })
         .collect())
 }

@@ -77,6 +77,57 @@ pub async fn create_batch(
     })
 }
 
+/// 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchConfig {
+    /// 参考图 → 提示词组挂靠（仅保留当前仍存在的参考图与分组）。
+    pub refs: Vec<RefMappingInput2>,
+    pub params_json: String,
+}
+
+/// 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RefMappingInput2 {
+    pub ref_image_id: i64,
+    pub prompt_group_id: i64,
+}
+
+/// 读取某批次的挂靠与参数快照（E07 再来一批）。只返回未删除的参考图与仍存在的分组，
+/// 保证还原到生成页后可直接创建新批次。
+#[tauri::command]
+#[specta::specta]
+pub async fn get_batch_config(
+    state: State<'_, AppState>,
+    batch_id: i64,
+) -> AppResult<BatchConfig> {
+    let params_json: Option<String> =
+        sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
+            .bind(batch_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(params_json) = params_json else {
+        return Err(AppError::InvalidInput("批次不存在".into()));
+    };
+    let refs: Vec<RefMappingInput2> = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT br.ref_image_id, br.prompt_group_id FROM batch_refs br
+         JOIN ref_images ri ON ri.id = br.ref_image_id AND ri.deleted_at IS NULL
+         JOIN prompt_groups pg ON pg.id = br.prompt_group_id
+         WHERE br.batch_id = ?1",
+    )
+    .bind(batch_id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|(ref_image_id, prompt_group_id)| RefMappingInput2 {
+        ref_image_id,
+        prompt_group_id,
+    })
+    .collect();
+    Ok(BatchConfig { refs, params_json })
+}
+
 /// 历史单张生成均值秒数（E31 确认摘要 ETA 估算）；无成功历史返回 None。
 #[tauri::command]
 #[specta::specta]

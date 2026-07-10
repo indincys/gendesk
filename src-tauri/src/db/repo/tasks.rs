@@ -15,6 +15,8 @@ pub struct BatchRow {
     pub output_dir: String,
     pub params_json: String,
     pub status: String,
+    /// 批次备注名（E10）；None = 未命名。
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -82,6 +84,36 @@ pub async fn get_batch(pool: &SqlitePool, id: i64) -> Result<Option<BatchRow>, s
         .bind(id)
         .fetch_optional(pool)
         .await
+}
+
+/// 批次备注名（E10）：空串归一为 NULL（清除备注）。
+pub async fn rename_batch(pool: &SqlitePool, id: i64, note: &str) -> Result<(), sqlx::Error> {
+    let trimmed = note.trim();
+    let value: Option<&str> = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    sqlx::query("UPDATE batches SET note = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 批次首张有缩略图的任务缩略图路径（E10 批次切换器预览）。
+pub async fn batch_first_thumb(
+    pool: &SqlitePool,
+    batch_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT result_thumb_path FROM tasks
+         WHERE batch_id = ?1 AND result_thumb_path IS NOT NULL ORDER BY id ASC LIMIT 1",
+    )
+    .bind(batch_id)
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn set_batch_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {

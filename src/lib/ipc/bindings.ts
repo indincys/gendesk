@@ -385,6 +385,17 @@ async getBatchConfig(batchId: number) : Promise<Result<BatchConfig, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 批次备注命名（E10）。空串清除备注。
+ */
+async renameBatch(batchId: number, note: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_batch", { batchId, note }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async pauseQueue() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pause_queue") };
@@ -759,7 +770,15 @@ export type BatchView = { id: number; createdAt: number; status: string; taskCou
 /**
  * 批次生效的生成参数快照（E16 / D1），任务页可回查。
  */
-paramsJson: string }
+paramsJson: string; 
+/**
+ * 批次备注名（E10）；None = 未命名。
+ */
+note: string | null; 
+/**
+ * 首张产出缩略图（E10 批次切换器预览）。
+ */
+firstThumbPath: string | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
  * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。

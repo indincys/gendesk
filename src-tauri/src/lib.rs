@@ -72,6 +72,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::cancel_batch_pending,
             commands::batches::list_batches,
             commands::batches::get_batch_config,
+            commands::batches::rename_batch,
             commands::batches::pause_queue,
             commands::batches::resume_queue,
             commands::tasks::list_tasks,

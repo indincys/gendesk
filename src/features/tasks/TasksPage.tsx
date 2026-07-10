@@ -46,6 +46,11 @@ export function TasksPage() {
   const [rewordText, setRewordText] = useState("");
   // E35：展开查看原始报错的失败行。
   const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
+  // E10：任务搜索（参考图名 / 提示词编号）。
+  const [search, setSearch] = useState("");
+  // E10：批次备注行内编辑。
+  const [editNoteId, setEditNoteId] = useState<number | null>(null);
+  const [noteText, setNoteText] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -81,8 +86,13 @@ export function TasksPage() {
 
   const visible = useMemo(() => {
     const match = FILTERS.find((x) => x.key === filter)?.match ?? (() => true);
-    return tasks.filter((t) => match(t.status));
-  }, [tasks, filter]);
+    const q = search.trim().toLowerCase();
+    return tasks.filter(
+      (t) =>
+        match(t.status) &&
+        (q === "" || t.refName.toLowerCase().includes(q) || t.promptCode.toLowerCase().includes(q)),
+    );
+  }, [tasks, filter, search]);
 
   // E06：失败任务按错误类型分组计数。
   const failByType = useMemo(() => {
@@ -192,6 +202,17 @@ export function TasksPage() {
       setRewordTarget(null);
       toast(edited ? "已按改后的提示词重新生成" : "已重新生成");
       if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
+
+  // E10：批次备注提交。
+  const saveNote = async (id: number) => {
+    setEditNoteId(null);
+    try {
+      await unwrap(commands.renameBatch(id, noteText));
+      setBatches(await unwrap(commands.listBatches()));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -341,7 +362,14 @@ export function TasksPage() {
           ))}
         </div>
         <div className="f1" />
-        <span className="fs11 t3 nowrap">事件推送 250ms 节流 · 列表虚拟滚动</span>
+        <input
+          type="search"
+          className="inp"
+          placeholder="搜参考图名 / 提示词编号"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 200 }}
+        />
       </div>
 
       <div style={{ overflow: "auto", minHeight: 0 }}>
@@ -530,11 +558,47 @@ export function TasksPage() {
               {batches.map((b) => (
                 <div key={b.id} className="pickrow" onClick={() => switchBatch(b.id)}>
                   <span className={cn("ckb", b.id === currentBatchId && "on")} />
-                  <span className="fs12 f1">
-                    批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
-                    任务
-                  </span>
-                  <span className="fs11 t3 nowrap">{paramsLabel(b.paramsJson)}</span>
+                  <span className="ph thumb" style={thumbStyle(b.firstThumbPath)} />
+                  <div className="col f1" style={{ minWidth: 0, gap: 2 }}>
+                    {editNoteId === b.id ? (
+                      <input
+                        type="text"
+                        className="inp"
+                        value={noteText}
+                        placeholder={`批次 #${b.id} 备注名`}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setNoteText(e.target.value)}
+                        onBlur={() => void saveNote(b.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void saveNote(b.id);
+                          if (e.key === "Escape") setEditNoteId(null);
+                        }}
+                        // biome-ignore lint/a11y/noAutofocus: 行内编辑即时聚焦符合预期
+                        autoFocus
+                      />
+                    ) : (
+                      <span className="fs12 nowrap ohide fw5">
+                        {b.note || `批次 #${b.id}`}
+                        <button
+                          type="button"
+                          className="fs10 t3"
+                          style={{ marginLeft: 6 }}
+                          title="重命名批次"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setNoteText(b.note ?? "");
+                            setEditNoteId(b.id);
+                          }}
+                        >
+                          ✎
+                        </button>
+                      </span>
+                    )}
+                    <span className="fs10 t3 nowrap">
+                      {fmtBatchTime(b.createdAt)} · {b.status === "archived" ? "已归档" : "进行中"}{" "}
+                      · {b.taskCount} 任务 · {paramsLabel(b.paramsJson)}
+                    </span>
+                  </div>
                   <button
                     type="button"
                     className="btn sm gho"
@@ -564,6 +628,13 @@ export function TasksPage() {
 
 function visibleCount(tasks: TaskView[], f: { match: (s: string) => boolean }): number {
   return tasks.filter((t) => f.match(t.status)).length;
+}
+
+/** E10 批次时间：unix 秒 → 本地 MM-DD HH:mm。 */
+function fmtBatchTime(unix: number): string {
+  const d = new Date(unix * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 /** E04 剩余耗时：历史单张均值 × 剩余数 ÷ 有效并发；无历史或无并发则不估算。 */

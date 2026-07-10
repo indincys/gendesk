@@ -34,6 +34,10 @@ pub struct BatchView {
     pub task_count: i64,
     /// 批次生效的生成参数快照（E16 / D1），任务页可回查。
     pub params_json: String,
+    /// 批次备注名（E10）；None = 未命名。
+    pub note: Option<String>,
+    /// 首张产出缩略图（E10 批次切换器预览）。
+    pub first_thumb_path: Option<String>,
 }
 
 /// 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
@@ -74,7 +78,21 @@ pub async fn create_batch(
         status: "running".into(),
         task_count: count,
         params_json: input.params_json.clone(),
+        note: None,
+        first_thumb_path: None,
     })
+}
+
+/// 批次备注命名（E10）。空串清除备注。
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_batch(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    note: String,
+) -> AppResult<()> {
+    repo::rename_batch(&state.db, batch_id, &note).await?;
+    Ok(())
 }
 
 /// 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
@@ -148,12 +166,15 @@ pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView
     let mut out = Vec::with_capacity(rows.len());
     for b in rows {
         let counts = repo::counts_for_batch(&state.db, b.id).await?;
+        let first_thumb_path = repo::batch_first_thumb(&state.db, b.id).await?;
         out.push(BatchView {
             id: b.id,
             created_at: b.created_at,
             status: b.status,
             task_count: counts.total,
             params_json: b.params_json,
+            note: b.note,
+            first_thumb_path,
         });
     }
     Ok(out)

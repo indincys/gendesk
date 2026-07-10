@@ -537,6 +537,38 @@ async installUpdate() : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async dataDirInfo() : Promise<Result<DataDirInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_dir_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器中打开数据目录。
+ */
+async openDataDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_data_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出备份：选目标 zip → WAL 检查点 → 打包数据目录（排除 logs）。
+ * 队列运行中（有 run/retry 任务）拒绝，避免边写边打包出不一致备份。
+ * 返回所选路径；用户取消返回 None。
+ */
+async exportBackup() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_backup") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -544,12 +576,14 @@ async installUpdate() : Promise<Result<null, AppError>> {
 
 
 export const events = __makeEvents__<{
+backupProgress: BackupProgress,
 batchSummary: BatchSummary,
 keyHealth: KeyHealth,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged
 }>({
+backupProgress: "backup-progress",
 batchSummary: "batch-summary",
 keyHealth: "key-health",
 taskProgress: "task-progress",
@@ -617,11 +651,23 @@ export type AppError =
  */
 { type: "Internal"; message: string }
 /**
+ * `backup://progress`：导出进度（前端进度条）。
+ */
+export type BackupProgress = { done: number; total: number; 
+/**
+ * running / done / error
+ */
+phase: string }
+/**
  * `batch://summary`（250ms 节流）
  */
 export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean }
 export type BatchView = { id: number; createdAt: number; status: string; taskCount: number }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
+/**
+ * 数据目录信息（E19：暴露落盘位置）。
+ */
+export type DataDirInfo = { root: string; dbPath: string }
 /**
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */

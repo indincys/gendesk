@@ -55,6 +55,10 @@ image = "0.25"
 encoding_rs = "0.8"
 chardetng = "0.1"
 
+# 数据备份打包（E19，DB + 资产目录 → zip）
+zip = { version = "2", default-features = false, features = ["deflate", "time"] }
+walkdir = "2"
+
 # IPC 契约自动生成（specta + tauri-specta，禁手改 bindings.ts）
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 specta-typescript = "0.0.9"

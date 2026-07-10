@@ -1,11 +1,18 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { type ApiKeyView, commands, unwrap } from "@/lib/ipc";
+import {
+  type ApiKeyView,
+  type DataDirInfo,
+  commands,
+  subscribeBackupProgress,
+  unwrap,
+} from "@/lib/ipc";
 import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
+import { useEngineStore } from "@/stores/engine";
 import { useSettingsStore } from "@/stores/settings";
-import { Plus, Trash2 } from "lucide-react";
+import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,6 +25,11 @@ export function SettingsPage() {
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
+  // E19：数据目录信息 + 备份导出进度。
+  const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
+  const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
+  // 队列是否有在途任务（run/retry）——运行中禁止备份（避免边写边打包）。
+  const queueRunning = useEngineStore((s) => Object.values(s.summaries).some((b) => b.running > 0));
 
   const loadKeys = useCallback(async () => {
     try {
@@ -30,7 +42,37 @@ export function SettingsPage() {
   useEffect(() => {
     void loadSettings();
     void loadKeys();
+    void (async () => {
+      setDataDir(await unwrap(commands.dataDirInfo()).catch(() => null));
+    })();
   }, [loadSettings, loadKeys]);
+
+  const openDataDir = async () => {
+    await unwrap(commands.openDataDir()).catch((e) => toast.error(String(e)));
+  };
+
+  const exportBackup = async () => {
+    if (backup) return; // 进行中
+    if (queueRunning) {
+      toast.error("队列运行中，请先暂停队列再导出备份");
+      return;
+    }
+    setBackup({ done: 0, total: 0 });
+    // 订阅进度事件，导出结束即反订阅。
+    const unsub = await subscribeBackupProgress((p) => {
+      setBackup({ done: p.done, total: p.total });
+    });
+    try {
+      const path = await unwrap(commands.exportBackup());
+      if (path) toast.success(`备份已导出到 ${path}`);
+      else toast("已取消导出");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      unsub();
+      setBackup(null);
+    }
+  };
 
   const patchKeyConcurrency = async (k: ApiKeyView, v: number) => {
     setKeys((cur) => cur.map((x) => (x.id === k.id ? { ...x, concurrencyLimit: v } : x)));
@@ -299,6 +341,60 @@ export function SettingsPage() {
             >
               检查更新
             </button>
+          </div>
+        </section>
+
+        <section className="sec">
+          <div className="sechead">
+            <span className="fw6 fs13">数据</span>
+            <span className="fs11 t3">数据目录位置 · 备份导出</span>
+          </div>
+          <div className="fx ac gap10">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              数据目录
+            </span>
+            <span className="mono fs11 t3 f1 ohide nowrap" title={dataDir?.root ?? ""}>
+              {dataDir?.root ?? "…"}
+            </span>
+            <button type="button" className="btn sm gho" onClick={openDataDir}>
+              <FolderOpen className="ic12" />
+              打开目录
+            </button>
+          </div>
+          <div className="fx ac gap10 mt14">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              备份
+            </span>
+            {backup ? (
+              <div className="fx ac gap8 f1">
+                <div className="pg f1">
+                  <i
+                    style={{
+                      width: `${backup.total > 0 ? Math.round((backup.done / backup.total) * 100) : 5}%`,
+                    }}
+                  />
+                </div>
+                <span className="mono fs10 t3 nowrap">
+                  {backup.done}/{backup.total || "…"}
+                </span>
+              </div>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={queueRunning}
+                  onClick={exportBackup}
+                >
+                  导出备份（zip）
+                </button>
+                <span className="fs11 t3">
+                  {queueRunning
+                    ? "队列运行中不可备份，请先暂停队列"
+                    : "打包数据库与全部资产到所选 zip；导出前自动检查点保证一致"}
+                </span>
+              </>
+            )}
           </div>
         </section>
       </div>

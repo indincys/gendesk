@@ -93,6 +93,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // updater 域
             commands::updater::check_update_now,
             commands::updater::install_update,
+            // backup 域（E19 数据备份与数据目录可见性）
+            commands::backup::data_dir_info,
+            commands::backup::open_data_dir,
+            commands::backup::export_backup,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,
@@ -100,6 +104,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             engine::events::BatchSummary,
             engine::events::KeyHealth,
             commands::updater::UpdateStateChanged,
+            commands::backup::BackupProgress,
         ])
 }
 

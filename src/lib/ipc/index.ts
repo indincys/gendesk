@@ -12,8 +12,10 @@ export type {
   AddApiKeyInput,
   ApiKeyView,
   AppError,
+  BackupProgress,
   BatchSummary,
   BatchView,
+  DataDirInfo,
   CreateBatchInput,
   FrontendErrorPayload,
   GroupView,
@@ -75,6 +77,18 @@ export async function subscribeEngine(handlers: {
   return () => {
     for (const un of unlisteners) un();
   };
+}
+
+/**
+ * 订阅数据备份进度事件（E19）。返回反订阅函数；非 Tauri 环境为 no-op。
+ * 独立于引擎事件订阅：仅设置页导出期间临时挂载。
+ */
+export async function subscribeBackupProgress(
+  handler: (e: import("./bindings").BackupProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.backupProgress.listen((e) => handler(e.payload));
+  return () => un();
 }
 
 /**

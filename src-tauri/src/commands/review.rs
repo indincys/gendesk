@@ -75,6 +75,7 @@ struct AcceptRow {
     ref_image_id: i64,
     prompt_id: i64,
     prompt_text_snapshot: String,
+    draw_index: i64,
     result_image_path: Option<String>,
     result_thumb_path: Option<String>,
     ref_name: String,
@@ -87,7 +88,7 @@ struct AcceptRow {
 }
 
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
-        t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
+        t.prompt_text_snapshot, t.draw_index, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
@@ -125,7 +126,8 @@ pub async fn accept_tasks(
         // 输出到 outputs/{批次}/参考图名_YYMMDD_编号.JPG
         let out_dir = state.dirs.outputs().join(row.batch_id.to_string());
         std::fs::create_dir_all(&out_dir)?;
-        let filename = files::output_filename(&row.ref_name, &row.prompt_code, &date);
+        let filename =
+            files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index);
         let out_path = out_dir.join(&filename);
         // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
         std::fs::copy(&src, &out_path)?;

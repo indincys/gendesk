@@ -21,6 +21,8 @@ pub struct RefMappingInput {
 pub struct CreateBatchInput {
     pub refs: Vec<RefMappingInput>,
     pub params_json: String,
+    /// 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
+    pub draws: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -55,7 +57,8 @@ pub async fn create_batch(
 
     let output_dir = state.dirs.outputs().to_string_lossy().to_string();
     let (batch_id, count) =
-        engine::create_batch(&state.db, &output_dir, &input.params_json, &mappings).await?;
+        engine::create_batch(&state.db, &output_dir, &input.params_json, &mappings, input.draws)
+            .await?;
 
     // 唤醒调度器开跑。
     state.engine.kick();
@@ -67,6 +70,22 @@ pub async fn create_batch(
         task_count: count,
         params_json: input.params_json.clone(),
     })
+}
+
+/// 历史单张生成均值秒数（E31 确认摘要 ETA 估算）；无成功历史返回 None。
+#[tauri::command]
+#[specta::specta]
+pub async fn estimate_task_seconds(state: State<'_, AppState>) -> AppResult<Option<f64>> {
+    // 近 50 次成功尝试的平均耗时。
+    let avg: Option<f64> = sqlx::query_scalar(
+        "SELECT AVG(duration_ms) FROM (
+            SELECT duration_ms FROM task_attempts
+            WHERE outcome = 'success' AND duration_ms IS NOT NULL
+            ORDER BY id DESC LIMIT 50)",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    Ok(avg.map(|ms| ms / 1000.0))
 }
 
 #[tauri::command]

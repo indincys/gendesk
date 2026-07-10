@@ -95,12 +95,13 @@ pub fn generate_thumbnail(src: &Path, dest: &Path) -> AppResult<(u32, u32)> {
     Ok((w, h))
 }
 
-/// 输出文件名：`参考图名_YYMMDD_编号无连字符.JPG`（技术文档 14.3）。
-/// 例：`productA_260708_DZ0001.JPG`。参考图名做文件系统安全清洗（保留中文）。
-pub fn output_filename(ref_name: &str, code: &str, date_yymmdd: &str) -> String {
+/// 输出文件名：`参考图名_YYMMDD_编号无连字符_抽卡序号.JPG`（需求 14.3 / E17 D2）。
+/// 例：`productA_260708_DZ0001_2.JPG`。抽卡序号避免同组合多张通过时文件名冲突。
+/// 参考图名做文件系统安全清洗（保留中文）。
+pub fn output_filename(ref_name: &str, code: &str, date_yymmdd: &str, draw_index: i64) -> String {
     let safe = sanitize_filename(ref_name);
     let code_nohyphen = code.replace('-', "");
-    format!("{safe}_{date_yymmdd}_{code_nohyphen}.JPG")
+    format!("{safe}_{date_yymmdd}_{code_nohyphen}_{draw_index}.JPG")
 }
 
 /// Unix 秒 → `YYMMDD`（本地按 UTC 近似；输出命名用）。
@@ -178,13 +179,21 @@ mod tests {
     #[test]
     fn output_filename_strips_hyphen_and_keeps_chinese() {
         assert_eq!(
-            output_filename("productA", "DZ-0001", "260708"),
-            "productA_260708_DZ0001.JPG"
+            output_filename("productA", "DZ-0001", "260708", 1),
+            "productA_260708_DZ0001_1.JPG"
         );
         assert_eq!(
-            output_filename("商品主图", "DZ-0128", "260101"),
-            "商品主图_260101_DZ0128.JPG"
+            output_filename("商品主图", "DZ-0128", "260101", 2),
+            "商品主图_260101_DZ0128_2.JPG"
         );
+    }
+
+    // E17 D2：同一组合不同抽卡序号的文件名不冲突。
+    #[test]
+    fn output_filename_draw_index_avoids_collision() {
+        let a = output_filename("productA", "DZ-0001", "260708", 1);
+        let b = output_filename("productA", "DZ-0001", "260708", 2);
+        assert_ne!(a, b, "同组合两次抽卡的输出文件名必须不同");
     }
 
     #[test]

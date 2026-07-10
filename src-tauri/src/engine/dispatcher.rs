@@ -781,6 +781,7 @@ mod tests {
                 ref_image_id: 1,
                 prompt_group_id: 1,
             }],
+            1,
         )
         .await
         .unwrap();

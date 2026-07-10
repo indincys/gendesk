@@ -105,30 +105,36 @@ pub async fn create_batch(
     output_dir: &str,
     params_json: &str,
     mappings: &[RefMapping],
+    draws: i64,
 ) -> AppResult<(i64, i64)> {
+    // 抽卡次数（E17 / D2）：每个组合独立生成 k 次；夹取 1..=5 防脏输入。
+    let draws = draws.clamp(1, 5);
     // 预取各组 active 提示词（读，不在事务内）。
-    let mut task_count = 0i64;
-    let mut expanded: Vec<(i64, i64, String)> = Vec::new(); // (ref, prompt_id, snapshot)
+    let mut combos: Vec<(i64, i64, String)> = Vec::new(); // (ref, prompt_id, snapshot)
     for m in mappings {
         let prompts = prompt_repo::list_active_prompts(pool, m.prompt_group_id).await?;
         for (pid, text) in prompts {
-            expanded.push((m.ref_image_id, pid, text));
-            task_count += 1;
+            combos.push((m.ref_image_id, pid, text));
         }
     }
-    if task_count == 0 {
+    if combos.is_empty() {
         return Err(crate::error::AppError::InvalidInput(
             "所选组合展开后无任务（提示词组为空？）".into(),
         ));
     }
+    let task_count = combos.len() as i64 * draws;
 
     let mut tx = pool.begin().await?;
     let batch_id = task_repo::create_batch(&mut tx, output_dir, params_json).await?;
     for m in mappings {
         task_repo::add_batch_ref(&mut tx, batch_id, m.ref_image_id, m.prompt_group_id).await?;
     }
-    for (ref_id, prompt_id, snapshot) in &expanded {
-        task_repo::insert_task(&mut tx, batch_id, *ref_id, *prompt_id, snapshot).await?;
+    // 每个组合展开 draws 个任务，draw_index ∈ 1..=draws（供输出命名去重）。
+    for (ref_id, prompt_id, snapshot) in &combos {
+        for draw_index in 1..=draws {
+            task_repo::insert_task(&mut tx, batch_id, *ref_id, *prompt_id, snapshot, draw_index)
+                .await?;
+        }
     }
     tx.commit().await?;
     Ok((batch_id, task_count))
@@ -284,15 +290,41 @@ mod tests {
                 ref_image_id: rid,
                 prompt_group_id: gid,
             }],
+            1,
         )
         .await
         .unwrap();
-        assert_eq!(count, 3, "1 参考图 × 3 提示词 = 3 任务");
+        assert_eq!(count, 3, "1 参考图 × 3 提示词 × 抽 1 = 3 任务");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
             .bind(batch_id)
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(n, 3);
+
+        // E17 D2：抽卡次数展开。1 参考图 × 3 提示词 × 抽 2 = 6 任务，draw_index ∈ {1,2}。
+        let (batch2, count2) = create_batch(
+            &pool,
+            "/out",
+            "{}",
+            &[RefMapping {
+                ref_image_id: rid,
+                prompt_group_id: gid,
+            }],
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count2, 6, "抽卡 2 次 → 任务翻倍");
+        // 每个组合恰好 draw_index 1 与 2 各一。
+        let draws: Vec<i64> = sqlx::query_scalar(
+            "SELECT draw_index FROM tasks WHERE batch_id = ?1 AND prompt_id =
+                (SELECT id FROM prompts WHERE code='GG-0001') ORDER BY draw_index",
+        )
+        .bind(batch2)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(draws, vec![1, 2], "同组合两次抽卡序号为 1、2");
     }
 }

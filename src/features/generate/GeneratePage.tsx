@@ -1,6 +1,14 @@
 import { Modal } from "@/components/ui/Modal";
+import { Stepper } from "@/components/ui/Stepper";
 import { assetSrc } from "@/lib/img";
-import { type GroupView, type PromptView, type RefImageView, commands, unwrap } from "@/lib/ipc";
+import {
+  type ApiKeyView,
+  type GroupView,
+  type PromptView,
+  type RefImageView,
+  commands,
+  unwrap,
+} from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
@@ -20,6 +28,12 @@ export function GeneratePage() {
   // E16 / D1：生成参数，null = 未设置（不传该参数，跟随提示词）。
   const [size, setSize] = useState<string | null>(null);
   const [quality, setQuality] = useState<string | null>(null);
+  // E17 / D2：抽卡次数 k（每组合独立生成 k 次），默认 1，上限 5。
+  const [draws, setDraws] = useState(1);
+  // E31：启用 Key 快照（确认摘要展示 + ETA 估算并发）。
+  const [keys, setKeys] = useState<ApiKeyView[]>([]);
+  // E31：开始生成确认卡（null = 未打开）。
+  const [confirm, setConfirm] = useState<null | { avgSec: number | null }>(null);
   const [modal, setModal] = useState<null | "groups" | "refs" | { assign: number }>(null);
   const [starting, setStarting] = useState(false);
   // 已展开查看提示词原文的分组 + 其提示词缓存（按需加载）。
@@ -50,6 +64,7 @@ export function GeneratePage() {
     try {
       setGroups(await unwrap(commands.listPromptGroups()));
       setRefs(await unwrap(commands.listRefImages()));
+      setKeys(await unwrap(commands.listApiKeys()));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -61,10 +76,13 @@ export function GeneratePage() {
   const selGroups = groups.filter((g) => selGroupIds.includes(g.id));
   const selRefs = refs.filter((r) => selRefIds.includes(r.id));
   const allMapped = selRefs.length > 0 && selRefs.every((r) => mapping[r.id] != null);
-  const total = selRefs.reduce((sum, r) => {
+  // 组合数 = Σ(参考图 × 挂靠组提示词数)；任务总数 = 组合数 × 抽卡次数（D2）。
+  const combos = selRefs.reduce((sum, r) => {
     const g = groups.find((x) => x.id === mapping[r.id]);
     return sum + (g?.count ?? 0);
   }, 0);
+  const taskTotal = combos * draws;
+  const enabledKeys = keys.filter((k) => k.enabled);
 
   const importTxt = async () => {
     try {
@@ -101,6 +119,12 @@ export function GeneratePage() {
     return JSON.stringify(p);
   };
 
+  // E31：点「开始生成」先拉 ETA 均值并弹确认卡（不直接建批次）。
+  const openConfirm = async () => {
+    const avgSec = await unwrap(commands.estimateTaskSeconds()).catch(() => null);
+    setConfirm({ avgSec });
+  };
+
   const start = async () => {
     setStarting(true);
     try {
@@ -108,8 +132,10 @@ export function GeneratePage() {
         commands.createBatch({
           refs: selRefs.map((r) => ({ refImageId: r.id, promptGroupId: mapping[r.id] as number })),
           paramsJson: buildParamsJson(),
+          draws,
         }),
       );
+      setConfirm(null);
       toast(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`);
       await loadBatchTasks(batch.id, null);
       go("tasks");
@@ -251,6 +277,15 @@ export function GeneratePage() {
             <div className="mt10">
               <ParamRow label="质量" value={quality} onChange={setQuality} options={QUALITY_OPTS} />
             </div>
+            <div className="fx ac gap10 mt10">
+              <span className="fs12 t2" style={{ width: 76 }}>
+                抽卡次数
+              </span>
+              <Stepper value={draws} min={1} max={5} onChange={setDraws} />
+              <span className="fs11 t3">
+                每个「参考图 × 提示词」组合独立生成 k 次，各占一个任务
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -266,11 +301,11 @@ export function GeneratePage() {
               </span>
             );
           })}
-          {total > 0 && (
+          {combos > 0 && (
             <>
               <span className="t3 fs12">=</span>
               <span className="fw6 fs13" style={{ color: "var(--acc2)" }}>
-                {total} 个任务
+                {combos} 组合{draws > 1 ? ` × ${draws}` : ""} = {taskTotal} 个任务
               </span>
             </>
           )}
@@ -280,11 +315,75 @@ export function GeneratePage() {
             每张参考图需指定一个提示词组
           </span>
         )}
-        <button type="button" className="btn pri" disabled={!allMapped || starting} onClick={start}>
+        <button
+          type="button"
+          className="btn pri"
+          disabled={!allMapped || starting}
+          onClick={openConfirm}
+        >
           <Play className="ic12" />
           开始生成
         </button>
       </div>
+
+      {confirm && (
+        <Modal
+          title="确认开始生成"
+          width="w420"
+          onClose={() => setConfirm(null)}
+          footer={
+            <>
+              <div className="f1" />
+              <button type="button" className="btn sm" onClick={() => setConfirm(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn pri sm"
+                disabled={starting}
+                onClick={() => void start()}
+              >
+                <Play className="ic12" />
+                确认生成
+              </button>
+            </>
+          }
+        >
+          <div className="col gap10">
+            <SummaryLine
+              label="任务总数"
+              value={
+                draws > 1
+                  ? `${combos} 组合 × ${draws} 抽卡 = ${taskTotal}`
+                  : `${combos} 组合 = ${taskTotal}`
+              }
+            />
+            <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含失败重试）`} />
+            <SummaryLine
+              label="预计耗时"
+              value={etaLabel(confirm.avgSec, taskTotal, enabledKeys)}
+            />
+            <div>
+              <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+                参与的启用 Key（{enabledKeys.length}）
+              </div>
+              {enabledKeys.length === 0 ? (
+                <div className="fs12" style={{ color: "var(--wr)" }}>
+                  当前无启用的 API Key，任务将无法生成——请先到设置启用。
+                </div>
+              ) : (
+                <div className="fx ac gap6 wrap">
+                  {enabledKeys.map((k) => (
+                    <span key={k.id} className="chip">
+                      {k.name || "未命名"} · 并发 {k.concurrencyLimit}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {modal === "groups" && (
         <PickGroups
@@ -495,6 +594,28 @@ function GroupPromptList({ prompts }: { prompts: PromptView[] | undefined }) {
       })}
     </div>
   );
+}
+
+function SummaryLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="fx ac gap10">
+      <span className="fs12 t2" style={{ width: 76 }}>
+        {label}
+      </span>
+      <span className="fs12 fw5 f1">{value}</span>
+    </div>
+  );
+}
+
+/** ETA 文案（E31）：历史均值 × 任务数 ÷ 有效并发；无历史或无 Key 则不给估算。 */
+function etaLabel(avgSec: number | null, taskTotal: number, enabledKeys: ApiKeyView[]): string {
+  const concurrency = enabledKeys.reduce((s, k) => s + k.concurrencyLimit, 0);
+  if (avgSec == null || concurrency === 0 || taskTotal === 0) return "—（无历史数据）";
+  const seconds = Math.round((avgSec * taskTotal) / concurrency);
+  if (seconds < 60) return `约 ${seconds} 秒`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `约 ${m} 分 ${s} 秒` : `约 ${m} 分`;
 }
 
 type ParamOpt = { v: string | null; label: string };

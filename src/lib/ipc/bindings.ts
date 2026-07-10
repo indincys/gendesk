@@ -309,6 +309,17 @@ async createBatch(input: CreateBatchInput) : Promise<Result<BatchView, AppError>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 历史单张生成均值秒数（E31 确认摘要 ETA 估算）；无成功历史返回 None。
+ */
+async estimateTaskSeconds() : Promise<Result<number | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("estimate_task_seconds") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listBatches() : Promise<Result<BatchView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_batches") };
@@ -667,7 +678,11 @@ export type BatchView = { id: number; createdAt: number; status: string; taskCou
  * 批次生效的生成参数快照（E16 / D1），任务页可回查。
  */
 paramsJson: string }
-export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
+export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
+/**
+ * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
+ */
+draws: number }
 /**
  * 数据目录信息（E19：暴露落盘位置）。
  */

@@ -120,16 +120,18 @@ pub async fn insert_task(
     ref_image_id: i64,
     prompt_id: i64,
     snapshot: &str,
+    draw_index: i64,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'q', ?5, ?5) RETURNING id",
+        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, draw_index, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'q', ?6, ?6) RETURNING id",
     )
     .bind(batch_id)
     .bind(ref_image_id)
     .bind(prompt_id)
     .bind(snapshot)
+    .bind(draw_index)
     .bind(now)
     .fetch_one(&mut *conn)
     .await?;
@@ -401,7 +403,7 @@ mod tests {
         sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/a','/t',1,1,1,0)").execute(&mut *tx).await.unwrap();
         let mut ids = Vec::new();
         for _ in 0..n {
-            ids.push(insert_task(&mut tx, bid, 1, 1, "t").await.unwrap());
+            ids.push(insert_task(&mut tx, bid, 1, 1, "t", 1).await.unwrap());
         }
         tx.commit().await.unwrap();
         (bid, ids)

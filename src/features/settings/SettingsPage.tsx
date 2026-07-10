@@ -415,6 +415,14 @@ export function SettingsPage() {
               检查更新
             </button>
           </div>
+          <div className="fx ac gap10 mt10">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              通知
+            </span>
+            <span className="fs11 t3">
+              批次完成、失败达阈值、Key 熔断时发系统通知；Dock/任务栏角标显示待验收任务数
+            </span>
+          </div>
         </section>
 
         <section className="sec">

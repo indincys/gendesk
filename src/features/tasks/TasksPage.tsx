@@ -38,6 +38,9 @@ export function TasksPage() {
   const [intDismissed, setIntDismissed] = useState(false);
   // E03：取消剩余任务确认框。
   const [cancelConfirm, setCancelConfirm] = useState(false);
+  // E04：批次总进度 ETA 估算所需——历史单张均值 + 有效并发。
+  const [avgSec, setAvgSec] = useState<number | null>(null);
+  const [concurrency, setConcurrency] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -46,6 +49,9 @@ export function TasksPage() {
       const target = currentBatchId ?? bs[0]?.id ?? null;
       if (target != null) await loadBatchTasks(target, null);
       setInterrupted(await unwrap(commands.countInterrupted()));
+      setAvgSec(await unwrap(commands.estimateTaskSeconds()).catch(() => null));
+      const keys = await unwrap(commands.listApiKeys()).catch(() => []);
+      setConcurrency(keys.filter((k) => k.enabled).reduce((s, k) => s + k.concurrencyLimit, 0));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -167,6 +173,13 @@ export function TasksPage() {
     if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
   };
 
+  // E04：批次总进度（终态数/总数）+ 预计剩余时间。
+  const total = tasks.length;
+  const terminal = counts.done + counts.fail; // pass + rej + fail
+  const remaining = counts.q + counts.run; // 仍需生成的任务
+  const progressPct = total > 0 ? Math.round((terminal / total) * 100) : 0;
+  const showProgress = total > 0 && remaining > 0;
+
   return (
     <PageScaffold title="任务队列" caption="事件推送 250ms 节流 · 列表虚拟滚动">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
@@ -210,6 +223,20 @@ export function TasksPage() {
           {paused ? "继续队列" : "暂停队列"}
         </button>
       </div>
+
+      {showProgress && (
+        <div className="fx ac gap10" style={{ padding: "8px 14px 0" }}>
+          <div className="pg f1" style={{ height: 8 }}>
+            <i style={{ width: `${progressPct}%` }} />
+          </div>
+          <span className="fs11 t3 mono nowrap">
+            {terminal}/{total} · {progressPct}%
+          </span>
+          <span className="fs11 t3 nowrap">
+            预计剩余 {tasksEta(avgSec, remaining, concurrency)}
+          </span>
+        </div>
+      )}
 
       {failedCount > 0 && (
         <div className="fx ac gap6 wrap" style={{ padding: "8px 14px 0" }}>
@@ -413,6 +440,16 @@ export function TasksPage() {
 
 function visibleCount(tasks: TaskView[], f: { match: (s: string) => boolean }): number {
   return tasks.filter((t) => f.match(t.status)).length;
+}
+
+/** E04 剩余耗时：历史单张均值 × 剩余数 ÷ 有效并发；无历史或无并发则不估算。 */
+function tasksEta(avgSec: number | null, remaining: number, concurrency: number): string {
+  if (avgSec == null || concurrency === 0 || remaining === 0) return "—";
+  const seconds = Math.round((avgSec * remaining) / concurrency);
+  if (seconds < 60) return `约 ${seconds} 秒`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `约 ${m} 分 ${s} 秒` : `约 ${m} 分`;
 }
 
 /** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。 */

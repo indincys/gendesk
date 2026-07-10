@@ -432,7 +432,13 @@ impl Scheduler {
 
         drop(permit);
         // 先归档 + 汇总，再减 active，避免 drive_to_idle 在归档前误判空闲。
-        let _ = task_repo::archive_if_all_terminal(&self.pool, task.batch_id).await;
+        // E04：仅在批次真正归档（全终态）的那一次发系统通知。
+        if task_repo::archive_if_all_terminal(&self.pool, task.batch_id)
+            .await
+            .unwrap_or(false)
+        {
+            self.notify_batch_complete(task.batch_id).await;
+        }
         self.emit_summary(task.batch_id).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.notify();
@@ -804,6 +810,28 @@ impl Scheduler {
         });
     }
 
+    /// 批次完成系统通知（E04）：全终态归档的那一次发一条，附通过/未通过/失败计数。
+    async fn notify_batch_complete(&self, batch_id: i64) {
+        if let Ok(c) = task_repo::counts_for_batch(&self.pool, batch_id).await {
+            self.sink.notify(
+                format!("批次 #{batch_id} 已完成"),
+                format!(
+                    "共 {} 个任务：待验收 {} · 通过 {} · 未通过 {} · 失败 {}",
+                    c.total, c.review, c.passed, c.rejected, c.failed
+                ),
+            );
+        }
+    }
+
+    /// 更新 Dock/任务栏角标（E04）：全库待验收任务数（无人值守时提示「有图待验收」）。
+    async fn update_badge(&self) {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'rev'")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+        self.sink.set_badge(if n > 0 { Some(n) } else { None });
+    }
+
     /// 主动补发某批次汇总（供命令层在验收改动任务态后驱动徽章）。
     pub async fn emit_summary(&self, batch_id: i64) {
         if let Ok(counts) = task_repo::counts_for_batch(&self.pool, batch_id).await {
@@ -815,6 +843,8 @@ impl Scheduler {
                 auto_pause_reason: self.auto_pause_reason(),
             });
         }
+        // 待验收角标随汇总同步刷新（验收/生成/删除后均经此路径）。
+        self.update_badge().await;
     }
 }
 

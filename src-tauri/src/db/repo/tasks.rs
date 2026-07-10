@@ -105,8 +105,13 @@ pub async fn archive_if_all_terminal(
     .fetch_one(pool)
     .await?;
     if pending == 0 {
-        set_batch_status(pool, batch_id, "archived").await?;
-        Ok(true)
+        // 仅在真正发生「→archived」迁移时返回 true：多个并发 worker 同时收尾时避免
+        // 重复触发批次完成通知（E04）。
+        let res = sqlx::query("UPDATE batches SET status = 'archived' WHERE id = ?1 AND status != 'archived'")
+            .bind(batch_id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     } else {
         Ok(false)
     }

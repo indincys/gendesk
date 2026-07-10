@@ -45,6 +45,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::api_keys::update_api_key,
             commands::api_keys::set_api_key_enabled,
             commands::api_keys::delete_api_key,
+            commands::api_keys::test_api_key,
+            commands::api_keys::test_api_key_saved,
             // refs 域
             commands::refs::import_ref_images,
             commands::refs::list_ref_images,

@@ -1439,7 +1439,7 @@ a:hover {
 }
 .kline {
   display: grid;
-  grid-template-columns: 170px minmax(110px, 1fr) 80px 84px 54px 104px 34px 26px;
+  grid-template-columns: 170px minmax(110px, 1fr) 80px 84px 54px 104px 56px 34px 26px;
   align-items: center;
   column-gap: 10px;
   padding: 0 12px;

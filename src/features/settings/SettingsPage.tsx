@@ -101,6 +101,20 @@ export function SettingsPage() {
     toast("已删除 API Key");
   };
 
+  // E11：测试已保存 Key 的连接。
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const testSaved = async (k: ApiKeyView) => {
+    setTestingId(k.id);
+    try {
+      await unwrap(commands.testApiKeySaved(k.id));
+      toast.success(`「${k.name || "未命名"}」连接正常`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTestingId(null);
+    }
+  };
+
   const enabledCount = keys.filter((k) => k.enabled).length;
 
   return (
@@ -127,6 +141,7 @@ export function SettingsPage() {
               <span>并发 1–10</span>
               <span>成功率</span>
               <span>状态</span>
+              <span />
               <span />
               <span />
             </div>
@@ -156,6 +171,15 @@ export function SettingsPage() {
                     {k.enabled ? "启用" : "停用"}
                   </span>
                 </span>
+                <button
+                  type="button"
+                  className="btn sm gho"
+                  disabled={testingId === k.id}
+                  onClick={() => testSaved(k)}
+                  title="测试连接"
+                >
+                  {testingId === k.id ? "测试中…" : "测试"}
+                </button>
                 <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
                 <button type="button" className="icb" onClick={() => setConfirmDel(k)} title="删除">
                   <Trash2 className="ic12" />
@@ -429,6 +453,23 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
   const [model, setModel] = useState("gpt-image-2");
   const [concurrency, setConcurrency] = useState("2");
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    if (!key.trim() || !baseUrl.trim()) {
+      toast.error("请先填写 Key 与 Base URL");
+      return;
+    }
+    setTesting(true);
+    try {
+      await unwrap(commands.testApiKey(baseUrl.trim(), key.trim()));
+      toast.success("连接正常，可以保存");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const save = async () => {
     if (!key.trim() || !baseUrl.trim()) {
@@ -463,8 +504,8 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
         <>
           <span className="fs11 t3">按 OpenAI 兼容端点接入 · GPT-Image 2</span>
           <div className="f1" />
-          <button type="button" className="btn" onClick={onClose}>
-            取消
+          <button type="button" className="btn" onClick={test} disabled={testing || busy}>
+            {testing ? "测试中…" : "测试连接"}
           </button>
           <button type="button" className="btn pri" onClick={save} disabled={busy}>
             保存

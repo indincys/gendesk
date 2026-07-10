@@ -188,10 +188,118 @@ pub async fn delete_api_key(state: State<'_, AppState>, id: i64) -> AppResult<()
     Ok(())
 }
 
+/// 探活：GET {base_url}/models 校验 Key + Base URL 可用性（E11，最廉价的探活方式，
+/// 不消耗生图额度）。成功返回 Ok，失败返回人话错误（Auth/Other）。
+async fn probe(base_url: &str, api_key: &str) -> AppResult<()> {
+    let base = normalize_base_url(base_url);
+    if base.is_empty() || api_key.trim().is_empty() {
+        return Err(AppError::InvalidInput("Base URL 与 Key 均不能为空".into()));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let resp = client
+        .get(format!("{base}/models"))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                AppError::Internal("连接超时：请检查 Base URL 与网络".into())
+            } else if e.is_connect() {
+                AppError::Internal(format!("无法连接到 {base}：请检查 Base URL 是否正确"))
+            } else {
+                AppError::Internal(format!("请求失败：{e}"))
+            }
+        })?;
+    let code = resp.status().as_u16();
+    match code {
+        200..=299 => Ok(()),
+        401 | 403 => Err(AppError::InvalidInput("Key 无效或已过期".into())),
+        404 => Err(AppError::Internal(
+            "端点 /models 不存在：请确认 Base URL 已包含 /v1".into(),
+        )),
+        429 => Err(AppError::Internal(
+            "被限流（429）：Key 可用，但当前请求过多".into(),
+        )),
+        _ => Err(AppError::Internal(format!("测试失败：HTTP {code}"))),
+    }
+}
+
+/// 测试一组连接参数（E11：添加/编辑弹窗，raw key 在前端）。
+#[tauri::command]
+#[specta::specta]
+pub async fn test_api_key(base_url: String, api_key: String) -> AppResult<()> {
+    probe(&base_url, &api_key).await
+}
+
+/// 测试已保存的 Key（E11：Key 行内测试，从钥匙串取密钥）。
+#[tauri::command]
+#[specta::specta]
+pub async fn test_api_key_saved(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let row = repo::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
+    let secret = state
+        .secrets
+        .get(&row.keyring_account)?
+        .ok_or_else(|| AppError::Internal("钥匙串中未找到该 Key 的凭据".into()))?;
+    probe(&row.base_url, &secret).await
+}
+
 /// 纳秒级后缀，用于生成唯一 keyring 账户名。
 fn nano_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::probe;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // E11：正确配置探活通过。
+    #[tokio::test]
+    async fn probe_ok_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        assert!(probe(&server.uri(), "sk-xxx").await.is_ok());
+    }
+
+    // E11：401 → 可读的 Key 无效错误。
+    #[tokio::test]
+    async fn probe_reports_auth_error_on_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let err = probe(&server.uri(), "sk-bad").await.unwrap_err();
+        assert!(
+            err.to_string().contains("Key 无效"),
+            "应给出可读的 Key 无效错误，实际：{err}"
+        );
+    }
+
+    // E11：错误 Base URL（连不上）→ 可读的连接错误。
+    #[tokio::test]
+    async fn probe_reports_connection_error_on_bad_base_url() {
+        // 未监听的地址：立即连接失败。
+        let err = probe("http://127.0.0.1:1/v1", "sk-xxx").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("无法连接") || msg.contains("请求失败") || msg.contains("超时"),
+            "应给出可读的连接错误，实际：{msg}"
+        );
+    }
 }

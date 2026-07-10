@@ -140,6 +140,28 @@ async deleteApiKey(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * 测试一组连接参数（E11：添加/编辑弹窗，raw key 在前端）。
+ */
+async testApiKey(baseUrl: string, apiKey: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_api_key", { baseUrl, apiKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 测试已保存的 Key（E11：Key 行内测试，从钥匙串取密钥）。
+ */
+async testApiKeySaved(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_api_key_saved", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 导入参考图：拷入库、生成缩略图、写记录，返回视图列表。
  */
 async importRefImages(paths: string[], groupId: number | null) : Promise<Result<RefImageView[], AppError>> {

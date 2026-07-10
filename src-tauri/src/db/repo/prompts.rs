@@ -22,6 +22,7 @@ pub struct PromptRow {
     pub id: i64,
     pub group_id: i64,
     pub code: String,
+    pub title: Option<String>,
     pub text: String,
     pub favorite: i64,
     pub edited: i64,
@@ -74,16 +75,18 @@ pub async fn insert_prompt(
     conn: &mut SqliteConnection,
     group_id: i64,
     code: &str,
+    title: Option<&str>,
     text: &str,
     source: &str,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO prompts (group_id, code, text, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
+        "INSERT INTO prompts (group_id, code, title, text, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) RETURNING id",
     )
     .bind(group_id)
     .bind(code)
+    .bind(title)
     .bind(text)
     .bind(source)
     .bind(now)
@@ -165,8 +168,12 @@ pub async fn toggle_favorite(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Err
     Ok(())
 }
 
-/// 置 trash 状态，返回 (code, group_id) 供废纸篓编号回收。
-pub async fn set_trash(pool: &SqlitePool, id: i64) -> Result<Option<(String, i64)>, sqlx::Error> {
+/// 置 trash 状态，返回 (code, title, group_id) 供废纸篓快照与编号回收。
+#[allow(clippy::type_complexity)]
+pub async fn set_trash(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<(String, Option<String>, i64)>, sqlx::Error> {
     let row = get(pool, id).await?;
     if let Some(r) = &row {
         sqlx::query("UPDATE prompts SET status = 'trash', updated_at = ?2 WHERE id = ?1")
@@ -174,7 +181,7 @@ pub async fn set_trash(pool: &SqlitePool, id: i64) -> Result<Option<(String, i64
             .bind(crate::db::now_unix())
             .execute(pool)
             .await?;
-        return Ok(Some((r.code.clone(), r.group_id)));
+        return Ok(Some((r.code.clone(), r.title.clone(), r.group_id)));
     }
     Ok(None)
 }

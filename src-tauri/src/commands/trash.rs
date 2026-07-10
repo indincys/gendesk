@@ -17,6 +17,7 @@ pub struct TrashItemView {
     pub id: i64,
     pub entity_type: String,
     pub code: Option<String>,
+    pub title: Option<String>,
     pub ref_name: Option<String>,
     pub thumb_path: Option<String>,
     pub prompt_text: Option<String>,
@@ -34,6 +35,7 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
             id: r.id,
             entity_type: r.entity_type,
             code: r.code,
+            title: r.title,
             ref_name: None, // trash_items 不冗余参考图名；列表以编号 + 提示词为主
             thumb_path: r.thumb_path,
             prompt_text: r.prompt_text,

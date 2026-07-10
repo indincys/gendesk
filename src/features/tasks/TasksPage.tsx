@@ -2,7 +2,7 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type BatchView, type TaskView, commands, unwrap } from "@/lib/ipc";
 import { errorLabel, statusVisual } from "@/lib/status";
-import { cn } from "@/lib/utils";
+import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
 import { ChevronDown } from "lucide-react";
@@ -182,7 +182,7 @@ export function TasksPage() {
                 <span className="mono fs11 nowrap ohide">{t.refName}</span>
               </span>
               <span className="fx ac gap7 ohide">
-                <span className="pid">{t.promptCode}</span>
+                <span className="pid nowrap ohide">{promptLabel(t.promptCode, t.promptTitle)}</span>
                 <span className="t3 fs11 nowrap ohide">{t.groupName}</span>
               </span>
               <span>{t.keyAlias && <span className="chip">{t.keyAlias}</span>}</span>

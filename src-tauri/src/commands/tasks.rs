@@ -19,6 +19,7 @@ pub struct TaskView {
     pub ref_name: String,
     pub prompt_id: i64,
     pub prompt_code: String,
+    pub prompt_title: Option<String>,
     pub group_name: String,
     pub api_key_id: Option<i64>,
     pub key_alias: Option<String>,
@@ -31,7 +32,8 @@ pub struct TaskView {
 
 const TASK_SELECT: &str = "SELECT t.id, t.batch_id, t.status, t.ref_image_id,
         COALESCE(r.name, '') AS ref_name, t.prompt_id,
-        COALESCE(p.code, '') AS prompt_code, COALESCE(g.name, '') AS group_name,
+        COALESCE(p.code, '') AS prompt_code, p.title AS prompt_title,
+        COALESCE(g.name, '') AS group_name,
         t.api_key_id, k.name AS key_alias, t.error_type, t.error_message,
         t.retry_count, t.result_thumb_path, t.prompt_text_snapshot
     FROM tasks t

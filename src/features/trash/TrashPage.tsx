@@ -2,7 +2,7 @@ import { ConfirmModal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type TrashItemView, commands, unwrap } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
+import { cn, promptLabel } from "@/lib/utils";
 import { Check, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -82,7 +82,7 @@ export function TrashPage() {
                 <Check className="ic12" />
               </span>
               <span className="ph xthumb" style={bg(x.thumbPath)} />
-              {x.code && <span className="pid noshrink">{x.code}</span>}
+              {x.code && <span className="pid noshrink">{promptLabel(x.code, x.title)}</span>}
               <span className="mono fs11 t3 f1 nowrap ohide">
                 {x.promptText ?? entityLabel(x.entityType)}
               </span>

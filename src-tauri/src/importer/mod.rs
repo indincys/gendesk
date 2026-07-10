@@ -1,12 +1,24 @@
 //! 提示词 txt 导入（执行计划 1.6 / 需求 6.4）。
 //!
-//! 解析「分组 / 前缀 / 场景 / 标签 / 正文」字段 + UTF-8/GBK 编码探测；
+//! 解析「分组 / 前缀 / 场景 / 标签 / 小标题 / 正文」字段 + UTF-8/GBK 编码探测；
 //! 两段式：`parse`（纯函数，不落库）→ 命令层 `commit`（落库 + 号池发放）。
 //!
-//! 格式约定（宽容解析）：
-//! - 头部行 `分组:`/`前缀:`/`场景:`/`标签:`（半/全角冒号均可）设置当前分组元信息；
+//! 格式约定（宽容解析，两种写法并存）：
+//! - 分组头：`分组: 名称`（半/全角冒号）**或** `分组【名称】`（括号内联）→ 开启新分组；
+//!   一个文件含多个 `分组` 头即按分组自动拆分。
+//! - 其它头部行 `前缀:`/`场景:`/`标签:` 设置当前分组元信息；
+//! - 独占一行的 `【小标题】` → 作为紧随其后那条提示词的小标题；
+//! - 正文行前导序号（`1.`/`2、`/`3）` 等）自动剥离；
 //! - 其余每条非空行 = 一条提示词（一行一提示词，空行忽略）；
 //! - 缺分组 → 归入默认分组「未分组导入」；缺前缀 → 由 commit 阶段自动分配。
+
+/// 单条解析出的提示词（正文 + 可选小标题）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedPrompt {
+    /// 来自 `【小标题】` 行；无则 None。
+    pub title: Option<String>,
+    pub text: String,
+}
 
 /// 单个解析出的分组。
 #[derive(Debug, Clone, PartialEq)]
@@ -15,7 +27,7 @@ pub struct ParsedGroup {
     pub prefix: Option<String>,
     pub scene: String,
     pub tags: Vec<String>,
-    pub prompts: Vec<String>,
+    pub prompts: Vec<ParsedPrompt>,
 }
 
 /// 解析结果。
@@ -53,6 +65,8 @@ pub fn parse(bytes: &[u8]) -> ParsedImport {
 fn parse_text(text: &str) -> Vec<ParsedGroup> {
     let mut groups: Vec<ParsedGroup> = Vec::new();
     let mut cur: Option<ParsedGroup> = None;
+    // 待挂靠的小标题：遇到 `【小标题】` 行后暂存，附加到下一条正文。
+    let mut pending_title: Option<String> = None;
 
     // 确保存在「当前分组」；否则建默认分组。
     fn ensure(cur: &mut Option<ParsedGroup>) -> &mut ParsedGroup {
@@ -65,7 +79,7 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
         })
     }
 
-    // 解析模型：每条非空、非头部行 = 一条提示词（一行一提示词，无歧义）。
+    // 解析模型：每条非空、非头部/非小标题行 = 一条提示词（一行一提示词）。
     // 空行仅作视觉分隔，被忽略。
     for raw in text.lines() {
         let trimmed = raw.trim_end_matches('\r').trim();
@@ -73,21 +87,24 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
             continue;
         }
 
+        // 分组头：`分组: 名称` 或 `分组【名称】`（后者优先于「小标题」判定）。
+        if let Some(name) = parse_group_header(trimmed) {
+            if let Some(g) = cur.take() {
+                groups.push(g);
+            }
+            cur = Some(ParsedGroup {
+                name,
+                prefix: None,
+                scene: String::new(),
+                tags: Vec::new(),
+                prompts: Vec::new(),
+            });
+            pending_title = None;
+            continue;
+        }
+
         if let Some((key, value)) = parse_header(trimmed) {
             match key {
-                Header::Group => {
-                    // 新「分组:」头开启新分组：先收束上一个。
-                    if let Some(g) = cur.take() {
-                        groups.push(g);
-                    }
-                    cur = Some(ParsedGroup {
-                        name: value.to_string(),
-                        prefix: None,
-                        scene: String::new(),
-                        tags: Vec::new(),
-                        prompts: Vec::new(),
-                    });
-                }
                 Header::Prefix => ensure(&mut cur).prefix = Some(value.to_uppercase()),
                 Header::Scene => ensure(&mut cur).scene = value.to_string(),
                 Header::Tags => ensure(&mut cur).tags = split_tags(value),
@@ -95,7 +112,16 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
             continue;
         }
 
-        ensure(&mut cur).prompts.push(trimmed.to_string());
+        // 独占一行的 `【小标题】` → 暂存给下一条正文。
+        if let Some(title) = parse_title_line(trimmed) {
+            pending_title = Some(title);
+            continue;
+        }
+
+        ensure(&mut cur).prompts.push(ParsedPrompt {
+            title: pending_title.take(),
+            text: strip_leading_number(trimmed).to_string(),
+        });
     }
 
     if let Some(g) = cur.take() {
@@ -106,14 +132,70 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
     groups
 }
 
+/// 识别分组头：`分组: 名称` / `分组：名称` / `分组【名称】`（含 `组`/`group` 同义）。
+fn parse_group_header(line: &str) -> Option<String> {
+    for kw in ["分组", "组", "group", "Group"] {
+        if let Some(rest) = line.strip_prefix(kw) {
+            let rest = rest.trim_start();
+            // 内联括号形式：分组【名称】
+            if let Some(inner) = bracket_inner(rest) {
+                let name = inner.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+            // 冒号形式：分组: 名称
+            if let Some(after) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) {
+                let name = after.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 取 `【...】` 中第一个括号块的内部文本（要求以 `【` 开头）。
+fn bracket_inner(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix('【')?;
+    let end = rest.find('】')?;
+    Some(&rest[..end])
+}
+
+/// 若整行是单个 `【...】` 括号块，返回括号内文本（作为小标题）。
+fn parse_title_line(line: &str) -> Option<String> {
+    let inner = line.strip_prefix('【')?.strip_suffix('】')?;
+    // 内部若还含闭括号，说明不是单一括号块（可能是正文），不当作小标题。
+    if inner.contains('】') {
+        return None;
+    }
+    let t = inner.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// 剥离正文前导序号：`1.` / `2、` / `3）` / `4．` 等（要求序号后紧跟分隔符）。
+fn strip_leading_number(s: &str) -> &str {
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if digits_end == 0 {
+        return s; // 无前导数字
+    }
+    let after = &s[digits_end..];
+    match after.chars().next() {
+        Some(c) if matches!(c, '.' | '．' | '、' | '。' | ')' | '）' | ':' | '：') => {
+            after[c.len_utf8()..].trim_start()
+        }
+        _ => s,
+    }
+}
+
 enum Header {
-    Group,
     Prefix,
     Scene,
     Tags,
 }
 
-/// 识别头部行 `键: 值`（半/全角冒号）。
+/// 识别元信息头部行 `键: 值`（半/全角冒号）。分组头另由 `parse_group_header` 处理。
 fn parse_header(line: &str) -> Option<(Header, &str)> {
     let idx = line.find([':', '：'])?;
     let key = line[..idx].trim();
@@ -125,7 +207,6 @@ fn parse_header(line: &str) -> Option<(Header, &str)> {
         .unwrap_or("")
         .trim();
     let header = match key {
-        "分组" | "组" | "group" | "Group" => Header::Group,
         "前缀" | "prefix" | "Prefix" => Header::Prefix,
         "场景" | "scene" | "Scene" => Header::Scene,
         "标签" | "tag" | "tags" | "Tags" => Header::Tags,
@@ -149,6 +230,17 @@ fn split_tags(value: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// 测试便捷：把 ParsedPrompt 拍平成 (title, text) 便于断言。
+    fn flat(g: &ParsedGroup) -> Vec<(Option<&str>, &str)> {
+        g.prompts
+            .iter()
+            .map(|p| (p.title.as_deref(), p.text.as_str()))
+            .collect()
+    }
+    fn texts(g: &ParsedGroup) -> Vec<&str> {
+        g.prompts.iter().map(|p| p.text.as_str()).collect()
+    }
+
     #[test]
     fn parses_full_utf8_document() {
         let doc = "\
@@ -167,7 +259,9 @@ mod tests {
         assert_eq!(g.prefix.as_deref(), Some("DZ")); // 前缀大写归一
         assert_eq!(g.scene, "商品");
         assert_eq!(g.tags, vec!["白底", "3C", "主图"]);
-        assert_eq!(g.prompts, vec!["第一条提示词正文。", "第二条提示词正文。"]);
+        assert_eq!(texts(g), vec!["第一条提示词正文。", "第二条提示词正文。"]);
+        // 无小标题行时 title 为 None。
+        assert!(g.prompts.iter().all(|p| p.title.is_none()));
     }
 
     #[test]
@@ -184,7 +278,7 @@ mod tests {
         let doc = "分组: A\n\n\n正文1\n\n\n正文2\n\n";
         let out = parse(doc.as_bytes());
         assert_eq!(out.groups[0].tags.len(), 0);
-        assert_eq!(out.groups[0].prompts, vec!["正文1", "正文2"]);
+        assert_eq!(texts(&out.groups[0]), vec!["正文1", "正文2"]);
     }
 
     #[test]
@@ -192,7 +286,7 @@ mod tests {
         let doc = "分组: A\n第一行\n第二行\n第三行\n\n下一条";
         let out = parse(doc.as_bytes());
         assert_eq!(
-            out.groups[0].prompts,
+            texts(&out.groups[0]),
             vec!["第一行", "第二行", "第三行", "下一条"]
         );
     }
@@ -202,7 +296,7 @@ mod tests {
         let long = "光".repeat(600);
         let doc = format!("分组: A\n{long}");
         let out = parse(doc.as_bytes());
-        assert_eq!(out.groups[0].prompts[0].chars().count(), 600);
+        assert_eq!(out.groups[0].prompts[0].text.chars().count(), 600);
     }
 
     #[test]
@@ -211,9 +305,9 @@ mod tests {
         let out = parse(doc.as_bytes());
         assert_eq!(out.groups.len(), 2);
         assert_eq!(out.groups[0].name, "A");
-        assert_eq!(out.groups[0].prompts, vec!["a1"]);
+        assert_eq!(texts(&out.groups[0]), vec!["a1"]);
         assert_eq!(out.groups[1].name, "B");
-        assert_eq!(out.groups[1].prompts, vec!["b1", "b2扩展", "b3"]);
+        assert_eq!(texts(&out.groups[1]), vec!["b1", "b2扩展", "b3"]);
     }
 
     #[test]
@@ -222,13 +316,82 @@ mod tests {
         let (bytes, _enc, _had_errors) = encoding_rs::GBK.encode("分组: 商品\n正文一");
         let out = parse(&bytes);
         assert_eq!(out.groups[0].name, "商品");
-        assert_eq!(out.groups[0].prompts, vec!["正文一"]);
+        assert_eq!(texts(&out.groups[0]), vec!["正文一"]);
     }
 
     #[test]
     fn fullwidth_colon_supported() {
         let out = parse("分组：全角\n正文".as_bytes());
         assert_eq!(out.groups[0].name, "全角");
+    }
+
+    #[test]
+    fn bracket_group_header_and_titles() {
+        // 用户实际格式：分组【名】 + 每条上方独占一行的【小标题】 + 带前导序号的正文。
+        let doc = "\
+分组【丁禹兮】
+
+【雷雨拆快递】
+1. 把图中这只卡套放进随手拍照片里。
+
+【楼道骑车】
+2. 把绿色卡套连同配件放进照片里。
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        let g = &out.groups[0];
+        assert_eq!(g.name, "丁禹兮");
+        assert_eq!(
+            flat(g),
+            vec![
+                (Some("雷雨拆快递"), "把图中这只卡套放进随手拍照片里。"),
+                (Some("楼道骑车"), "把绿色卡套连同配件放进照片里。"),
+            ]
+        );
+    }
+
+    #[test]
+    fn multiple_bracket_groups_split() {
+        let doc = "\
+分组【组一】
+【标题A】
+1. 甲正文
+分组【组二】
+【标题B】
+1、乙正文
+【标题C】
+2）丙正文
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.groups[0].name, "组一");
+        assert_eq!(flat(&out.groups[0]), vec![(Some("标题A"), "甲正文")]);
+        assert_eq!(out.groups[1].name, "组二");
+        assert_eq!(
+            flat(&out.groups[1]),
+            vec![(Some("标题B"), "乙正文"), (Some("标题C"), "丙正文")]
+        );
+    }
+
+    #[test]
+    fn title_without_number_and_prompt_without_title() {
+        let doc = "分组【G】\n【只有标题】\n没有序号的正文\n没有标题也没序号的正文";
+        let out = parse(doc.as_bytes());
+        assert_eq!(
+            flat(&out.groups[0]),
+            vec![
+                (Some("只有标题"), "没有序号的正文"),
+                (None, "没有标题也没序号的正文"),
+            ]
+        );
+    }
+
+    #[test]
+    fn embedded_brackets_in_body_not_treated_as_title() {
+        // 正文中含括号但非整行括号块 → 不误判为小标题。
+        let doc = "分组【G】\n把【绿色】卡套放进照片";
+        let out = parse(doc.as_bytes());
+        assert_eq!(flat(&out.groups[0]), vec![(None, "把【绿色】卡套放进照片")]);
     }
 
     #[test]

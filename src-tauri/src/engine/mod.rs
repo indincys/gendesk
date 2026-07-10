@@ -270,7 +270,7 @@ mod tests {
             .await
             .unwrap();
         for i in 1..=3 {
-            prompt_repo::insert_prompt(&mut tx, gid, &format!("GG-000{i}"), "t", "library")
+            prompt_repo::insert_prompt(&mut tx, gid, &format!("GG-000{i}"), None, "t", "library")
                 .await
                 .unwrap();
         }

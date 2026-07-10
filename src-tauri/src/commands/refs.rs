@@ -231,6 +231,7 @@ pub async fn trash_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<(
             thumb_path: Some(row.thumb_path.clone()),
             prompt_text: None,
             code: None,
+            title: None,
             source_label: "手动删除".into(),
             file_paths: vec![row.file_path, row.thumb_path],
         },

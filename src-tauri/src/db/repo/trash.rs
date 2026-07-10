@@ -14,6 +14,7 @@ pub struct TrashItemRow {
     pub thumb_path: Option<String>,
     pub prompt_text: Option<String>,
     pub code: Option<String>,
+    pub title: Option<String>,
     pub source_label: String,
     pub file_paths_json: String,
     pub deleted_at: i64,
@@ -25,6 +26,8 @@ pub struct NewTrashItem {
     pub thumb_path: Option<String>,
     pub prompt_text: Option<String>,
     pub code: Option<String>,
+    /// 提示词小标题快照（仅 prompt 类；废纸篓按 `编号_小标题` 展示）
+    pub title: Option<String>,
     pub source_label: String,
     /// 待清理时物理删除的文件路径列表
     pub file_paths: Vec<String>,
@@ -33,15 +36,16 @@ pub struct NewTrashItem {
 pub async fn insert(conn: &mut SqliteConnection, t: &NewTrashItem) -> Result<i64, sqlx::Error> {
     let files = serde_json::to_string(&t.file_paths).unwrap_or_else(|_| "[]".into());
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO trash_items (entity_type, ref_id, thumb_path, prompt_text, code,
+        "INSERT INTO trash_items (entity_type, ref_id, thumb_path, prompt_text, code, title,
             source_label, file_paths_json, deleted_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
     )
     .bind(&t.entity_type)
     .bind(t.ref_id)
     .bind(&t.thumb_path)
     .bind(&t.prompt_text)
     .bind(&t.code)
+    .bind(&t.title)
     .bind(&t.source_label)
     .bind(files)
     .bind(now_unix())

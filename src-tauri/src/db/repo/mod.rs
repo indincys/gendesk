@@ -61,7 +61,7 @@ mod tests {
         for _ in 0..3 {
             let n = ids::allocate(&mut tx, "DZ").await.unwrap();
             let code = ids::format_code("DZ", n);
-            prompts::insert_prompt(&mut tx, gid, &code, "正文", "library")
+            prompts::insert_prompt(&mut tx, gid, &code, None, "正文", "library")
                 .await
                 .unwrap();
         }
@@ -126,7 +126,7 @@ mod tests {
             .unwrap();
         let n = ids::allocate(&mut tx, "DZ").await.unwrap();
         let code = ids::format_code("DZ", n);
-        let pid = prompts::insert_prompt(&mut tx, gid, &code, "正文", "library")
+        let pid = prompts::insert_prompt(&mut tx, gid, &code, Some("小标题"), "正文", "library")
             .await
             .unwrap();
         let bid = tasks::create_batch(&mut tx, "/out", "{}").await.unwrap();
@@ -158,7 +158,8 @@ mod tests {
         assert_eq!(works::get(&pool, wid).await.unwrap().unwrap().favorite, 1);
 
         // 提示词进废纸篓（entity_type='prompt' + code），take/purge 编号回收
-        let (tcode, _g) = prompts::set_trash(&pool, pid).await.unwrap().unwrap();
+        let (tcode, ttitle, _g) = prompts::set_trash(&pool, pid).await.unwrap().unwrap();
+        assert_eq!(ttitle.as_deref(), Some("小标题")); // title 快照随删除保留
         let mut tx = pool.begin().await.unwrap();
         let trash_id = trash::insert(
             &mut tx,
@@ -168,6 +169,7 @@ mod tests {
                 thumb_path: None,
                 prompt_text: None,
                 code: Some(tcode),
+                title: ttitle,
                 source_label: "手动删除".into(),
                 file_paths: Vec::new(),
             },

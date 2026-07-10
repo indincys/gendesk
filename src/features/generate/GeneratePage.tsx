@@ -1,10 +1,10 @@
 import { Modal } from "@/components/ui/Modal";
 import { assetSrc } from "@/lib/img";
-import { type GroupView, type RefImageView, commands, unwrap } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
+import { type GroupView, type PromptView, type RefImageView, commands, unwrap } from "@/lib/ipc";
+import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
-import { ChevronDown, FileUp, Play, Plus, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileUp, Play, Plus, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -19,6 +19,29 @@ export function GeneratePage() {
   const [mapping, setMapping] = useState<Record<number, number>>({});
   const [modal, setModal] = useState<null | "groups" | "refs" | { assign: number }>(null);
   const [starting, setStarting] = useState(false);
+  // 已展开查看提示词原文的分组 + 其提示词缓存（按需加载）。
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [promptsByGroup, setPromptsByGroup] = useState<Record<number, PromptView[]>>({});
+
+  const toggleExpand = useCallback(
+    async (gid: number) => {
+      setExpanded((cur) => {
+        const next = new Set(cur);
+        if (next.has(gid)) next.delete(gid);
+        else next.add(gid);
+        return next;
+      });
+      if (!promptsByGroup[gid]) {
+        try {
+          const ps = await unwrap(commands.listPrompts(gid));
+          setPromptsByGroup((m) => ({ ...m, [gid]: ps }));
+        } catch (e) {
+          if (e instanceof Error) toast.error(e.message);
+        }
+      }
+    },
+    [promptsByGroup],
+  );
 
   const load = useCallback(async () => {
     try {
@@ -121,6 +144,18 @@ export function GeneratePage() {
               selGroups.map((g) => (
                 <div className="ggrp" key={g.id}>
                   <div className="fx ac gap9">
+                    <button
+                      type="button"
+                      className="icb"
+                      title={expanded.has(g.id) ? "收起提示词" : "展开查看提示词"}
+                      onClick={() => toggleExpand(g.id)}
+                    >
+                      {expanded.has(g.id) ? (
+                        <ChevronDown className="ic12" />
+                      ) : (
+                        <ChevronRight className="ic12" />
+                      )}
+                    </button>
                     <i className="gdot" style={{ background: "var(--acc)" }} />
                     <span className="fw5 nowrap">{g.name}</span>
                     <span className="chip">{g.prefix}</span>
@@ -136,6 +171,7 @@ export function GeneratePage() {
                       <X className="ic12" />
                     </button>
                   </div>
+                  {expanded.has(g.id) && <GroupPromptList prompts={promptsByGroup[g.id]} />}
                 </div>
               ))
             )}
@@ -394,6 +430,47 @@ function AssignGroup({
       ))}
       {groups.length === 0 && <div className="fs12 t3">请先在上方「选择提示词组」中选择分组</div>}
     </Modal>
+  );
+}
+
+/** 展开区：分组内提示词列表，点击某条切换显示其原文。 */
+function GroupPromptList({ prompts }: { prompts: PromptView[] | undefined }) {
+  const [openId, setOpenId] = useState<number | null>(null);
+  if (!prompts) {
+    return (
+      <div className="fs12 t3 mt6" style={{ paddingLeft: 26 }}>
+        加载中…
+      </div>
+    );
+  }
+  if (prompts.length === 0) {
+    return (
+      <div className="fs12 t3 mt6" style={{ paddingLeft: 26 }}>
+        该分组暂无提示词
+      </div>
+    );
+  }
+  return (
+    <div className="col gap6 mt6" style={{ paddingLeft: 26 }}>
+      {prompts.map((p) => {
+        const open = openId === p.id;
+        return (
+          <div key={p.id} className="col gap4">
+            <button
+              type="button"
+              className="pchip"
+              style={{ alignSelf: "flex-start" }}
+              title={open ? "收起原文" : "查看原文"}
+              onClick={() => setOpenId(open ? null : p.id)}
+            >
+              {p.favorite && <i className="favdot" />}
+              {promptLabel(p.code, p.title)}
+            </button>
+            {open && <div className="ptext">{p.text}</div>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

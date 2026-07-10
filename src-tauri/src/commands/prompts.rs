@@ -32,8 +32,16 @@ pub struct ImportPreviewGroup {
     /// 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
     pub code_range: String,
     pub is_new_group: bool,
-    /// 提示词正文（commit 阶段回传落库；UI 列表不展示）
-    pub prompts: Vec<String>,
+    /// 提示词（正文 + 可选小标题；commit 阶段回传落库）
+    pub prompts: Vec<ImportPreviewPrompt>,
+}
+
+/// 导入预览中的单条提示词（正文 + 可选小标题）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreviewPrompt {
+    pub title: Option<String>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -67,6 +75,7 @@ pub struct PromptView {
     pub id: i64,
     pub group_id: i64,
     pub code: String,
+    pub title: Option<String>,
     pub text: String,
     pub favorite: bool,
     pub edited: bool,
@@ -77,6 +86,7 @@ fn to_prompt_view(r: repo::PromptRow) -> PromptView {
         id: r.id,
         group_id: r.group_id,
         code: r.code,
+        title: r.title,
         text: r.text,
         favorite: r.favorite != 0,
         edited: r.edited != 0,
@@ -131,7 +141,7 @@ pub async fn toggle_prompt_favorite(state: State<'_, AppState>, id: i64) -> AppR
 #[tauri::command]
 #[specta::specta]
 pub async fn trash_prompt(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    if let Some((code, _gid)) = repo::set_trash(&state.db, id).await? {
+    if let Some((code, title, _gid)) = repo::set_trash(&state.db, id).await? {
         let mut tx = state.db.begin().await?;
         crate::db::repo::trash::insert(
             &mut tx,
@@ -141,6 +151,7 @@ pub async fn trash_prompt(state: State<'_, AppState>, id: i64) -> AppResult<()> 
                 thumb_path: None,
                 prompt_text: None,
                 code: Some(code),
+                title,
                 source_label: "手动删除".into(),
                 file_paths: Vec::new(),
             },
@@ -216,7 +227,14 @@ pub async fn parse_prompt_txt(
             count,
             code_range,
             is_new_group: is_new,
-            prompts: g.prompts.clone(),
+            prompts: g
+                .prompts
+                .iter()
+                .map(|p| ImportPreviewPrompt {
+                    title: p.title.clone(),
+                    text: p.text.clone(),
+                })
+                .collect(),
         });
     }
 
@@ -280,10 +298,18 @@ pub async fn commit_prompt_import(
         };
         group_ids.push(group_id);
 
-        for text in &pg.prompts {
+        for p in &pg.prompts {
             let number = ids::allocate(&mut tx, &pg.prefix).await?;
             let code = ids::format_code(&pg.prefix, number);
-            repo::insert_prompt(&mut tx, group_id, &code, text, source).await?;
+            repo::insert_prompt(
+                &mut tx,
+                group_id,
+                &code,
+                p.title.as_deref(),
+                &p.text,
+                source,
+            )
+            .await?;
             inserted += 1;
         }
 

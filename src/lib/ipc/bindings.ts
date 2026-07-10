@@ -613,9 +613,13 @@ export type ImportPreviewGroup = { name: string; prefix: string; scene: string; 
  */
 codeRange: string; isNewGroup: boolean; 
 /**
- * 提示词正文（commit 阶段回传落库；UI 列表不展示）
+ * 提示词（正文 + 可选小标题；commit 阶段回传落库）
  */
-prompts: string[] }
+prompts: ImportPreviewPrompt[] }
+/**
+ * 导入预览中的单条提示词（正文 + 可选小标题）。
+ */
+export type ImportPreviewPrompt = { title: string | null; text: string }
 export type ImportResult = { groupIds: number[]; inserted: number; 
 /**
  * 是否新建了临时分组（ctx=generate）
@@ -633,7 +637,7 @@ export type Phase = "queued" | "requestStarted" | "generating" | "downloading" |
 /**
  * 提示词视图（编号网格 / 详情）。
  */
-export type PromptView = { id: number; groupId: number; code: string; text: string; favorite: boolean; edited: boolean }
+export type PromptView = { id: number; groupId: number; code: string; title: string | null; text: string; favorite: boolean; edited: boolean }
 /**
  * 参考图详情（含使用统计）。
  */
@@ -740,8 +744,8 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
 /**
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
-export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
-export type TrashItemView = { id: number; entityType: string; code: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
+export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
+export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
 /**
  * `update://state`

@@ -103,6 +103,7 @@ pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
             thumb_path: Some(row.thumb_path.clone()),
             prompt_text: Some(row.prompt_text.clone()),
             code: None,
+            title: None,
             source_label: "手动删除".into(),
             file_paths: vec![row.image_path, row.thumb_path],
         },

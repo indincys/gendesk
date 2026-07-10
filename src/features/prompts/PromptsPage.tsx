@@ -1,7 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { type GroupView, type ImportPreview, type PromptView, commands, unwrap } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
+import { cn, promptLabel } from "@/lib/utils";
 import { FileUp, Search, Star } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -179,7 +179,7 @@ function PChip({ p, onOpen }: { p: PromptView; onOpen: () => void }) {
   return (
     <button type="button" className="pchip" onClick={onOpen} title={p.text.slice(0, 88)}>
       {p.favorite && <i className="favdot" />}
-      {p.code}
+      {promptLabel(p.code, p.title)}
     </button>
   );
 }
@@ -226,7 +226,7 @@ function PromptDetail({
 
   return (
     <Modal
-      title={<span className="pid">{p.code}</span>}
+      title={<span className="pid">{promptLabel(p.code, p.title)}</span>}
       width="w700"
       onClose={onClose}
       headerExtra={

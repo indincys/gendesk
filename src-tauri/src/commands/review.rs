@@ -81,6 +81,7 @@ struct AcceptRow {
     result_thumb_path: Option<String>,
     ref_name: String,
     prompt_code: String,
+    prompt_title: Option<String>,
     prompt_text: String,
     group_id: Option<i64>,
     is_temp: i64,
@@ -90,6 +91,7 @@ struct AcceptRow {
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
         t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
+        p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
         COALESCE(g.is_temp,0) AS is_temp, COALESCE(g.name,'') AS group_name
     FROM tasks t
@@ -210,6 +212,7 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
                 thumb_path: row.result_thumb_path.clone(),
                 prompt_text: Some(row.prompt_text_snapshot.clone()),
                 code: Some(row.prompt_code.clone()),
+                title: row.prompt_title.clone(),
                 source_label: "验收未通过".into(),
                 file_paths: row.result_thumb_path.iter().cloned().collect(),
             },

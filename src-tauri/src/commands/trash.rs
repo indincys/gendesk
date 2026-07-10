@@ -20,6 +20,8 @@ pub struct TrashItemView {
     pub title: Option<String>,
     pub ref_name: Option<String>,
     pub thumb_path: Option<String>,
+    /// 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
+    pub image_path: Option<String>,
     pub prompt_text: Option<String>,
     pub source_label: String,
     pub deleted_at: i64,
@@ -31,16 +33,27 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
     let rows = repo::list(&state.db).await?;
     Ok(rows
         .into_iter()
-        .map(|r| TrashItemView {
-            id: r.id,
-            entity_type: r.entity_type,
-            code: r.code,
-            title: r.title,
-            ref_name: None, // trash_items 不冗余参考图名；列表以编号 + 提示词为主
-            thumb_path: r.thumb_path,
-            prompt_text: r.prompt_text,
-            source_label: r.source_label,
-            deleted_at: r.deleted_at,
+        .map(|r| {
+            // 未通过任务的原图存于 file_paths 首位（E02）；仅 task 类暴露供查看。
+            let image_path = (r.entity_type == "task")
+                .then(|| {
+                    serde_json::from_str::<Vec<String>>(&r.file_paths_json)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                })
+                .flatten();
+            TrashItemView {
+                id: r.id,
+                entity_type: r.entity_type,
+                code: r.code,
+                title: r.title,
+                ref_name: None, // trash_items 不冗余参考图名；列表以编号 + 提示词为主
+                thumb_path: r.thumb_path,
+                image_path,
+                prompt_text: r.prompt_text,
+                source_label: r.source_label,
+                deleted_at: r.deleted_at,
+            }
         })
         .collect())
 }

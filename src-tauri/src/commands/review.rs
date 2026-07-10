@@ -1,7 +1,5 @@
 //! review 域命令（执行计划 2.1 / 需求 13 / R7 / R8）。
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 use specta::Type;
 use sqlx::FromRow;
@@ -183,7 +181,20 @@ pub async fn accept_tasks(
     })
 }
 
-/// 不通过所选：置 rej + 原图删除（留缩略图）+ 进废纸篓，单事务。
+/// 不通过任务待清理时应物理删除的文件列表（E02）：原图 + 缩略图。
+/// reject 时**不**立即物理删除原图——原图随此列表暂存至废纸篓，「彻底删除/清空」才删。
+fn rejected_file_paths(image: &Option<String>, thumb: &Option<String>) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(img) = image {
+        paths.push(img.clone());
+    }
+    if let Some(t) = thumb {
+        paths.push(t.clone());
+    }
+    paths
+}
+
+/// 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
 #[tauri::command]
 #[specta::specta]
 pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> AppResult<i64> {
@@ -199,10 +210,9 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
             continue;
         };
 
-        // 原图物理删除，缩略图留存进废纸篓。
-        if let Some(img) = &row.result_image_path {
-            let _ = files::purge(&PathBuf::from(img));
-        }
+        // E02：原图不再立即物理删除，随缩略图一并暂存进废纸篓 file_paths，
+        // 由「彻底删除/清空废纸篓」时的 purge 统一物理删除。误触「不通过」不再丢原图。
+        let file_paths = rejected_file_paths(&row.result_image_path, &row.result_thumb_path);
         let mut tx = state.db.begin().await?;
         trash_repo::insert(
             &mut tx,
@@ -214,7 +224,7 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
                 code: Some(row.prompt_code.clone()),
                 title: row.prompt_title.clone(),
                 source_label: "验收未通过".into(),
-                file_paths: row.result_thumb_path.iter().cloned().collect(),
+                file_paths,
             },
         )
         .await?;
@@ -274,5 +284,29 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some(), "rev 待验收任务应被选中");
+    }
+
+    // E02：不通过时原图必须进入待清理文件列表（不立即物理删除），否则误触即永久丢原图。
+    #[test]
+    fn rejected_file_paths_retains_original_image() {
+        let paths = rejected_file_paths(
+            &Some("/data/results/img.jpg".into()),
+            &Some("/data/thumbs/img.jpg".into()),
+        );
+        assert!(
+            paths.contains(&"/data/results/img.jpg".to_string()),
+            "原图须列入废纸篓待清理文件，供 purge 时才物理删除"
+        );
+        assert!(
+            paths.contains(&"/data/thumbs/img.jpg".to_string()),
+            "缩略图一并列入待清理文件"
+        );
+    }
+
+    // 极端：无缩略图仍须保住原图。
+    #[test]
+    fn rejected_file_paths_handles_missing_thumb() {
+        let paths = rejected_file_paths(&Some("/data/results/img.jpg".into()), &None);
+        assert_eq!(paths, vec!["/data/results/img.jpg".to_string()]);
     }
 }

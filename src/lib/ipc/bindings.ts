@@ -427,7 +427,7 @@ async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
 }
 },
 /**
- * 不通过所选：置 rej + 原图删除（留缩略图）+ 进废纸篓，单事务。
+ * 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
  */
 async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
     try {
@@ -780,7 +780,11 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
-export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
+export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
+/**
+ * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
+ */
+imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
 /**
  * `update://state`

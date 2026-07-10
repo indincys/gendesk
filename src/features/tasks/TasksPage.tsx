@@ -1,4 +1,4 @@
-import { ConfirmModal } from "@/components/ui/Modal";
+import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type BatchView, type TaskView, commands, unwrap } from "@/lib/ipc";
@@ -41,6 +41,11 @@ export function TasksPage() {
   // E04：批次总进度 ETA 估算所需——历史单张均值 + 有效并发。
   const [avgSec, setAvgSec] = useState<number | null>(null);
   const [concurrency, setConcurrency] = useState(0);
+  // E34：改词重试目标 + 编辑文本。
+  const [rewordTarget, setRewordTarget] = useState<TaskView | null>(null);
+  const [rewordText, setRewordText] = useState("");
+  // E35：展开查看原始报错的失败行。
+  const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -171,6 +176,45 @@ export function TasksPage() {
   const retryOne = async (t: TaskView) => {
     await unwrap(commands.retryTask(t.id, null));
     if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+  };
+
+  // E34：改词重试——预填快照，确认后按编辑文本回队重生。
+  const openReword = (t: TaskView) => {
+    setRewordTarget(t);
+    setRewordText(t.promptTextSnapshot);
+  };
+  const submitReword = async () => {
+    const t = rewordTarget;
+    if (!t) return;
+    const edited = rewordText.trim() !== t.promptTextSnapshot.trim() ? rewordText : null;
+    try {
+      await unwrap(commands.retryTask(t.id, edited));
+      setRewordTarget(null);
+      toast(edited ? "已按改后的提示词重新生成" : "已重新生成");
+      if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
+
+  const toggleErr = (id: number) =>
+    setExpandedErr((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  // E35：按错误类型给建议动作（可点链接）。
+  const errAction = (t: TaskView): { label: string; run: () => void } => {
+    switch (t.errorType) {
+      case "Auth":
+        return { label: "检查设置", run: () => go("settings") };
+      case "ContentPolicy":
+        return { label: "改词重试", run: () => openReword(t) };
+      default:
+        return { label: "重试", run: () => void retryOne(t) };
+    }
   };
 
   // E04：批次总进度（终态数/总数）+ 预计剩余时间。
@@ -344,11 +388,39 @@ export function TasksPage() {
                     </span>
                   </>
                 )}
-                {t.status === "fail" && (
-                  <span className="terr" title={t.errorMessage ?? ""}>
-                    {errorLabel(t.errorType)}
-                  </span>
-                )}
+                {t.status === "fail" &&
+                  (() => {
+                    const act = errAction(t);
+                    return (
+                      <span className="col gap2 ohide" style={{ minWidth: 0 }}>
+                        <span className="fx ac gap6 ohide">
+                          <span className="terr">{errorLabel(t.errorType)}</span>
+                          <button
+                            type="button"
+                            className="fs11 nowrap"
+                            style={{ color: "var(--acc2)", textDecoration: "underline" }}
+                            onClick={act.run}
+                          >
+                            {act.label}
+                          </button>
+                          {t.errorMessage && (
+                            <button
+                              type="button"
+                              className="fs10 t3 nowrap"
+                              onClick={() => toggleErr(t.id)}
+                            >
+                              {expandedErr.has(t.id) ? "收起" : "详情"}
+                            </button>
+                          )}
+                        </span>
+                        {expandedErr.has(t.id) && t.errorMessage && (
+                          <span className="fs10 t3" style={{ wordBreak: "break-all" }}>
+                            {t.errorMessage}
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })()}
                 {t.status === "rev" && (
                   <span className="fs11 nowrap" style={{ color: "var(--ok)" }}>
                     已生成 · 待验收
@@ -361,9 +433,20 @@ export function TasksPage() {
               <span className="tract">
                 {t.status === "fail" && (
                   <>
-                    <button type="button" className="btn sm gho" onClick={() => retryOne(t)}>
-                      重试
-                    </button>
+                    {t.errorType === "ContentPolicy" ? (
+                      <button type="button" className="btn pri sm" onClick={() => openReword(t)}>
+                        改词重试
+                      </button>
+                    ) : (
+                      <>
+                        <button type="button" className="btn sm gho" onClick={() => retryOne(t)}>
+                          重试
+                        </button>
+                        <button type="button" className="btn sm gho" onClick={() => openReword(t)}>
+                          改词重试
+                        </button>
+                      </>
+                    )}
                     <button type="button" className="btn sm gho" onClick={() => deleteOne(t)}>
                       删除
                     </button>
@@ -383,6 +466,47 @@ export function TasksPage() {
           </div>
         )}
       </div>
+
+      {rewordTarget && (
+        <Modal
+          title="改词重试"
+          width="w420"
+          onClose={() => setRewordTarget(null)}
+          footer={
+            <>
+              <div className="f1" />
+              <button type="button" className="btn sm" onClick={() => setRewordTarget(null)}>
+                取消
+              </button>
+              <button type="button" className="btn pri sm" onClick={() => void submitReword()}>
+                重新生成
+              </button>
+            </>
+          }
+        >
+          <div className="fx ac gap6 wrap" style={{ marginBottom: 10 }}>
+            <span className="pid">{rewordTarget.promptCode}</span>
+            <span className="chip">{rewordTarget.refName}</span>
+            {rewordTarget.errorType === "ContentPolicy" && (
+              <span className="bdg b-red">违规 · 建议改词后再试</span>
+            )}
+          </div>
+          <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+            提示词（可修改后重试）
+          </div>
+          <textarea
+            className="ta"
+            style={{ width: "100%", minHeight: 140, resize: "vertical" }}
+            value={rewordText}
+            onChange={(e) => setRewordText(e.target.value)}
+            // biome-ignore lint/a11y/noAutofocus: 弹窗即为改词而生，聚焦符合预期
+            autoFocus
+          />
+          <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
+            确认后该任务按改后的提示词回队重新出图；未改动则按原文重试。通过验收后改后版本会写回提示词库。
+          </div>
+        </Modal>
+      )}
 
       {cancelConfirm && (
         <ConfirmModal

@@ -245,6 +245,37 @@ pub async fn requeue(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// 删除单个任务（「不需要了」）。生成中/重试中的任务拒绝删除（返回 None），避免与在途
+/// worker 竞争；成功则返回其所属批次 id（供调用方重估归档 + 补发汇总）。
+/// task_attempts 由外键 ON DELETE CASCADE 一并清除。
+pub async fn delete_task(pool: &SqlitePool, id: i64) -> Result<Option<i64>, sqlx::Error> {
+    let batch_id: Option<i64> = sqlx::query_scalar(
+        "SELECT batch_id FROM tasks WHERE id = ?1 AND status NOT IN ('run','retry')",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(bid) = batch_id {
+        sqlx::query("DELETE FROM tasks WHERE id = ?1")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(Some(bid))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 删除某批次全部失败任务。返回删除行数。
+pub async fn delete_failed(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx::Error> {
+    let n = sqlx::query("DELETE FROM tasks WHERE batch_id = ?1 AND status = 'fail'")
+        .bind(batch_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n as i64)
+}
+
 /// 五视觉组计数（批次汇总）。
 pub async fn counts_for_batch(
     pool: &SqlitePool,
@@ -353,4 +384,68 @@ pub async fn finish_attempt(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败，是期望行为
+mod tests {
+    use super::*;
+    use crate::db::test_support::test_pool;
+
+    /// 造 1 批次 + N 任务（默认 q），返回 (batch_id, task_ids)。
+    async fn seed(pool: &SqlitePool, n: usize) -> (i64, Vec<i64>) {
+        let mut tx = pool.begin().await.unwrap();
+        let bid = create_batch(&mut tx, "/out", "{}").await.unwrap();
+        sqlx::query("INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (1,1,'GG-0001','t','active','library',0,0)").execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/a','/t',1,1,1,0)").execute(&mut *tx).await.unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..n {
+            ids.push(insert_task(&mut tx, bid, 1, 1, "t").await.unwrap());
+        }
+        tx.commit().await.unwrap();
+        (bid, ids)
+    }
+
+    #[tokio::test]
+    async fn delete_task_refuses_running_and_cascades_attempts() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 2).await;
+        let t = ids[0];
+        // 造一个 Key + 一条 attempt，验证级联删除。
+        sqlx::query("INSERT INTO api_keys (id,name,keyring_account,base_url,model,concurrency_limit,enabled,created_at) VALUES (1,'k','acct','http://x/v1','m',2,1,0)")
+            .execute(&pool).await.unwrap();
+        insert_attempt(&pool, t, 1, 0).await.unwrap();
+
+        // 运行中拒绝删除。
+        set_status(&pool, t, "run").await.unwrap();
+        assert_eq!(delete_task(&pool, t).await.unwrap(), None, "运行中不应删除");
+        // 置回可删终态后删除成功，返回批次 id。
+        set_status(&pool, t, "fail").await.unwrap();
+        assert_eq!(delete_task(&pool, t).await.unwrap(), Some(bid));
+        assert!(get_task(&pool, t).await.unwrap().is_none(), "任务已删除");
+        let att: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_attempts WHERE task_id = ?1")
+            .bind(t)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(att, 0, "attempts 应级联删除");
+    }
+
+    #[tokio::test]
+    async fn delete_failed_only_removes_failed() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 3).await;
+        set_status(&pool, ids[0], "fail").await.unwrap();
+        set_status(&pool, ids[1], "fail").await.unwrap();
+        // ids[2] 留 q
+        let n = delete_failed(&pool, bid).await.unwrap();
+        assert_eq!(n, 2);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1, "仅失败任务被删，q 保留");
+    }
 }

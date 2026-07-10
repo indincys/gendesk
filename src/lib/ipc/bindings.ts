@@ -16,6 +16,18 @@ async logFrontendError(payload: FrontendErrorPayload) : Promise<Result<null, App
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 返回应用当前版本（取自 tauri.conf 的 package 版本，与 updater 比对同源，随发布 tag 同步）。
+ * 前端页脚/设置页展示真实版本，避免硬编码漂移；「是否有新版」由 updater 域另行驱动。
+ */
+async appVersion() : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("app_version") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getSettings() : Promise<Result<Settings, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
@@ -345,6 +357,29 @@ async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, 
 async retryFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("retry_failed_tasks", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除单个任务（「不需要了」）。生成中/重试中的任务不允许删除，避免与在途 worker 竞争；
+ * 删除会级联清除 task_attempts（外键 ON DELETE CASCADE）。删除后重估批次归档并补发汇总。
+ */
+async deleteTask(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_task", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除某批次全部失败任务（批量「不需要了」）。返回删除数。
+ */
+async deleteFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_failed_tasks", { batchId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

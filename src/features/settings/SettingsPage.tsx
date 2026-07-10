@@ -2,6 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { type ApiKeyView, commands, unwrap } from "@/lib/ipc";
+import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings";
 import { Plus, Trash2 } from "lucide-react";
@@ -13,6 +14,7 @@ export function SettingsPage() {
   const loadSettings = useSettingsStore((s) => s.load);
   const updateSettings = useSettingsStore((s) => s.update);
 
+  const version = useAppVersion();
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
@@ -284,7 +286,7 @@ export function SettingsPage() {
             <span className="fs12 t2" style={{ width: 72 }}>
               更新
             </span>
-            <span className="fs12 nowrap">当前 v0.1.0</span>
+            <span className="fs12 nowrap">当前 {version ? `v${version}` : "…"}</span>
             <button
               type="button"
               className="btn sm"

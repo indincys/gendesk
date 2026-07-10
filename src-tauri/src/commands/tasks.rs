@@ -141,6 +141,33 @@ pub async fn retry_interrupted_tasks(state: State<'_, AppState>) -> AppResult<i6
     Ok(ids.len() as i64)
 }
 
+/// 删除单个任务（「不需要了」）。生成中/重试中的任务不允许删除，避免与在途 worker 竞争；
+/// 删除会级联清除 task_attempts（外键 ON DELETE CASCADE）。删除后重估批次归档并补发汇总。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_task(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let Some(batch_id) = repo::delete_task(&state.db, id).await? else {
+        return Err(AppError::InvalidInput(
+            "任务不存在或正在生成中，无法删除".into(),
+        ));
+    };
+    let _ = repo::archive_if_all_terminal(&state.db, batch_id).await;
+    state.engine.emit_summary(batch_id).await;
+    Ok(())
+}
+
+/// 删除某批次全部失败任务（批量「不需要了」）。返回删除数。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_failed_tasks(state: State<'_, AppState>, batch_id: i64) -> AppResult<i64> {
+    let n = repo::delete_failed(&state.db, batch_id).await?;
+    if n > 0 {
+        let _ = repo::archive_if_all_terminal(&state.db, batch_id).await;
+        state.engine.emit_summary(batch_id).await;
+    }
+    Ok(n)
+}
+
 /// 统计当前中断任务数（前端 banner 用）。
 #[tauri::command]
 #[specta::specta]

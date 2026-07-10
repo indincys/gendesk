@@ -24,6 +24,7 @@ export function TasksPage() {
   const currentBatchId = useEngineStore((s) => s.currentBatchId);
   const progress = useEngineStore((s) => s.progress);
   const paused = useEngineStore((s) => s.paused);
+  const setPaused = useEngineStore((s) => s.setPaused);
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
 
   const [batches, setBatches] = useState<BatchView[]>([]);
@@ -75,8 +76,15 @@ export function TasksPage() {
   };
 
   const togglePause = async () => {
-    if (paused) await unwrap(commands.resumeQueue());
-    else await unwrap(commands.pauseQueue());
+    const next = !paused;
+    try {
+      if (paused) await unwrap(commands.resumeQueue());
+      else await unwrap(commands.pauseQueue());
+      // 命令不会立即回推汇总事件，乐观更新按钮态。
+      setPaused(next);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
   };
 
   const retryAllFailed = async () => {
@@ -84,6 +92,22 @@ export function TasksPage() {
     const n = await unwrap(commands.retryFailedTasks(currentBatchId));
     toast(`已重试 ${n} 个失败任务`);
     await loadBatchTasks(currentBatchId, null);
+  };
+
+  const deleteAllFailed = async () => {
+    if (currentBatchId == null) return;
+    const n = await unwrap(commands.deleteFailedTasks(currentBatchId));
+    toast(`已删除 ${n} 个失败任务`);
+    await loadBatchTasks(currentBatchId, null);
+  };
+
+  const deleteOne = async (t: TaskView) => {
+    try {
+      await unwrap(commands.deleteTask(t.id));
+      if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
   };
 
   const retryInterrupted = async () => {
@@ -114,9 +138,14 @@ export function TasksPage() {
         </div>
         <div className="f1" />
         {failedCount > 0 && (
-          <button type="button" className="btn sm gho" onClick={retryAllFailed}>
-            重试全部失败 · {failedCount}
-          </button>
+          <>
+            <button type="button" className="btn sm gho" onClick={retryAllFailed}>
+              重试全部失败 · {failedCount}
+            </button>
+            <button type="button" className="btn sm gho" onClick={deleteAllFailed}>
+              删除全部失败 · {failedCount}
+            </button>
+          </>
         )}
         <button type="button" className="btn sm" onClick={togglePause}>
           {paused ? "继续队列" : "暂停队列"}
@@ -216,9 +245,14 @@ export function TasksPage() {
               <span className="tc mono fs11 t3">{t.retryCount || ""}</span>
               <span className="tract">
                 {t.status === "fail" && (
-                  <button type="button" className="btn sm gho" onClick={() => retryOne(t)}>
-                    重试
-                  </button>
+                  <>
+                    <button type="button" className="btn sm gho" onClick={() => retryOne(t)}>
+                      重试
+                    </button>
+                    <button type="button" className="btn sm gho" onClick={() => deleteOne(t)}>
+                      删除
+                    </button>
+                  </>
                 )}
               </span>
             </div>

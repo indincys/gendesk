@@ -102,6 +102,22 @@ pub async fn rename_batch(pool: &SqlitePool, id: i64, note: &str) -> Result<(), 
     Ok(())
 }
 
+/// 删除归档时刻早于 cutoff 的批次（E22 / D3）。tasks/task_attempts/batch_refs 经外键
+/// ON DELETE CASCADE 一并删除；accepted_works.task_id 为 ON DELETE SET NULL 故作品保留
+/// （D3「作品不动」）。返回删除批次数。
+pub async fn delete_batches_archived_before(
+    pool: &SqlitePool,
+    cutoff: i64,
+) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "DELETE FROM batches WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?1",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// 批次首张有缩略图的任务缩略图路径（E10 批次切换器预览）。
 pub async fn batch_first_thumb(
     pool: &SqlitePool,
@@ -140,9 +156,10 @@ pub async fn archive_if_all_terminal(
         // 仅在真正发生「→archived」迁移时返回 true：多个并发 worker 同时收尾时避免
         // 重复触发批次完成通知（E04）。
         let res = sqlx::query(
-            "UPDATE batches SET status = 'archived' WHERE id = ?1 AND status != 'archived'",
+            "UPDATE batches SET status = 'archived', archived_at = ?2 WHERE id = ?1 AND status != 'archived'",
         )
         .bind(batch_id)
+        .bind(now_unix())
         .execute(pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -457,6 +474,73 @@ mod tests {
         }
         tx.commit().await.unwrap();
         (bid, ids)
+    }
+
+    // E22 / D3：归档满 N 天的批次启动时删除（级联任务），作品（accepted_works）不受影响。
+    #[tokio::test]
+    async fn delete_old_archived_batches_keeps_works() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 2).await;
+        // 造一条作品指向该批次任务。
+        sqlx::query(
+            "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text, ref_image_id, batch_id, accepted_at)
+             VALUES (?1, '/out/x.jpg', '/t.jpg', 1, 't', 1, ?2, 0)",
+        )
+        .bind(ids[0])
+        .bind(bid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 批次归档且 archived_at 为 40 天前。
+        let old = now_unix() - 40 * 86_400;
+        sqlx::query("UPDATE batches SET status='archived', archived_at=?2 WHERE id=?1")
+            .bind(bid)
+            .bind(old)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // cutoff = 30 天前：40 天前的批次到期。
+        let cutoff = now_unix() - 30 * 86_400;
+        let deleted = delete_batches_archived_before(&pool, cutoff).await.unwrap();
+        assert_eq!(deleted, 1, "到期归档批次应被删除");
+
+        let batch_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM batches WHERE id=?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(batch_left, 0, "批次已删");
+        let tasks_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id=?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tasks_left, 0, "任务经级联删除");
+        // 作品保留（task_id 被置空，记录仍在）——D3「作品不动」。
+        let works_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(works_left, 1, "作品是独立快照，不随批次删除");
+    }
+
+    // E22：未到期的归档批次与运行中批次不删。
+    #[tokio::test]
+    async fn delete_old_archived_batches_spares_recent_and_running() {
+        let (pool, _d) = test_pool().await;
+        let (bid, _) = seed(&pool, 1).await;
+        // 归档但仅 5 天前。
+        let recent = now_unix() - 5 * 86_400;
+        sqlx::query("UPDATE batches SET status='archived', archived_at=?2 WHERE id=?1")
+            .bind(bid)
+            .bind(recent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cutoff = now_unix() - 30 * 86_400;
+        let deleted = delete_batches_archived_before(&pool, cutoff).await.unwrap();
+        assert_eq!(deleted, 0, "未满 30 天不删");
     }
 
     // E03：取消剩余只删 'q' 态，在途 run/retry 与终态 pass 不受影响。

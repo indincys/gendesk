@@ -900,11 +900,19 @@ paused: boolean;
 /**
  * 全局熔断阈值（E05）：跨 Key 连续失败达此数自动暂停队列；0 = 关闭。
  */
-globalFailThreshold?: number }
+globalFailThreshold?: number; 
+/**
+ * 废纸篓保留天数（E40 / D3）：删除项保留满此天数后启动时自动物理清理；0 = 不自动清理。
+ */
+trashRetentionDays?: number; 
+/**
+ * 归档批次保留天数（E22 / D3）：批次归档满此天数后启动时自动删除（作品不受影响）；0 = 不自动删除。
+ */
+batchRetentionDays?: number }
 /**
  * 设置补丁（部分更新）。
  */
-export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null }
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null }
 /**
  * 5 视觉组计数。
  */

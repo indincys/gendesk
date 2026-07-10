@@ -18,6 +18,8 @@ const EMPTY_PATCH: SettingsPatch = {
   motion: null,
   paused: null,
   globalFailThreshold: null,
+  trashRetentionDays: null,
+  batchRetentionDays: null,
 };
 
 export const useSettingsStore = create<SettingsState>((set) => ({

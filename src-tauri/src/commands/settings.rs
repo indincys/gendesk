@@ -27,11 +27,22 @@ pub struct Settings {
     /// 全局熔断阈值（E05）：跨 Key 连续失败达此数自动暂停队列；0 = 关闭。
     #[serde(default = "default_global_fail_threshold")]
     pub global_fail_threshold: i64,
+    /// 废纸篓保留天数（E40 / D3）：删除项保留满此天数后启动时自动物理清理；0 = 不自动清理。
+    #[serde(default = "default_retention_days")]
+    pub trash_retention_days: i64,
+    /// 归档批次保留天数（E22 / D3）：批次归档满此天数后启动时自动删除（作品不受影响）；0 = 不自动删除。
+    #[serde(default = "default_retention_days")]
+    pub batch_retention_days: i64,
 }
 
 /// 全局熔断默认阈值（连续失败 10 次）。
 fn default_global_fail_threshold() -> i64 {
     10
+}
+
+/// 保留期默认 30 天（D3）。
+fn default_retention_days() -> i64 {
+    30
 }
 
 impl Settings {
@@ -43,6 +54,8 @@ impl Settings {
             motion: "standard".to_string(),
             paused: false,
             global_fail_threshold: default_global_fail_threshold(),
+            trash_retention_days: default_retention_days(),
+            batch_retention_days: default_retention_days(),
         }
     }
 
@@ -58,6 +71,13 @@ impl Settings {
         if self.global_fail_threshold != 0 {
             self.global_fail_threshold = self.global_fail_threshold.clamp(3, 100);
         }
+        // 保留天数：0 = 关闭；否则至少 1 天，上限 365。
+        if self.trash_retention_days != 0 {
+            self.trash_retention_days = self.trash_retention_days.clamp(1, 365);
+        }
+        if self.batch_retention_days != 0 {
+            self.batch_retention_days = self.batch_retention_days.clamp(1, 365);
+        }
     }
 }
 
@@ -71,6 +91,8 @@ pub struct SettingsPatch {
     pub motion: Option<String>,
     pub paused: Option<bool>,
     pub global_fail_threshold: Option<i64>,
+    pub trash_retention_days: Option<i64>,
+    pub batch_retention_days: Option<i64>,
 }
 
 /// 从连接池加载设置（供引擎启动读取策略/重试/暂停态）。
@@ -130,6 +152,12 @@ pub async fn update_settings(
     }
     if let Some(v) = patch.global_fail_threshold {
         s.global_fail_threshold = v;
+    }
+    if let Some(v) = patch.trash_retention_days {
+        s.trash_retention_days = v;
+    }
+    if let Some(v) = patch.batch_retention_days {
+        s.batch_retention_days = v;
     }
     s.sanitize();
     save(&state, &s).await?;

@@ -7,9 +7,45 @@ use serde::Serialize;
 use specta::Type;
 use tauri::State;
 
+use crate::db::repo::tasks as task_repo;
 use crate::db::repo::trash as repo;
 use crate::error::AppResult;
 use crate::{files, ids};
+
+/// 启动时到期自动清理（E22 批次 + E40 废纸篓，决策 D3）。
+/// 各自 0 天 = 关闭。清理失败仅告警，不阻断启动。返回 (删除批次数, 清理废纸篓项数)。
+pub async fn run_startup_cleanup(
+    pool: &sqlx::SqlitePool,
+    batch_retention_days: i64,
+    trash_retention_days: i64,
+) -> (u64, i64) {
+    let now = crate::db::now_unix();
+    let mut batches_deleted = 0u64;
+    let mut trash_purged = 0i64;
+
+    if batch_retention_days > 0 {
+        let cutoff = now - batch_retention_days * 86_400;
+        match task_repo::delete_batches_archived_before(pool, cutoff).await {
+            Ok(n) => batches_deleted = n,
+            Err(e) => tracing::warn!(error = %e, "归档批次自动清理失败"),
+        }
+    }
+    if trash_retention_days > 0 {
+        let cutoff = now - trash_retention_days * 86_400;
+        match repo::expired_ids(pool, cutoff).await {
+            Ok(ids) if !ids.is_empty() => match purge_ids(pool, &ids).await {
+                Ok(n) => trash_purged = n,
+                Err(e) => tracing::warn!(error = %e, "废纸篓到期项自动清理失败"),
+            },
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "废纸篓到期项查询失败"),
+        }
+    }
+    if batches_deleted > 0 || trash_purged > 0 {
+        tracing::info!(batches_deleted, trash_purged, "启动自动清理完成（D3）");
+    }
+    (batches_deleted, trash_purged)
+}
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +102,12 @@ fn parse_code(code: &str) -> Option<(String, i64)> {
 }
 
 async fn purge(state: &crate::state::AppState, ids_in: &[i64]) -> AppResult<i64> {
-    let rows = repo::take(&state.db, ids_in).await?;
+    purge_ids(&state.db, ids_in).await
+}
+
+/// 物理删 + 级联删记录 + 编号回收（同事务）。命令层与启动清理（E40）共用。
+pub async fn purge_ids(pool: &sqlx::SqlitePool, ids_in: &[i64]) -> AppResult<i64> {
+    let rows = repo::take(pool, ids_in).await?;
     if rows.is_empty() {
         return Ok(0);
     }
@@ -84,7 +125,7 @@ async fn purge(state: &crate::state::AppState, ids_in: &[i64]) -> AppResult<i64>
     }
 
     // 2) 级联删记录 + 编号回收（同事务）。
-    let mut tx = state.db.begin().await?;
+    let mut tx = pool.begin().await?;
     for r in &rows {
         match r.entity_type.as_str() {
             "prompt" => {

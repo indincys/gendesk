@@ -213,6 +213,13 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ))?;
     engine.set_global_fail_threshold(settings.global_fail_threshold.max(0) as u32);
 
+    // E22/E40（决策 D3）：启动时到期自动清理归档批次与废纸篓（0 天 = 关闭）。
+    tauri::async_runtime::block_on(commands::trash::run_startup_cleanup(
+        &pool,
+        settings.batch_retention_days,
+        settings.trash_retention_days,
+    ));
+
     app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
 
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。

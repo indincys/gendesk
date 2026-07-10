@@ -345,6 +345,62 @@ export function SettingsPage() {
               productA_260708_DZ0001.JPG
             </span>
           </div>
+          {/* E40 / D3：废纸篓保留期 */}
+          <div className="fx ac gap10 mt14 wrap">
+            <span className="fs12 t2 nowrap" style={{ width: 96 }}>
+              废纸篓保留
+            </span>
+            <Toggle
+              on={(settings?.trashRetentionDays ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  trashRetentionDays: (settings?.trashRetentionDays ?? 0) > 0 ? 0 : 30,
+                })
+              }
+            />
+            {(settings?.trashRetentionDays ?? 0) > 0 && (
+              <>
+                <Stepper
+                  value={settings?.trashRetentionDays ?? 30}
+                  min={1}
+                  max={365}
+                  onChange={(v) => updateSettings({ trashRetentionDays: v })}
+                />
+                <span className="fs11 t3">天</span>
+              </>
+            )}
+            <span className="fs11 t3">
+              删除项（含验收未通过的原图）保留到期后启动时物理清理并回收编号，不可恢复；关闭则永不自动清理
+            </span>
+          </div>
+          {/* E22 / D3：归档批次保留期 */}
+          <div className="fx ac gap10 mt10 wrap">
+            <span className="fs12 t2 nowrap" style={{ width: 96 }}>
+              归档批次保留
+            </span>
+            <Toggle
+              on={(settings?.batchRetentionDays ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  batchRetentionDays: (settings?.batchRetentionDays ?? 0) > 0 ? 0 : 30,
+                })
+              }
+            />
+            {(settings?.batchRetentionDays ?? 0) > 0 && (
+              <>
+                <Stepper
+                  value={settings?.batchRetentionDays ?? 30}
+                  min={1}
+                  max={365}
+                  onChange={(v) => updateSettings({ batchRetentionDays: v })}
+                />
+                <span className="fs11 t3">天</span>
+              </>
+            )}
+            <span className="fs11 t3">
+              批次归档满设定天数后启动时删除其任务记录；已输出的作品是独立快照，不受影响
+            </span>
+          </div>
         </section>
 
         {/* ---------------- 通用 ---------------- */}

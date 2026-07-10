@@ -849,7 +849,11 @@ export type RefMappingInput2 = { refImageId: number; promptGroupId: number }
 /**
  * 待验收项视图。
  */
-export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string }
+export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
+/**
+ * 参考图缩略图/原图（E08 大图对比）。
+ */
+refThumbPath: string | null; refImagePath: string | null }
 /**
  * 应用设置（单行 JSON 持久化）。
  */

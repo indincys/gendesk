@@ -18,6 +18,9 @@ export function ReviewPage() {
   const [onlyPending, setOnlyPending] = useState(false);
   // E38：shift 范围多选锚点（索引进 displayed）。
   const lastClicked = useRef<number | null>(null);
+  // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
+  const [compareRef, setCompareRef] = useState(false);
+  const [holdRef, setHoldRef] = useState(false);
   // E29：按批次筛选（null = 全部批次混排）。
   const [batches, setBatches] = useState<BatchView[]>([]);
   const [batchFilter, setBatchFilter] = useState<number | null>(null);
@@ -165,6 +168,32 @@ export function ReviewPage() {
     if (zoom !== null && zoom >= displayed.length)
       setZoom(displayed.length > 0 ? displayed.length - 1 : null);
   }, [displayed, zoom]);
+
+  // E08：切换到另一张图时复位参考图对比态。
+  useEffect(() => {
+    setCompareRef(false);
+    setHoldRef(false);
+  }, [zoom]);
+
+  // E08：大图模式按住空格临时 peek 参考图，松开回到生成图。
+  useEffect(() => {
+    if (zoom === null || retryTarget) return;
+    const down = (e: KeyboardEvent) => {
+      if (e.key === " ") {
+        e.preventDefault();
+        setHoldRef(true);
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === " ") setHoldRef(false);
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [zoom, retryTarget]);
 
   // E09：网格模式键盘流（大图/重试框打开时让位）。
   // biome-ignore lint/correctness/useExhaustiveDependencies: toggleSel/togglePending 为稳定内联 setter，无需入依赖
@@ -412,73 +441,106 @@ export function ReviewPage() {
         </div>
       )}
 
-      {zoomItem && (
-        <div className="rdet">
-          <div className="rdimgw">
-            <BigImage
-              path={zoomItem.resultImagePath ?? zoomItem.resultThumbPath}
-              caption={`GEN · ${zoomItem.promptCode}`}
-            />
-          </div>
-          <div className="rdside">
-            <div
-              className="fx ac gap8"
-              style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}
-            >
-              <span className="pid">{zoomItem.promptCode}</span>
-              <span className="fs12 fw5 nowrap ohide f1">{zoomItem.groupName}</span>
-              <button type="button" className="icb" onClick={() => setZoom(null)}>
-                <X className="ic12" />
-              </button>
-            </div>
-            <div className="f1" style={{ overflow: "auto", padding: "12px 14px" }}>
-              <div className="fx ac gap6 wrap">
-                <span className="chip">{zoomItem.refName}</span>
-                {zoomItem.keyAlias && <span className="chip">{zoomItem.keyAlias}</span>}
+      {zoomItem &&
+        (() => {
+          const refPath = zoomItem.refImagePath ?? zoomItem.refThumbPath;
+          const showingRef = (compareRef || holdRef) && !!refPath;
+          return (
+            <div className="rdet dark">
+              <div className="rdimgw">
+                <BigImage
+                  path={
+                    showingRef ? refPath : (zoomItem.resultImagePath ?? zoomItem.resultThumbPath)
+                  }
+                  caption={
+                    showingRef ? `REF · ${zoomItem.refName}` : `GEN · ${zoomItem.promptCode}`
+                  }
+                />
+                {showingRef && <span className="refbadge">参考图</span>}
               </div>
-              <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
-                提示词原文
+              <div className="rdside">
+                <div
+                  className="fx ac gap8"
+                  style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}
+                >
+                  <span className="pid">{zoomItem.promptCode}</span>
+                  <span className="fs12 fw5 nowrap ohide f1">{zoomItem.groupName}</span>
+                  <button type="button" className="icb" onClick={() => setZoom(null)}>
+                    <X className="ic12" />
+                  </button>
+                </div>
+                <div className="f1" style={{ overflow: "auto", padding: "12px 14px" }}>
+                  <div className="fx ac gap6 wrap">
+                    <span className="chip">{zoomItem.refName}</span>
+                    {zoomItem.keyAlias && <span className="chip">{zoomItem.keyAlias}</span>}
+                  </div>
+                  {refPath && (
+                    <>
+                      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+                        参考图对比
+                      </div>
+                      <button
+                        type="button"
+                        className={cn("refcmp mt6", showingRef && "on")}
+                        title="点击切换对比 · 或在大图上按住空格临时查看"
+                        onClick={() => setCompareRef((v) => !v)}
+                      >
+                        <span className="ph refcmpimg" style={bg(zoomItem.refThumbPath)} />
+                        <span className="fs11 t2 f1">
+                          {showingRef ? "正在看参考图 · 点击回到生成图" : "点击对比参考图"}
+                        </span>
+                        <span className="kbd">空格</span>
+                      </button>
+                    </>
+                  )}
+                  <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+                    提示词原文
+                  </div>
+                  <div className="ptext mt6">{zoomItem.promptText}</div>
+                </div>
+                <div className="rdbar">
+                  <button
+                    type="button"
+                    className="icb"
+                    onClick={() => setZoom((z) => (z === null ? null : Math.max(0, z - 1)))}
+                  >
+                    ‹
+                  </button>
+                  <span className="mono fs11 t3 nowrap">
+                    {zoom !== null ? zoom + 1 : 0} / {displayed.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="icb"
+                    onClick={() =>
+                      setZoom((z) => (z === null ? null : Math.min(displayed.length - 1, z + 1)))
+                    }
+                  >
+                    ›
+                  </button>
+                  <div className="f1" />
+                  <button type="button" className="btn sm gho" onClick={() => openRetry(zoomItem)}>
+                    重试 R
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm gho dng"
+                    onClick={() => reject([zoomItem.id])}
+                  >
+                    不通过 ⌫
+                  </button>
+                  <button
+                    type="button"
+                    className="btn pri sm"
+                    onClick={() => accept([zoomItem.id])}
+                  >
+                    通过 ⏎
+                  </button>
+                </div>
               </div>
-              <div className="ptext mt6">{zoomItem.promptText}</div>
             </div>
-            <div className="rdbar">
-              <button
-                type="button"
-                className="icb"
-                onClick={() => setZoom((z) => (z === null ? null : Math.max(0, z - 1)))}
-              >
-                ‹
-              </button>
-              <span className="mono fs11 t3 nowrap">
-                {zoom !== null ? zoom + 1 : 0} / {items.length}
-              </span>
-              <button
-                type="button"
-                className="icb"
-                onClick={() =>
-                  setZoom((z) => (z === null ? null : Math.min(items.length - 1, z + 1)))
-                }
-              >
-                ›
-              </button>
-              <div className="f1" />
-              <button type="button" className="btn sm gho" onClick={() => openRetry(zoomItem)}>
-                重试 R
-              </button>
-              <button
-                type="button"
-                className="btn sm gho dng"
-                onClick={() => reject([zoomItem.id])}
-              >
-                不通过 ⌫
-              </button>
-              <button type="button" className="btn pri sm" onClick={() => accept([zoomItem.id])}>
-                通过 ⏎
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          );
+        })()}
 
       {showBatchPicker && (
         <div className="ovl" onClick={() => setShowBatchPicker(false)}>

@@ -26,6 +26,9 @@ pub struct ReviewItemView {
     pub result_image_path: Option<String>,
     pub result_thumb_path: Option<String>,
     pub prompt_text: String,
+    /// 参考图缩略图/原图（E08 大图对比）。
+    pub ref_thumb_path: Option<String>,
+    pub ref_image_path: Option<String>,
 }
 
 /// 验收结果。
@@ -39,7 +42,8 @@ pub struct AcceptResult {
 
 const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref_name,
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
-        k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text
+        k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
+        r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id

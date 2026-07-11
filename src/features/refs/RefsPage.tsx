@@ -1,4 +1,5 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import {
@@ -286,7 +287,7 @@ export function RefsPage() {
                       className={cn("rcard", selectMode && sel.has(r.id) && "sel")}
                       onClick={(e) => onCardClick(idx, r.id, e.shiftKey)}
                     >
-                      <div className="ph rcimg" style={bg(r.thumbPath)} />
+                      <NatThumb path={r.thumbPath} className="rcimg rcnat" />
                       <div className="rmeta">
                         <span className="mono fs11 fw5 nowrap ohide f1">{r.name}</span>
                       </div>

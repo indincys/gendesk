@@ -1,4 +1,5 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type GroupView, type WorkView, commands, unwrap } from "@/lib/ipc";
@@ -276,7 +277,7 @@ export function WorksPage() {
                 className={cn("wcard", selectMode && sel.has(w.id) && "sel")}
                 onClick={(e) => onCardClick(idx, w.id, e.shiftKey)}
               >
-                <div className="ph wcimg" style={bg(w.thumbPath)} />
+                <NatThumb path={w.thumbPath} className="wcimg wcnat" />
                 <div className="rmeta">
                   <span className="pid">{w.promptCode}</span>
                   <span className="fs10 t3 nowrap ohide f1">

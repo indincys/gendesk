@@ -32,7 +32,8 @@ export function TasksPage() {
   const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
 
   const [batches, setBatches] = useState<BatchView[]>([]);
-  const [filter, setFilter] = useState("all");
+  // 任务7：默认展示「待处理」而非「全部」。
+  const [filter, setFilter] = useState("pending");
   const [showBatchPicker, setShowBatchPicker] = useState(false);
   const [interrupted, setInterrupted] = useState(0);
   const [intDismissed, setIntDismissed] = useState(false);

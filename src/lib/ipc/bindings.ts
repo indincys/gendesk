@@ -195,6 +195,14 @@ async importRefImages(paths: string[], groupId: number | null) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scan_ref_imports", { paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 列出全部未删除参考图（供参考图库/生成页选择）。
  */
@@ -212,6 +220,17 @@ async listRefImages() : Promise<Result<RefImageView[], AppError>> {
 async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_ref_image_group", { id, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量改分组（E30b）。gid=None 为未分组。
+ */
+async setRefImagesGroup(ids: number[], groupId: number | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_ref_images_group", { ids, groupId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -242,6 +261,17 @@ async replaceRefImageFile(id: number, path: string) : Promise<Result<null, AppEr
 async trashRefImage(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("trash_ref_image", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量删除参考图 → 进废纸篓（E30b）。
+ */
+async trashRefImages(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_ref_images", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -990,6 +1020,14 @@ export type RefMappingInput = { refImageId: number; promptGroupId: number }
  * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
  */
 export type RefMappingInput2 = { refImageId: number; promptGroupId: number }
+/**
+ * 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
+ */
+export type RefScanItem = { path: string; name: string; duplicate: boolean; 
+/**
+ * 与之重复的已有图名（库内）或本次靠前的文件名。
+ */
+dupOf: string | null }
 /**
  * 待验收项视图。
  */

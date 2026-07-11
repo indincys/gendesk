@@ -51,11 +51,14 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::api_keys::test_api_key_saved,
             // refs 域
             commands::refs::import_ref_images,
+            commands::refs::scan_ref_imports,
             commands::refs::list_ref_images,
             commands::refs::set_ref_image_group,
+            commands::refs::set_ref_images_group,
             commands::refs::get_ref_image,
             commands::refs::replace_ref_image_file,
             commands::refs::trash_ref_image,
+            commands::refs::trash_ref_images,
             // prompts 域
             commands::prompts::list_prompt_groups,
             commands::prompts::create_prompt_group,

@@ -5,13 +5,14 @@ import {
   type GroupView,
   type RefImageDetail,
   type RefImageView,
+  type RefScanItem,
   commands,
   subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Upload } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { CheckSquare, FolderInput, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function RefsPage() {
@@ -23,6 +24,13 @@ export function RefsPage() {
   const [pendingPaths, setPendingPaths] = useState<string[] | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [importing, setImporting] = useState(false);
+  // E30b：导入去重扫描结果（含重复项时弹窗），与多选批量操作态。
+  const [scan, setScan] = useState<RefScanItem[] | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const [batchPick, setBatchPick] = useState(false);
+  const [confirmBatchDel, setConfirmBatchDel] = useState(false);
+  const lastClicked = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -36,30 +44,58 @@ export function RefsPage() {
     void load();
   }, [load]);
 
-  // 第一步：选文件；有文件则弹出选组弹窗（E30a）。
+  // E30b：导入前先按内容 hash 扫描重复；有重复弹窗（默认跳过），否则直接进选组。
+  const beginImport = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    const items = await unwrap(commands.scanRefImports(paths)).catch((e) => {
+      toast.error(String(e));
+      return null;
+    });
+    if (!items) return;
+    if (items.some((i) => i.duplicate)) {
+      setScan(items);
+    } else {
+      setNewGroupName("");
+      setPendingPaths(paths);
+    }
+  }, []);
+
+  // 第一步：选文件 → 去重扫描（E30a + E30b）。
   const importRefs = async () => {
     const paths = await unwrap(commands.pickImageFiles()).catch(() => [] as string[]);
-    if (paths.length === 0) return;
-    setNewGroupName("");
-    setPendingPaths(paths);
+    await beginImport(paths);
   };
 
-  // E14：拖拽图片进参考图库 → 走同一选组弹窗。
+  // E14：拖拽图片进参考图库 → 同一去重 + 选组流程。
   useEffect(() => {
     let un = () => {};
     void subscribeFileDrop((paths) => {
       const images = paths.filter((p) => /\.(png|jpe?g|webp|bmp)$/i.test(p));
-      if (images.length > 0) {
-        setNewGroupName("");
-        setPendingPaths(images);
-      } else if (paths.length > 0) {
-        toast.error("参考图库仅支持拖入图片文件");
-      }
+      if (images.length > 0) void beginImport(images);
+      else if (paths.length > 0) toast.error("参考图库仅支持拖入图片文件");
     }).then((f) => {
       un = f;
     });
     return () => un();
-  }, []);
+  }, [beginImport]);
+
+  // 去重弹窗：跳过重复继续（默认），或全部仍导入。
+  const proceedSkipDup = () => {
+    const keep = (scan ?? []).filter((i) => !i.duplicate).map((i) => i.path);
+    setScan(null);
+    if (keep.length === 0) {
+      toast("全部为重复项，已跳过");
+      return;
+    }
+    setNewGroupName("");
+    setPendingPaths(keep);
+  };
+  const proceedImportAll = () => {
+    const all = (scan ?? []).map((i) => i.path);
+    setScan(null);
+    setNewGroupName("");
+    setPendingPaths(all);
+  };
 
   // 第二步：带选定分组导入。gid=null 为未分组。
   const doImport = async (gid: number | null) => {
@@ -125,15 +161,104 @@ export function RefsPage() {
     { name: "未分组", gid: null, items: byGroup(null) },
   ].filter((s) => s.items.length > 0);
 
+  // E30b：多选批量操作。扁平序（分组内顺序）供 shift 范围选择。
+  const flat = sections.flatMap((s) => s.items);
+  const exitSelect = () => {
+    setSelectMode(false);
+    setSel(new Set());
+    lastClicked.current = null;
+  };
+  const onCardClick = (globalIdx: number, id: number, shift: boolean) => {
+    if (!selectMode) {
+      void openDetail(id);
+      return;
+    }
+    if (shift && lastClicked.current !== null) {
+      const a = Math.min(lastClicked.current, globalIdx);
+      const b = Math.max(lastClicked.current, globalIdx);
+      setSel((s) => {
+        const n = new Set(s);
+        for (let i = a; i <= b; i++) {
+          const it = flat[i];
+          if (it) n.add(it.id);
+        }
+        return n;
+      });
+    } else {
+      setSel((s) => {
+        const n = new Set(s);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
+      lastClicked.current = globalIdx;
+    }
+  };
+  const batchSetGroup = async (gid: number | null) => {
+    const ids = [...sel];
+    await unwrap(commands.setRefImagesGroup(ids, gid)).catch((e) => toast.error(String(e)));
+    toast.success(`已移动 ${ids.length} 张`);
+    setBatchPick(false);
+    exitSelect();
+    void load();
+  };
+  const batchDelete = async () => {
+    const ids = [...sel];
+    await unwrap(commands.trashRefImages(ids)).catch((e) => toast.error(String(e)));
+    toast(`已移入废纸篓 ${ids.length} 张`);
+    setConfirmBatchDel(false);
+    exitSelect();
+    void load();
+  };
+
   return (
     <PageScaffold title="参考图库" caption="与提示词库共用同一套分组体系">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
         <span className="cnt">{refs.length} 张</span>
         <div className="f1" />
-        <button type="button" className="btn sm" onClick={importRefs}>
-          <Upload className="ic12" />
-          导入参考图
-        </button>
+        {selectMode ? (
+          <>
+            <span className="fs12 t2 nowrap">已选 {sel.size}</span>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={() => setBatchPick(true)}
+            >
+              <FolderInput className="ic12" />
+              改分组
+            </button>
+            <button
+              type="button"
+              className="btn sm gho dng"
+              disabled={sel.size === 0}
+              onClick={() => setConfirmBatchDel(true)}
+            >
+              删除
+            </button>
+            <button type="button" className="btn sm gho" onClick={exitSelect}>
+              退出多选
+            </button>
+          </>
+        ) : (
+          <>
+            {refs.length > 0 && (
+              <button
+                type="button"
+                className="btn sm gho"
+                onClick={() => setSelectMode(true)}
+                title="多选参考图做批量操作"
+              >
+                <CheckSquare className="ic12" />
+                多选
+              </button>
+            )}
+            <button type="button" className="btn sm" onClick={importRefs}>
+              <Upload className="ic12" />
+              导入参考图
+            </button>
+          </>
+        )}
       </div>
 
       {refs.length === 0 ? (
@@ -153,14 +278,21 @@ export function RefsPage() {
                 <span className="fs11 t3">{s.items.length}</span>
               </div>
               <div className="fgrid">
-                {s.items.map((r) => (
-                  <div key={r.id} className="rcard" onClick={() => openDetail(r.id)}>
-                    <div className="ph rcimg" style={bg(r.thumbPath)} />
-                    <div className="rmeta">
-                      <span className="mono fs11 fw5 nowrap ohide f1">{r.name}</span>
+                {s.items.map((r) => {
+                  const idx = flat.findIndex((f) => f.id === r.id);
+                  return (
+                    <div
+                      key={r.id}
+                      className={cn("rcard", selectMode && sel.has(r.id) && "sel")}
+                      onClick={(e) => onCardClick(idx, r.id, e.shiftKey)}
+                    >
+                      <div className="ph rcimg" style={bg(r.thumbPath)} />
+                      <div className="rmeta">
+                        <span className="mono fs11 fw5 nowrap ohide f1">{r.name}</span>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -284,6 +416,84 @@ export function RefsPage() {
           danger
           onConfirm={() => del(confirmDel)}
           onClose={() => setConfirmDel(null)}
+        />
+      )}
+
+      {scan && (
+        <Modal
+          title="发现重复图片"
+          width="w420"
+          onClose={() => setScan(null)}
+          footer={
+            <>
+              <div className="f1" />
+              <button type="button" className="btn sm gho" onClick={proceedImportAll}>
+                全部仍导入
+              </button>
+              <button type="button" className="btn pri sm" onClick={proceedSkipDup}>
+                跳过重复并继续
+              </button>
+            </>
+          }
+        >
+          <div className="fs12 t2" style={{ lineHeight: 1.7 }}>
+            {scan.filter((i) => i.duplicate).length} / {scan.length} 张与库内已有图片内容相同。
+            默认跳过重复项，仅导入其余 {scan.filter((i) => !i.duplicate).length} 张。
+          </div>
+          <div
+            className="mt10 mlist"
+            style={{
+              maxHeight: 260,
+              overflow: "auto",
+              border: "1px solid var(--line)",
+              borderRadius: 9,
+            }}
+          >
+            {scan.map((i) => (
+              <div key={i.path} className="fx ac gap9" style={{ padding: "8px 11px" }}>
+                <span className="mono fs11 f1 nowrap ohide">{i.name}</span>
+                {i.duplicate ? (
+                  <span className="bdg b-amber">重复{i.dupOf ? ` · 同「${i.dupOf}」` : ""}</span>
+                ) : (
+                  <span className="bdg b-gray">新图</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {batchPick && (
+        <Modal
+          title={`将 ${sel.size} 张移动到分组`}
+          width="w420"
+          onClose={() => setBatchPick(false)}
+        >
+          <div className="mlist" style={{ maxHeight: 320, overflow: "auto" }}>
+            <div className="pickrow" onClick={() => void batchSetGroup(null)}>
+              <span className="ckb" />
+              <span className="fw5 f1 nowrap ohide">未分组</span>
+            </div>
+            {groups.map((g) => (
+              <div key={g.id} className="pickrow" onClick={() => void batchSetGroup(g.id)}>
+                <span className="ckb" />
+                <i className="gdot" style={{ background: "var(--acc)" }} />
+                <span className="fw5 f1 nowrap ohide">{g.name}</span>
+                <span className="fs11 t3">{g.prefix}</span>
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {confirmBatchDel && (
+        <ConfirmModal
+          title={`删除 ${sel.size} 张参考图`}
+          desc="删除后进入废纸篓，清理后不可恢复。历史任务与作品的关联仍保留快照。"
+          confirmLabel="删除"
+          danger
+          onConfirm={batchDelete}
+          onClose={() => setConfirmBatchDel(false)}
         />
       )}
     </PageScaffold>

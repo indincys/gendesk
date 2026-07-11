@@ -97,6 +97,8 @@ mod tests {
                 width: 1024,
                 height: 768,
                 file_size: 12345,
+                content_hash: None,
+                upload_path: None,
             },
         )
         .await
@@ -113,6 +115,41 @@ mod tests {
         assert_eq!(rows[0].group_id, Some(gid));
     }
 
+    // E30b：内容 hash 记录可查（去重比对源）+ 批量改分组。
+    #[tokio::test]
+    async fn refs_hash_names_and_batch_set_group() {
+        let (pool, _d) = test_pool().await;
+        let mk = |name: &str, hash: &str| refs::NewRefImage {
+            name: name.into(),
+            group_id: None,
+            file_path: format!("/x/{name}.jpg"),
+            thumb_path: format!("/x/{name}_t.jpg"),
+            width: 10,
+            height: 10,
+            file_size: 1,
+            content_hash: Some(hash.into()),
+            upload_path: None,
+        };
+        let a = refs::insert(&pool, &mk("a", "H1")).await.unwrap();
+        let b = refs::insert(&pool, &mk("b", "H2")).await.unwrap();
+
+        let hn = refs::active_hash_names(&pool).await.unwrap();
+        assert_eq!(hn.len(), 2);
+        assert!(hn.iter().any(|(h, n)| h == "H1" && n == "a"));
+
+        let mut tx = pool.begin().await.unwrap();
+        let gid = prompts::create_group(&mut tx, "组", "GG", "", false)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let n = refs::set_group_many(&pool, &[a, b], Some(gid))
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        let rows = refs::list_active(&pool).await.unwrap();
+        assert!(rows.iter().all(|r| r.group_id == Some(gid)));
+    }
+
     #[tokio::test]
     async fn works_and_trash_and_prompt_trash() {
         let (pool, _d) = test_pool().await;
@@ -127,6 +164,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 file_size: 1,
+                content_hash: None,
+                upload_path: None,
             },
         )
         .await

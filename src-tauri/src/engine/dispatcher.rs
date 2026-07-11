@@ -621,13 +621,16 @@ impl Scheduler {
     }
 
     async fn ref_path(&self, ref_image_id: i64) -> Option<std::path::PathBuf> {
-        sqlx::query_scalar::<_, String>("SELECT file_path FROM ref_images WHERE id = ?1")
-            .bind(ref_image_id)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
-            .map(std::path::PathBuf::from)
+        // E41：优先用压缩上传副本（upload_path），无则用原图（file_path）。
+        sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(upload_path, file_path) FROM ref_images WHERE id = ?1",
+        )
+        .bind(ref_image_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(std::path::PathBuf::from)
     }
 
     /// 批次生成参数快照（E16 / D1）。查不到或解析失败退化为「全部空」（不传参）。

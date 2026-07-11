@@ -285,6 +285,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 file_size: 1,
+                content_hash: None,
+                upload_path: None,
             },
         )
         .await

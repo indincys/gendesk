@@ -27,6 +27,7 @@ export type {
   RefImageDetail,
   RefImageView,
   RefMappingInput,
+  RefScanItem,
   Result,
   ReviewItemView,
   Settings,

@@ -11,6 +11,7 @@ pub mod prompts;
 pub mod refs;
 pub mod review;
 pub mod settings;
+pub mod stats;
 pub mod tasks;
 pub mod trash;
 pub mod updater;

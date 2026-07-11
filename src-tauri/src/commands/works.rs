@@ -119,6 +119,103 @@ pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     Ok(())
 }
 
+/// 批量收藏（E15）。favorite=true 收藏，false 取消。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_works_favorite(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    favorite: bool,
+) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("UPDATE accepted_works SET favorite = ? WHERE id IN ({ph})");
+    let mut q = sqlx::query(&sql).bind(favorite as i64);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    q.execute(&state.db).await?;
+    Ok(())
+}
+
+/// 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_works(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
+    for id in ids {
+        let Some(row) = work_repo::delete(&state.db, id).await? else {
+            continue;
+        };
+        let mut tx = state.db.begin().await?;
+        trash_repo::insert(
+            &mut tx,
+            &trash_repo::NewTrashItem {
+                entity_type: "work".into(),
+                ref_id: Some(row.id),
+                thumb_path: Some(row.thumb_path.clone()),
+                prompt_text: Some(row.prompt_text.clone()),
+                code: None,
+                title: None,
+                source_label: "批量删除".into(),
+                file_paths: vec![row.thumb_path],
+            },
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+/// 批量导出作品到指定文件夹（E15）：复制各作品输出文件（image_path）到目标目录。
+/// 返回成功导出数；源文件缺失的项跳过（不计入）。
+#[tauri::command]
+#[specta::specta]
+pub async fn export_works(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    dest_dir: String,
+) -> AppResult<i64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let dest = std::path::PathBuf::from(&dest_dir);
+    std::fs::create_dir_all(&dest).map_err(|e| AppError::Io(e.to_string()))?;
+
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT image_path FROM accepted_works WHERE id IN ({ph})");
+    let mut q = sqlx::query_scalar::<_, String>(&sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    let paths = q.fetch_all(&state.db).await?;
+
+    let mut exported = 0i64;
+    for p in paths {
+        let src = std::path::PathBuf::from(&p);
+        if !src.is_file() {
+            continue;
+        }
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        // 目标同名冲突时追加序号，避免覆盖。
+        let mut out = dest.join(name);
+        let mut n = 1;
+        while out.exists() {
+            let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("work");
+            let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
+            out = dest.join(format!("{stem}_{n}.{ext}"));
+            n += 1;
+        }
+        if std::fs::copy(&src, &out).is_ok() {
+            exported += 1;
+        }
+    }
+    Ok(exported)
+}
+
 /// 文件是否存在（E21 作品源文件缺失懒检测）。
 #[tauri::command]
 #[specta::specta]

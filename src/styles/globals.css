@@ -1367,6 +1367,10 @@ a:hover {
 .wcard:hover .wcimg {
   box-shadow: var(--sh2);
 }
+/* E15 作品多选：选中态 */
+.wcard.sel .wcimg {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
+}
 .star {
   background: none;
   border: none;
@@ -1498,6 +1502,28 @@ a:hover {
   color: #fff;
   background: var(--acc);
   border-color: var(--acc);
+}
+/* E25 生成页生产总览条 */
+.ovbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 14px;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--sub);
+  font-size: 11.5px;
+  color: var(--t2);
+}
+.ovbar b {
+  color: var(--t1);
+  font-weight: 600;
+}
+.ovsep {
+  width: 1px;
+  height: 12px;
+  background: var(--line2);
 }
 /* E37 导入格式说明 / 行号级报错 */
 .impfmt {

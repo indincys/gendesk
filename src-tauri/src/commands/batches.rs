@@ -38,6 +38,8 @@ pub struct BatchView {
     pub note: Option<String>,
     /// 首张产出缩略图（E10 批次切换器预览）。
     pub first_thumb_path: Option<String>,
+    /// 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
+    pub request_count: i64,
 }
 
 /// 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
@@ -80,6 +82,7 @@ pub async fn create_batch(
         params_json: input.params_json.clone(),
         note: None,
         first_thumb_path: None,
+        request_count: 0,
     })
 }
 
@@ -167,6 +170,7 @@ pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView
     for b in rows {
         let counts = repo::counts_for_batch(&state.db, b.id).await?;
         let first_thumb_path = repo::batch_first_thumb(&state.db, b.id).await?;
+        let request_count = repo::request_count_for_batch(&state.db, b.id).await?;
         out.push(BatchView {
             id: b.id,
             created_at: b.created_at,
@@ -175,9 +179,27 @@ pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView
             params_json: b.params_json,
             note: b.note,
             first_thumb_path,
+            request_count,
         });
     }
     Ok(out)
+}
+
+/// 在系统文件管理器打开某批次的输出目录（E15）：`outputs/{batch_id}`。
+/// 目录不存在（尚无通过作品）时先创建，避免打开失败。
+#[tauri::command]
+#[specta::specta]
+pub async fn open_batch_output_dir(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    batch_id: i64,
+) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = state.dirs.outputs().join(batch_id.to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| AppError::Io(e.to_string()))
 }
 
 /// 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。

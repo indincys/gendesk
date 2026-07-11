@@ -2,6 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import {
+  type GroupStat,
   type GroupView,
   type ImportPreview,
   type PromptView,
@@ -27,6 +28,8 @@ export function PromptsPage() {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // E25：各分组产出统计（合格率）。
+  const [stats, setStats] = useState<Record<number, GroupStat>>({});
 
   // E36 多选态
   const [selectMode, setSelectMode] = useState(false);
@@ -47,6 +50,8 @@ export function PromptsPage() {
       const map: Record<number, PromptView[]> = {};
       for (const g of gs) map[g.id] = await unwrap(commands.listPrompts(g.id));
       setByGroup(map);
+      const st = await unwrap(commands.listGroupStats()).catch(() => []);
+      setStats(Object.fromEntries(st.map((s) => [s.groupId, s])));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -355,6 +360,19 @@ export function PromptsPage() {
                     </span>
                   ))}
                   <div className="f1" />
+                  {(() => {
+                    const s = stats[g.id];
+                    if (!s || s.combos === 0) return null;
+                    const rate = Math.round((s.passed / s.combos) * 100);
+                    return (
+                      <span
+                        className="bdg b-green"
+                        title={`合格率按「组合(参考图×提示词)至少一张通过」计：${s.passed}/${s.combos} 组合 · 累计 ${s.works} 张`}
+                      >
+                        合格率 {rate}%
+                      </span>
+                    );
+                  })()}
                   <span className="fs11 t3 nowrap">{g.count}</span>
                   {!selectMode && (
                     <GroupMenu
@@ -637,6 +655,8 @@ function PromptDetail({
   const [draft, setDraft] = useState("");
   const [confirmDel, setConfirmDel] = useState(false);
   const [moving, setMoving] = useState(false);
+  // E25：该提示词历史产出 / 合格率。
+  const [stat, setStat] = useState<{ works: number; combos: number; passed: number } | null>(null);
 
   useEffect(() => {
     void unwrap(commands.getPrompt(id))
@@ -644,6 +664,9 @@ function PromptDetail({
         setP(r);
         setDraft(r.text);
       })
+      .catch(() => {});
+    void unwrap(commands.promptStats(id))
+      .then(setStat)
       .catch(() => {});
   }, [id]);
 
@@ -730,6 +753,19 @@ function PromptDetail({
         <textarea className="ta" value={draft} onChange={(e) => setDraft(e.target.value)} />
       ) : (
         <div className="ptext">{p.text}</div>
+      )}
+      {stat && (
+        <div className="fx ac gap8 mt10">
+          <span className="chip">历史产出 {stat.works} 张</span>
+          {stat.combos > 0 && (
+            <span
+              className="bdg b-green"
+              title={`合格率按「组合(参考图×提示词)至少一张通过」计：${stat.passed}/${stat.combos} 组合`}
+            >
+              合格率 {Math.round((stat.passed / stat.combos) * 100)}%
+            </span>
+          )}
+        </div>
       )}
       {confirmDel && (
         <ConfirmModal

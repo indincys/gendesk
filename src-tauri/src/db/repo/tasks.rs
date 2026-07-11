@@ -371,6 +371,17 @@ pub async fn counts_for_batch(
     Ok(c)
 }
 
+/// 批次实际请求次数（含重试）：该批次全部任务的 task_attempts 计数（E15）。
+pub async fn request_count_for_batch(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM task_attempts a
+         JOIN tasks t ON t.id = a.task_id WHERE t.batch_id = ?1",
+    )
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// 中断恢复：run/retry → fail(Interrupted)。返回受影响任务 id。
 pub async fn recover_interrupted(pool: &SqlitePool) -> Result<Vec<i64>, sqlx::Error> {
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM tasks WHERE status IN ('run','retry')")

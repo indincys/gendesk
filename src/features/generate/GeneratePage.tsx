@@ -6,6 +6,7 @@ import {
   type ApiKeyView,
   type GroupView,
   type ImportPreview,
+  type ProductionOverview,
   type PromptView,
   type RefImageView,
   commands,
@@ -56,6 +57,8 @@ export function GeneratePage() {
   const [starting, setStarting] = useState(false);
   // E14：生成页 txt 导入改走预览确认（取消不落库、不产生临时分组）。
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  // E25：今日生产总览。
+  const [overview, setOverview] = useState<ProductionOverview | null>(null);
   // 已展开查看提示词原文的分组 + 其提示词缓存（按需加载）。
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [promptsByGroup, setPromptsByGroup] = useState<Record<number, PromptView[]>>({});
@@ -85,6 +88,7 @@ export function GeneratePage() {
       setGroups(await unwrap(commands.listPromptGroups()));
       setRefs(await unwrap(commands.listRefImages()));
       setKeys(await unwrap(commands.listApiKeys()));
+      setOverview(await unwrap(commands.productionOverview()).catch(() => null));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -228,6 +232,26 @@ export function GeneratePage() {
     <div className="col f1 ohide">
       <div className="phd">
         <span className="ptt">图片生成</span>
+        {overview && (
+          <div className="ovbar">
+            <span>
+              今日生成 <b>{overview.generatedToday}</b> 张
+            </span>
+            <span className="ovsep" />
+            <span>
+              通过率{" "}
+              <b>
+                {overview.generatedToday > 0
+                  ? `${Math.round((overview.acceptedToday / overview.generatedToday) * 100)}%`
+                  : "—"}
+              </b>
+            </span>
+            <span className="ovsep" />
+            <span>
+              今日请求 <b>{overview.requestsToday}</b> 次
+            </span>
+          </div>
+        )}
         <div className="f1" />
         <span className="pcap">参考图 × 提示词组 → 任务队列 → 验收 → 输出</span>
       </div>

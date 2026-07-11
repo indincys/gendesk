@@ -86,6 +86,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::rename_batch,
             commands::batches::pause_queue,
             commands::batches::resume_queue,
+            commands::batches::open_batch_output_dir,
             commands::tasks::list_tasks,
             commands::tasks::get_task,
             commands::tasks::retry_task,
@@ -105,6 +106,13 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::trash_work,
             commands::works::file_exists,
             commands::works::reexport_work,
+            commands::works::set_works_favorite,
+            commands::works::trash_works,
+            commands::works::export_works,
+            // stats 域（E25）
+            commands::stats::list_group_stats,
+            commands::stats::prompt_stats,
+            commands::stats::production_overview,
             // trash 域
             commands::trash::list_trash,
             commands::trash::purge_trash_items,

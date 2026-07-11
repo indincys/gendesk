@@ -5,8 +5,17 @@ import { type GroupView, type WorkView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
-import { Copy, FolderOpen, ImageIcon, RefreshCw, Star, Wand2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import {
+  CheckSquare,
+  Copy,
+  Download,
+  FolderOpen,
+  ImageIcon,
+  RefreshCw,
+  Star,
+  Wand2,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export function WorksPage() {
@@ -19,6 +28,11 @@ export function WorksPage() {
   const [confirmDel, setConfirmDel] = useState<WorkView | null>(null);
   // E21：源输出文件是否缺失（懒检测：打开详情时校验）。
   const [sourceMissing, setSourceMissing] = useState(false);
+  // E15：多选批量操作态。
+  const [selectMode, setSelectMode] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const [confirmBatchDel, setConfirmBatchDel] = useState(false);
+  const lastClicked = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -110,27 +124,142 @@ export function WorksPage() {
     go("generate");
   };
 
+  // ── E15 批量操作 ──────────────────────────────────────────────
+  const exitSelect = () => {
+    setSelectMode(false);
+    setSel(new Set());
+    lastClicked.current = null;
+  };
+  const onCardClick = (idx: number, id: number, shift: boolean) => {
+    if (!selectMode) {
+      setDetail(works[idx] ?? null);
+      return;
+    }
+    if (shift && lastClicked.current !== null) {
+      const a = Math.min(lastClicked.current, idx);
+      const b = Math.max(lastClicked.current, idx);
+      setSel((s) => {
+        const n = new Set(s);
+        for (let i = a; i <= b; i++) {
+          const it = works[i];
+          if (it) n.add(it.id);
+        }
+        return n;
+      });
+    } else {
+      setSel((s) => {
+        const n = new Set(s);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
+      lastClicked.current = idx;
+    }
+  };
+  const batchFavorite = async () => {
+    const ids = [...sel];
+    await unwrap(commands.setWorksFavorite(ids, true)).catch((e) => toast.error(String(e)));
+    toast.success(`已收藏 ${ids.length} 张`);
+    exitSelect();
+    void load();
+  };
+  const batchExport = async () => {
+    const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
+    if (!dir) return;
+    const ids = [...sel];
+    const n = await unwrap(commands.exportWorks(ids, dir)).catch((e) => {
+      toast.error(String(e));
+      return 0;
+    });
+    if (n < ids.length) toast(`已导出 ${n}/${ids.length} 张（部分源文件缺失已跳过）`);
+    else toast.success(`已导出 ${n} 张到所选文件夹`);
+    exitSelect();
+  };
+  const batchDelete = async () => {
+    const ids = [...sel];
+    await unwrap(commands.trashWorks(ids)).catch((e) => toast.error(String(e)));
+    toast(`已移入废纸篓 ${ids.length} 张`);
+    setConfirmBatchDel(false);
+    exitSelect();
+    void load();
+  };
+
   return (
     <PageScaffold title="作品库" caption={`${works.length} 张已通过`}>
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
-        <div className="f1" />
-        <div className="seg">
-          <span className={cn("sgi", filter === "all" && "on")} onClick={() => setFilter("all")}>
-            全部
-          </span>
-          <span className={cn("sgi", filter === "fav" && "on")} onClick={() => setFilter("fav")}>
-            收藏
-          </span>
-          {groups.map((g) => (
-            <span
-              key={g.id}
-              className={cn("sgi", filter === g.id && "on")}
-              onClick={() => setFilter(g.id)}
+        {selectMode ? (
+          <>
+            <span className="fs12 t2 nowrap">已选 {sel.size}</span>
+            <div className="f1" />
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={batchExport}
             >
-              {g.name}
-            </span>
-          ))}
-        </div>
+              <Download className="ic12" />
+              导出到文件夹
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={batchFavorite}
+            >
+              <Star className="ic12" />
+              收藏
+            </button>
+            <button
+              type="button"
+              className="btn sm gho dng"
+              disabled={sel.size === 0}
+              onClick={() => setConfirmBatchDel(true)}
+            >
+              删除
+            </button>
+            <button type="button" className="btn sm gho" onClick={exitSelect}>
+              退出多选
+            </button>
+          </>
+        ) : (
+          <>
+            {works.length > 0 && (
+              <button
+                type="button"
+                className="btn sm gho"
+                onClick={() => setSelectMode(true)}
+                title="多选作品做批量操作"
+              >
+                <CheckSquare className="ic12" />
+                多选
+              </button>
+            )}
+            <div className="f1" />
+            <div className="seg">
+              <span
+                className={cn("sgi", filter === "all" && "on")}
+                onClick={() => setFilter("all")}
+              >
+                全部
+              </span>
+              <span
+                className={cn("sgi", filter === "fav" && "on")}
+                onClick={() => setFilter("fav")}
+              >
+                收藏
+              </span>
+              {groups.map((g) => (
+                <span
+                  key={g.id}
+                  className={cn("sgi", filter === g.id && "on")}
+                  onClick={() => setFilter(g.id)}
+                >
+                  {g.name}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {works.length === 0 ? (
@@ -141,8 +270,12 @@ export function WorksPage() {
       ) : (
         <div className="pbody">
           <div className="wgrid">
-            {works.map((w) => (
-              <div key={w.id} className="wcard" onClick={() => setDetail(w)}>
+            {works.map((w, idx) => (
+              <div
+                key={w.id}
+                className={cn("wcard", selectMode && sel.has(w.id) && "sel")}
+                onClick={(e) => onCardClick(idx, w.id, e.shiftKey)}
+              >
                 <div className="ph wcimg" style={bg(w.thumbPath)} />
                 <div className="rmeta">
                   <span className="pid">{w.promptCode}</span>
@@ -281,6 +414,17 @@ export function WorksPage() {
           danger
           onConfirm={() => del(confirmDel)}
           onClose={() => setConfirmDel(null)}
+        />
+      )}
+
+      {confirmBatchDel && (
+        <ConfirmModal
+          title={`删除 ${sel.size} 张作品`}
+          desc="删除后作品记录进入废纸篓，清理后不可恢复；已导出到本地文件夹的图片文件不会被删除。"
+          confirmLabel="删除"
+          danger
+          onConfirm={batchDelete}
+          onClose={() => setConfirmBatchDel(false)}
         />
       )}
     </PageScaffold>

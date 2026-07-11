@@ -533,6 +533,18 @@ async resumeQueue() : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * 在系统文件管理器打开某批次的输出目录（E15）：`outputs/{batch_id}`。
+ * 目录不存在（尚无通过作品）时先创建，避免打开失败。
+ */
+async openBatchOutputDir(batchId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_batch_output_dir", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 列出某批次任务，可按 5 视觉组筛选：all/pending/running/failed/review/done。
  */
 async listTasks(batchId: number, statusGroup: string | null, page: number | null) : Promise<Result<TaskView[], AppError>> {
@@ -702,6 +714,67 @@ async fileExists(path: string) : Promise<Result<boolean, AppError>> {
 async reexportWork(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reexport_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量收藏（E15）。favorite=true 收藏，false 取消。
+ */
+async setWorksFavorite(ids: number[], favorite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_works_favorite", { ids, favorite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
+ */
+async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_works", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量导出作品到指定文件夹（E15）：复制各作品输出文件（image_path）到目标目录。
+ * 返回成功导出数；源文件缺失的项跳过（不计入）。
+ */
+async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_works", { ids, destDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 各分组产出统计（E25）。按当前 prompts.group_id 归属（提示词移组后随之变化）。
+ */
+async listGroupStats() : Promise<Result<GroupStat[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_group_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async promptStats(promptId: number) : Promise<Result<PromptStat, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("prompt_stats", { promptId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async productionOverview() : Promise<Result<ProductionOverview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("production_overview") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -921,7 +994,11 @@ note: string | null;
 /**
  * 首张产出缩略图（E10 批次切换器预览）。
  */
-firstThumbPath: string | null }
+firstThumbPath: string | null; 
+/**
+ * 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
+ */
+requestCount: number }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
  * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
@@ -955,6 +1032,22 @@ source: string | null;
  * 关联任务 ID（若发生在任务上下文），用于全链路贯穿。
  */
 taskId: string | null }
+/**
+ * 单个分组的产出统计（E25 分组卡片合格率）。
+ */
+export type GroupStat = { groupId: number; 
+/**
+ * 已产出图的去重组合数（分母）。
+ */
+combos: number; 
+/**
+ * 通过图覆盖的去重组合数（分子）。
+ */
+passed: number; 
+/**
+ * 累计通过作品数。
+ */
+works: number }
 /**
  * 分组视图（生成页 / 提示词库列表）。
  */
@@ -1002,6 +1095,26 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
+/**
+ * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
+ */
+export type ProductionOverview = { 
+/**
+ * 今日成功产出的图片数（task_attempts.outcome='success'）。
+ */
+generatedToday: number; 
+/**
+ * 今日验收通过的作品数。
+ */
+acceptedToday: number; 
+/**
+ * 今日请求次数（含重试，全部 task_attempts）。
+ */
+requestsToday: number }
+/**
+ * 单条提示词的产出统计（E25 提示词详情）。
+ */
+export type PromptStat = { works: number; combos: number; passed: number }
 /**
  * 提示词视图（编号网格 / 详情）。
  */

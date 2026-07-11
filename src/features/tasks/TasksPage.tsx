@@ -7,7 +7,7 @@ import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
-import { ChevronDown, Repeat } from "lucide-react";
+import { ChevronDown, FolderOpen, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -596,9 +596,23 @@ export function TasksPage() {
                     )}
                     <span className="fs10 t3 nowrap">
                       {fmtBatchTime(b.createdAt)} · {b.status === "archived" ? "已归档" : "进行中"}{" "}
-                      · {b.taskCount} 任务 · {paramsLabel(b.paramsJson)}
+                      · {b.taskCount} 任务 · 请求 {b.requestCount} 次 · {paramsLabel(b.paramsJson)}
                     </span>
                   </div>
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    title="打开该批次的输出文件夹"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void unwrap(commands.openBatchOutputDir(b.id)).catch(() =>
+                        toast.error("打开输出文件夹失败"),
+                      );
+                    }}
+                  >
+                    <FolderOpen className="ic12" />
+                    输出
+                  </button>
                   <button
                     type="button"
                     className="btn sm gho"

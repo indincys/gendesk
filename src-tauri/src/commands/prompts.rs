@@ -172,9 +172,11 @@ pub struct GroupView {
     pub scene: String,
     pub is_temp: bool,
     pub count: i64,
+    /// 分组绑定的标签（E20 按标签筛选）。
+    pub tags: Vec<String>,
 }
 
-/// 列出全部提示词分组（含 active 提示词数）。
+/// 列出全部提示词分组（含 active 提示词数 + 标签）。
 #[tauri::command]
 #[specta::specta]
 pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<GroupView>> {
@@ -182,6 +184,7 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
     let mut out = Vec::with_capacity(groups.len());
     for g in groups {
         let count = repo::count_in_group(&state.db, g.id).await?;
+        let tags = repo::group_tags(&state.db, g.id).await?;
         out.push(GroupView {
             id: g.id,
             name: g.name,
@@ -189,6 +192,7 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
             scene: g.scene,
             is_temp: g.is_temp != 0,
             count,
+            tags,
         });
     }
     Ok(out)
@@ -224,7 +228,152 @@ pub async fn create_prompt_group(state: State<'_, AppState>, name: String) -> Ap
         scene: String::new(),
         is_temp: false,
         count: 0,
+        tags: Vec::new(),
     })
+}
+
+/// 重命名分组（E20，前缀/编号不变）。
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_prompt_group(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> AppResult<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput("分组名不能为空".into()));
+    }
+    let ok = repo::rename_group(&state.db, id, trimmed).await?;
+    if !ok {
+        return Err(AppError::InvalidInput("分组不存在".into()));
+    }
+    Ok(())
+}
+
+/// 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
+/// 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_prompt_group(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let group = repo::get_group(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("分组不存在".into()))?;
+    let prompts = repo::list_by_group(&state.db, id).await?;
+    let source_label = format!("删除分组「{}」", group.name);
+
+    let mut tx = state.db.begin().await?;
+    // 组内 active 提示词入废纸篓（保留编号快照供清理回收）。
+    for p in &prompts {
+        crate::db::repo::trash::insert(
+            &mut tx,
+            &crate::db::repo::trash::NewTrashItem {
+                entity_type: "prompt".into(),
+                ref_id: Some(p.id),
+                thumb_path: None,
+                prompt_text: None,
+                code: Some(p.code.clone()),
+                title: p.title.clone(),
+                source_label: source_label.clone(),
+                file_paths: Vec::new(),
+            },
+        )
+        .await?;
+    }
+    // 删除分组：级联删 prompts / batch_refs；ref_images.group_id 置空；作品快照保留。
+    repo::delete_group(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 合并分组（E20）：`fromId` 并入 `intoId`，编号前缀保留原值不重编。
+#[tauri::command]
+#[specta::specta]
+pub async fn merge_prompt_groups(
+    state: State<'_, AppState>,
+    from_id: i64,
+    into_id: i64,
+) -> AppResult<()> {
+    if from_id == into_id {
+        return Err(AppError::InvalidInput("不能合并到同一分组".into()));
+    }
+    // 两组均须存在。
+    repo::get_group(&state.db, from_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("源分组不存在".into()))?;
+    repo::get_group(&state.db, into_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("目标分组不存在".into()))?;
+
+    let mut tx = state.db.begin().await?;
+    repo::merge_into(&mut tx, from_id, into_id).await?;
+    repo::delete_group(&mut tx, from_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 批量移动提示词到指定分组（E20 单条 / E36 批量；编号前缀保留原值不重编）。
+#[tauri::command]
+#[specta::specta]
+pub async fn move_prompts_to_group(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    group_id: i64,
+) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    repo::get_group(&state.db, group_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("目标分组不存在".into()))?;
+    let mut tx = state.db.begin().await?;
+    repo::move_prompts(&mut tx, &ids, group_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 批量设置收藏（E36）。favorite=true 收藏，false 取消。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_prompts_favorite(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    favorite: bool,
+) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = state.db.begin().await?;
+    repo::set_favorite_many(&mut tx, &ids, favorite).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 批量删除提示词 → 入废纸篓（E36；编号在清理时回收）。
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_prompts(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
+    for id in ids {
+        if let Some((code, title, _gid)) = repo::set_trash(&state.db, id).await? {
+            let mut tx = state.db.begin().await?;
+            crate::db::repo::trash::insert(
+                &mut tx,
+                &crate::db::repo::trash::NewTrashItem {
+                    entity_type: "prompt".into(),
+                    ref_id: Some(id),
+                    thumb_path: None,
+                    prompt_text: None,
+                    code: Some(code),
+                    title,
+                    source_label: "批量删除".into(),
+                    file_paths: Vec::new(),
+                },
+            )
+            .await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
 }
 
 /// 第一步：解析 txt，构建预览（不落库）。

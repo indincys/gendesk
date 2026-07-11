@@ -1465,6 +1465,79 @@ a:hover {
   background: oklch(68% 0.13 80);
   flex: none;
 }
+/* E36 提示词多选：选中态 */
+.pchip.sel {
+  border-color: var(--accln);
+  color: var(--acc2);
+  background: var(--accbg2);
+}
+/* E20 分组标签筛选条 */
+.tagbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 18px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.tagchip {
+  font-size: 11.5px;
+  color: var(--t2);
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+.tagchip:hover {
+  border-color: var(--accln);
+  color: var(--acc2);
+}
+.tagchip.on {
+  color: #fff;
+  background: var(--acc);
+  border-color: var(--acc);
+}
+/* E20 分组操作菜单 */
+.gwrap {
+  position: relative;
+}
+.gmenu {
+  position: absolute;
+  top: 28px;
+  right: 0;
+  z-index: 30;
+  min-width: 148px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px oklch(20% 0.02 260 / 0.14);
+  padding: 4px;
+}
+.gmi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--t1);
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  text-align: left;
+}
+.gmi:hover {
+  background: var(--sub);
+}
+.gmi.dng {
+  color: var(--er);
+}
+.gmi.dng:hover {
+  background: var(--erbg);
+}
 
 /* ============================ 废纸篓 ============================ */
 .xrow {

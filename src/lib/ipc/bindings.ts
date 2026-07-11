@@ -248,7 +248,7 @@ async trashRefImage(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 列出全部提示词分组（含 active 提示词数）。
+ * 列出全部提示词分组（含 active 提示词数 + 标签）。
  */
 async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
     try {
@@ -265,6 +265,73 @@ async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
 async createPromptGroup(name: string) : Promise<Result<GroupView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_prompt_group", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重命名分组（E20，前缀/编号不变）。
+ */
+async renamePromptGroup(id: number, name: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_prompt_group", { id, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
+ * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
+ */
+async deletePromptGroup(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_prompt_group", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 合并分组（E20）：`fromId` 并入 `intoId`，编号前缀保留原值不重编。
+ */
+async mergePromptGroups(fromId: number, intoId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("merge_prompt_groups", { fromId, intoId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量移动提示词到指定分组（E20 单条 / E36 批量；编号前缀保留原值不重编）。
+ */
+async movePromptsToGroup(ids: number[], groupId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("move_prompts_to_group", { ids, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量设置收藏（E36）。favorite=true 收藏，false 取消。
+ */
+async setPromptsFavorite(ids: number[], favorite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_prompts_favorite", { ids, favorite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量删除提示词 → 入废纸篓（E36；编号在清理时回收）。
+ */
+async trashPrompts(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_prompts", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -850,7 +917,11 @@ taskId: string | null }
 /**
  * 分组视图（生成页 / 提示词库列表）。
  */
-export type GroupView = { id: number; name: string; prefix: string; scene: string; isTemp: boolean; count: number }
+export type GroupView = { id: number; name: string; prefix: string; scene: string; isTemp: boolean; count: number; 
+/**
+ * 分组绑定的标签（E20 按标签筛选）。
+ */
+tags: string[] }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */

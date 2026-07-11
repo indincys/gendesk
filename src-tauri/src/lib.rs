@@ -59,6 +59,12 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // prompts 域
             commands::prompts::list_prompt_groups,
             commands::prompts::create_prompt_group,
+            commands::prompts::rename_prompt_group,
+            commands::prompts::delete_prompt_group,
+            commands::prompts::merge_prompt_groups,
+            commands::prompts::move_prompts_to_group,
+            commands::prompts::set_prompts_favorite,
+            commands::prompts::trash_prompts,
             commands::prompts::list_prompts,
             commands::prompts::search_prompts,
             commands::prompts::get_prompt,

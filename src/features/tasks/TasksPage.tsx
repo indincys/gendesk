@@ -47,6 +47,8 @@ export function TasksPage() {
   const [rewordText, setRewordText] = useState("");
   // E35：展开查看原始报错的失败行。
   const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
+  // 任务5：查看单个任务的提示词快照原文。
+  const [promptView, setPromptView] = useState<TaskView | null>(null);
   // E10：任务搜索（参考图名 / 提示词编号）。
   const [search, setSearch] = useState("");
   // E10：批次备注行内编辑。
@@ -399,7 +401,14 @@ export function TasksPage() {
                 <span className="mono fs11 nowrap ohide">{t.refName}</span>
               </span>
               <span className="fx ac gap7 ohide">
-                <span className="pid nowrap ohide">{promptLabel(t.promptCode, t.promptTitle)}</span>
+                <button
+                  type="button"
+                  className="pid nowrap ohide"
+                  title="查看提示词原文"
+                  onClick={() => setPromptView(t)}
+                >
+                  {promptLabel(t.promptCode, t.promptTitle)}
+                </button>
                 <span className="t3 fs11 nowrap ohide">{t.groupName}</span>
               </span>
               <span>{t.keyAlias && <span className="chip">{t.keyAlias}</span>}</span>
@@ -533,6 +542,29 @@ export function TasksPage() {
           />
           <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
             确认后该任务按改后的提示词回队重新出图；未改动则按原文重试。通过验收后改后版本会写回提示词库。
+          </div>
+        </Modal>
+      )}
+
+      {promptView && (
+        <Modal
+          title={promptLabel(promptView.promptCode, promptView.promptTitle)}
+          width="w420"
+          onClose={() => setPromptView(null)}
+          headerExtra={<span className="chip">{promptView.groupName}</span>}
+        >
+          <div className="fx ac gap6 wrap" style={{ marginBottom: 10 }}>
+            <span className="chip">{promptView.refName}</span>
+            {promptView.keyAlias && <span className="chip">{promptView.keyAlias}</span>}
+            <span className={cn("bdg", statusVisual(promptView.status).badgeClass)}>
+              {statusVisual(promptView.status).label}
+            </span>
+          </div>
+          <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+            提示词原文（快照）
+          </div>
+          <div className="ptext" style={{ maxHeight: 360, overflow: "auto" }}>
+            {promptView.promptTextSnapshot}
           </div>
         </Modal>
       )}

@@ -104,4 +104,10 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
 - [x] **UX 优化阶段 E01–E41（v0.3.0）** — 三批 41 条 UX 评审建议全数落地（《内部图片生产工具_UX优化执行计划.md》
   M6 安全修正 → M7 生成调度 → M8 验收工作台 → M9 资产运维）。migration 到 0009；单分支
   `feat/ux-overhaul` 小步提交（每项/组一 commit 注明 Exx，保 bisect），一次 PR 合入 main。
+- [x] **生成输出处理 + 6 项 UX（v0.4.0）** — 输出元数据/C2PA 剥离（provider::sanitize）、生成页两栏消留白、
+  缩略图瀑布流、废纸篓详情、任务多选删/重试、提示词 txt 宽泛解析等（PR #5）。
+- [x] **图片生成页 1:1 重构（v0.5.0）** — 按 Claude Design handoff 原型将生成页由堆叠卡片改为两栏就地挂靠：
+  左栏彩色可展开词组卡（配色 gc0–gc4，可拖拽 + 悬停交叉高亮），右栏参考图就地弹层/拖放挂靠，
+  生成参数移入底栏「参数 ▾」弹层；提示词原文改上一条/下一条弹窗。纯前端（GeneratePage + globals.css），
+  无 migration/无新 IPC，删除旧生成页样式。
 

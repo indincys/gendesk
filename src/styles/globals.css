@@ -423,23 +423,6 @@ a:hover {
   overflow: auto;
   min-height: 0;
 }
-.cwrap {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 18px 24px 26px;
-}
-/* 任务2：提示词/参考图宽屏两栏，减少侧边与纵向留白；窄屏自动堆叠。 */
-.cgrid2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  align-items: start;
-}
-@media (max-width: 1040px) {
-  .cgrid2 {
-    grid-template-columns: 1fr;
-  }
-}
 
 /* ============================ 通用组件件 ============================ */
 .kbd {
@@ -457,12 +440,6 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--sh1);
-}
-/* 任务1：生成参数卡内「输出处理」分隔线。 */
-.opsep {
-  height: 1px;
-  background: var(--line);
-  margin: 14px 0;
 }
 .chead {
   display: flex;
@@ -515,31 +492,11 @@ a:hover {
   padding: 4px 12px;
   border-top: 1px solid var(--line);
 }
-.ggrp {
-  padding: 10px 12px 8px;
-  border-top: 1px solid var(--line);
-}
 .gdot {
   width: 8px;
   height: 8px;
   border-radius: 3px;
   flex: none;
-}
-.refgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
-  gap: 12px;
-  padding: 12px;
-  border-top: 1px solid var(--line);
-}
-.reftile {
-  position: relative;
-  min-width: 0;
-}
-.rtph {
-  aspect-ratio: 1;
-  border-radius: 9px;
-  border: 1px solid var(--line);
 }
 .rtx {
   position: absolute;
@@ -555,49 +512,10 @@ a:hover {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  z-index: 2;
+  z-index: 4;
 }
-.reftile:hover .rtx {
+.rt:hover .rtx {
   display: flex;
-}
-.mapchip {
-  margin-top: 7px;
-  width: 100%;
-  height: 26px;
-  border-radius: 7px;
-  border: 1px solid var(--line2);
-  background: #fff;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--t2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  cursor: pointer;
-  padding: 0 7px;
-  transition: border-color 0.12s, background 0.12s;
-  font-family: inherit;
-}
-.mapchip.needmap {
-  border-color: oklch(60% 0.11 75 / 0.55);
-  color: oklch(45% 0.1 70);
-  background: var(--wrbg);
-  animation: plz 1.5s ease-out 2;
-}
-.mapchip.mapped {
-  border-color: var(--accln);
-  color: var(--acc2);
-  background: var(--accbg);
-}
-.genbar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 18px;
-  border-top: 1px solid var(--line);
-  background: linear-gradient(180deg, oklch(99.2% 0.002 255), #fff);
-  flex: none;
 }
 .fchip {
   font: 500 11px var(--mono);
@@ -2251,5 +2169,411 @@ a:hover {
   * {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ============================================================================
+ * 图片生成页重构（Claude Design 原型「GenDesk · 图片生成」1:1）
+ * 两栏就地挂靠：左「提示词」可展开词组卡（可拖拽），右「参考图」就地选择/拖放挂靠。
+ * 分组配色 gc0–gc4 为本页专用色板；oklch 硬编码仅此文件（铁律 5）。
+ * ==========================================================================*/
+.gc0 {
+  --gc: oklch(58% 0.18 257);
+  --gcln: oklch(58% 0.18 257 / 0.45);
+  --gcbg: oklch(58% 0.18 257 / 0.09);
+}
+.gc1 {
+  --gc: oklch(60% 0.13 160);
+  --gcln: oklch(60% 0.13 160 / 0.45);
+  --gcbg: oklch(60% 0.13 160 / 0.1);
+}
+.gc2 {
+  --gc: oklch(64% 0.13 75);
+  --gcln: oklch(64% 0.13 75 / 0.5);
+  --gcbg: oklch(64% 0.13 75 / 0.12);
+}
+.gc3 {
+  --gc: oklch(58% 0.15 310);
+  --gcln: oklch(58% 0.15 310 / 0.45);
+  --gcbg: oklch(58% 0.15 310 / 0.09);
+}
+.gc4 {
+  --gc: oklch(60% 0.15 20);
+  --gcln: oklch(60% 0.15 20 / 0.45);
+  --gcbg: oklch(60% 0.15 20 / 0.09);
+}
+
+/* 两栏主体：左右各自独立滚动 */
+.abody {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1.06fr 0.94fr;
+  gap: 12px;
+  padding: 12px 16px 10px;
+}
+@media (max-width: 1040px) {
+  .abody {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+}
+.acol {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.colhd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  flex: none;
+  padding: 0 2px;
+}
+.colsc {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+@media (max-width: 1040px) {
+  .colsc {
+    overflow: visible;
+  }
+}
+
+/* 提示词词组卡：色条 + 可展开词条 + 可拖拽 */
+.gcard2 {
+  position: relative;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gc);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: var(--sh1);
+  padding: 9px 11px 8px;
+  height: 152px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  cursor: grab;
+  transition: box-shadow 0.15s, opacity 0.15s, transform 0.12s;
+  animation: pop2 0.22s ease;
+  flex: none;
+}
+.gcard2.exp {
+  height: auto;
+}
+.gcard2.hl {
+  box-shadow: 0 0 0 2px var(--gcln), var(--sh2);
+  transform: translateY(-1px);
+}
+.gcard2.dim {
+  opacity: 0.45;
+}
+.gcard2.drg {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+.gcard2 .ghint {
+  margin-top: auto;
+  padding-top: 7px;
+}
+.cfclip {
+  position: relative;
+  max-height: 82px;
+  overflow: hidden;
+  margin-top: 8px;
+  flex: none;
+}
+.cfclip::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 20px;
+  background: linear-gradient(180deg, transparent, #fff);
+}
+.cfopen {
+  margin-top: 8px;
+}
+.gchd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.grcnt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gc);
+  background: var(--gcbg);
+  padding: 2px 7px;
+  border-radius: 99px;
+  white-space: nowrap;
+  flex: none;
+}
+.car {
+  font-size: 10px;
+  color: var(--t3);
+  transition: transform 0.15s;
+  flex: none;
+  width: 14px;
+  text-align: center;
+}
+.car.open {
+  transform: rotate(180deg);
+}
+.chipflow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pch {
+  font: 500 10.5px var(--mono);
+  color: var(--t2);
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+}
+.pch:hover {
+  border-color: var(--gc, var(--accln));
+  color: var(--gc, var(--acc2));
+  background: var(--gcbg, var(--accbg));
+}
+.ghint {
+  font-size: 10.5px;
+  color: var(--t3);
+}
+
+/* 参考图网格与图块 */
+.rgrid4 {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(114px, 1fr));
+  gap: 10px;
+}
+.rt {
+  position: relative;
+  min-width: 0;
+}
+.rt.pz {
+  z-index: 16;
+}
+.rtimg {
+  aspect-ratio: 1;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  position: relative;
+  overflow: hidden;
+  background: var(--sub);
+  transition: box-shadow 0.18s, opacity 0.18s, transform 0.15s;
+  cursor: pointer;
+}
+.rtimg.mapped {
+  box-shadow: 0 0 0 2px var(--gc);
+}
+.rtimg.need {
+  outline: 2px dashed oklch(60% 0.11 75 / 0.6);
+  outline-offset: -2px;
+}
+.rtimg.glow {
+  box-shadow: 0 0 0 2px var(--gc), 0 4px 18px var(--gcln);
+  transform: translateY(-2px);
+}
+.rtimg.dimm {
+  opacity: 0.35;
+}
+.rtimg.drop {
+  outline: 2px dashed var(--accln);
+  outline-offset: 2px;
+}
+.rtimg.drop::before {
+  content: "松开挂靠";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--accbg2);
+  color: var(--acc2);
+  padding: 3px 0;
+  z-index: 3;
+}
+.rtb {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  font: 600 9.5px var(--mono);
+  color: #fff;
+  background: var(--gc);
+  padding: 2px 6px;
+  border-radius: 5px;
+  z-index: 2;
+}
+.rtname {
+  font: 500 10px var(--mono);
+  color: var(--t2);
+  text-align: center;
+  margin-top: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.rtag {
+  margin-top: 4px;
+  width: 100%;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--gcln, var(--line2));
+  background: var(--gcbg, #fff);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--gc, var(--t2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  padding: 0 5px;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: filter 0.12s;
+}
+.rtag:hover {
+  filter: brightness(0.96);
+}
+.rtag.tneed {
+  border: 1px dashed oklch(60% 0.11 75 / 0.55);
+  color: oklch(45% 0.1 70);
+  background: var(--wrbg);
+  animation: plz 1.6s ease-out 2;
+}
+
+/* 就地挂靠弹层 */
+.pcl {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+}
+.apop {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 4px;
+  min-width: 215px;
+  background: #fff;
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  box-shadow: var(--sh3);
+  padding: 5px;
+  z-index: 15;
+  animation: slup 0.15s ease;
+}
+.apopi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.1s;
+}
+.apopi:hover {
+  background: var(--sub);
+}
+
+/* 底部生成条 + 参数弹层 */
+.gb2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, oklch(99.2% 0.002 255), #fff);
+  flex: none;
+  position: relative;
+  z-index: 6;
+}
+.fchips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+.ppop {
+  position: absolute;
+  right: 14px;
+  bottom: 52px;
+  width: 470px;
+  background: #fff;
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  box-shadow: var(--sh3);
+  padding: 13px 14px;
+  z-index: 9;
+  animation: slup 0.18s ease;
+}
+.prow2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plabel {
+  width: 70px;
+  font-size: 12px;
+  color: var(--t2);
+  flex: none;
+}
+.psep {
+  height: 1px;
+  background: var(--line);
+  margin: 12px 0;
+}
+
+/* 提示词原文弹窗（复用 Modal）：编号徽标 + 正文 */
+.pcode {
+  font: 600 10.5px var(--mono);
+  color: var(--gc, var(--acc2));
+  background: var(--gcbg, var(--accbg));
+  border: 1px solid var(--gcln, var(--accln));
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.pmtxt {
+  font-size: 13px;
+  line-height: 1.95;
+  color: var(--t1);
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+@keyframes pop2 {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(3px);
+  }
+}
+@keyframes slup {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
 }

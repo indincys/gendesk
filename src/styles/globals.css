@@ -824,7 +824,8 @@ a:hover {
 /* ============================ 任务表 ============================ */
 .tgrid {
   display: grid;
-  grid-template-columns: 106px 168px minmax(170px, 1fr) 58px 168px 44px 116px;
+  /* 任务6：首列为多选勾选框。 */
+  grid-template-columns: 26px 106px 168px minmax(170px, 1fr) 58px 168px 44px 116px;
   align-items: center;
   column-gap: 10px;
   padding: 0 14px;
@@ -849,6 +850,10 @@ a:hover {
 }
 .tr:hover {
   background: var(--sub);
+}
+/* 任务6：多选选中行高亮。 */
+.tr.selrow {
+  background: var(--accbg);
 }
 .tract {
   opacity: 0;

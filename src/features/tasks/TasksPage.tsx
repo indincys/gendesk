@@ -8,7 +8,7 @@ import { useEngineStore } from "@/stores/engine";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
 import { ChevronDown, FolderOpen, Repeat } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const FILTERS: { key: string; label: string; match: (s: string) => boolean }[] = [
@@ -49,6 +49,10 @@ export function TasksPage() {
   const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
   // 任务5：查看单个任务的提示词快照原文。
   const [promptView, setPromptView] = useState<TaskView | null>(null);
+  // 任务6：任务多选（跨筛选保留选择）+ shift 范围锚点 + 批量删除确认。
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const lastPicked = useRef<number | null>(null);
+  const [bulkDelConfirm, setBulkDelConfirm] = useState(false);
   // E10：任务搜索（参考图名 / 提示词编号）。
   const [search, setSearch] = useState("");
   // E10：批次备注行内编辑。
@@ -177,6 +181,87 @@ export function TasksPage() {
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
+  };
+
+  // ── 任务6 多选批量操作 ────────────────────────────────────────
+  // 可重试的终态：失败/待验收/已通过/未通过（生成中与排队不参与重试）。
+  const RETRYABLE = new Set(["fail", "rev", "pass", "rej"]);
+  const clearSel = () => {
+    setSel(new Set());
+    lastPicked.current = null;
+  };
+  // 勾选：shift 从锚点范围加选，否则切换单项并设锚点（索引进 visible）。
+  const pickSel = (idx: number, id: number, shift: boolean) => {
+    if (shift && lastPicked.current !== null) {
+      const a = Math.min(lastPicked.current, idx);
+      const b = Math.max(lastPicked.current, idx);
+      setSel((s) => {
+        const n = new Set(s);
+        for (let i = a; i <= b; i++) {
+          const it = visible[i];
+          if (it) n.add(it.id);
+        }
+        return n;
+      });
+    } else {
+      setSel((s) => {
+        const n = new Set(s);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
+      lastPicked.current = idx;
+    }
+  };
+  const allVisibleSelected = visible.length > 0 && visible.every((t) => sel.has(t.id));
+  const toggleAllVisible = () => {
+    setSel((s) => {
+      const n = new Set(s);
+      if (allVisibleSelected) {
+        for (const t of visible) n.delete(t.id);
+      } else {
+        for (const t of visible) n.add(t.id);
+      }
+      return n;
+    });
+    lastPicked.current = null;
+  };
+  // 选中任务里可重试的数量（供按钮显示与禁用）。
+  const selRetryable = tasks.filter((t) => sel.has(t.id) && RETRYABLE.has(t.status)).length;
+
+  const bulkRetry = async () => {
+    const ids = tasks.filter((t) => sel.has(t.id) && RETRYABLE.has(t.status)).map((t) => t.id);
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await unwrap(commands.retryTask(id, null));
+        ok++;
+      } catch {
+        /* 单项失败不阻断其余 */
+      }
+    }
+    toast(`已重试 ${ok} 个任务`);
+    clearSel();
+    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+  };
+
+  const bulkDelete = async () => {
+    const ids = [...sel];
+    let ok = 0;
+    let skipped = 0;
+    for (const id of ids) {
+      try {
+        await unwrap(commands.deleteTask(id));
+        ok++;
+      } catch {
+        // 生成中/重试中的任务后端拒绝删除，计入跳过。
+        skipped++;
+      }
+    }
+    toast(`已删除 ${ok} 个任务${skipped > 0 ? ` · ${skipped} 个生成中跳过` : ""}`);
+    setBulkDelConfirm(false);
+    clearSel();
+    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
   };
 
   const retryInterrupted = async () => {
@@ -375,8 +460,45 @@ export function TasksPage() {
         />
       </div>
 
+      {sel.size > 0 && (
+        <div
+          className="fx ac gap8"
+          style={{ padding: "0 14px 8px", borderBottom: "1px solid var(--line)" }}
+        >
+          <span className="fs12 t2 nowrap">已选 {sel.size}</span>
+          <button
+            type="button"
+            className="btn sm"
+            disabled={selRetryable === 0}
+            title={selRetryable === 0 ? "所选中无可重试任务（生成中/排队不可重试）" : undefined}
+            onClick={bulkRetry}
+          >
+            重试所选{selRetryable > 0 ? ` · ${selRetryable}` : ""}
+          </button>
+          <button
+            type="button"
+            className="btn sm gho dng"
+            onClick={() => setBulkDelConfirm(true)}
+          >
+            删除所选
+          </button>
+          <div className="f1" />
+          <button type="button" className="btn sm gho" onClick={clearSel}>
+            清除选择
+          </button>
+        </div>
+      )}
+
       <div style={{ overflow: "auto", minHeight: 0 }}>
         <div className="tgrid th">
+          <span className="fx ac">
+            <button
+              type="button"
+              className={cn("ckb", allVisibleSelected && "on")}
+              title={allVisibleSelected ? "取消全选（本筛选）" : "全选（本筛选）"}
+              onClick={toggleAllVisible}
+            />
+          </span>
           <span>状态</span>
           <span>参考图</span>
           <span>提示词</span>
@@ -385,11 +507,19 @@ export function TasksPage() {
           <span className="tc">重试</span>
           <span />
         </div>
-        {visible.map((t) => {
+        {visible.map((t, idx) => {
           const v = statusVisual(t.status);
           const pct = progress[t.id]?.pct ?? (t.status === "rev" || t.status === "pass" ? 100 : 0);
           return (
-            <div className="tgrid tr" key={t.id}>
+            <div className={cn("tgrid tr", sel.has(t.id) && "selrow")} key={t.id}>
+              <span className="fx ac">
+                <button
+                  type="button"
+                  className={cn("ckb", sel.has(t.id) && "on")}
+                  title="选择任务（⇧ 范围多选）"
+                  onClick={(e) => pickSel(idx, t.id, e.shiftKey)}
+                />
+              </span>
               <span>
                 <span className={cn("bdg", v.badgeClass)}>
                   {v.spinner && <i className="spn s9" />}
@@ -567,6 +697,17 @@ export function TasksPage() {
             {promptView.promptTextSnapshot}
           </div>
         </Modal>
+      )}
+
+      {bulkDelConfirm && (
+        <ConfirmModal
+          title={`删除所选 ${sel.size} 个任务`}
+          desc="将删除所选任务及其生成记录（生成中/重试中的任务会被跳过）。已通过归档的作品不受影响。此操作不可撤销。"
+          confirmLabel="删除所选"
+          danger
+          onConfirm={() => void bulkDelete()}
+          onClose={() => setBulkDelConfirm(false)}
+        />
       )}
 
       {cancelConfirm && (

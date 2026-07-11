@@ -3,12 +3,14 @@
 //! 解析「分组 / 前缀 / 场景 / 标签 / 小标题 / 正文」字段 + UTF-8/GBK 编码探测；
 //! 两段式：`parse`（纯函数，不落库）→ 命令层 `commit`（落库 + 号池发放）。
 //!
-//! 格式约定（宽容解析，两种写法并存）：
-//! - 分组头：`分组: 名称`（半/全角冒号）**或** `分组【名称】`（括号内联）→ 开启新分组；
+//! 格式约定（宽泛解析，多种写法并存；目标：常见 txt 结构无需改格式即可正确识别）：
+//! - 显式分组头：`分组: 名称`（半/全角冒号）**或** `分组【名称】`（括号内联）→ 开启新分组；
 //!   一个文件含多个 `分组` 头即按分组自动拆分。
+//! - **裸括号自动判层**：独占一行的括号块 `【名称】`（亦支持 `[名称]`/`［名称］`/`〖名称〗`），
+//!   若其下一条非空行是「正文」→ 视为该正文的**小标题**；否则（下一条是另一括号块 / 元信息头）
+//!   → 视为**分组头**。这样图中「`【分组】` 换行 `【小标题】` 换行 `1．正文`」结构可零配置识别。
 //! - 其它头部行 `前缀:`/`场景:`/`标签:` 设置当前分组元信息；
-//! - 独占一行的 `【小标题】` → 作为紧随其后那条提示词的小标题；
-//! - 正文行前导序号（`1.`/`2、`/`3）` 等）自动剥离；
+//! - 正文行前导序号（`1.`/`2、`/`3）`/`(4)`/`（5）`/`①` 等）自动剥离；
 //! - 其余每条非空行 = 一条提示词（一行一提示词，空行忽略）；
 //! - 缺分组 → 归入默认分组「未分组导入」；缺前缀 → 由 commit 阶段自动分配。
 
@@ -77,6 +79,16 @@ pub fn parse(bytes: &[u8]) -> ParsedImport {
 }
 
 fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
+    // 预收集非空行（保留 1-based 原始行号），便于对裸括号做前瞻判层。
+    let lines: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, raw)| {
+            let t = raw.trim_end_matches('\r').trim();
+            (!t.is_empty()).then_some((idx + 1, t))
+        })
+        .collect();
+
     let mut groups: Vec<ParsedGroup> = Vec::new();
     let mut cur: Option<ParsedGroup> = None;
     let mut warnings: Vec<ParseWarning> = Vec::new();
@@ -96,34 +108,36 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
             prompts: Vec::new(),
         })
     }
+    fn new_group(name: String) -> ParsedGroup {
+        ParsedGroup {
+            name,
+            prefix: None,
+            scene: String::new(),
+            tags: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+    fn warn_dangling(warnings: &mut Vec<ParseWarning>, pending: Option<(String, usize)>) {
+        if let Some((t, tline)) = pending {
+            warnings.push(ParseWarning {
+                line: tline,
+                message: format!("小标题「{t}」后没有正文，已忽略。"),
+            });
+        }
+    }
 
     // 解析模型：每条非空、非头部/非小标题行 = 一条提示词（一行一提示词）。
     // 空行仅作视觉分隔，被忽略。行号 1-based。
-    for (idx, raw) in text.lines().enumerate() {
-        let line = idx + 1;
-        let trimmed = raw.trim_end_matches('\r').trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    for i in 0..lines.len() {
+        let (line, trimmed) = lines[i];
 
-        // 分组头：`分组: 名称` 或 `分组【名称】`（后者优先于「小标题」判定）。
+        // 显式分组头：`分组: 名称` 或 `分组【名称】`（优先于裸括号/小标题判定）。
         if let Some(name) = parse_group_header(trimmed) {
-            if let Some((t, tline)) = pending_title.take() {
-                warnings.push(ParseWarning {
-                    line: tline,
-                    message: format!("小标题「{t}」后没有正文，已忽略。"),
-                });
-            }
+            warn_dangling(&mut warnings, pending_title.take());
             if let Some(g) = cur.take() {
                 groups.push(g);
             }
-            cur = Some(ParsedGroup {
-                name,
-                prefix: None,
-                scene: String::new(),
-                tags: Vec::new(),
-                prompts: Vec::new(),
-            });
+            cur = Some(new_group(name));
             seen_group_header = true;
             continue;
         }
@@ -137,9 +151,27 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
             continue;
         }
 
-        // 独占一行的 `【小标题】` → 暂存给下一条正文。
-        if let Some(title) = parse_title_line(trimmed) {
-            pending_title = Some((title, line));
+        // 独占一行的裸括号块 → 依「下一条非空行」判层：
+        //   下一条是正文  → 本行是该正文的小标题；
+        //   下一条是括号/元信息头 → 本行是分组头；
+        //   已到文件尾（无下一条）→ 视为悬空小标题（结尾告警）。
+        if let Some(inner) = parse_bracket_line(trimmed) {
+            match lines.get(i + 1) {
+                Some(&(_, next)) if is_body_line(next) => {
+                    warn_dangling(&mut warnings, pending_title.replace((inner, line)));
+                }
+                Some(_) => {
+                    warn_dangling(&mut warnings, pending_title.take());
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    cur = Some(new_group(inner));
+                    seen_group_header = true;
+                }
+                None => {
+                    warn_dangling(&mut warnings, pending_title.replace((inner, line)));
+                }
+            }
             continue;
         }
 
@@ -161,12 +193,7 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     }
 
     // 文件结尾仍有未挂靠的小标题。
-    if let Some((t, tline)) = pending_title.take() {
-        warnings.push(ParseWarning {
-            line: tline,
-            message: format!("小标题「{t}」后没有正文，已忽略。"),
-        });
-    }
+    warn_dangling(&mut warnings, pending_title.take());
 
     if let Some(g) = cur.take() {
         groups.push(g);
@@ -174,6 +201,13 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     // 丢弃完全为空（无提示词）的分组。
     groups.retain(|g| !g.prompts.is_empty());
     (groups, warnings)
+}
+
+/// 一行是否为「正文」：既非显式分组头、亦非元信息头、亦非裸括号块。
+fn is_body_line(line: &str) -> bool {
+    parse_group_header(line).is_none()
+        && parse_header(line).is_none()
+        && parse_bracket_line(line).is_none()
 }
 
 /// 识别分组头：`分组: 名称` / `分组：名称` / `分组【名称】`（含 `组`/`group` 同义）。
@@ -200,36 +234,93 @@ fn parse_group_header(line: &str) -> Option<String> {
     None
 }
 
-/// 取 `【...】` 中第一个括号块的内部文本（要求以 `【` 开头）。
+/// 支持的成对括号（宽泛识别常见标题/分组括号；不含 `「」`/`《》` 以免误伤正文引用）。
+const BRACKET_PAIRS: &[(char, char)] = &[('【', '】'), ('[', ']'), ('［', '］'), ('〖', '〗')];
+
+/// 取内联括号块的内部文本（要求 `s` 以某个开括号开头，返回到对应闭括号前的内容）。
 fn bracket_inner(s: &str) -> Option<&str> {
-    let rest = s.strip_prefix('【')?;
-    let end = rest.find('】')?;
-    Some(&rest[..end])
-}
-
-/// 若整行是单个 `【...】` 括号块，返回括号内文本（作为小标题）。
-fn parse_title_line(line: &str) -> Option<String> {
-    let inner = line.strip_prefix('【')?.strip_suffix('】')?;
-    // 内部若还含闭括号，说明不是单一括号块（可能是正文），不当作小标题。
-    if inner.contains('】') {
-        return None;
+    for &(open, close) in BRACKET_PAIRS {
+        if let Some(rest) = s.strip_prefix(open) {
+            if let Some(end) = rest.find(close) {
+                return Some(&rest[..end]);
+            }
+        }
     }
-    let t = inner.trim();
-    (!t.is_empty()).then(|| t.to_string())
+    None
 }
 
-/// 剥离正文前导序号：`1.` / `2、` / `3）` / `4．` 等（要求序号后紧跟分隔符）。
+/// 若整行恰是单个成对括号块 `【...】`/`[...]`/`［...］`/`〖...〗`，返回括号内文本。
+/// 内部若再含闭括号（非单一块，疑似正文），或内容为空 → 不识别。
+fn parse_bracket_line(line: &str) -> Option<String> {
+    for &(open, close) in BRACKET_PAIRS {
+        if let Some(rest) = line.strip_prefix(open) {
+            if let Some(inner) = rest.strip_suffix(close) {
+                if inner.contains(close) {
+                    return None;
+                }
+                let t = inner.trim();
+                return (!t.is_empty()).then(|| t.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 剥离正文前导序号，宽泛覆盖常见写法：
+/// - `1.` / `2、` / `3）` / `4．` / `5:` / `6,`（数字 + 分隔符）；
+/// - `(7)` / `（8）`（括号包裹的数字）；
+/// - `①`…`⑳` 圆圈数字（后可再跟分隔符）。
+///
+/// 无法识别为序号时原样返回。
 fn strip_leading_number(s: &str) -> &str {
-    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    // 圆圈数字：①-⑳ (U+2460..=U+2473)。
+    if let Some(first) = s.chars().next() {
+        if ('\u{2460}'..='\u{2473}').contains(&first) {
+            return strip_leading_separator(&s[first.len_utf8()..]);
+        }
+    }
+
+    // 可选前导开括号：(1) / （1）。
+    let (had_paren, body) = match s.strip_prefix('(').or_else(|| s.strip_prefix('（')) {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+
+    let digits_end = body
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(body.len());
     if digits_end == 0 {
         return s; // 无前导数字
     }
-    let after = &s[digits_end..];
+    let after = &body[digits_end..];
     match after.chars().next() {
-        Some(c) if matches!(c, '.' | '．' | '、' | '。' | ')' | '）' | ':' | '：') => {
+        // 括号包裹：吃掉闭括号（后面可能还紧跟别的分隔符，如「(1). 」）。
+        Some(c @ (')' | '）')) if had_paren => strip_leading_separator(&after[c.len_utf8()..]),
+        // 普通分隔符：数字后紧跟标点。
+        Some(c)
+            if matches!(
+                c,
+                '.' | '．' | '、' | '。' | ')' | '）' | ':' | '：' | ',' | '，'
+            ) =>
+        {
             after[c.len_utf8()..].trim_start()
         }
         _ => s,
+    }
+}
+
+/// 若字符串以一个序号分隔符开头则吃掉它，再去掉随后空白；否则仅去掉前导空白。
+fn strip_leading_separator(s: &str) -> &str {
+    match s.chars().next() {
+        Some(c)
+            if matches!(
+                c,
+                '.' | '．' | '、' | '。' | ')' | '）' | ':' | '：' | ',' | '，'
+            ) =>
+        {
+            s[c.len_utf8()..].trim_start()
+        }
+        _ => s.trim_start(),
     }
 }
 
@@ -436,6 +527,95 @@ mod tests {
         let doc = "分组【G】\n把【绿色】卡套放进照片";
         let out = parse(doc.as_bytes());
         assert_eq!(flat(&out.groups[0]), vec![(None, "把【绿色】卡套放进照片")]);
+    }
+
+    // 用户真实格式：**裸括号**分组头（无「分组」关键字）+ 小标题 + 带全角点序号正文。
+    // 结构：`【分组】` 空行 `【小标题】` `1．正文` …（图 1 卡套提示词批次）。
+    #[test]
+    fn bare_bracket_group_is_detected() {
+        let doc = "\
+【时代少年团场景图】
+
+【画室调色台】
+1．把图中这只印有男团合照的浅绿色证件卡套放进照片。
+
+【天台画速写】
+2．把图中这只卡套连同配件放进照片。
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1, "裸括号应识别为分组而非小标题");
+        let g = &out.groups[0];
+        assert_eq!(g.name, "时代少年团场景图");
+        assert_eq!(
+            flat(g),
+            vec![
+                (
+                    Some("画室调色台"),
+                    "把图中这只印有男团合照的浅绿色证件卡套放进照片。"
+                ),
+                (Some("天台画速写"), "把图中这只卡套连同配件放进照片。"),
+            ]
+        );
+        // 分组已识别 → 无「正文出现在分组标记前」告警。
+        assert!(out.warnings.is_empty(), "不应再落入默认分组并告警");
+    }
+
+    // 多个裸括号分组按其后是否紧跟另一括号自动拆分。
+    #[test]
+    fn multiple_bare_bracket_groups_split() {
+        let doc = "\
+【场景一】
+【标题A】
+1．甲正文
+【场景二】
+【标题B】
+2．乙正文
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.groups[0].name, "场景一");
+        assert_eq!(flat(&out.groups[0]), vec![(Some("标题A"), "甲正文")]);
+        assert_eq!(out.groups[1].name, "场景二");
+        assert_eq!(flat(&out.groups[1]), vec![(Some("标题B"), "乙正文")]);
+        assert!(out.warnings.is_empty());
+    }
+
+    // 裸括号分组下紧跟正文（无小标题）：仍识别为分组。
+    #[test]
+    fn bare_bracket_group_then_direct_body() {
+        // 【组】下一行是元信息头 → 判为分组；再下面才是正文。
+        let doc = "【只有一个分组】\n前缀: ab\n直接正文一\n直接正文二";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "只有一个分组");
+        assert_eq!(out.groups[0].prefix.as_deref(), Some("AB"));
+        assert_eq!(texts(&out.groups[0]), vec!["直接正文一", "直接正文二"]);
+    }
+
+    // 方括号 / 全角方括号 / 六角括号亦可作分组与小标题。
+    #[test]
+    fn alternative_bracket_styles() {
+        let doc = "[场景]\n［标题一］\n1. 正文一\n〖标题二〗\n2. 正文二";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "场景");
+        assert_eq!(
+            flat(&out.groups[0]),
+            vec![(Some("标题一"), "正文一"), (Some("标题二"), "正文二")]
+        );
+    }
+
+    // 序号剥离：括号数字 `(1)`/`（2）` 与圆圈数字 `③`。
+    #[test]
+    fn strips_paren_and_circled_numbers() {
+        assert_eq!(strip_leading_number("(1) 甲"), "甲");
+        assert_eq!(strip_leading_number("（2）乙"), "乙");
+        assert_eq!(strip_leading_number("③丙"), "丙");
+        assert_eq!(strip_leading_number("④、丁"), "丁");
+        assert_eq!(strip_leading_number("5，戊"), "戊");
+        // 非序号：括号内非纯数字、或无分隔符时原样保留。
+        assert_eq!(strip_leading_number("(a) 保留"), "(a) 保留");
+        assert_eq!(strip_leading_number("2024 年不是序号"), "2024 年不是序号");
     }
 
     // E37：正文出现在任何「分组」标记前 → 告警含首个正文行号。

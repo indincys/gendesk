@@ -268,6 +268,8 @@ export function GeneratePage() {
       </div>
       <div className="pbody">
         <div className="cwrap">
+          {/* 提示词 + 参考图并排（宽屏两栏，窄屏自动堆叠），减少留白（任务2）。 */}
+          <div className="cgrid2">
           {/* 提示词卡 */}
           <div className="card">
             <div className="chead">
@@ -328,7 +330,7 @@ export function GeneratePage() {
           </div>
 
           {/* 参考图卡 */}
-          <div className="card mt14">
+          <div className="card">
             <div className="chead">
               <span className="fw6 fs13">参考图</span>
               {selRefs.length > 0 && <span className="cnt">{selRefs.length} 张</span>}
@@ -378,6 +380,8 @@ export function GeneratePage() {
                 })}
               </div>
             )}
+          </div>
+
           </div>
 
           {/* 生成参数卡（E16 / D1：默认跟随提示词，显式设置才透传） */}

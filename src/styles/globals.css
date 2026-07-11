@@ -424,9 +424,21 @@ a:hover {
   min-height: 0;
 }
 .cwrap {
-  max-width: 860px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 18px 24px 26px;
+}
+/* 任务2：提示词/参考图宽屏两栏，减少侧边与纵向留白；窄屏自动堆叠。 */
+.cgrid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1040px) {
+  .cgrid2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ============================ 通用组件件 ============================ */

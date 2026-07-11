@@ -475,11 +475,7 @@ export function TasksPage() {
           >
             重试所选{selRetryable > 0 ? ` · ${selRetryable}` : ""}
           </button>
-          <button
-            type="button"
-            className="btn sm gho dng"
-            onClick={() => setBulkDelConfirm(true)}
-          >
+          <button type="button" className="btn sm gho dng" onClick={() => setBulkDelConfirm(true)}>
             删除所选
           </button>
           <div className="f1" />

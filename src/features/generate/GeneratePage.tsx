@@ -270,118 +270,117 @@ export function GeneratePage() {
         <div className="cwrap">
           {/* 提示词 + 参考图并排（宽屏两栏，窄屏自动堆叠），减少留白（任务2）。 */}
           <div className="cgrid2">
-          {/* 提示词卡 */}
-          <div className="card">
-            <div className="chead">
-              <span className="fw6 fs13">提示词</span>
-              {selGroups.length > 0 && <span className="cnt">{selGroups.length} 组</span>}
-              <div className="f1" />
-              <button type="button" className="btn sm gho" onClick={importTxt}>
-                <FileUp className="ic12" />
-                导入 .txt
-              </button>
-              <button type="button" className="btn sm" onClick={() => setModal("groups")}>
-                <Plus className="ic12" />
-                选择提示词组
-              </button>
-            </div>
-            {selGroups.length === 0 ? (
-              <div className="empt">
-                <div className="fs13 fw5 t2">尚未选择提示词</div>
-                <div className="fs12 t3 mt4">
-                  从提示词库选择分组，或导入 .txt 作为本批次的临时提示词
-                </div>
+            {/* 提示词卡 */}
+            <div className="card">
+              <div className="chead">
+                <span className="fw6 fs13">提示词</span>
+                {selGroups.length > 0 && <span className="cnt">{selGroups.length} 组</span>}
+                <div className="f1" />
+                <button type="button" className="btn sm gho" onClick={importTxt}>
+                  <FileUp className="ic12" />
+                  导入 .txt
+                </button>
+                <button type="button" className="btn sm" onClick={() => setModal("groups")}>
+                  <Plus className="ic12" />
+                  选择提示词组
+                </button>
               </div>
-            ) : (
-              selGroups.map((g) => (
-                <div className="ggrp" key={g.id}>
-                  <div className="fx ac gap9">
-                    <button
-                      type="button"
-                      className="icb"
-                      title={expanded.has(g.id) ? "收起提示词" : "展开查看提示词"}
-                      onClick={() => toggleExpand(g.id)}
-                    >
-                      {expanded.has(g.id) ? (
-                        <ChevronDown className="ic12" />
-                      ) : (
-                        <ChevronRight className="ic12" />
-                      )}
-                    </button>
-                    <i className="gdot" style={{ background: "var(--acc)" }} />
-                    <span className="fw5 nowrap">{g.name}</span>
-                    <span className="chip">{g.prefix}</span>
-                    {g.scene && <span className="bdg b-gray">{g.scene}</span>}
-                    {g.isTemp && <span className="bdg b-amber">临时 · 验收通过后自动入库</span>}
-                    <div className="f1" />
-                    <span className="t3 fs12 nowrap">{g.count} 条</span>
-                    <button
-                      type="button"
-                      className="icb"
-                      onClick={() => setSelGroupIds((c) => c.filter((x) => x !== g.id))}
-                    >
-                      <X className="ic12" />
-                    </button>
+              {selGroups.length === 0 ? (
+                <div className="empt">
+                  <div className="fs13 fw5 t2">尚未选择提示词</div>
+                  <div className="fs12 t3 mt4">
+                    从提示词库选择分组，或导入 .txt 作为本批次的临时提示词
                   </div>
-                  {expanded.has(g.id) && <GroupPromptList prompts={promptsByGroup[g.id]} />}
                 </div>
-              ))
-            )}
-          </div>
-
-          {/* 参考图卡 */}
-          <div className="card">
-            <div className="chead">
-              <span className="fw6 fs13">参考图</span>
-              {selRefs.length > 0 && <span className="cnt">{selRefs.length} 张</span>}
-              <div className="f1" />
-              <button type="button" className="btn sm gho" onClick={uploadRefs}>
-                <Upload className="ic12" />
-                上传
-              </button>
-              <button type="button" className="btn sm" onClick={() => setModal("refs")}>
-                <Plus className="ic12" />
-                从参考图库选择
-              </button>
-            </div>
-            {selRefs.length === 0 ? (
-              <div className="empt">
-                <div className="fs13 fw5 t2">尚未选择参考图</div>
-                <div className="fs12 t3 mt4">
-                  从参考图库选择已有素材，或上传新图；每张参考图将挂靠一个提示词组
-                </div>
-              </div>
-            ) : (
-              <div className="refgrid">
-                {selRefs.map((r) => {
-                  const mg = groups.find((g) => g.id === mapping[r.id]);
-                  return (
-                    <div className="reftile" key={r.id}>
-                      <div className="ph rtph" style={bg(r.thumbPath)}>
-                        <button
-                          type="button"
-                          className="rtx"
-                          onClick={() => setSelRefIds((c) => c.filter((x) => x !== r.id))}
-                        >
-                          <X className="ic12" />
-                        </button>
-                      </div>
-                      <div className="fs11 fw5 mt6 nowrap ohide tc mono">{r.name}</div>
+              ) : (
+                selGroups.map((g) => (
+                  <div className="ggrp" key={g.id}>
+                    <div className="fx ac gap9">
                       <button
                         type="button"
-                        className={cn("mapchip", mg ? "mapped" : "needmap")}
-                        onClick={() => setModal({ assign: r.id })}
+                        className="icb"
+                        title={expanded.has(g.id) ? "收起提示词" : "展开查看提示词"}
+                        onClick={() => toggleExpand(g.id)}
                       >
-                        <span className="nowrap ohide">{mg ? mg.name : "指定提示词组"}</span>
-                        <ChevronDown className="ic12" />
+                        {expanded.has(g.id) ? (
+                          <ChevronDown className="ic12" />
+                        ) : (
+                          <ChevronRight className="ic12" />
+                        )}
+                      </button>
+                      <i className="gdot" style={{ background: "var(--acc)" }} />
+                      <span className="fw5 nowrap">{g.name}</span>
+                      <span className="chip">{g.prefix}</span>
+                      {g.scene && <span className="bdg b-gray">{g.scene}</span>}
+                      {g.isTemp && <span className="bdg b-amber">临时 · 验收通过后自动入库</span>}
+                      <div className="f1" />
+                      <span className="t3 fs12 nowrap">{g.count} 条</span>
+                      <button
+                        type="button"
+                        className="icb"
+                        onClick={() => setSelGroupIds((c) => c.filter((x) => x !== g.id))}
+                      >
+                        <X className="ic12" />
                       </button>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                    {expanded.has(g.id) && <GroupPromptList prompts={promptsByGroup[g.id]} />}
+                  </div>
+                ))
+              )}
+            </div>
 
+            {/* 参考图卡 */}
+            <div className="card">
+              <div className="chead">
+                <span className="fw6 fs13">参考图</span>
+                {selRefs.length > 0 && <span className="cnt">{selRefs.length} 张</span>}
+                <div className="f1" />
+                <button type="button" className="btn sm gho" onClick={uploadRefs}>
+                  <Upload className="ic12" />
+                  上传
+                </button>
+                <button type="button" className="btn sm" onClick={() => setModal("refs")}>
+                  <Plus className="ic12" />
+                  从参考图库选择
+                </button>
+              </div>
+              {selRefs.length === 0 ? (
+                <div className="empt">
+                  <div className="fs13 fw5 t2">尚未选择参考图</div>
+                  <div className="fs12 t3 mt4">
+                    从参考图库选择已有素材，或上传新图；每张参考图将挂靠一个提示词组
+                  </div>
+                </div>
+              ) : (
+                <div className="refgrid">
+                  {selRefs.map((r) => {
+                    const mg = groups.find((g) => g.id === mapping[r.id]);
+                    return (
+                      <div className="reftile" key={r.id}>
+                        <div className="ph rtph" style={bg(r.thumbPath)}>
+                          <button
+                            type="button"
+                            className="rtx"
+                            onClick={() => setSelRefIds((c) => c.filter((x) => x !== r.id))}
+                          >
+                            <X className="ic12" />
+                          </button>
+                        </div>
+                        <div className="fs11 fw5 mt6 nowrap ohide tc mono">{r.name}</div>
+                        <button
+                          type="button"
+                          className={cn("mapchip", mg ? "mapped" : "needmap")}
+                          onClick={() => setModal({ assign: r.id })}
+                        >
+                          <span className="nowrap ohide">{mg ? mg.name : "指定提示词组"}</span>
+                          <ChevronDown className="ic12" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 生成参数卡（E16 / D1：默认跟随提示词，显式设置才透传） */}
@@ -408,23 +407,36 @@ export function GeneratePage() {
             <div className="opsep" />
             <div className="fx ac gap8" style={{ marginBottom: 10 }}>
               <span className="fw6 fs12">输出处理</span>
-              <span className="fs11 t3">集成自 remove-ai-watermarks · 默认清除 AI 元数据与 C2PA</span>
+              <span className="fs11 t3">
+                集成自 remove-ai-watermarks · 默认清除 AI 元数据与 C2PA
+              </span>
             </div>
             <div className="fx ac gap10">
               <span className="fs12 t2" style={{ width: 76 }}>
                 去水印
               </span>
               <div className="seg">
-                <span className={cn("sgi", watermark === "none" && "on")} onClick={() => setWatermark("none")}>
+                <span
+                  className={cn("sgi", watermark === "none" && "on")}
+                  onClick={() => setWatermark("none")}
+                >
                   无需去水印
                 </span>
-                <span className="sgi" style={{ opacity: 0.4, cursor: "not-allowed" }} title="可见水印去除即将支持">
+                <span
+                  className="sgi"
+                  style={{ opacity: 0.4, cursor: "not-allowed" }}
+                  title="可见水印去除即将支持"
+                >
                   去除可见水印 · 即将支持
                 </span>
               </div>
             </div>
             <div className="mt10">
-              <BoolRow label="清除 AI 元数据" value={clearAiMetadata} onChange={setClearAiMetadata} />
+              <BoolRow
+                label="清除 AI 元数据"
+                value={clearAiMetadata}
+                onChange={setClearAiMetadata}
+              />
             </div>
             <div className="mt10">
               <BoolRow label="去除 C2PA" value={removeC2pa} onChange={setRemoveC2pa} />

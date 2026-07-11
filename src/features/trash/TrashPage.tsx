@@ -141,7 +141,9 @@ export function TrashPage() {
 
       {detail && (
         <Modal
-          title={detail.code ? promptLabel(detail.code, detail.title) : entityLabel(detail.entityType)}
+          title={
+            detail.code ? promptLabel(detail.code, detail.title) : entityLabel(detail.entityType)
+          }
           width="w700"
           onClose={() => setDetail(null)}
           headerExtra={<span className="bdg b-gray">{detail.sourceLabel}</span>}

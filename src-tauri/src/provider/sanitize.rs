@@ -92,7 +92,12 @@ fn strip_jpeg(bytes: &[u8], clear_meta: bool, remove_c2pa: bool) -> Vec<u8> {
 }
 
 /// 判定某 JPEG APPn/COM 段是否应被丢弃。
-fn should_drop_jpeg_segment(marker: u8, payload: &[u8], clear_meta: bool, remove_c2pa: bool) -> bool {
+fn should_drop_jpeg_segment(
+    marker: u8,
+    payload: &[u8],
+    clear_meta: bool,
+    remove_c2pa: bool,
+) -> bool {
     match marker {
         // APP1：EXIF 或 XMP。
         0xE1 if clear_meta => {
@@ -219,10 +224,7 @@ mod tests {
         assert_eq!(ext, "jpg");
         assert!(!jpeg_has_marker(&out, 0xEB), "APP11(C2PA) 应被剥离");
         // EXIF 段（APP1 首个）应被剥离——校验无 "Exif" 标识残留。
-        assert!(
-            !out.windows(4).any(|w| w == b"Exif"),
-            "EXIF 标识应被剥离"
-        );
+        assert!(!out.windows(4).any(|w| w == b"Exif"), "EXIF 标识应被剥离");
         assert!(image::load_from_memory(&out).is_ok(), "剥离后仍可解码");
     }
 

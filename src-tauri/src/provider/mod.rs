@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// 生成参数（E16 / 决策 D1）：默认全部空 = 不向 API 传该字段，以提示词与模型默认为准；
 /// 显式设置则透传（软件设置优先于提示词内同类描述，由 API 侧覆盖）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GenParams {
     /// 图像尺寸，如 "1024x1024" / "1536x1024" / "1024x1536" / "auto"。
@@ -25,17 +25,6 @@ pub struct GenParams {
     pub clear_ai_metadata: Option<bool>,
     /// 输出处理（任务1）：去除 C2PA 内容凭据（JUMBF/`caBX`）。缺省视为开启。
     pub remove_c2pa: Option<bool>,
-}
-
-impl Default for GenParams {
-    fn default() -> Self {
-        Self {
-            size: None,
-            quality: None,
-            clear_ai_metadata: None,
-            remove_c2pa: None,
-        }
-    }
 }
 
 impl GenParams {

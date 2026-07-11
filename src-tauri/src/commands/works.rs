@@ -223,7 +223,7 @@ pub async fn file_exists(path: String) -> AppResult<bool> {
     Ok(std::path::Path::new(&path).is_file())
 }
 
-/// 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.jpg`。
+/// 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.{ext}`。
 /// 批次已删除（task_id 为空）或快照已随清理消失时报可读错误。
 #[tauri::command]
 #[specta::specta]
@@ -241,7 +241,13 @@ pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()>
             "该作品所属批次已清理，源快照不存在，无法重新导出".into(),
         ));
     };
-    let src = state.dirs.results().join(format!("{task_id}.jpg"));
+    // 任务1：结果快照扩展名跟随输出文件（默认 jpg；保留原格式时可能 png）。
+    let ext = std::path::Path::new(&image_path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase();
+    let src = state.dirs.results().join(format!("{task_id}.{ext}"));
     if !src.is_file() {
         return Err(AppError::InvalidInput(
             "资产区源快照已不存在（可能随批次清理删除），无法重新导出".into(),

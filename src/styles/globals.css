@@ -446,6 +446,12 @@ a:hover {
   border-radius: 12px;
   box-shadow: var(--sh1);
 }
+/* 任务1：生成参数卡内「输出处理」分隔线。 */
+.opsep {
+  height: 1px;
+  background: var(--line);
+  margin: 14px 0;
+}
 .chead {
   display: flex;
   align-items: center;

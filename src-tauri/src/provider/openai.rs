@@ -156,6 +156,10 @@ impl ImageProvider for OpenAiCompatible {
             .unwrap_or("image.png")
             .to_string();
 
+        // 输出处理开关须在下方消费 size/quality 前读取（避免 params 部分移动后再借用）。
+        let clear_meta = req.params.clear_meta();
+        let remove_c2pa = req.params.remove_c2pa();
+
         let part = reqwest::multipart::Part::bytes(image_bytes).file_name(file_name);
         let mut form = reqwest::multipart::Form::new()
             .part("image", part)
@@ -239,9 +243,25 @@ impl ImageProvider for OpenAiCompatible {
             ));
         };
 
-        Ok(GenImage {
-            jpeg: to_jpeg(&raw)?,
-        })
+        // 输出处理（任务1）：默认「清元数据 + 去 C2PA」→ 统一重编码 JPEG（本身抹除全部附属段）；
+        // 用户任一开关关闭 → 保留原格式做容器级定向剥离（保留其想留的元数据/C2PA）。
+        if clear_meta && remove_c2pa {
+            return Ok(GenImage {
+                bytes: to_jpeg(&raw)?,
+                ext: "jpg".to_string(),
+            });
+        }
+        match super::sanitize::strip_preserve(&raw, clear_meta, remove_c2pa) {
+            Some((bytes, ext)) => Ok(GenImage {
+                bytes,
+                ext: ext.to_string(),
+            }),
+            // 无法识别的容器：退化为重编码 JPEG（无法保留其元数据）。
+            None => Ok(GenImage {
+                bytes: to_jpeg(&raw)?,
+                ext: "jpg".to_string(),
+            }),
+        }
     }
 }
 
@@ -350,7 +370,7 @@ mod tests {
             .await
             .unwrap();
         // 应为合法 JPEG
-        assert!(image::load_from_memory(&out.jpeg).is_ok());
+        assert!(image::load_from_memory(&out.bytes).is_ok());
     }
 
     // 挂一个恒定成功的 /images/edits mock，返回该 server。
@@ -394,6 +414,7 @@ mod tests {
         r.params = crate::provider::GenParams {
             size: Some("1024x1024".into()),
             quality: Some("high".into()),
+            ..Default::default()
         };
         provider(&server.uri()).generate(r, None).await.unwrap();
         let reqs = server.received_requests().await.unwrap();
@@ -430,7 +451,7 @@ mod tests {
             .generate(req(rp), Some(cb))
             .await
             .unwrap();
-        assert!(image::load_from_memory(&out.jpeg).is_ok());
+        assert!(image::load_from_memory(&out.bytes).is_ok());
         assert!(
             hit.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "应有下载进度回调"

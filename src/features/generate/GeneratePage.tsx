@@ -49,6 +49,13 @@ export function GeneratePage() {
   // E17 / D2：抽卡次数 k（每组合独立生成 k 次），默认 1，上限 5。
   const draws = useGenerateStore((s) => s.draws);
   const setDraws = useGenerateStore((s) => s.setDraws);
+  // 任务1 输出处理：去水印档位 + 清除 AI 元数据 + 去除 C2PA。
+  const watermark = useGenerateStore((s) => s.watermark);
+  const setWatermark = useGenerateStore((s) => s.setWatermark);
+  const clearAiMetadata = useGenerateStore((s) => s.clearAiMetadata);
+  const setClearAiMetadata = useGenerateStore((s) => s.setClearAiMetadata);
+  const removeC2pa = useGenerateStore((s) => s.removeC2pa);
+  const setRemoveC2pa = useGenerateStore((s) => s.setRemoveC2pa);
   // E31：启用 Key 快照（确认摘要展示 + ETA 估算并发）。
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   // E31：开始生成确认卡（null = 未打开）。
@@ -195,9 +202,13 @@ export function GeneratePage() {
 
   // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
   const buildParamsJson = () => {
-    const p: Record<string, string> = {};
+    const p: Record<string, string | boolean> = {};
     if (size) p.size = size;
     if (quality) p.quality = quality;
+    // 任务1：输出处理开关随批次记忆（后端缺省视为开启，故显式写入以便「再来一批」还原）。
+    p.watermark = watermark;
+    p.clearAiMetadata = clearAiMetadata;
+    p.removeC2pa = removeC2pa;
     return JSON.stringify(p);
   };
 
@@ -387,6 +398,37 @@ export function GeneratePage() {
               <span className="fs11 t3">
                 每个「参考图 × 提示词」组合独立生成 k 次，各占一个任务
               </span>
+            </div>
+
+            {/* 任务1 输出处理：去水印（占位）+ 清除 AI 元数据 + 去除 C2PA。 */}
+            <div className="opsep" />
+            <div className="fx ac gap8" style={{ marginBottom: 10 }}>
+              <span className="fw6 fs12">输出处理</span>
+              <span className="fs11 t3">集成自 remove-ai-watermarks · 默认清除 AI 元数据与 C2PA</span>
+            </div>
+            <div className="fx ac gap10">
+              <span className="fs12 t2" style={{ width: 76 }}>
+                去水印
+              </span>
+              <div className="seg">
+                <span className={cn("sgi", watermark === "none" && "on")} onClick={() => setWatermark("none")}>
+                  无需去水印
+                </span>
+                <span className="sgi" style={{ opacity: 0.4, cursor: "not-allowed" }} title="可见水印去除即将支持">
+                  去除可见水印 · 即将支持
+                </span>
+              </div>
+            </div>
+            <div className="mt10">
+              <BoolRow label="清除 AI 元数据" value={clearAiMetadata} onChange={setClearAiMetadata} />
+            </div>
+            <div className="mt10">
+              <BoolRow label="去除 C2PA" value={removeC2pa} onChange={setRemoveC2pa} />
+            </div>
+            <div className="fs11 t3 mt8" style={{ lineHeight: 1.7 }}>
+              {clearAiMetadata && removeC2pa
+                ? "输出统一重编码为干净 JPEG：不含 EXIF/XMP、PNG 文本、IPTC 与 C2PA 内容凭据。"
+                : "关闭任一项将保留原图格式，仅按所选清除 EXIF/XMP/PNG 文本或 C2PA，保留你想留下的其余信息。"}
             </div>
           </div>
         </div>
@@ -789,6 +831,33 @@ function ParamRow({
             </span>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/** 布尔开关行（开/关分段控件），复用生成参数的视觉语言（任务1 输出处理）。 */
+function BoolRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="fx ac gap10">
+      <span className="fs12 t2" style={{ width: 76 }}>
+        {label}
+      </span>
+      <div className="seg">
+        <span className={cn("sgi", value && "on")} onClick={() => onChange(true)}>
+          开启
+        </span>
+        <span className={cn("sgi", !value && "on")} onClick={() => onChange(false)}>
+          关闭
+        </span>
       </div>
     </div>
   );

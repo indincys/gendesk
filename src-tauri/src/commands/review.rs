@@ -130,8 +130,10 @@ pub async fn accept_tasks(
         // 输出到 outputs/{批次}/参考图名_YYMMDD_编号.JPG
         let out_dir = state.dirs.outputs().join(row.batch_id.to_string());
         std::fs::create_dir_all(&out_dir)?;
+        // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
+        let ext = files::output_ext_from_path(&src);
         let filename =
-            files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index);
+            files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index, &ext);
         let out_path = out_dir.join(&filename);
         // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
         std::fs::copy(&src, &out_path)?;

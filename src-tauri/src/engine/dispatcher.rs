@@ -455,10 +455,11 @@ impl Scheduler {
         // 落盘：结果暂存 + 缩略图。
         let results = self.dirs.results();
         let _ = tokio::fs::create_dir_all(&results).await;
-        let full = results.join(format!("{}.jpg", task.id));
+        // 输出处理（任务1）：默认为 jpg；用户保留原格式时 ext 可能是 png。
+        let full = results.join(format!("{}.{}", task.id, img.ext));
         let thumb = self.dirs.thumbs().join(format!("result_{}.jpg", task.id));
         // 写盘失败（磁盘满等）不能静默转 rev，否则用户在验收页看到空图；标失败让其可重试。
-        if let Err(e) = tokio::fs::write(&full, &img.jpeg).await {
+        if let Err(e) = tokio::fs::write(&full, &img.bytes).await {
             tracing::error!(task_id = task.id, error = %e, "生成结果写盘失败，任务标记为失败");
             let msg = format!("结果写盘失败：{e}");
             if let Some(aid) = attempt_id {
@@ -917,7 +918,8 @@ mod tests {
             self.cur.fetch_sub(1, Ordering::SeqCst);
             match res {
                 Ok(()) => Ok(GenImage {
-                    jpeg: (*self.jpeg).clone(),
+                    bytes: (*self.jpeg).clone(),
+                    ext: "jpg".to_string(),
                 }),
                 Err(kind) => Err(ProviderError::new(kind, None, "fake 错误")),
             }

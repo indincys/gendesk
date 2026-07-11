@@ -424,9 +424,21 @@ a:hover {
   min-height: 0;
 }
 .cwrap {
-  max-width: 860px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 18px 24px 26px;
+}
+/* 任务2：提示词/参考图宽屏两栏，减少侧边与纵向留白；窄屏自动堆叠。 */
+.cgrid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1040px) {
+  .cgrid2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ============================ 通用组件件 ============================ */
@@ -445,6 +457,12 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--sh1);
+}
+/* 任务1：生成参数卡内「输出处理」分隔线。 */
+.opsep {
+  height: 1px;
+  background: var(--line);
+  margin: 14px 0;
 }
 .chead {
   display: flex;
@@ -806,7 +824,8 @@ a:hover {
 /* ============================ 任务表 ============================ */
 .tgrid {
   display: grid;
-  grid-template-columns: 106px 168px minmax(170px, 1fr) 58px 168px 44px 116px;
+  /* 任务6：首列为多选勾选框。 */
+  grid-template-columns: 26px 106px 168px minmax(170px, 1fr) 58px 168px 44px 116px;
   align-items: center;
   column-gap: 10px;
   padding: 0 14px;
@@ -831,6 +850,10 @@ a:hover {
 }
 .tr:hover {
   background: var(--sub);
+}
+/* 任务6：多选选中行高亮。 */
+.tr.selrow {
+  background: var(--accbg);
 }
 .tract {
   opacity: 0;
@@ -1001,10 +1024,14 @@ a:hover {
 }
 
 /* ============================ 验收 / 作品网格 ============================ */
+/* 任务3：验收/参考图网格改瀑布流（多列），缩略图按自然比例展示。列数由内联 columnCount 控制。 */
 .rgrid {
-  display: grid;
-  gap: 12px;
+  column-gap: 12px;
   padding: 16px 18px 80px;
+}
+.rgrid > .rcard {
+  break-inside: avoid;
+  margin-bottom: 12px;
 }
 .rcard {
   position: relative;
@@ -1016,6 +1043,23 @@ a:hover {
   border-radius: 10px;
   border: 1px solid var(--line);
   transition: box-shadow 0.15s, transform 0.12s;
+}
+/* 自然比例修饰：容器高度跟随内部 <img>（覆盖 .rcimg 的固定 1:1）。 */
+.rcnat {
+  aspect-ratio: auto;
+}
+/* 缩略图元素（任务3）：按原图比例铺满列宽。z-index 盖住 .ph 的斜纹占位层。 */
+.thumbimg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: inherit;
+  position: relative;
+  z-index: 1;
+}
+/* 无缩略时的占位（保持方形，避免高度塌陷）。 */
+.thumbfill {
+  aspect-ratio: 1;
 }
 .rcard.sel .rcimg {
   box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
@@ -1172,6 +1216,9 @@ a:hover {
   padding: 6px 2px 2px;
   border-bottom: 1px solid var(--line);
   margin-top: 4px;
+  /* 任务3：瀑布流多列下跨全部列（替代原 grid 的整行跨列）。 */
+  column-span: all;
+  break-inside: avoid;
 }
 .rdet {
   position: absolute;
@@ -1348,11 +1395,15 @@ a:hover {
   z-index: 6;
   white-space: nowrap;
 }
+/* 任务3：作品库瀑布流，缩略图按自然比例展示。 */
 .wgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
-  gap: 14px;
+  column-width: 200px;
+  column-gap: 14px;
   padding: 16px 18px 40px;
+}
+.wgrid > .wcard {
+  break-inside: avoid;
+  margin-bottom: 14px;
 }
 .wcard {
   cursor: pointer;
@@ -1363,6 +1414,10 @@ a:hover {
   border-radius: 10px;
   border: 1px solid var(--line);
   transition: box-shadow 0.15s;
+}
+/* 自然比例修饰（作品卡）。 */
+.wcnat {
+  aspect-ratio: auto;
 }
 .wcard:hover .wcimg {
   box-shadow: var(--sh2);
@@ -1432,11 +1487,15 @@ a:hover {
   white-space: nowrap;
   cursor: pointer;
 }
+/* 任务3：参考图库瀑布流，缩略图按自然比例展示。 */
 .fgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
-  gap: 12px;
+  column-width: 150px;
+  column-gap: 12px;
   padding: 10px 18px 16px;
+}
+.fgrid > .rcard {
+  break-inside: avoid;
+  margin-bottom: 12px;
 }
 .pgrid {
   display: flex;

@@ -1,4 +1,5 @@
 import { Modal } from "@/components/ui/Modal";
+import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type BatchView, type ReviewItemView, commands, unwrap } from "@/lib/ipc";
@@ -360,7 +361,7 @@ export function ReviewPage() {
         </div>
       ) : (
         <div className="pbody">
-          <div className="rgrid" style={{ gridTemplateColumns: `repeat(${cols},1fr)` }}>
+          <div className="rgrid" style={{ columnCount: cols }}>
             {displayed.map((it, idx) => {
               const ck = clusterKey(it);
               const prev = idx > 0 ? displayed[idx - 1] : undefined;
@@ -368,7 +369,7 @@ export function ReviewPage() {
               return (
                 <Fragment key={it.id}>
                   {showHeader && (
-                    <div className="rclhead" style={{ gridColumn: "1 / -1" }}>
+                    <div className="rclhead">
                       {sortMode === "ref" ? "参考图" : "提示词组"} · {ck}
                     </div>
                   )}
@@ -383,7 +384,7 @@ export function ReviewPage() {
                     onClick={(e) => onCardClick(idx, e.shiftKey)}
                     onDoubleClick={() => setZoom(idx)}
                   >
-                    <div className="ph rcimg" style={bg(it.resultThumbPath)} />
+                    <NatThumb path={it.resultThumbPath} className="rcimg rcnat" />
                     <span className={cn("rck", sel.has(it.id) && "on")}>
                       <Check className="ic12" />
                     </span>

@@ -708,7 +708,7 @@ async fileExists(path: string) : Promise<Result<boolean, AppError>> {
 }
 },
 /**
- * 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.jpg`。
+ * 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.{ext}`。
  * 批次已删除（task_id 为空）或快照已随清理消失时报可读错误。
  */
 async reexportWork(id: number) : Promise<Result<null, AppError>> {

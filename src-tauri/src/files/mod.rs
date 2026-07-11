@@ -146,13 +146,40 @@ pub fn make_upload_copy(src: &Path, dest: &Path) -> AppResult<Option<u64>> {
     Ok(Some(size))
 }
 
-/// 输出文件名：`参考图名_YYMMDD_编号无连字符_抽卡序号.JPG`（需求 14.3 / E17 D2）。
+/// 输出文件名：`参考图名_YYMMDD_编号无连字符_抽卡序号.EXT`（需求 14.3 / E17 D2）。
 /// 例：`productA_260708_DZ0001_2.JPG`。抽卡序号避免同组合多张通过时文件名冲突。
-/// 参考图名做文件系统安全清洗（保留中文）。
-pub fn output_filename(ref_name: &str, code: &str, date_yymmdd: &str, draw_index: i64) -> String {
+/// 参考图名做文件系统安全清洗（保留中文）。扩展名（大写）跟随源结果格式
+/// （任务1：用户保留原格式时可能为 PNG）。
+pub fn output_filename(
+    ref_name: &str,
+    code: &str,
+    date_yymmdd: &str,
+    draw_index: i64,
+    ext: &str,
+) -> String {
     let safe = sanitize_filename(ref_name);
     let code_nohyphen = code.replace('-', "");
-    format!("{safe}_{date_yymmdd}_{code_nohyphen}_{draw_index}.JPG")
+    let ext = normalize_ext(ext);
+    format!("{safe}_{date_yymmdd}_{code_nohyphen}_{draw_index}.{ext}")
+}
+
+/// 从结果文件路径取输出用扩展名（大写）；无扩展名退化为 `JPG`。
+pub fn output_ext_from_path(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jpg");
+    normalize_ext(ext)
+}
+
+/// 规范扩展名：去点、转大写、空则 JPG。
+fn normalize_ext(ext: &str) -> String {
+    let e = ext.trim().trim_start_matches('.').to_uppercase();
+    if e.is_empty() {
+        "JPG".to_string()
+    } else {
+        e
+    }
 }
 
 /// Unix 秒 → `YYMMDD`（本地按 UTC 近似；输出命名用）。
@@ -230,20 +257,32 @@ mod tests {
     #[test]
     fn output_filename_strips_hyphen_and_keeps_chinese() {
         assert_eq!(
-            output_filename("productA", "DZ-0001", "260708", 1),
+            output_filename("productA", "DZ-0001", "260708", 1, "jpg"),
             "productA_260708_DZ0001_1.JPG"
         );
         assert_eq!(
-            output_filename("商品主图", "DZ-0128", "260101", 2),
+            output_filename("商品主图", "DZ-0128", "260101", 2, "jpg"),
             "商品主图_260101_DZ0128_2.JPG"
         );
+    }
+
+    // 任务1：保留原格式时扩展名跟随源结果（大写）。
+    #[test]
+    fn output_filename_follows_source_ext() {
+        assert_eq!(
+            output_filename("p", "DZ-0001", "260708", 1, "png"),
+            "p_260708_DZ0001_1.PNG"
+        );
+        assert_eq!(output_ext_from_path("/data/results/12.png"), "PNG");
+        assert_eq!(output_ext_from_path("/data/results/12.jpg"), "JPG");
+        assert_eq!(output_ext_from_path("/data/results/noext"), "JPG");
     }
 
     // E17 D2：同一组合不同抽卡序号的文件名不冲突。
     #[test]
     fn output_filename_draw_index_avoids_collision() {
-        let a = output_filename("productA", "DZ-0001", "260708", 1);
-        let b = output_filename("productA", "DZ-0001", "260708", 2);
+        let a = output_filename("productA", "DZ-0001", "260708", 1, "jpg");
+        let b = output_filename("productA", "DZ-0001", "260708", 2, "jpg");
         assert_ne!(a, b, "同组合两次抽卡的输出文件名必须不同");
     }
 

@@ -1,9 +1,9 @@
-import { ConfirmModal } from "@/components/ui/Modal";
+import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type TrashItemView, commands, unwrap } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
-import { Check, Eye, Trash2, X } from "lucide-react";
+import { Check, Eye, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,8 +11,8 @@ export function TrashPage() {
   const [rows, setRows] = useState<TrashItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [confirm, setConfirm] = useState<null | { ids: number[]; all: boolean }>(null);
-  // E02：查看未通过原图（清理前原图仍暂存）。
-  const [viewImage, setViewImage] = useState<string | null>(null);
+  // 任务4：点击查看被丢弃的大图 + 提示词原文（清理前仍暂存）。
+  const [detail, setDetail] = useState<TrashItemView | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -83,7 +83,16 @@ export function TrashPage() {
               <span className={cn("ckb", sel.has(x.id) && "on")}>
                 <Check className="ic12" />
               </span>
-              <span className="ph xthumb" style={bg(x.thumbPath)} />
+              <button
+                type="button"
+                className="ph xthumb"
+                title="查看大图与提示词"
+                style={{ ...bg(x.thumbPath), cursor: "pointer", padding: 0 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDetail(x);
+                }}
+              />
               {x.code && <span className="pid noshrink">{promptLabel(x.code, x.title)}</span>}
               <span className="mono fs11 t3 f1 nowrap ohide">
                 {x.promptText ?? entityLabel(x.entityType)}
@@ -92,19 +101,17 @@ export function TrashPage() {
               <span className="fs11 t3 noshrink" style={{ width: 76, textAlign: "right" }}>
                 {fmtTime(x.deletedAt)}
               </span>
-              {x.imagePath && (
-                <button
-                  type="button"
-                  className="icb"
-                  title="查看原图"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setViewImage(x.imagePath ?? null);
-                  }}
-                >
-                  <Eye className="ic12" />
-                </button>
-              )}
+              <button
+                type="button"
+                className="icb"
+                title="查看大图与提示词"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDetail(x);
+                }}
+              >
+                <Eye className="ic12" />
+              </button>
               <button
                 type="button"
                 className="icb"
@@ -132,28 +139,82 @@ export function TrashPage() {
         />
       )}
 
-      {viewImage && (
-        <div className="ovl" onClick={() => setViewImage(null)}>
-          <button
-            type="button"
-            className="icb"
-            style={{ position: "fixed", top: 16, right: 16, zIndex: 1 }}
-            title="关闭"
-            onClick={() => setViewImage(null)}
-          >
-            <X className="ic12" />
-          </button>
-          {assetSrc(viewImage) ? (
-            <img
-              src={assetSrc(viewImage)}
-              alt="未通过原图"
-              style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain" }}
-              onClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            <div className="fs12 t2">无法预览（原图可能已被清理）</div>
-          )}
-        </div>
+      {detail && (
+        <Modal
+          title={
+            detail.code ? promptLabel(detail.code, detail.title) : entityLabel(detail.entityType)
+          }
+          width="w700"
+          onClose={() => setDetail(null)}
+          headerExtra={<span className="bdg b-gray">{detail.sourceLabel}</span>}
+          footer={
+            <>
+              <span className="fs11 t3">清理后彻底删除并回收编号，不可恢复</span>
+              <div className="f1" />
+              <button
+                type="button"
+                className="btn sm gho dng"
+                onClick={() => {
+                  const id = detail.id;
+                  setDetail(null);
+                  setConfirm({ ids: [id], all: false });
+                }}
+              >
+                彻底删除
+              </button>
+              <button type="button" className="btn sm" onClick={() => setDetail(null)}>
+                关闭
+              </button>
+            </>
+          }
+        >
+          <div className="fx gap14">
+            <div style={{ width: 320, flex: "none" }}>
+              {assetSrc(detail.imagePath) ? (
+                <img
+                  src={assetSrc(detail.imagePath)}
+                  alt="被丢弃的图片"
+                  style={{
+                    width: "100%",
+                    borderRadius: 10,
+                    border: "1px solid var(--line)",
+                    display: "block",
+                  }}
+                />
+              ) : assetSrc(detail.thumbPath) ? (
+                <img
+                  src={assetSrc(detail.thumbPath)}
+                  alt="缩略图"
+                  style={{
+                    width: "100%",
+                    borderRadius: 10,
+                    border: "1px solid var(--line)",
+                    display: "block",
+                  }}
+                />
+              ) : (
+                <div
+                  className="ph"
+                  style={{ aspectRatio: 1, borderRadius: 10, border: "1px solid var(--line)" }}
+                />
+              )}
+              <div className="fs11 t3 mt10">删除于 {fmtTime(detail.deletedAt)}</div>
+              {!detail.imagePath && (
+                <div className="fs11 t3 mt6" style={{ lineHeight: 1.6 }}>
+                  原图已随清理删除，仅保留缩略图与提示词记录。
+                </div>
+              )}
+            </div>
+            <div className="f1" style={{ minWidth: 0 }}>
+              <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+                提示词原文
+              </div>
+              <div className="ptext mt6" style={{ maxHeight: 380, overflow: "auto" }}>
+                {detail.promptText ?? "（无提示词记录）"}
+              </div>
+            </div>
+          </div>
+        </Modal>
       )}
     </PageScaffold>
   );

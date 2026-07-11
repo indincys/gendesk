@@ -19,6 +19,16 @@ pub struct ImportPreview {
     pub encoding: String,
     pub groups: Vec<ImportPreviewGroup>,
     pub total: i64,
+    /// 行号级诊断（E37），非致命，仅提示。
+    pub warnings: Vec<ImportWarning>,
+}
+
+/// 导入诊断（E37：缺分组标记 / 悬空小标题等，含行号）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWarning {
+    pub line: i64,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -421,11 +431,57 @@ pub async fn parse_prompt_txt(
     }
 
     let total = parsed.total_prompts() as i64;
+    let warnings = parsed
+        .warnings
+        .into_iter()
+        .map(|w| ImportWarning {
+            line: w.line as i64,
+            message: w.message,
+        })
+        .collect();
     Ok(ImportPreview {
         encoding: parsed.encoding,
         total,
         groups,
+        warnings,
     })
+}
+
+/// 提示词 txt 模板正文（E37「保存模板」）：覆盖分组/前缀/场景/标签/小标题/序号语法。
+const PROMPT_TXT_TEMPLATE: &str = "\
+分组: 电商主图
+前缀: DZ
+场景: 商品
+标签: 白底, 3C, 主图
+
+【正面主图】
+1. 白底商品正面，居中构图，柔和顶光，画面干净。
+
+【细节特写】
+2. 商品材质细节特写，45 度侧光，浅景深。
+
+分组【人物场景】
+
+【楼道骑行】
+把卡套连同配件放进照片里，自然光，真实随手拍质感。
+";
+
+/// 保存一份提示词 txt 模板到用户选定位置（E37）。返回保存路径；取消返回 None。
+#[tauri::command]
+#[specta::specta]
+pub async fn save_prompt_template(app: tauri::AppHandle) -> AppResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .set_file_name("提示词导入模板.txt")
+        .add_filter("文本文件", &["txt"])
+        .blocking_save_file();
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    std::fs::write(&path, PROMPT_TXT_TEMPLATE)?;
+    Ok(Some(path.to_string_lossy().to_string()))
 }
 
 /// 解析前缀：显式前缀优先；否则由名字生成并保证（本次导入 + DB）唯一。

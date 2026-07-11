@@ -6,6 +6,7 @@ import {
   type RefImageDetail,
   type RefImageView,
   commands,
+  subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,23 @@ export function RefsPage() {
     setNewGroupName("");
     setPendingPaths(paths);
   };
+
+  // E14：拖拽图片进参考图库 → 走同一选组弹窗。
+  useEffect(() => {
+    let un = () => {};
+    void subscribeFileDrop((paths) => {
+      const images = paths.filter((p) => /\.(png|jpe?g|webp|bmp)$/i.test(p));
+      if (images.length > 0) {
+        setNewGroupName("");
+        setPendingPaths(images);
+      } else if (paths.length > 0) {
+        toast.error("参考图库仅支持拖入图片文件");
+      }
+    }).then((f) => {
+      un = f;
+    });
+    return () => un();
+  }, []);
 
   // 第二步：带选定分组导入。gid=null 为未分组。
   const doImport = async (gid: number | null) => {

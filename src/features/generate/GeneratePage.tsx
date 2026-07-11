@@ -1,12 +1,15 @@
 import { Modal } from "@/components/ui/Modal";
 import { Stepper } from "@/components/ui/Stepper";
+import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
 import { assetSrc } from "@/lib/img";
 import {
   type ApiKeyView,
   type GroupView,
+  type ImportPreview,
   type PromptView,
   type RefImageView,
   commands,
+  subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
@@ -16,6 +19,13 @@ import { useUiStore } from "@/stores/ui";
 import { ChevronDown, ChevronRight, FileUp, Play, Plus, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+
+/** 按扩展名分拣拖入路径（E14）。 */
+function sortDrops(paths: string[]): { txt: string | undefined; images: string[] } {
+  const images = paths.filter((p) => /\.(png|jpe?g|webp|bmp)$/i.test(p));
+  const txt = paths.find((p) => p.toLowerCase().endsWith(".txt"));
+  return { txt, images };
+}
 
 export function GeneratePage() {
   const go = useUiStore((s) => s.go);
@@ -44,6 +54,8 @@ export function GeneratePage() {
   const [confirm, setConfirm] = useState<null | { avgSec: number | null }>(null);
   const [modal, setModal] = useState<null | "groups" | "refs" | { assign: number }>(null);
   const [starting, setStarting] = useState(false);
+  // E14：生成页 txt 导入改走预览确认（取消不落库、不产生临时分组）。
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   // 已展开查看提示词原文的分组 + 其提示词缓存（按需加载）。
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [promptsByGroup, setPromptsByGroup] = useState<Record<number, PromptView[]>>({});
@@ -112,32 +124,70 @@ export function GeneratePage() {
   // E12：有可用 Key = 至少一个启用且并发合计 > 0。
   const hasUsableKey = enabledKeys.reduce((s, k) => s + k.concurrencyLimit, 0) > 0;
 
+  // E14：解析 txt → 预览确认（不落库）；确认后才 commit 为临时分组。
+  const parseTxt = useCallback(async (path: string) => {
+    const preview = await unwrap(commands.parsePromptTxt(path)).catch((e) => {
+      toast.error(String(e));
+      return null;
+    });
+    if (preview) setImportPreview(preview);
+  }, []);
+
   const importTxt = async () => {
-    try {
-      const path = await unwrap(commands.pickTxtFile());
-      if (!path) return;
-      const preview = await unwrap(commands.parsePromptTxt(path));
-      const res = await unwrap(commands.commitPromptImport(preview, "generate"));
+    const path = await unwrap(commands.pickTxtFile()).catch(() => null);
+    if (!path) return;
+    await parseTxt(path);
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview) return;
+    const res = await unwrap(commands.commitPromptImport(importPreview, "generate")).catch((e) => {
+      toast.error(String(e));
+      return null;
+    });
+    if (res) {
       toast(`已导入 ${res.inserted} 条到临时分组`);
+      setImportPreview(null);
       await load();
       setSelGroupIds((cur) => [...new Set([...cur, ...res.groupIds])]);
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
     }
   };
 
-  const uploadRefs = async () => {
-    try {
-      const paths = await unwrap(commands.pickImageFiles());
+  const importImages = useCallback(
+    async (paths: string[]) => {
       if (paths.length === 0) return;
-      const added = await unwrap(commands.importRefImages(paths, null));
-      toast(`已上传 ${added.length} 张参考图`);
-      await load();
-      setSelRefIds((cur) => [...new Set([...cur, ...added.map((r) => r.id)])]);
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
-    }
+      const added = await unwrap(commands.importRefImages(paths, null)).catch((e) => {
+        toast.error(String(e));
+        return [];
+      });
+      if (added.length > 0) {
+        toast(`已上传 ${added.length} 张参考图`);
+        await load();
+        setSelRefIds((cur) => [...new Set([...cur, ...added.map((r) => r.id)])]);
+      }
+    },
+    [load, setSelRefIds],
+  );
+
+  const uploadRefs = async () => {
+    const paths = await unwrap(commands.pickImageFiles()).catch(() => []);
+    await importImages(paths);
   };
+
+  // E14：拖拽——txt 走预览确认，图片直接导入为参考图。
+  useEffect(() => {
+    let un = () => {};
+    void subscribeFileDrop((paths) => {
+      const { txt, images } = sortDrops(paths);
+      if (txt) void parseTxt(txt);
+      if (images.length > 0) void importImages(images);
+      if (!txt && images.length === 0 && paths.length > 0)
+        toast.error("仅支持拖入 .txt 或图片文件");
+    }).then((f) => {
+      un = f;
+    });
+    return () => un();
+  }, [parseTxt, importImages]);
 
   // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
   const buildParamsJson = () => {
@@ -455,6 +505,15 @@ export function GeneratePage() {
             setMapping((m) => ({ ...m, [(modal as { assign: number }).assign]: gid }));
             setModal(null);
           }}
+        />
+      )}
+      {importPreview && (
+        <ImportPreviewModal
+          preview={importPreview}
+          note="将作为本批次临时分组"
+          confirmLabel={`导入 ${importPreview.total} 条`}
+          onConfirm={confirmImport}
+          onClose={() => setImportPreview(null)}
         />
       )}
     </div>

@@ -1,10 +1,23 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { type GroupView, type ImportPreview, type PromptView, commands, unwrap } from "@/lib/ipc";
+import {
+  type GroupView,
+  type ImportPreview,
+  type PromptView,
+  commands,
+  subscribeFileDrop,
+  unwrap,
+} from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
 import { CheckSquare, FileUp, FolderInput, MoreHorizontal, Plus, Search, Star } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+
+/** 提取路径列表中首个 .txt（拖拽导入）。 */
+function firstTxt(paths: string[]): string | undefined {
+  return paths.find((p) => p.toLowerCase().endsWith(".txt"));
+}
 
 export function PromptsPage() {
   const [groups, setGroups] = useState<GroupView[]>([]);
@@ -105,15 +118,32 @@ export function PromptsPage() {
     }
   };
 
-  const doImport = async () => {
-    const path = await unwrap(commands.pickTxtFile()).catch(() => null);
-    if (!path) return;
+  const parsePath = useCallback(async (path: string) => {
     const preview = await unwrap(commands.parsePromptTxt(path)).catch((e) => {
       toast.error(String(e));
       return null;
     });
     if (preview) setImportPreview(preview);
+  }, []);
+
+  const doImport = async () => {
+    const path = await unwrap(commands.pickTxtFile()).catch(() => null);
+    if (!path) return;
+    await parsePath(path);
   };
+
+  // E14：拖拽 .txt 进本页 → 走同一预览确认。
+  useEffect(() => {
+    let un = () => {};
+    void subscribeFileDrop((paths) => {
+      const txt = firstTxt(paths);
+      if (txt) void parsePath(txt);
+      else if (paths.length > 0) toast.error("提示词库仅支持拖入 .txt 文件");
+    }).then((f) => {
+      un = f;
+    });
+    return () => un();
+  }, [parsePath]);
 
   const confirmImport = async () => {
     if (!importPreview) return;
@@ -407,41 +437,12 @@ export function PromptsPage() {
       )}
 
       {importPreview && (
-        <Modal
-          title="导入提示词 .txt"
+        <ImportPreviewModal
+          preview={importPreview}
+          confirmLabel={`导入 ${importPreview.total} 条`}
+          onConfirm={confirmImport}
           onClose={() => setImportPreview(null)}
-          footer={
-            <>
-              <div className="f1" />
-              <button type="button" className="btn" onClick={() => setImportPreview(null)}>
-                取消
-              </button>
-              <button type="button" className="btn pri" onClick={confirmImport}>
-                导入 {importPreview.total} 条
-              </button>
-            </>
-          }
-        >
-          <div className="fx ac gap8">
-            <span className="chip">{importPreview.encoding}</span>
-            <span className="fs11 t3">解析成功</span>
-          </div>
-          <div
-            className="mt10"
-            style={{ border: "1px solid var(--line)", borderRadius: 9, overflow: "hidden" }}
-          >
-            {importPreview.groups.map((o) => (
-              <div key={o.prefix} className="fx ac gap9" style={{ padding: "9px 11px" }}>
-                <i className="gdot" style={{ background: "var(--wr)" }} />
-                <span className="fw5 fs12 nowrap">{o.name}</span>
-                <span className="chip">{o.prefix}</span>
-                <span className="t3 fs11 f1 nowrap ohide">{o.tags.join(" · ")}</span>
-                <span className="chip">{o.codeRange}</span>
-                <span className="t3 fs11 nowrap">{o.count} 条</span>
-              </div>
-            ))}
-          </div>
-        </Modal>
+        />
       )}
     </PageScaffold>
   );

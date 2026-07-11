@@ -30,12 +30,22 @@ pub struct ParsedGroup {
     pub prompts: Vec<ParsedPrompt>,
 }
 
+/// 解析诊断（E37：行号级报错/提示，非致命）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseWarning {
+    /// 1-based 行号。
+    pub line: usize,
+    pub message: String,
+}
+
 /// 解析结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedImport {
     /// 探测到的编码名（如 "UTF-8" / "GBK"）。
     pub encoding: String,
     pub groups: Vec<ParsedGroup>,
+    /// 非致命诊断（缺分组标记、悬空小标题等），含行号。
+    pub warnings: Vec<ParseWarning>,
 }
 
 impl ParsedImport {
@@ -58,15 +68,23 @@ pub fn decode(bytes: &[u8]) -> (String, String) {
 /// 解析字节流为结构化导入结果（不落库、不 panic）。
 pub fn parse(bytes: &[u8]) -> ParsedImport {
     let (encoding, text) = decode(bytes);
-    let groups = parse_text(&text);
-    ParsedImport { encoding, groups }
+    let (groups, warnings) = parse_text(&text);
+    ParsedImport {
+        encoding,
+        groups,
+        warnings,
+    }
 }
 
-fn parse_text(text: &str) -> Vec<ParsedGroup> {
+fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     let mut groups: Vec<ParsedGroup> = Vec::new();
     let mut cur: Option<ParsedGroup> = None;
-    // 待挂靠的小标题：遇到 `【小标题】` 行后暂存，附加到下一条正文。
-    let mut pending_title: Option<String> = None;
+    let mut warnings: Vec<ParseWarning> = Vec::new();
+    // 待挂靠的小标题：遇到 `【小标题】` 行后暂存，附加到下一条正文。含行号供悬空诊断。
+    let mut pending_title: Option<(String, usize)> = None;
+    // 是否已见过任一「分组」标记（E37：正文出现在分组标记前时告警一次）。
+    let mut seen_group_header = false;
+    let mut warned_missing_group = false;
 
     // 确保存在「当前分组」；否则建默认分组。
     fn ensure(cur: &mut Option<ParsedGroup>) -> &mut ParsedGroup {
@@ -80,8 +98,9 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
     }
 
     // 解析模型：每条非空、非头部/非小标题行 = 一条提示词（一行一提示词）。
-    // 空行仅作视觉分隔，被忽略。
-    for raw in text.lines() {
+    // 空行仅作视觉分隔，被忽略。行号 1-based。
+    for (idx, raw) in text.lines().enumerate() {
+        let line = idx + 1;
         let trimmed = raw.trim_end_matches('\r').trim();
         if trimmed.is_empty() {
             continue;
@@ -89,6 +108,12 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
 
         // 分组头：`分组: 名称` 或 `分组【名称】`（后者优先于「小标题」判定）。
         if let Some(name) = parse_group_header(trimmed) {
+            if let Some((t, tline)) = pending_title.take() {
+                warnings.push(ParseWarning {
+                    line: tline,
+                    message: format!("小标题「{t}」后没有正文，已忽略。"),
+                });
+            }
             if let Some(g) = cur.take() {
                 groups.push(g);
             }
@@ -99,7 +124,7 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
                 tags: Vec::new(),
                 prompts: Vec::new(),
             });
-            pending_title = None;
+            seen_group_header = true;
             continue;
         }
 
@@ -114,13 +139,32 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
 
         // 独占一行的 `【小标题】` → 暂存给下一条正文。
         if let Some(title) = parse_title_line(trimmed) {
-            pending_title = Some(title);
+            pending_title = Some((title, line));
             continue;
         }
 
+        // 正文行：若此前从未见过「分组」标记，告警一次（含行号）。
+        if !seen_group_header && !warned_missing_group {
+            warnings.push(ParseWarning {
+                line,
+                message: format!(
+                    "此行正文出现在任何「分组」标记之前，已归入默认分组「{DEFAULT_GROUP}」。\
+                     可在文件开头加一行「分组: 名称」。"
+                ),
+            });
+            warned_missing_group = true;
+        }
         ensure(&mut cur).prompts.push(ParsedPrompt {
-            title: pending_title.take(),
+            title: pending_title.take().map(|(t, _)| t),
             text: strip_leading_number(trimmed).to_string(),
+        });
+    }
+
+    // 文件结尾仍有未挂靠的小标题。
+    if let Some((t, tline)) = pending_title.take() {
+        warnings.push(ParseWarning {
+            line: tline,
+            message: format!("小标题「{t}」后没有正文，已忽略。"),
         });
     }
 
@@ -129,7 +173,7 @@ fn parse_text(text: &str) -> Vec<ParsedGroup> {
     }
     // 丢弃完全为空（无提示词）的分组。
     groups.retain(|g| !g.prompts.is_empty());
-    groups
+    (groups, warnings)
 }
 
 /// 识别分组头：`分组: 名称` / `分组：名称` / `分组【名称】`（含 `组`/`group` 同义）。
@@ -392,6 +436,36 @@ mod tests {
         let doc = "分组【G】\n把【绿色】卡套放进照片";
         let out = parse(doc.as_bytes());
         assert_eq!(flat(&out.groups[0]), vec![(None, "把【绿色】卡套放进照片")]);
+    }
+
+    // E37：正文出现在任何「分组」标记前 → 告警含首个正文行号。
+    #[test]
+    fn warns_content_before_group_with_line() {
+        // 第 1~2 行为空/说明，第 3 行是缺分组标记的正文。
+        let doc = "\n\n没有分组头的正文\n分组: A\n正文A";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(out.warnings[0].line, 3, "告警指向第 3 行");
+        assert!(out.warnings[0].message.contains("分组"));
+        // 正文仍被容错归入默认组 + A 组。
+        assert_eq!(out.total_prompts(), 2);
+    }
+
+    // E37：小标题后无正文（文件结尾悬空）→ 告警含小标题行号。
+    #[test]
+    fn warns_dangling_title_at_eof() {
+        let doc = "分组: A\n正文1\n【结尾悬空标题】";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(out.warnings[0].line, 3);
+        assert!(out.warnings[0].message.contains("结尾悬空标题"));
+    }
+
+    // 正常文档无告警。
+    #[test]
+    fn clean_document_has_no_warnings() {
+        let out = parse("分组: A\n前缀: AA\n【标题】\n正文".as_bytes());
+        assert!(out.warnings.is_empty());
     }
 
     #[test]

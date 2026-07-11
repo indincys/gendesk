@@ -73,6 +73,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::prompts::trash_prompt,
             commands::prompts::parse_prompt_txt,
             commands::prompts::commit_prompt_import,
+            commands::prompts::save_prompt_template,
             // batches / tasks 域（引擎）
             commands::batches::create_batch,
             commands::batches::estimate_task_seconds,

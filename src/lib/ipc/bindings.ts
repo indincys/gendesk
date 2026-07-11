@@ -411,6 +411,17 @@ async commitPromptImport(preview: ImportPreview, ctx: string) : Promise<Result<I
 }
 },
 /**
+ * 保存一份提示词 txt 模板到用户选定位置（E37）。返回保存路径；取消返回 None。
+ */
+async savePromptTemplate() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_prompt_template") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
  */
 async createBatch(input: CreateBatchInput) : Promise<Result<BatchView, AppError>> {
@@ -925,7 +936,11 @@ tags: string[] }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */
-export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number }
+export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number; 
+/**
+ * 行号级诊断（E37），非致命，仅提示。
+ */
+warnings: ImportWarning[] }
 export type ImportPreviewGroup = { name: string; prefix: string; scene: string; tags: string[]; count: number; 
 /**
  * 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
@@ -944,6 +959,10 @@ export type ImportResult = { groupIds: number[]; inserted: number;
  * 是否新建了临时分组（ctx=generate）
  */
 temp: boolean }
+/**
+ * 导入诊断（E37：缺分组标记 / 悬空小标题等，含行号）。
+ */
+export type ImportWarning = { line: number; message: string }
 /**
  * `keys://health`
  */

@@ -117,3 +117,17 @@ export async function reportFrontendError(payload: {
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
+
+/**
+ * 订阅窗口文件拖入事件（E14 拖拽导入）。仅在 drop 完成时回调落盘路径列表。
+ * Tauri webview 事件封装于此，遵守「前端只经 lib/ipc 出入」铁律。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribeFileDrop(handler: (paths: string[]) => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const un = await getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "drop") handler(event.payload.paths);
+  });
+  return () => un();
+}

@@ -3,7 +3,7 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type TrashItemView, commands, unwrap } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
-import { Check, Trash2 } from "lucide-react";
+import { Check, Eye, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,6 +11,8 @@ export function TrashPage() {
   const [rows, setRows] = useState<TrashItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [confirm, setConfirm] = useState<null | { ids: number[]; all: boolean }>(null);
+  // E02：查看未通过原图（清理前原图仍暂存）。
+  const [viewImage, setViewImage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -90,6 +92,19 @@ export function TrashPage() {
               <span className="fs11 t3 noshrink" style={{ width: 76, textAlign: "right" }}>
                 {fmtTime(x.deletedAt)}
               </span>
+              {x.imagePath && (
+                <button
+                  type="button"
+                  className="icb"
+                  title="查看原图"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setViewImage(x.imagePath ?? null);
+                  }}
+                >
+                  <Eye className="ic12" />
+                </button>
+              )}
               <button
                 type="button"
                 className="icb"
@@ -109,12 +124,36 @@ export function TrashPage() {
       {confirm && (
         <ConfirmModal
           title={confirm.all ? "清空废纸篓" : "彻底删除所选"}
-          desc="将物理删除文件、级联清除记录并回收编号，此操作不可恢复。"
+          desc="将物理删除文件（含未通过原图）、级联清除记录并回收编号，此操作不可恢复。"
           confirmLabel="彻底删除"
           danger
           onConfirm={() => purge(confirm.ids, confirm.all)}
           onClose={() => setConfirm(null)}
         />
+      )}
+
+      {viewImage && (
+        <div className="ovl" onClick={() => setViewImage(null)}>
+          <button
+            type="button"
+            className="icb"
+            style={{ position: "fixed", top: 16, right: 16, zIndex: 1 }}
+            title="关闭"
+            onClick={() => setViewImage(null)}
+          >
+            <X className="ic12" />
+          </button>
+          {assetSrc(viewImage) ? (
+            <img
+              src={assetSrc(viewImage)}
+              alt="未通过原图"
+              style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain" }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <div className="fs12 t2">无法预览（原图可能已被清理）</div>
+          )}
+        </div>
       )}
     </PageScaffold>
   );

@@ -1,11 +1,18 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { type ApiKeyView, commands, unwrap } from "@/lib/ipc";
+import {
+  type ApiKeyView,
+  type DataDirInfo,
+  commands,
+  subscribeBackupProgress,
+  unwrap,
+} from "@/lib/ipc";
 import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
+import { useEngineStore } from "@/stores/engine";
 import { useSettingsStore } from "@/stores/settings";
-import { Plus, Trash2 } from "lucide-react";
+import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,6 +25,11 @@ export function SettingsPage() {
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
+  // E19：数据目录信息 + 备份导出进度。
+  const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
+  const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
+  // 队列是否有在途任务（run/retry）——运行中禁止备份（避免边写边打包）。
+  const queueRunning = useEngineStore((s) => Object.values(s.summaries).some((b) => b.running > 0));
 
   const loadKeys = useCallback(async () => {
     try {
@@ -30,7 +42,37 @@ export function SettingsPage() {
   useEffect(() => {
     void loadSettings();
     void loadKeys();
+    void (async () => {
+      setDataDir(await unwrap(commands.dataDirInfo()).catch(() => null));
+    })();
   }, [loadSettings, loadKeys]);
+
+  const openDataDir = async () => {
+    await unwrap(commands.openDataDir()).catch((e) => toast.error(String(e)));
+  };
+
+  const exportBackup = async () => {
+    if (backup) return; // 进行中
+    if (queueRunning) {
+      toast.error("队列运行中，请先暂停队列再导出备份");
+      return;
+    }
+    setBackup({ done: 0, total: 0 });
+    // 订阅进度事件，导出结束即反订阅。
+    const unsub = await subscribeBackupProgress((p) => {
+      setBackup({ done: p.done, total: p.total });
+    });
+    try {
+      const path = await unwrap(commands.exportBackup());
+      if (path) toast.success(`备份已导出到 ${path}`);
+      else toast("已取消导出");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      unsub();
+      setBackup(null);
+    }
+  };
 
   const patchKeyConcurrency = async (k: ApiKeyView, v: number) => {
     setKeys((cur) => cur.map((x) => (x.id === k.id ? { ...x, concurrencyLimit: v } : x)));
@@ -41,6 +83,7 @@ export function SettingsPage() {
           name: null,
           baseUrl: null,
           model: null,
+          rpmLimit: null,
         }),
       );
     } catch {
@@ -57,6 +100,27 @@ export function SettingsPage() {
     await unwrap(commands.deleteApiKey(k.id)).catch(() => {});
     void loadKeys();
     toast("已删除 API Key");
+  };
+
+  // E18：恢复被熔断的 Key。
+  const recoverKey = async (k: ApiKeyView) => {
+    await unwrap(commands.recoverApiKey(k.id)).catch((e) => toast.error(String(e)));
+    void loadKeys();
+    toast(`已恢复「${k.name || "未命名"}」`);
+  };
+
+  // E11：测试已保存 Key 的连接。
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const testSaved = async (k: ApiKeyView) => {
+    setTestingId(k.id);
+    try {
+      await unwrap(commands.testApiKeySaved(k.id));
+      toast.success(`「${k.name || "未命名"}」连接正常`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTestingId(null);
+    }
   };
 
   const enabledCount = keys.filter((k) => k.enabled).length;
@@ -87,6 +151,7 @@ export function SettingsPage() {
               <span>状态</span>
               <span />
               <span />
+              <span />
             </div>
             {keys.map((k) => (
               <div className="kline" key={k.id}>
@@ -109,11 +174,38 @@ export function SettingsPage() {
                 <span className="mono fs11 t2">
                   {k.sampleCount > 0 ? `${Math.round(k.successRate * 100)}%` : "—"}
                 </span>
-                <span>
-                  <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
-                    {k.enabled ? "启用" : "停用"}
-                  </span>
+                <span className="fx ac gap6 ohide">
+                  {k.circuitBroken ? (
+                    <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
+                      已熔断
+                    </span>
+                  ) : (
+                    <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
+                      {k.enabled ? "启用" : "停用"}
+                    </span>
+                  )}
+                  {k.rpmLimit != null && <span className="fs10 t3 nowrap">{k.rpmLimit}/min</span>}
                 </span>
+                {k.circuitBroken ? (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => recoverKey(k)}
+                    title="清除熔断并重新启用"
+                  >
+                    恢复
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    disabled={testingId === k.id}
+                    onClick={() => testSaved(k)}
+                    title="测试连接"
+                  >
+                    {testingId === k.id ? "测试中…" : "测试"}
+                  </button>
+                )}
                 <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
                 <button type="button" className="icb" onClick={() => setConfirmDel(k)} title="删除">
                   <Trash2 className="ic12" />
@@ -191,6 +283,29 @@ export function SettingsPage() {
               超时 / 限流 / 违规默认各自动重试 1 次并切换可用 Key；再次失败则中断并保留错误原因
             </span>
           </div>
+          <div className="fx ac gap10 mt14 wrap">
+            <span className="fs12 t2 nowrap">连续失败自动暂停</span>
+            <Toggle
+              on={(settings?.globalFailThreshold ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  globalFailThreshold: (settings?.globalFailThreshold ?? 0) > 0 ? 0 : 10,
+                })
+              }
+            />
+            {(settings?.globalFailThreshold ?? 0) > 0 && (
+              <Stepper
+                value={settings?.globalFailThreshold ?? 10}
+                min={3}
+                max={50}
+                onChange={(v) => updateSettings({ globalFailThreshold: v })}
+              />
+            )}
+            <span className="fs11 t3">
+              跨全部 Key
+              连续这么多个任务失败即自动暂停队列并系统通知，避免无人值守时烧完额度；关闭则不熔断
+            </span>
+          </div>
         </section>
 
         {/* ---------------- 输出与归档 ---------------- */}
@@ -228,6 +343,62 @@ export function SettingsPage() {
             <span className="t3 fs12">→</span>
             <span className="chip" style={{ color: "var(--acc2)" }}>
               productA_260708_DZ0001.JPG
+            </span>
+          </div>
+          {/* E40 / D3：废纸篓保留期 */}
+          <div className="fx ac gap10 mt14 wrap">
+            <span className="fs12 t2 nowrap" style={{ width: 96 }}>
+              废纸篓保留
+            </span>
+            <Toggle
+              on={(settings?.trashRetentionDays ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  trashRetentionDays: (settings?.trashRetentionDays ?? 0) > 0 ? 0 : 30,
+                })
+              }
+            />
+            {(settings?.trashRetentionDays ?? 0) > 0 && (
+              <>
+                <Stepper
+                  value={settings?.trashRetentionDays ?? 30}
+                  min={1}
+                  max={365}
+                  onChange={(v) => updateSettings({ trashRetentionDays: v })}
+                />
+                <span className="fs11 t3">天</span>
+              </>
+            )}
+            <span className="fs11 t3">
+              删除项（含验收未通过的原图）保留到期后启动时物理清理并回收编号，不可恢复；关闭则永不自动清理
+            </span>
+          </div>
+          {/* E22 / D3：归档批次保留期 */}
+          <div className="fx ac gap10 mt10 wrap">
+            <span className="fs12 t2 nowrap" style={{ width: 96 }}>
+              归档批次保留
+            </span>
+            <Toggle
+              on={(settings?.batchRetentionDays ?? 0) > 0}
+              onClick={() =>
+                updateSettings({
+                  batchRetentionDays: (settings?.batchRetentionDays ?? 0) > 0 ? 0 : 30,
+                })
+              }
+            />
+            {(settings?.batchRetentionDays ?? 0) > 0 && (
+              <>
+                <Stepper
+                  value={settings?.batchRetentionDays ?? 30}
+                  min={1}
+                  max={365}
+                  onChange={(v) => updateSettings({ batchRetentionDays: v })}
+                />
+                <span className="fs11 t3">天</span>
+              </>
+            )}
+            <span className="fs11 t3">
+              批次归档满设定天数后启动时删除其任务记录；已输出的作品是独立快照，不受影响
             </span>
           </div>
         </section>
@@ -300,6 +471,96 @@ export function SettingsPage() {
               检查更新
             </button>
           </div>
+          <div className="fx ac gap10 mt10">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              通知
+            </span>
+            <span className="fs11 t3">
+              批次完成、失败达阈值、Key 熔断时发系统通知；Dock/任务栏角标显示待验收任务数
+            </span>
+          </div>
+          <div className="fx ac gap10 mt14">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              诊断
+            </span>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => void unwrap(commands.openLogsDir()).catch(() => {})}
+            >
+              打开日志目录
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={async () => {
+                try {
+                  const info = await unwrap(commands.diagnosticsInfo());
+                  await navigator.clipboard.writeText(info);
+                  toast.success("诊断信息已复制到剪贴板");
+                } catch (e) {
+                  if (e instanceof Error) toast.error(e.message);
+                }
+              }}
+            >
+              复制诊断信息
+            </button>
+            <span className="fs11 t3">版本 / 系统 / Key 状态 / 最近错误（不含密钥）</span>
+          </div>
+        </section>
+
+        <section className="sec">
+          <div className="sechead">
+            <span className="fw6 fs13">数据</span>
+            <span className="fs11 t3">数据目录位置 · 备份导出</span>
+          </div>
+          <div className="fx ac gap10">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              数据目录
+            </span>
+            <span className="mono fs11 t3 f1 ohide nowrap" title={dataDir?.root ?? ""}>
+              {dataDir?.root ?? "…"}
+            </span>
+            <button type="button" className="btn sm gho" onClick={openDataDir}>
+              <FolderOpen className="ic12" />
+              打开目录
+            </button>
+          </div>
+          <div className="fx ac gap10 mt14">
+            <span className="fs12 t2" style={{ width: 72 }}>
+              备份
+            </span>
+            {backup ? (
+              <div className="fx ac gap8 f1">
+                <div className="pg f1">
+                  <i
+                    style={{
+                      width: `${backup.total > 0 ? Math.round((backup.done / backup.total) * 100) : 5}%`,
+                    }}
+                  />
+                </div>
+                <span className="mono fs10 t3 nowrap">
+                  {backup.done}/{backup.total || "…"}
+                </span>
+              </div>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={queueRunning}
+                  onClick={exportBackup}
+                >
+                  导出备份（zip）
+                </button>
+                <span className="fs11 t3">
+                  {queueRunning
+                    ? "队列运行中不可备份，请先暂停队列"
+                    : "打包数据库与全部资产到所选 zip；导出前自动检查点保证一致"}
+                </span>
+              </>
+            )}
+          </div>
         </section>
       </div>
 
@@ -332,7 +593,25 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("gpt-image-2");
   const [concurrency, setConcurrency] = useState("2");
+  const [rpm, setRpm] = useState(""); // 空 = 不限速
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    if (!key.trim() || !baseUrl.trim()) {
+      toast.error("请先填写 Key 与 Base URL");
+      return;
+    }
+    setTesting(true);
+    try {
+      await unwrap(commands.testApiKey(baseUrl.trim(), key.trim()));
+      toast.success("连接正常，可以保存");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const save = async () => {
     if (!key.trim() || !baseUrl.trim()) {
@@ -348,6 +627,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
           baseUrl: baseUrl.trim(),
           model: model.trim() || "gpt-image-2",
           concurrencyLimit: Number(concurrency) || 2,
+          rpmLimit: rpm.trim() ? Number(rpm) : null,
         }),
       );
       toast("已添加 API Key");
@@ -367,8 +647,8 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
         <>
           <span className="fs11 t3">按 OpenAI 兼容端点接入 · GPT-Image 2</span>
           <div className="f1" />
-          <button type="button" className="btn" onClick={onClose}>
-            取消
+          <button type="button" className="btn" onClick={test} disabled={testing || busy}>
+            {testing ? "测试中…" : "测试连接"}
           </button>
           <button type="button" className="btn pri" onClick={save} disabled={busy}>
             保存
@@ -412,6 +692,15 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
               className="inp mono"
               value={concurrency}
               onChange={(e) => setConcurrency(e.target.value)}
+            />
+          </div>
+          <div className="col gap4" style={{ width: 110 }}>
+            <span className="fs11 t3">RPM（可选）</span>
+            <input
+              className="inp mono"
+              placeholder="不限"
+              value={rpm}
+              onChange={(e) => setRpm(e.target.value)}
             />
           </div>
         </div>

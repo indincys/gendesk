@@ -4,7 +4,7 @@
 //! 的 Semaphore 许可 → spawn worker。所有状态迁移由 worker 统一落库；task_attempts 全记录。
 //! 暂停 = 停派发；批次全终态自动归档。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -35,11 +35,36 @@ struct KeyRuntime {
     sem: Arc<Semaphore>,
     cooldown_until: Instant,
     consecutive_failures: u32,
+    /// 连续 Auth/欠费失败次数（E18 熔断计数，成功即清零）。
+    auth_failures: u32,
+    /// 近一分钟派发时刻（E18 RPM 滑动窗口）。
+    request_times: VecDeque<Instant>,
 }
+
+/// 连续 Auth/欠费失败达到此阈值即自动熔断该 Key（E18）。
+const CIRCUIT_BREAK_THRESHOLD: u32 = 3;
+/// RPM 滑动窗口长度。
+const RPM_WINDOW: Duration = Duration::from_secs(60);
 
 /// 防 Mutex 中毒导致 panic：取 into_inner。
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// RPM 滑动窗口检查（E18）：裁掉窗口外旧记录后，判断近一分钟派发数是否仍低于上限。
+/// 无 rpm_limit（None）恒放行。
+fn rpm_ok(k: &mut KeyRuntime, now: Instant) -> bool {
+    let Some(limit) = k.config.rpm_limit else {
+        return true;
+    };
+    while let Some(front) = k.request_times.front() {
+        if now.duration_since(*front) > RPM_WINDOW {
+            k.request_times.pop_front();
+        } else {
+            break;
+        }
+    }
+    (k.request_times.len() as u32) < limit
 }
 
 pub struct Scheduler {
@@ -56,11 +81,19 @@ pub struct Scheduler {
     active: AtomicI64,
     /// Key 退避冷却基数（ms）；生产 30s，测试可调小。
     cooldown_base_ms: AtomicU64,
+    /// 跨 Key 连续任务失败计数（E05 全局熔断）。任一任务成功即清零。
+    global_fail_streak: AtomicU32,
+    /// 全局熔断阈值（连续失败达此数自动暂停队列）。0 = 关闭。
+    global_fail_threshold: AtomicU32,
+    /// 自动暂停原因（E05）；None = 非自动暂停。手动继续队列时清空。
+    auto_pause_reason: Mutex<Option<String>>,
     notify: Arc<Notify>,
 }
 
 /// 生产默认 Key 冷却基数（对应 strategy::backoff 的 30s 起点）。
 const DEFAULT_COOLDOWN_BASE_MS: u64 = 30_000;
+/// 全局熔断默认阈值（跨 Key 连续失败 10 次自动暂停）。
+const DEFAULT_GLOBAL_FAIL_THRESHOLD: u32 = 10;
 
 impl Scheduler {
     pub fn new(
@@ -85,8 +118,21 @@ impl Scheduler {
             user_retry: AtomicU32::new(user_retry),
             active: AtomicI64::new(0),
             cooldown_base_ms: AtomicU64::new(DEFAULT_COOLDOWN_BASE_MS),
+            global_fail_streak: AtomicU32::new(0),
+            global_fail_threshold: AtomicU32::new(DEFAULT_GLOBAL_FAIL_THRESHOLD),
+            auto_pause_reason: Mutex::new(None),
             notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// 设置全局熔断阈值（E05；0 = 关闭）。
+    pub fn set_global_fail_threshold(&self, n: u32) {
+        self.global_fail_threshold.store(n, Ordering::SeqCst);
+    }
+
+    /// 当前自动暂停原因（None = 非自动暂停）。
+    pub fn auto_pause_reason(&self) -> Option<String> {
+        lock(&self.auto_pause_reason).clone()
     }
 
     /// 调小 Key 退避冷却基数（测试用，避免真实时钟长等待）。
@@ -119,6 +165,8 @@ impl Scheduler {
                 config: c,
                 cooldown_until: now,
                 consecutive_failures: 0,
+                auth_failures: 0,
+                request_times: VecDeque::new(),
             })
             .collect();
     }
@@ -133,6 +181,9 @@ impl Scheduler {
         self.paused.store(true, Ordering::SeqCst);
     }
     pub fn resume(&self) {
+        // 手动继续队列即消费掉自动暂停：清原因 + 重置连续失败计数，避免立刻再次熔断。
+        *lock(&self.auto_pause_reason) = None;
+        self.global_fail_streak.store(0, Ordering::SeqCst);
         self.paused.store(false, Ordering::SeqCst);
         self.notify();
     }
@@ -208,13 +259,18 @@ impl Scheduler {
             return 0;
         }
 
-        // 1) 就绪 Key 快照（启用、未冷却），并克隆各自 Semaphore。
+        // 1) 就绪 Key 快照（启用、未冷却、未超 RPM），并克隆各自 Semaphore。
         let now = Instant::now();
         let eligible: Vec<(i64, Arc<Semaphore>)> = {
-            let keys = lock(&self.keys);
-            keys.iter()
-                .filter(|k| k.config.enabled && k.cooldown_until <= now)
-                .map(|k| (k.config.id, k.sem.clone()))
+            let mut keys = lock(&self.keys);
+            keys.iter_mut()
+                .filter_map(|k| {
+                    if k.config.enabled && k.cooldown_until <= now && rpm_ok(k, now) {
+                        Some((k.config.id, k.sem.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
         if eligible.is_empty() {
@@ -292,6 +348,8 @@ impl Scheduler {
             if from == TaskStatus::Retry {
                 lock(&self.ready_retry).remove(&task.id);
             }
+            // E18：记录本次派发时刻用于 RPM 滑动窗口。
+            self.record_request(key_id, Instant::now());
             self.emit_status(&task, TaskStatus::Run, Some(key_id), None, None);
             self.spawn_worker(task, key_id, permit);
             spawned += 1;
@@ -340,10 +398,13 @@ impl Scheduler {
         let outcome = match (self.ref_path(task.ref_image_id).await, key_cfg.clone()) {
             (Some(image_path), Some(cfg)) => {
                 let provider = self.factory.build(&cfg);
+                // E16 / D1：取批次生成参数快照，仅透传显式设置项。
+                let params = self.batch_params(task.batch_id).await;
                 let req = GenRequest {
                     prompt: task.prompt_text_snapshot.clone(),
                     image_path,
                     model: cfg.model.clone(),
+                    params,
                 };
                 let progress = self.download_progress_cb(task.id);
                 provider.generate(req, Some(progress)).await
@@ -371,7 +432,13 @@ impl Scheduler {
 
         drop(permit);
         // 先归档 + 汇总，再减 active，避免 drive_to_idle 在归档前误判空闲。
-        let _ = task_repo::archive_if_all_terminal(&self.pool, task.batch_id).await;
+        // E04：仅在批次真正归档（全终态）的那一次发系统通知。
+        if task_repo::archive_if_all_terminal(&self.pool, task.batch_id)
+            .await
+            .unwrap_or(false)
+        {
+            self.notify_batch_complete(task.batch_id).await;
+        }
         self.emit_summary(task.batch_id).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.notify();
@@ -411,6 +478,10 @@ impl Scheduler {
                 task_repo::mark_fail(&self.pool, task.id, ErrorType::Other.as_str(), &msg).await;
             // API 调用本身成功，不惩罚该 Key。
             self.on_key_result(key_id, true);
+            // E05：写盘失败也是终态失败，计入全局熔断（磁盘满会连续触发）。
+            if self.note_global_outcome(false) {
+                self.trip_global_breaker(self.global_fail_threshold.load(Ordering::SeqCst));
+            }
             self.emit_status(
                 task,
                 TaskStatus::Fail,
@@ -450,6 +521,8 @@ impl Scheduler {
             .await;
         }
         self.on_key_result(key_id, true);
+        // E05：一次成功清零跨 Key 连续失败计数。
+        self.note_global_outcome(true);
         self.sink.progress(TaskProgress {
             task_id: task.id,
             pct: 100,
@@ -518,6 +591,10 @@ impl Scheduler {
                 Some(et),
                 Some(&perr.message),
             );
+            // E05：终态失败计入全局熔断（重试态不计，尚未失败）。
+            if self.note_global_outcome(false) {
+                self.trip_global_breaker(self.global_fail_threshold.load(Ordering::SeqCst));
+            }
         }
         self.on_key_result(key_id, false);
         if et.suggests_disable_key() {
@@ -527,6 +604,10 @@ impl Scheduler {
                 used_concurrency: 0,
                 success_rate: 0.0,
             });
+            // E18：连续 Auth/欠费失败达阈值 → 自动熔断该 Key（停用 + 通知）。
+            if self.bump_auth_failure(key_id) {
+                self.trip_breaker(key_id).await;
+            }
         }
     }
 
@@ -540,16 +621,31 @@ impl Scheduler {
     }
 
     async fn ref_path(&self, ref_image_id: i64) -> Option<std::path::PathBuf> {
-        sqlx::query_scalar::<_, String>("SELECT file_path FROM ref_images WHERE id = ?1")
-            .bind(ref_image_id)
+        // E41：优先用压缩上传副本（upload_path），无则用原图（file_path）。
+        sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(upload_path, file_path) FROM ref_images WHERE id = ?1",
+        )
+        .bind(ref_image_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(std::path::PathBuf::from)
+    }
+
+    /// 批次生成参数快照（E16 / D1）。查不到或解析失败退化为「全部空」（不传参）。
+    async fn batch_params(&self, batch_id: i64) -> crate::provider::GenParams {
+        let json = sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
+            .bind(batch_id)
             .fetch_optional(&self.pool)
             .await
             .ok()
             .flatten()
-            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "{}".into());
+        crate::provider::GenParams::from_json(&json)
     }
 
-    /// 更新 Key 连续失败/冷却，并推送健康事件。
+    /// 更新 Key 连续失败/冷却，并推送健康事件。成功时同时清零熔断计数。
     fn on_key_result(&self, id: i64, success: bool) {
         let now = Instant::now();
         let mut state = KeyState::Ok;
@@ -558,6 +654,7 @@ impl Scheduler {
             if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
                 if success {
                     k.consecutive_failures = 0;
+                    k.auth_failures = 0;
                     k.cooldown_until = now;
                 } else {
                     k.consecutive_failures += 1;
@@ -575,6 +672,81 @@ impl Scheduler {
             used_concurrency: 0,
             success_rate: 0.0,
         });
+    }
+
+    /// 记录派发时刻（E18 RPM 滑动窗口）。
+    fn record_request(&self, id: i64, now: Instant) {
+        let mut keys = lock(&self.keys);
+        if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
+            k.request_times.push_back(now);
+            // 顺手裁掉窗口外的旧记录，避免无界增长。
+            while let Some(front) = k.request_times.front() {
+                if now.duration_since(*front) > RPM_WINDOW {
+                    k.request_times.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// 累加一次 Auth/欠费失败并返回是否达到熔断阈值（E18）。达阈值时同时把运行时
+    /// 该 Key 置为停用，避免后续轮次继续派发到它。
+    fn bump_auth_failure(&self, id: i64) -> bool {
+        let mut keys = lock(&self.keys);
+        if let Some(k) = keys.iter_mut().find(|k| k.config.id == id) {
+            k.auth_failures += 1;
+            if k.auth_failures >= CIRCUIT_BREAK_THRESHOLD {
+                k.config.enabled = false; // 运行时立即停用
+                k.auth_failures = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 熔断 Key（E18）：落库停用 + 置熔断位，推健康事件与系统通知。
+    async fn trip_breaker(&self, id: i64) {
+        let _ = key_repo::trip_circuit(&self.pool, id).await;
+        self.sink.key_health(KeyHealth {
+            key_id: id,
+            state: KeyState::Disabled,
+            used_concurrency: 0,
+            success_rate: 0.0,
+        });
+        self.sink.notify(
+            "API Key 已熔断".into(),
+            format!("Key #{id} 连续鉴权/欠费失败已达 {CIRCUIT_BREAK_THRESHOLD} 次，已自动停用。请到设置检查并恢复。"),
+        );
+    }
+
+    /// 记录一次终态任务结果用于 E05 全局熔断：成功清零跨 Key 连续失败计数；
+    /// 终态失败累加，达阈值（>0）返回 true 表示应触发全局熔断。
+    fn note_global_outcome(&self, success: bool) -> bool {
+        if success {
+            self.global_fail_streak.store(0, Ordering::SeqCst);
+            return false;
+        }
+        let threshold = self.global_fail_threshold.load(Ordering::SeqCst);
+        let streak = self.global_fail_streak.fetch_add(1, Ordering::SeqCst) + 1;
+        threshold > 0 && streak >= threshold
+    }
+
+    /// 全局熔断（E05）：跨 Key 连续失败达阈值 → 自动暂停队列 + 记原因 + 系统通知。
+    /// 已处于自动暂停态则跳过，避免重复通知。
+    fn trip_global_breaker(&self, threshold: u32) {
+        {
+            let mut reason = lock(&self.auto_pause_reason);
+            if reason.is_some() {
+                return;
+            }
+            *reason = Some(format!("连续 {threshold} 个任务失败，已自动暂停队列"));
+        }
+        self.paused.store(true, Ordering::SeqCst);
+        self.sink.notify(
+            "队列已自动暂停".into(),
+            format!("连续 {threshold} 个任务失败，队列已自动暂停以防继续消耗额度。请检查设置后继续队列。"),
+        );
     }
 
     fn spawn_progress_ticker(
@@ -641,6 +813,28 @@ impl Scheduler {
         });
     }
 
+    /// 批次完成系统通知（E04）：全终态归档的那一次发一条，附通过/未通过/失败计数。
+    async fn notify_batch_complete(&self, batch_id: i64) {
+        if let Ok(c) = task_repo::counts_for_batch(&self.pool, batch_id).await {
+            self.sink.notify(
+                format!("批次 #{batch_id} 已完成"),
+                format!(
+                    "共 {} 个任务：待验收 {} · 通过 {} · 未通过 {} · 失败 {}",
+                    c.total, c.review, c.passed, c.rejected, c.failed
+                ),
+            );
+        }
+    }
+
+    /// 更新 Dock/任务栏角标（E04）：全库待验收任务数（无人值守时提示「有图待验收」）。
+    async fn update_badge(&self) {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'rev'")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+        self.sink.set_badge(if n > 0 { Some(n) } else { None });
+    }
+
     /// 主动补发某批次汇总（供命令层在验收改动任务态后驱动徽章）。
     pub async fn emit_summary(&self, batch_id: i64) {
         if let Ok(counts) = task_repo::counts_for_batch(&self.pool, batch_id).await {
@@ -649,8 +843,11 @@ impl Scheduler {
                 counts,
                 active_concurrency: self.active.load(Ordering::SeqCst),
                 paused: self.paused.load(Ordering::SeqCst),
+                auto_pause_reason: self.auto_pause_reason(),
             });
         }
+        // 待验收角标随汇总同步刷新（验收/生成/删除后均经此路径）。
+        self.update_badge().await;
     }
 }
 
@@ -766,6 +963,7 @@ mod tests {
                 ref_image_id: 1,
                 prompt_group_id: 1,
             }],
+            1,
         )
         .await
         .unwrap();
@@ -800,9 +998,11 @@ mod tests {
                 api_key: "sk".into(),
                 concurrency_limit: *conc,
                 enabled: true,
+                rpm_limit: None,
             })
             .collect();
         sched.set_cooldown_base_ms(2); // 测试用极短冷却，避免真实时钟等待
+        sched.set_global_fail_threshold(0); // 默认关闭全局熔断，E05 用例单独打开
         sched.set_keys(configs);
         Harness {
             sched,
@@ -936,14 +1136,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn batch_archived_when_all_terminal() {
-        // 全部 Auth 失败（不重试）→ 全 fail → 批次归档
+        // 全部 ContentPolicy 失败（user_retry=0 → 首次即终态，且不触发 E18 Key 熔断）
+        // → 全 fail → 批次归档。
+        // 注：原用 Auth 注入，E18（单 Key 连续 3 次 Auth 熔断停用）落地后会把第 4 个任务
+        // 卡在 q（无可用 Key），批次不再全终态。本测试意在验「全终态即归档」，改用不触发
+        // 熔断的终态错误以隔离该无关特性；断言（4 fail + archived）保持不变。
         let h = setup(
             4,
             &[(1, 2)],
             Duration::from_millis(10),
-            Arc::new(|_| Err(ProviderErrorKind::Auth)),
+            Arc::new(|_| Err(ProviderErrorKind::ContentPolicy)),
             Strategy::RoundRobin,
-            1,
+            0,
         )
         .await;
         h.sched.drive_to_idle().await;
@@ -957,6 +1161,124 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "archived");
+    }
+
+    // E18：连续 Auth 失败达阈值 → Key 自动熔断（DB enabled=0 + circuit_broken=1），
+    // 任务切到其它可用 Key 继续完成。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_circuit_breaks_and_tasks_fail_over() {
+        // key 1 恒 Auth 失败，key 2 恒成功。
+        let h = setup(
+            10,
+            &[(1, 1), (2, 1)],
+            Duration::from_millis(5),
+            Arc::new(|kid| {
+                if kid == 1 {
+                    Err(ProviderErrorKind::Auth)
+                } else {
+                    Ok(())
+                }
+            }),
+            Strategy::RoundRobin,
+            1,
+        )
+        .await;
+        h.sched.drive_to_idle().await;
+
+        let (enabled, broken): (i64, i64) =
+            sqlx::query_as("SELECT enabled, circuit_broken FROM api_keys WHERE id = 1")
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!((enabled, broken), (0, 1), "连续 Auth 失败后 key1 应被熔断");
+
+        // 熔断后剩余任务切到 key2 成功产出（至少有若干 rev）。
+        let revs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'rev'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert!(revs > 0, "任务应能切到其它 Key 完成，实际 rev={revs}");
+    }
+
+    // E05：跨 Key 连续失败达阈值 → 自动暂停队列（在烧完前停住），记录原因，
+    // 剩余 q 任务不再派发；resume 后清原因并可继续。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn global_breaker_pauses_queue_before_burning_all() {
+        // 30 任务全部 ContentPolicy（非重试、不停用 Key），阈值 5。
+        let h = setup(
+            30,
+            &[(1, 2)],
+            Duration::from_millis(5),
+            Arc::new(|_| Err(ProviderErrorKind::ContentPolicy)),
+            Strategy::RoundRobin,
+            0, // user_retry=0：ContentPolicy 首次即终态失败
+        )
+        .await;
+        h.sched.set_global_fail_threshold(5);
+
+        // 驱动直到自动暂停或超时（避免 drive_to_idle 在暂停态死循环）。
+        let mut tripped = false;
+        for _ in 0..300 {
+            h.sched.dispatch_once().await;
+            if h.sched.is_paused() {
+                tripped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(tripped, "连续失败达阈值应自动暂停队列");
+        assert!(
+            h.sched.is_paused() && h.sched.auto_pause_reason().is_some(),
+            "自动暂停应记录原因"
+        );
+        // 停在烧完之前：仍有排队任务。
+        let remaining_q: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status='q'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert!(
+            remaining_q > 0,
+            "应在烧完 30 任务前停住，实际剩余 q={remaining_q}"
+        );
+
+        // 恢复队列：清原因、重置计数。
+        h.sched.resume();
+        assert!(
+            h.sched.auto_pause_reason().is_none(),
+            "resume 应清空自动暂停原因"
+        );
+        assert!(!h.sched.is_paused());
+    }
+
+    // E18：RPM 滑动窗口——达到上限即拒派，窗口滑过后恢复。
+    #[test]
+    fn rpm_ok_enforces_limit_and_slides() {
+        let now = Instant::now();
+        let mut k = KeyRuntime {
+            config: KeyConfig {
+                id: 1,
+                base_url: "http://x/v1".into(),
+                model: "m".into(),
+                api_key: "sk".into(),
+                concurrency_limit: 1,
+                enabled: true,
+                rpm_limit: Some(2),
+            },
+            sem: Arc::new(Semaphore::new(1)),
+            cooldown_until: now,
+            consecutive_failures: 0,
+            auth_failures: 0,
+            request_times: VecDeque::new(),
+        };
+        assert!(rpm_ok(&mut k, now), "空窗口应放行");
+        k.request_times.push_back(now);
+        assert!(rpm_ok(&mut k, now), "1 < 2 放行");
+        k.request_times.push_back(now);
+        assert!(!rpm_ok(&mut k, now), "达上限 2 应拒派");
+        // 窗口滑过：旧记录被裁掉，恢复放行。
+        let later = now + RPM_WINDOW + Duration::from_secs(1);
+        assert!(rpm_ok(&mut k, later), "窗口外旧记录裁掉后应恢复放行");
+        assert!(k.request_times.is_empty(), "过期记录应已裁剪");
     }
 
     // 1→500 压测（执行计划 2.8）：500 任务 × 6 Key，注入 ~5% 超时/3% 违规/2% Auth。

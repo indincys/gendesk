@@ -15,6 +15,8 @@ pub struct BatchRow {
     pub output_dir: String,
     pub params_json: String,
     pub status: String,
+    /// 批次备注名（E10）；None = 未命名。
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -84,6 +86,52 @@ pub async fn get_batch(pool: &SqlitePool, id: i64) -> Result<Option<BatchRow>, s
         .await
 }
 
+/// 批次备注名（E10）：空串归一为 NULL（清除备注）。
+pub async fn rename_batch(pool: &SqlitePool, id: i64, note: &str) -> Result<(), sqlx::Error> {
+    let trimmed = note.trim();
+    let value: Option<&str> = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    sqlx::query("UPDATE batches SET note = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 删除归档时刻早于 cutoff 的批次（E22 / D3）。tasks/task_attempts/batch_refs 经外键
+/// ON DELETE CASCADE 一并删除；accepted_works.task_id 为 ON DELETE SET NULL 故作品保留
+/// （D3「作品不动」）。返回删除批次数。
+pub async fn delete_batches_archived_before(
+    pool: &SqlitePool,
+    cutoff: i64,
+) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "DELETE FROM batches WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?1",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// 批次首张有缩略图的任务缩略图路径（E10 批次切换器预览）。
+pub async fn batch_first_thumb(
+    pool: &SqlitePool,
+    batch_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT result_thumb_path FROM tasks
+         WHERE batch_id = ?1 AND result_thumb_path IS NOT NULL ORDER BY id ASC LIMIT 1",
+    )
+    .bind(batch_id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn set_batch_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE batches SET status = ?2 WHERE id = ?1")
         .bind(id)
@@ -105,8 +153,16 @@ pub async fn archive_if_all_terminal(
     .fetch_one(pool)
     .await?;
     if pending == 0 {
-        set_batch_status(pool, batch_id, "archived").await?;
-        Ok(true)
+        // 仅在真正发生「→archived」迁移时返回 true：多个并发 worker 同时收尾时避免
+        // 重复触发批次完成通知（E04）。
+        let res = sqlx::query(
+            "UPDATE batches SET status = 'archived', archived_at = ?2 WHERE id = ?1 AND status != 'archived'",
+        )
+        .bind(batch_id)
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     } else {
         Ok(false)
     }
@@ -120,16 +176,18 @@ pub async fn insert_task(
     ref_image_id: i64,
     prompt_id: i64,
     snapshot: &str,
+    draw_index: i64,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'q', ?5, ?5) RETURNING id",
+        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, draw_index, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'q', ?6, ?6) RETURNING id",
     )
     .bind(batch_id)
     .bind(ref_image_id)
     .bind(prompt_id)
     .bind(snapshot)
+    .bind(draw_index)
     .bind(now)
     .fetch_one(&mut *conn)
     .await?;
@@ -276,6 +334,17 @@ pub async fn delete_failed(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx
     Ok(n as i64)
 }
 
+/// 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务。只删排队态，
+/// 在途（run/retry）与终态任务不受影响。返回删除数。
+pub async fn cancel_pending(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx::Error> {
+    let n = sqlx::query("DELETE FROM tasks WHERE batch_id = ?1 AND status = 'q'")
+        .bind(batch_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n as i64)
+}
+
 /// 五视觉组计数（批次汇总）。
 pub async fn counts_for_batch(
     pool: &SqlitePool,
@@ -300,6 +369,17 @@ pub async fn counts_for_batch(
         c.total += n;
     }
     Ok(c)
+}
+
+/// 批次实际请求次数（含重试）：该批次全部任务的 task_attempts 计数（E15）。
+pub async fn request_count_for_batch(pool: &SqlitePool, batch_id: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM task_attempts a
+         JOIN tasks t ON t.id = a.task_id WHERE t.batch_id = ?1",
+    )
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await
 }
 
 /// 中断恢复：run/retry → fail(Interrupted)。返回受影响任务 id。
@@ -401,10 +481,108 @@ mod tests {
         sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/a','/t',1,1,1,0)").execute(&mut *tx).await.unwrap();
         let mut ids = Vec::new();
         for _ in 0..n {
-            ids.push(insert_task(&mut tx, bid, 1, 1, "t").await.unwrap());
+            ids.push(insert_task(&mut tx, bid, 1, 1, "t", 1).await.unwrap());
         }
         tx.commit().await.unwrap();
         (bid, ids)
+    }
+
+    // E22 / D3：归档满 N 天的批次启动时删除（级联任务），作品（accepted_works）不受影响。
+    #[tokio::test]
+    async fn delete_old_archived_batches_keeps_works() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 2).await;
+        // 造一条作品指向该批次任务。
+        sqlx::query(
+            "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text, ref_image_id, batch_id, accepted_at)
+             VALUES (?1, '/out/x.jpg', '/t.jpg', 1, 't', 1, ?2, 0)",
+        )
+        .bind(ids[0])
+        .bind(bid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 批次归档且 archived_at 为 40 天前。
+        let old = now_unix() - 40 * 86_400;
+        sqlx::query("UPDATE batches SET status='archived', archived_at=?2 WHERE id=?1")
+            .bind(bid)
+            .bind(old)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // cutoff = 30 天前：40 天前的批次到期。
+        let cutoff = now_unix() - 30 * 86_400;
+        let deleted = delete_batches_archived_before(&pool, cutoff).await.unwrap();
+        assert_eq!(deleted, 1, "到期归档批次应被删除");
+
+        let batch_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM batches WHERE id=?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(batch_left, 0, "批次已删");
+        let tasks_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id=?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tasks_left, 0, "任务经级联删除");
+        // 作品保留（task_id 被置空，记录仍在）——D3「作品不动」。
+        let works_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(works_left, 1, "作品是独立快照，不随批次删除");
+    }
+
+    // E22：未到期的归档批次与运行中批次不删。
+    #[tokio::test]
+    async fn delete_old_archived_batches_spares_recent_and_running() {
+        let (pool, _d) = test_pool().await;
+        let (bid, _) = seed(&pool, 1).await;
+        // 归档但仅 5 天前。
+        let recent = now_unix() - 5 * 86_400;
+        sqlx::query("UPDATE batches SET status='archived', archived_at=?2 WHERE id=?1")
+            .bind(bid)
+            .bind(recent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cutoff = now_unix() - 30 * 86_400;
+        let deleted = delete_batches_archived_before(&pool, cutoff).await.unwrap();
+        assert_eq!(deleted, 0, "未满 30 天不删");
+    }
+
+    // E03：取消剩余只删 'q' 态，在途 run/retry 与终态 pass 不受影响。
+    #[tokio::test]
+    async fn cancel_pending_deletes_only_queued() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 5).await;
+        // ids: 0=run(在途) 1=retry(在途) 2=pass(终态) 3,4=q(排队)
+        set_status(&pool, ids[0], "run").await.unwrap();
+        set_status(&pool, ids[1], "retry").await.unwrap();
+        set_status(&pool, ids[2], "pass").await.unwrap();
+
+        let n = cancel_pending(&pool, bid).await.unwrap();
+        assert_eq!(n, 2, "仅取消 2 个排队任务");
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 3, "run/retry/pass 三个任务保留");
+        let q_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1 AND status = 'q'")
+                .bind(bid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(q_left, 0, "排队任务全部清空");
+        // 在途任务仍在，不被误删。
+        assert!(get_task(&pool, ids[0]).await.unwrap().is_some());
+        assert!(get_task(&pool, ids[1]).await.unwrap().is_some());
     }
 
     #[tokio::test]

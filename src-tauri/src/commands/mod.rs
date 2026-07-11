@@ -4,12 +4,14 @@
 //! 全部命令签名经 tauri-specta 自动导出到 `src/lib/ipc/bindings.ts`（禁手改）。
 
 pub mod api_keys;
+pub mod backup;
 pub mod batches;
 pub mod misc;
 pub mod prompts;
 pub mod refs;
 pub mod review;
 pub mod settings;
+pub mod stats;
 pub mod tasks;
 pub mod trash;
 pub mod updater;

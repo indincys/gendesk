@@ -99,6 +99,18 @@ async openPathInFolder(path: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 复制诊断信息（E27）：版本 / OS / Key 数量与状态 / 最近 5 条错误摘要。
+ * 明确不含 Key 明文（仅计数与启用/熔断状态），可安全粘贴给支持者。
+ */
+async diagnosticsInfo() : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("diagnostics_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listApiKeys() : Promise<Result<ApiKeyView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_api_keys") };
@@ -131,9 +143,42 @@ async setApiKeyEnabled(id: number, enabled: boolean) : Promise<Result<null, AppE
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 恢复被熔断的 Key（E18）：清熔断位 + 重新启用 + 重载调度器。
+ */
+async recoverApiKey(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recover_api_key", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteApiKey(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_api_key", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 测试一组连接参数（E11：添加/编辑弹窗，raw key 在前端）。
+ */
+async testApiKey(baseUrl: string, apiKey: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_api_key", { baseUrl, apiKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 测试已保存的 Key（E11：Key 行内测试，从钥匙串取密钥）。
+ */
+async testApiKeySaved(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_api_key_saved", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -145,6 +190,14 @@ async deleteApiKey(id: number) : Promise<Result<null, AppError>> {
 async importRefImages(paths: string[], groupId: number | null) : Promise<Result<RefImageView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scan_ref_imports", { paths }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -167,6 +220,17 @@ async listRefImages() : Promise<Result<RefImageView[], AppError>> {
 async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_ref_image_group", { id, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量改分组（E30b）。gid=None 为未分组。
+ */
+async setRefImagesGroup(ids: number[], groupId: number | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_ref_images_group", { ids, groupId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -203,11 +267,101 @@ async trashRefImage(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 列出全部提示词分组（含 active 提示词数）。
+ * 批量删除参考图 → 进废纸篓（E30b）。
+ */
+async trashRefImages(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_ref_images", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出全部提示词分组（含 active 提示词数 + 标签）。
  */
 async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_prompt_groups") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
+ * 自动从分组名生成唯一前缀（号池按前缀发放）。
+ */
+async createPromptGroup(name: string) : Promise<Result<GroupView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_prompt_group", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重命名分组（E20，前缀/编号不变）。
+ */
+async renamePromptGroup(id: number, name: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_prompt_group", { id, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
+ * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
+ */
+async deletePromptGroup(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_prompt_group", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 合并分组（E20）：`fromId` 并入 `intoId`，编号前缀保留原值不重编。
+ */
+async mergePromptGroups(fromId: number, intoId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("merge_prompt_groups", { fromId, intoId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量移动提示词到指定分组（E20 单条 / E36 批量；编号前缀保留原值不重编）。
+ */
+async movePromptsToGroup(ids: number[], groupId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("move_prompts_to_group", { ids, groupId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量设置收藏（E36）。favorite=true 收藏，false 取消。
+ */
+async setPromptsFavorite(ids: number[], favorite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_prompts_favorite", { ids, favorite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量删除提示词 → 入废纸篓（E36；编号在清理时回收）。
+ */
+async trashPrompts(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_prompts", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -287,6 +441,17 @@ async commitPromptImport(preview: ImportPreview, ctx: string) : Promise<Result<I
 }
 },
 /**
+ * 保存一份提示词 txt 模板到用户选定位置（E37）。返回保存路径；取消返回 None。
+ */
+async savePromptTemplate() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_prompt_template") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
  */
 async createBatch(input: CreateBatchInput) : Promise<Result<BatchView, AppError>> {
@@ -297,9 +462,55 @@ async createBatch(input: CreateBatchInput) : Promise<Result<BatchView, AppError>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 历史单张生成均值秒数（E31 确认摘要 ETA 估算）；无成功历史返回 None。
+ */
+async estimateTaskSeconds() : Promise<Result<number | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("estimate_task_seconds") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。
+ * 在途（run/retry）任务不受影响，会自行跑完。返回取消数。
+ */
+async cancelBatchPending(batchId: number) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_batch_pending", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listBatches() : Promise<Result<BatchView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_batches") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 读取某批次的挂靠与参数快照（E07 再来一批）。只返回未删除的参考图与仍存在的分组，
+ * 保证还原到生成页后可直接创建新批次。
+ */
+async getBatchConfig(batchId: number) : Promise<Result<BatchConfig, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_batch_config", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批次备注命名（E10）。空串清除备注。
+ */
+async renameBatch(batchId: number, note: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_batch", { batchId, note }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -316,6 +527,18 @@ async pauseQueue() : Promise<Result<null, AppError>> {
 async resumeQueue() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("resume_queue") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器打开某批次的输出目录（E15）：`outputs/{batch_id}`。
+ * 目录不存在（尚无通过作品）时先创建，避免打开失败。
+ */
+async openBatchOutputDir(batchId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_batch_output_dir", { batchId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -352,7 +575,8 @@ async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, 
 }
 },
 /**
- * 重试某批次全部失败任务。
+ * 重试某批次全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
+ * 应走「改词重试」E34 单独处理）。
  */
 async retryFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
     try {
@@ -427,7 +651,7 @@ async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
 }
 },
 /**
- * 不通过所选：置 rej + 原图删除（留缩略图）+ 进废纸篓，单事务。
+ * 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
  */
 async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
     try {
@@ -467,6 +691,90 @@ async toggleWorkFavorite(id: number) : Promise<Result<null, AppError>> {
 async trashWork(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("trash_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 文件是否存在（E21 作品源文件缺失懒检测）。
+ */
+async fileExists(path: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_exists", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从资产区快照重新导出作品输出文件（E21）：源为 `results/{task_id}.jpg`。
+ * 批次已删除（task_id 为空）或快照已随清理消失时报可读错误。
+ */
+async reexportWork(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reexport_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量收藏（E15）。favorite=true 收藏，false 取消。
+ */
+async setWorksFavorite(ids: number[], favorite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_works_favorite", { ids, favorite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
+ */
+async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_works", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量导出作品到指定文件夹（E15）：复制各作品输出文件（image_path）到目标目录。
+ * 返回成功导出数；源文件缺失的项跳过（不计入）。
+ */
+async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_works", { ids, destDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 各分组产出统计（E25）。按当前 prompts.group_id 归属（提示词移组后随之变化）。
+ */
+async listGroupStats() : Promise<Result<GroupStat[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_group_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async promptStats(promptId: number) : Promise<Result<PromptStat, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("prompt_stats", { promptId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async productionOverview() : Promise<Result<ProductionOverview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("production_overview") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -525,6 +833,38 @@ async installUpdate() : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async dataDirInfo() : Promise<Result<DataDirInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_dir_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器中打开数据目录。
+ */
+async openDataDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_data_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出备份：选目标 zip → WAL 检查点 → 打包数据目录（排除 logs）。
+ * 队列运行中（有 run/retry 任务）拒绝，避免边写边打包出不一致备份。
+ * 返回所选路径；用户取消返回 None。
+ */
+async exportBackup() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_backup") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -532,12 +872,14 @@ async installUpdate() : Promise<Result<null, AppError>> {
 
 
 export const events = __makeEvents__<{
+backupProgress: BackupProgress,
 batchSummary: BatchSummary,
 keyHealth: KeyHealth,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged
 }>({
+backupProgress: "backup-progress",
 batchSummary: "batch-summary",
 keyHealth: "key-health",
 taskProgress: "task-progress",
@@ -559,7 +901,11 @@ export type AcceptResult = { accepted: number;
  * 本次因验收通过而转正的临时分组名（前端 toast）
  */
 promotedGroups: string[] }
-export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number }
+export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number; 
+/**
+ * 每分钟请求上限（E18）；None/<=0 = 不限速。
+ */
+rpmLimit: number | null }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
  */
@@ -568,6 +914,14 @@ export type ApiKeyView = { id: number; name: string;
  * 脱敏 Key：`****后4位`
  */
 maskedKey: string; baseUrl: string; model: string; concurrencyLimit: number; enabled: boolean; 
+/**
+ * 每分钟请求上限（E18）；None = 不限速。
+ */
+rpmLimit: number | null; 
+/**
+ * 是否已被自动熔断（E18）：连续 Auth/欠费失败导致停用，可在设置页恢复。
+ */
+circuitBroken: boolean; 
 /**
  * 近 50 次成功率（0.0–1.0）
  */
@@ -605,11 +959,55 @@ export type AppError =
  */
 { type: "Internal"; message: string }
 /**
+ * `backup://progress`：导出进度（前端进度条）。
+ */
+export type BackupProgress = { done: number; total: number; 
+/**
+ * running / done / error
+ */
+phase: string }
+/**
+ * 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
+ */
+export type BatchConfig = { 
+/**
+ * 参考图 → 提示词组挂靠（仅保留当前仍存在的参考图与分组）。
+ */
+refs: RefMappingInput2[]; paramsJson: string }
+/**
  * `batch://summary`（250ms 节流）
  */
-export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean }
-export type BatchView = { id: number; createdAt: number; status: string; taskCount: number }
-export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
+export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean; 
+/**
+ * 自动暂停原因（E05 全局熔断）；None = 非自动暂停或运行中。
+ */
+autoPauseReason: string | null }
+export type BatchView = { id: number; createdAt: number; status: string; taskCount: number; 
+/**
+ * 批次生效的生成参数快照（E16 / D1），任务页可回查。
+ */
+paramsJson: string; 
+/**
+ * 批次备注名（E10）；None = 未命名。
+ */
+note: string | null; 
+/**
+ * 首张产出缩略图（E10 批次切换器预览）。
+ */
+firstThumbPath: string | null; 
+/**
+ * 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
+ */
+requestCount: number }
+export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
+/**
+ * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
+ */
+draws: number }
+/**
+ * 数据目录信息（E19：暴露落盘位置）。
+ */
+export type DataDirInfo = { root: string; dbPath: string }
 /**
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */
@@ -635,13 +1033,37 @@ source: string | null;
  */
 taskId: string | null }
 /**
+ * 单个分组的产出统计（E25 分组卡片合格率）。
+ */
+export type GroupStat = { groupId: number; 
+/**
+ * 已产出图的去重组合数（分母）。
+ */
+combos: number; 
+/**
+ * 通过图覆盖的去重组合数（分子）。
+ */
+passed: number; 
+/**
+ * 累计通过作品数。
+ */
+works: number }
+/**
  * 分组视图（生成页 / 提示词库列表）。
  */
-export type GroupView = { id: number; name: string; prefix: string; scene: string; isTemp: boolean; count: number }
+export type GroupView = { id: number; name: string; prefix: string; scene: string; isTemp: boolean; count: number; 
+/**
+ * 分组绑定的标签（E20 按标签筛选）。
+ */
+tags: string[] }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */
-export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number }
+export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number; 
+/**
+ * 行号级诊断（E37），非致命，仅提示。
+ */
+warnings: ImportWarning[] }
 export type ImportPreviewGroup = { name: string; prefix: string; scene: string; tags: string[]; count: number; 
 /**
  * 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
@@ -661,6 +1083,10 @@ export type ImportResult = { groupIds: number[]; inserted: number;
  */
 temp: boolean }
 /**
+ * 导入诊断（E37：缺分组标记 / 悬空小标题等，含行号）。
+ */
+export type ImportWarning = { line: number; message: string }
+/**
  * `keys://health`
  */
 export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: number; successRate: number }
@@ -670,6 +1096,26 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 /**
+ * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
+ */
+export type ProductionOverview = { 
+/**
+ * 今日成功产出的图片数（task_attempts.outcome='success'）。
+ */
+generatedToday: number; 
+/**
+ * 今日验收通过的作品数。
+ */
+acceptedToday: number; 
+/**
+ * 今日请求次数（含重试，全部 task_attempts）。
+ */
+requestsToday: number }
+/**
+ * 单条提示词的产出统计（E25 提示词详情）。
+ */
+export type PromptStat = { works: number; combos: number; passed: number }
+/**
  * 提示词视图（编号网格 / 详情）。
  */
 export type PromptView = { id: number; groupId: number; code: string; title: string | null; text: string; favorite: boolean; edited: boolean }
@@ -677,12 +1123,32 @@ export type PromptView = { id: number; groupId: number; code: string; title: str
  * 参考图详情（含使用统计）。
  */
 export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
-export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number }
+export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; 
+/**
+ * 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
+ */
+lastGroupId: number | null }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
+/**
+ * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
+ */
+export type RefMappingInput2 = { refImageId: number; promptGroupId: number }
+/**
+ * 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
+ */
+export type RefScanItem = { path: string; name: string; duplicate: boolean; 
+/**
+ * 与之重复的已有图名（库内）或本次靠前的文件名。
+ */
+dupOf: string | null }
 /**
  * 待验收项视图。
  */
-export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string }
+export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
+/**
+ * 参考图缩略图/原图（E08 大图对比）。
+ */
+refThumbPath: string | null; refImagePath: string | null }
 /**
  * 应用设置（单行 JSON 持久化）。
  */
@@ -706,11 +1172,27 @@ motion: string;
 /**
  * 队列暂停态
  */
-paused: boolean }
+paused: boolean; 
+/**
+ * 全局熔断阈值（E05）：跨 Key 连续失败达此数自动暂停队列；0 = 关闭。
+ */
+globalFailThreshold?: number; 
+/**
+ * 废纸篓保留天数（E40 / D3）：删除项保留满此天数后启动时自动物理清理；0 = 不自动清理。
+ */
+trashRetentionDays?: number; 
+/**
+ * 归档批次保留天数（E22 / D3）：批次归档满此天数后启动时自动删除（作品不受影响）；0 = 不自动删除。
+ */
+batchRetentionDays?: number; 
+/**
+ * 首次使用引导是否已完成（E13）：四步齐备后置 true，引导永久消失。
+ */
+onboarded?: boolean }
 /**
  * 设置补丁（部分更新）。
  */
-export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null }
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
 /**
  * 5 视觉组计数。
  */
@@ -780,8 +1262,16 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
-export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
-export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null }
+export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
+/**
+ * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
+ */
+imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
+export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null; 
+/**
+ * None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。
+ */
+rpmLimit: number | null }
 /**
  * `update://state`
  */
@@ -791,7 +1281,11 @@ export type UpdateStateChanged = {
  */
 state: string; version: string | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean }
-export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string }
+export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
+/**
+ * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。
+ */
+refImageId: number | null; groupId: number | null; taskId: number | null }
 
 /** tauri-specta globals **/
 

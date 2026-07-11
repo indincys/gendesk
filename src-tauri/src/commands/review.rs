@@ -1,7 +1,5 @@
 //! review 域命令（执行计划 2.1 / 需求 13 / R7 / R8）。
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 use specta::Type;
 use sqlx::FromRow;
@@ -28,6 +26,9 @@ pub struct ReviewItemView {
     pub result_image_path: Option<String>,
     pub result_thumb_path: Option<String>,
     pub prompt_text: String,
+    /// 参考图缩略图/原图（E08 大图对比）。
+    pub ref_thumb_path: Option<String>,
+    pub ref_image_path: Option<String>,
 }
 
 /// 验收结果。
@@ -41,7 +42,8 @@ pub struct AcceptResult {
 
 const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref_name,
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
-        k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text
+        k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
+        r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
@@ -77,6 +79,7 @@ struct AcceptRow {
     ref_image_id: i64,
     prompt_id: i64,
     prompt_text_snapshot: String,
+    draw_index: i64,
     result_image_path: Option<String>,
     result_thumb_path: Option<String>,
     ref_name: String,
@@ -89,7 +92,7 @@ struct AcceptRow {
 }
 
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
-        t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
+        t.prompt_text_snapshot, t.draw_index, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
@@ -127,7 +130,8 @@ pub async fn accept_tasks(
         // 输出到 outputs/{批次}/参考图名_YYMMDD_编号.JPG
         let out_dir = state.dirs.outputs().join(row.batch_id.to_string());
         std::fs::create_dir_all(&out_dir)?;
-        let filename = files::output_filename(&row.ref_name, &row.prompt_code, &date);
+        let filename =
+            files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index);
         let out_path = out_dir.join(&filename);
         // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
         std::fs::copy(&src, &out_path)?;
@@ -183,7 +187,20 @@ pub async fn accept_tasks(
     })
 }
 
-/// 不通过所选：置 rej + 原图删除（留缩略图）+ 进废纸篓，单事务。
+/// 不通过任务待清理时应物理删除的文件列表（E02）：原图 + 缩略图。
+/// reject 时**不**立即物理删除原图——原图随此列表暂存至废纸篓，「彻底删除/清空」才删。
+fn rejected_file_paths(image: &Option<String>, thumb: &Option<String>) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(img) = image {
+        paths.push(img.clone());
+    }
+    if let Some(t) = thumb {
+        paths.push(t.clone());
+    }
+    paths
+}
+
+/// 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
 #[tauri::command]
 #[specta::specta]
 pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> AppResult<i64> {
@@ -199,10 +216,9 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
             continue;
         };
 
-        // 原图物理删除，缩略图留存进废纸篓。
-        if let Some(img) = &row.result_image_path {
-            let _ = files::purge(&PathBuf::from(img));
-        }
+        // E02：原图不再立即物理删除，随缩略图一并暂存进废纸篓 file_paths，
+        // 由「彻底删除/清空废纸篓」时的 purge 统一物理删除。误触「不通过」不再丢原图。
+        let file_paths = rejected_file_paths(&row.result_image_path, &row.result_thumb_path);
         let mut tx = state.db.begin().await?;
         trash_repo::insert(
             &mut tx,
@@ -214,7 +230,7 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
                 code: Some(row.prompt_code.clone()),
                 title: row.prompt_title.clone(),
                 source_label: "验收未通过".into(),
-                file_paths: row.result_thumb_path.iter().cloned().collect(),
+                file_paths,
             },
         )
         .await?;
@@ -274,5 +290,29 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some(), "rev 待验收任务应被选中");
+    }
+
+    // E02：不通过时原图必须进入待清理文件列表（不立即物理删除），否则误触即永久丢原图。
+    #[test]
+    fn rejected_file_paths_retains_original_image() {
+        let paths = rejected_file_paths(
+            &Some("/data/results/img.jpg".into()),
+            &Some("/data/thumbs/img.jpg".into()),
+        );
+        assert!(
+            paths.contains(&"/data/results/img.jpg".to_string()),
+            "原图须列入废纸篓待清理文件，供 purge 时才物理删除"
+        );
+        assert!(
+            paths.contains(&"/data/thumbs/img.jpg".to_string()),
+            "缩略图一并列入待清理文件"
+        );
+    }
+
+    // 极端：无缩略图仍须保住原图。
+    #[test]
+    fn rejected_file_paths_handles_missing_thumb() {
+        let paths = rejected_file_paths(&Some("/data/results/img.jpg".into()), &None);
+        assert_eq!(paths, vec!["/data/results/img.jpg".to_string()]);
     }
 }

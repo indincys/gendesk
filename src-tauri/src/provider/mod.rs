@@ -9,6 +9,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+/// 生成参数（E16 / 决策 D1）：默认全部空 = 不向 API 传该字段，以提示词与模型默认为准；
+/// 显式设置则透传（软件设置优先于提示词内同类描述，由 API 侧覆盖）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenParams {
+    /// 图像尺寸，如 "1024x1024" / "1536x1024" / "1024x1536" / "auto"。
+    pub size: Option<String>,
+    /// 质量，如 "low" / "medium" / "high" / "auto"。
+    pub quality: Option<String>,
+}
+
+impl GenParams {
+    /// 从批次 `params_json` 解析；非法/空对象都退化为「全部空」。
+    pub fn from_json(s: &str) -> Self {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+}
 
 /// 生成请求。
 #[derive(Debug, Clone)]
@@ -16,6 +34,7 @@ pub struct GenRequest {
     pub prompt: String,
     pub image_path: PathBuf,
     pub model: String,
+    pub params: GenParams,
 }
 
 /// 生成结果：已统一转为 JPEG（q95）字节，供 worker 落盘。

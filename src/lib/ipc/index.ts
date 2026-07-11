@@ -12,11 +12,16 @@ export type {
   AddApiKeyInput,
   ApiKeyView,
   AppError,
+  BackupProgress,
   BatchSummary,
   BatchView,
+  DataDirInfo,
   CreateBatchInput,
   FrontendErrorPayload,
+  GroupStat,
   GroupView,
+  ProductionOverview,
+  PromptStat,
   ImportPreview,
   ImportPreviewGroup,
   ImportResult,
@@ -25,6 +30,7 @@ export type {
   RefImageDetail,
   RefImageView,
   RefMappingInput,
+  RefScanItem,
   Result,
   ReviewItemView,
   Settings,
@@ -78,6 +84,18 @@ export async function subscribeEngine(handlers: {
 }
 
 /**
+ * 订阅数据备份进度事件（E19）。返回反订阅函数；非 Tauri 环境为 no-op。
+ * 独立于引擎事件订阅：仅设置页导出期间临时挂载。
+ */
+export async function subscribeBackupProgress(
+  handler: (e: import("./bindings").BackupProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.backupProgress.listen((e) => handler(e.payload));
+  return () => un();
+}
+
+/**
  * 转发前端未捕获错误到 Rust 统一日志流。
  * 本函数自身绝不抛错（避免错误处理链再次崩溃）。
  */
@@ -102,4 +120,18 @@ export async function reportFrontendError(payload: {
 /** 是否运行在 Tauri 环境（否则为纯浏览器 dev 预览）。 */
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * 订阅窗口文件拖入事件（E14 拖拽导入）。仅在 drop 完成时回调落盘路径列表。
+ * Tauri webview 事件封装于此，遵守「前端只经 lib/ipc 出入」铁律。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribeFileDrop(handler: (paths: string[]) => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const un = await getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "drop") handler(event.payload.paths);
+  });
+  return () => un();
 }

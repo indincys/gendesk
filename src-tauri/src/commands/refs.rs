@@ -21,6 +21,8 @@ pub struct RefImageView {
     pub thumb_path: String,
     pub width: i64,
     pub height: i64,
+    /// 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
+    pub last_group_id: Option<i64>,
 }
 
 /// 在目录内生成不冲突的路径。
@@ -85,6 +87,14 @@ pub async fn import_ref_images(
             .map(|m| m.len() as i64)
             .unwrap_or(0);
 
+        // E30b：内容 hash（去重比对用）。E41：超限则生成上传用压缩副本。
+        let content_hash = files::content_hash(&dest).ok();
+        let upload_dest = unique_path(&refs_dir, &format!("{stem}_up"), "jpg");
+        let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
+            Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
+            _ => None,
+        };
+
         let new = repo::NewRefImage {
             name: stem.clone(),
             group_id,
@@ -93,6 +103,8 @@ pub async fn import_ref_images(
             width: w as i64,
             height: h as i64,
             file_size,
+            content_hash,
+            upload_path,
         };
         let id = repo::insert(&state.db, &new).await?;
         views.push(RefImageView {
@@ -103,10 +115,105 @@ pub async fn import_ref_images(
             thumb_path: new.thumb_path,
             width: new.width,
             height: new.height,
+            last_group_id: None,
         });
     }
 
     Ok(views)
+}
+
+/// 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RefScanItem {
+    pub path: String,
+    pub name: String,
+    pub duplicate: bool,
+    /// 与之重复的已有图名（库内）或本次靠前的文件名。
+    pub dup_of: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn scan_ref_imports(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> AppResult<Vec<RefScanItem>> {
+    // 库内 hash → 名称（best-effort 展示重复源）。
+    let existing = repo::active_hash_names(&state.db).await?;
+    let mut seen: std::collections::HashMap<String, String> = existing.into_iter().collect();
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let src = PathBuf::from(&path);
+        let name = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(files::sanitize_filename)
+            .unwrap_or_else(|| "未命名".into());
+        let hash = files::content_hash(&src).ok();
+        let dup_of = hash.as_ref().and_then(|h| seen.get(h).cloned());
+        let duplicate = dup_of.is_some();
+        if let Some(h) = hash {
+            seen.entry(h).or_insert_with(|| name.clone());
+        }
+        out.push(RefScanItem {
+            path,
+            name,
+            duplicate,
+            dup_of,
+        });
+    }
+    Ok(out)
+}
+
+/// 批量改分组（E30b）。gid=None 为未分组。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_ref_images_group(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    group_id: Option<i64>,
+) -> AppResult<()> {
+    repo::set_group_many(&state.db, &ids, group_id).await?;
+    Ok(())
+}
+
+/// 批量删除参考图 → 进废纸篓（E30b）。
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_ref_images(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
+    for id in ids {
+        trash_one_ref(&state, id).await?;
+    }
+    Ok(())
+}
+
+/// 单张参考图入废纸篓（原图 + 缩略图 + 上传副本一并暂存至清理）。
+async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
+    let Some(row) = repo::soft_delete(&state.db, id).await? else {
+        return Ok(());
+    };
+    let mut file_paths = vec![row.file_path.clone(), row.thumb_path.clone()];
+    if let Some(up) = &row.upload_path {
+        file_paths.push(up.clone());
+    }
+    let mut tx = state.db.begin().await?;
+    crate::db::repo::trash::insert(
+        &mut tx,
+        &crate::db::repo::trash::NewTrashItem {
+            entity_type: "ref".into(),
+            ref_id: Some(row.id),
+            thumb_path: Some(row.thumb_path.clone()),
+            prompt_text: None,
+            code: None,
+            title: None,
+            source_label: "手动删除".into(),
+            file_paths,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// 列出全部未删除参考图（供参考图库/生成页选择）。
@@ -124,6 +231,7 @@ pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefIma
             thumb_path: r.thumb_path,
             width: r.width,
             height: r.height,
+            last_group_id: r.last_group_id,
         })
         .collect())
 }
@@ -202,6 +310,13 @@ pub async fn replace_ref_image_file(
     let size = std::fs::metadata(&dest)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
+    // 文件已更换：刷新内容 hash（E30b）与上传压缩副本（E41）。
+    let content_hash = files::content_hash(&dest).ok();
+    let upload_dest = unique_path(&state.dirs.refs(), &format!("{stem}_up"), "jpg");
+    let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
+        Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
+        _ => None,
+    };
     repo::update_file(
         &state.db,
         id,
@@ -210,6 +325,8 @@ pub async fn replace_ref_image_file(
         w as i64,
         h as i64,
         size,
+        content_hash.as_deref(),
+        upload_path.as_deref(),
     )
     .await?;
     Ok(())
@@ -219,24 +336,5 @@ pub async fn replace_ref_image_file(
 #[tauri::command]
 #[specta::specta]
 pub async fn trash_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let Some(row) = repo::soft_delete(&state.db, id).await? else {
-        return Ok(());
-    };
-    let mut tx = state.db.begin().await?;
-    crate::db::repo::trash::insert(
-        &mut tx,
-        &crate::db::repo::trash::NewTrashItem {
-            entity_type: "ref".into(),
-            ref_id: Some(row.id),
-            thumb_path: Some(row.thumb_path.clone()),
-            prompt_text: None,
-            code: None,
-            title: None,
-            source_label: "手动删除".into(),
-            file_paths: vec![row.file_path, row.thumb_path],
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    trash_one_ref(&state, id).await
 }

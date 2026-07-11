@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.2.2"
+version = "0.3.0"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
@@ -54,6 +55,10 @@ image = "0.25"
 # 提示词 txt 导入：GBK/UTF-8 编码探测
 encoding_rs = "0.8"
 chardetng = "0.1"
+
+# 数据备份打包（E19，DB + 资产目录 → zip）
+zip = { version = "2", default-features = false, features = ["deflate", "time"] }
+walkdir = "2"
 
 # IPC 契约自动生成（specta + tauri-specta，禁手改 bindings.ts）
 specta = { version = "2.0.0-rc.22", features = ["derive"] }

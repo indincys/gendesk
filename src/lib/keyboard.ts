@@ -15,6 +15,8 @@ import { useEffect } from "react";
 export function useGlobalKeyboard(): void {
   const togglePalette = useUiStore((s) => s.togglePalette);
   const closePalette = useUiStore((s) => s.closePalette);
+  const toggleHelp = useUiStore((s) => s.toggleHelp);
+  const closeHelp = useUiStore((s) => s.closeHelp);
   const go = useUiStore((s) => s.go);
 
   useEffect(() => {
@@ -28,7 +30,22 @@ export function useGlobalKeyboard(): void {
         return;
       }
 
-      const { paletteOpen } = useUiStore.getState();
+      // ⌘/ —— 快捷键速查面板（E39），全局有效。
+      if (mod && e.key === "/") {
+        e.preventDefault();
+        toggleHelp();
+        return;
+      }
+
+      const { paletteOpen, helpOpen } = useUiStore.getState();
+      // 帮助面板打开时，任意 Esc/? / ⌘/ 关闭。
+      if (helpOpen) {
+        if (e.key === "Escape" || e.key === "?") {
+          e.preventDefault();
+          closeHelp();
+        }
+        return;
+      }
       // 命令面板打开时，Esc 关闭它；其余交给面板内部处理。
       if (paletteOpen) {
         if (e.key === "Escape") {
@@ -44,6 +61,13 @@ export function useGlobalKeyboard(): void {
       const editable = target?.isContentEditable ?? false;
       if (tag === "INPUT" || tag === "TEXTAREA" || editable) return;
 
+      // ? —— 快捷键速查面板（E39）；输入区已在上方放行。
+      if (e.key === "?") {
+        e.preventDefault();
+        toggleHelp();
+        return;
+      }
+
       // ⌘1–8 切页。
       if (mod && e.key >= "1" && e.key <= "8") {
         const route = ROUTE_BY_SHORTCUT[Number(e.key)];
@@ -57,5 +81,5 @@ export function useGlobalKeyboard(): void {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [togglePalette, closePalette, go]);
+  }, [togglePalette, closePalette, toggleHelp, closeHelp, go]);
 }

@@ -38,6 +38,14 @@
   --er: oklch(54% 0.15 25);
   --erbg: oklch(54% 0.15 25 / 0.09);
 
+  /* 验收大图暗场（E28）：仅精审模式使用的深色环境，非全局深色（V2）。 */
+  --rd-bg: oklch(26% 0.02 262);
+  --rd-side: oklch(30% 0.02 262);
+  --rd-line: oklch(100% 0 0 / 0.12);
+  --rd-t1: oklch(96% 0.005 262);
+  --rd-t2: oklch(78% 0.01 262);
+  --rd-t3: oklch(64% 0.012 262);
+
   /* 字体族 */
   --mono: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
 
@@ -936,6 +944,12 @@ a:hover {
   font-size: 12px;
   color: oklch(40% 0.09 70);
 }
+/* E05 全局熔断：危险态 banner。 */
+.ban.dng {
+  border-color: var(--er);
+  background: var(--erbg);
+  color: var(--er);
+}
 .seg {
   display: inline-flex;
   background: var(--inset);
@@ -1007,6 +1021,32 @@ a:hover {
   box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
   transform: scale(0.99);
 }
+/* E09：键盘焦点环（与选中区分——虚线 + 强调色）。 */
+.rcard.focus .rcimg {
+  outline: 2px dashed var(--acc2);
+  outline-offset: 2px;
+}
+/* E38：待定角标 + 卡片降饱和沉底提示。 */
+.rcard.pend .rcimg {
+  opacity: 0.72;
+}
+.rpend {
+  position: absolute;
+  bottom: 34px;
+  left: 7px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--wr);
+  color: #fff;
+  box-shadow: var(--sh1);
+  z-index: 2;
+}
+.hbtn.on {
+  color: var(--acc2);
+  background: #fff;
+}
 .rck {
   position: absolute;
   top: 7px;
@@ -1072,6 +1112,67 @@ a:hover {
   margin-top: 6px;
   min-width: 0;
 }
+/* E13 首次引导浮层（右下角卡片，非模态遮挡）。 */
+.onbwrap {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  animation: fin 0.2s;
+}
+.onbcard {
+  width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 14px;
+  box-shadow: var(--sh3);
+  padding: 14px;
+}
+.onbstep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--sub);
+  cursor: pointer;
+}
+.onbstep:hover {
+  border-color: var(--accln);
+}
+.onbtick {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--line2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--t3);
+}
+.onbtick.done {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+}
+
+/* E24 验收聚类分段小标题（跨整行）。 */
+.rclhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--t2);
+  letter-spacing: 0.03em;
+  padding: 6px 2px 2px;
+  border-bottom: 1px solid var(--line);
+  margin-top: 4px;
+}
 .rdet {
   position: absolute;
   inset: 0;
@@ -1096,6 +1197,57 @@ a:hover {
   box-shadow: var(--sh2);
   border: 1px solid var(--line);
 }
+/* 验收大图 1:1 查看（E23）：contain 完整显示 + 滚轮缩放 + 拖拽平移。 */
+.rzoom {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+}
+.rzoom.drag {
+  cursor: grabbing;
+}
+.rzimg {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 12px;
+  box-shadow: var(--sh2);
+  border: 1px solid var(--line);
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.rzbadge {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  font: 500 10px var(--mono);
+  letter-spacing: 0.04em;
+  color: oklch(35% 0.03 262 / 0.7);
+  background: oklch(100% 0 0 / 0.7);
+  padding: 3px 7px;
+  border-radius: 5px;
+  z-index: 1;
+  pointer-events: none;
+}
+.rzhint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  font-size: 10px;
+  font-weight: 500;
+  color: oklch(35% 0.03 262 / 0.55);
+  background: oklch(100% 0 0 / 0.7);
+  padding: 3px 7px;
+  border-radius: 5px;
+  z-index: 1;
+  pointer-events: none;
+}
 .rdside {
   width: 344px;
   flex: none;
@@ -1110,6 +1262,66 @@ a:hover {
   gap: 8px;
   padding: 10px 14px;
   border-top: 1px solid var(--line);
+}
+/* E28 验收暗场：仅大图精审模式深色环境（遮罩加深 + 侧栏深色 token）。 */
+.rdet.dark {
+  background: var(--rd-bg);
+}
+.rdet.dark .rdimgw {
+  background: var(--rd-bg);
+}
+.rdet.dark .rdside {
+  background: var(--rd-side);
+  border-left-color: var(--rd-line);
+  color: var(--rd-t1);
+}
+.rdet.dark .rdside .ptext {
+  color: var(--rd-t1);
+}
+.rdet.dark .rdside .t3,
+.rdet.dark .rdside .fs11.t3 {
+  color: var(--rd-t3) !important;
+}
+.rdet.dark .rdbar {
+  border-top-color: var(--rd-line);
+}
+.rdet.dark .rdside > div:first-child {
+  border-bottom-color: var(--rd-line) !important;
+}
+/* E08 参考图对比角标 + 侧栏切换控件。 */
+.refbadge {
+  position: absolute;
+  left: 26px;
+  top: 26px;
+  font: 600 11px var(--mono);
+  color: #fff;
+  background: var(--acc);
+  padding: 3px 9px;
+  border-radius: 6px;
+  z-index: 2;
+}
+.refcmp {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px;
+  border-radius: 9px;
+  border: 1px solid var(--rd-line);
+  background: oklch(100% 0 0 / 0.05);
+  cursor: pointer;
+  text-align: left;
+}
+.refcmp.on {
+  border-color: var(--acc);
+  background: var(--accbg2);
+}
+.refcmpimg {
+  width: 44px;
+  height: 44px;
+  border-radius: 7px;
+  border: 1px solid var(--rd-line);
+  flex: none;
 }
 .ptext {
   font-size: 12.5px;
@@ -1154,6 +1366,10 @@ a:hover {
 }
 .wcard:hover .wcimg {
   box-shadow: var(--sh2);
+}
+/* E15 作品多选：选中态 */
+.wcard.sel .wcimg {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
 }
 .star {
   background: none;
@@ -1252,6 +1468,125 @@ a:hover {
   border-radius: 99px;
   background: oklch(68% 0.13 80);
   flex: none;
+}
+/* E36 提示词多选：选中态 */
+.pchip.sel {
+  border-color: var(--accln);
+  color: var(--acc2);
+  background: var(--accbg2);
+}
+/* E20 分组标签筛选条 */
+.tagbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 18px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.tagchip {
+  font-size: 11.5px;
+  color: var(--t2);
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+.tagchip:hover {
+  border-color: var(--accln);
+  color: var(--acc2);
+}
+.tagchip.on {
+  color: #fff;
+  background: var(--acc);
+  border-color: var(--acc);
+}
+/* E25 生成页生产总览条 */
+.ovbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 14px;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--sub);
+  font-size: 11.5px;
+  color: var(--t2);
+}
+.ovbar b {
+  color: var(--t1);
+  font-weight: 600;
+}
+.ovsep {
+  width: 1px;
+  height: 12px;
+  background: var(--line2);
+}
+/* E37 导入格式说明 / 行号级报错 */
+.impfmt {
+  margin-top: 10px;
+  padding: 11px 13px;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font: 11.5px / 1.75 var(--mono);
+  color: var(--t2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.impwarn {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--wrbg, oklch(80% 0.12 80 / 0.14));
+  border: 1px solid oklch(70% 0.13 80 / 0.4);
+  border-radius: 9px;
+  color: oklch(45% 0.11 70);
+}
+.impwarn-item {
+  margin-top: 5px;
+  line-height: 1.6;
+}
+/* E20 分组操作菜单 */
+.gwrap {
+  position: relative;
+}
+.gmenu {
+  position: absolute;
+  top: 28px;
+  right: 0;
+  z-index: 30;
+  min-width: 148px;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px oklch(20% 0.02 260 / 0.14);
+  padding: 4px;
+}
+.gmi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--t1);
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  text-align: left;
+}
+.gmi:hover {
+  background: var(--sub);
+}
+.gmi.dng {
+  color: var(--er);
+}
+.gmi.dng:hover {
+  background: var(--erbg);
 }
 
 /* ============================ 废纸篓 ============================ */
@@ -1388,7 +1723,7 @@ a:hover {
 }
 .kline {
   display: grid;
-  grid-template-columns: 170px minmax(110px, 1fr) 80px 84px 54px 104px 34px 26px;
+  grid-template-columns: 170px minmax(110px, 1fr) 80px 84px 54px 104px 56px 34px 26px;
   align-items: center;
   column-gap: 10px;
   padding: 0 12px;

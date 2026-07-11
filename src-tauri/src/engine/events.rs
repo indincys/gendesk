@@ -62,6 +62,8 @@ pub struct BatchSummary {
     pub counts: SummaryCounts,
     pub active_concurrency: i64,
     pub paused: bool,
+    /// 自动暂停原因（E05 全局熔断）；None = 非自动暂停或运行中。
+    pub auto_pause_reason: Option<String>,
 }
 
 /// Key 健康状态。
@@ -90,6 +92,10 @@ pub trait EventSink: Send + Sync + 'static {
     fn progress(&self, e: TaskProgress);
     fn batch_summary(&self, e: BatchSummary);
     fn key_health(&self, e: KeyHealth);
+    /// 系统通知（E18 熔断 / E04 批次完成等无人值守事件）。默认无操作。
+    fn notify(&self, _title: String, _body: String) {}
+    /// 更新 Dock/任务栏角标（E04）：待验收任务数；None/0 清除。默认无操作。
+    fn set_badge(&self, _count: Option<i64>) {}
 }
 
 /// 生产实现：经 tauri-specta 事件推送前端。
@@ -115,6 +121,24 @@ impl EventSink for TauriSink {
     }
     fn key_health(&self, e: KeyHealth) {
         let _ = e.emit(&self.app);
+    }
+    fn notify(&self, title: String, body: String) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
+    }
+    fn set_badge(&self, count: Option<i64>) {
+        use tauri::Manager;
+        // 0 视为清除，避免显示「0」。
+        let n = count.filter(|&c| c > 0);
+        if let Some(win) = self.app.get_webview_window("main") {
+            let _ = win.set_badge_count(n);
+        }
     }
 }
 

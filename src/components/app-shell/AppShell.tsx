@@ -1,10 +1,13 @@
 import { CommandPalette } from "@/components/CommandPalette";
+import { HelpPanel } from "@/components/HelpPanel";
+import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
 import { commands, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
+import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { useEffect } from "react";
 
@@ -15,7 +18,13 @@ export function AppShell() {
   const platform = useUiStore((s) => s.platform);
   const initEngine = useEngineStore((s) => s.init);
   const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
+  const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
+
+  // 加载设置（E13 引导态 / 动效偏好等全局所需）。
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
 
   // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）；启动检查更新一次。
   useEffect(() => {
@@ -39,9 +48,11 @@ export function AppShell() {
         <Sidebar />
         <div className="main">
           <ActivePage />
+          <Onboarding />
         </div>
       </div>
       <CommandPalette />
+      <HelpPanel />
     </div>
   );
 }

@@ -101,4 +101,7 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
 - [x] **M5 收尾质量关** — pnpm/cargo audit 清零（无修复传递告警书面豁免）；cargo-mutants(engine/+ids/)
   存活体全部补测试或书面豁免（docs/mutants-exemptions.md）；八页 UI 冒烟 + reduced-motion；
   §7 V2 预留自检 + V2 backlog（docs/V2-backlog.md）。**人工收尾清单**（AI 不可替代，交付前执行）见 V2-backlog.md。
+- [x] **UX 优化阶段 E01–E41（v0.3.0）** — 三批 41 条 UX 评审建议全数落地（《内部图片生产工具_UX优化执行计划.md》
+  M6 安全修正 → M7 生成调度 → M8 验收工作台 → M9 资产运维）。migration 到 0009；单分支
+  `feat/ux-overhaul` 小步提交（每项/组一 commit 注明 Exx，保 bisect），一次 PR 合入 main。
 

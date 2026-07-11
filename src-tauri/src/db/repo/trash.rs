@@ -84,6 +84,14 @@ pub async fn all(pool: &SqlitePool) -> Result<Vec<TrashItemRow>, sqlx::Error> {
     list(pool).await
 }
 
+/// 删除时刻早于 cutoff 的项 id（E40 到期自动清理）。
+pub async fn expired_ids(pool: &SqlitePool, cutoff: i64) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT id FROM trash_items WHERE deleted_at < ?1")
+        .bind(cutoff)
+        .fetch_all(pool)
+        .await
+}
+
 /// 删除 trash 记录（在事务内，与编号回收同事务）。
 pub async fn delete_rows(conn: &mut SqliteConnection, ids: &[i64]) -> Result<(), sqlx::Error> {
     if ids.is_empty() {
@@ -97,4 +105,37 @@ pub async fn delete_rows(conn: &mut SqliteConnection, ids: &[i64]) -> Result<(),
     }
     q.execute(&mut *conn).await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::*;
+    use crate::db::test_support::test_pool;
+
+    // E40 / D3：仅删除时刻早于 cutoff 的项被判定为到期。
+    #[tokio::test]
+    async fn expired_ids_selects_only_older_than_cutoff() {
+        let (pool, _d) = test_pool().await;
+        let now = now_unix();
+        // 旧项（40 天前）与新项（1 天前）。
+        let old = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO trash_items (entity_type, source_label, deleted_at) VALUES ('prompt','x',?1) RETURNING id",
+        )
+        .bind(now - 40 * 86_400)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let _fresh = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO trash_items (entity_type, source_label, deleted_at) VALUES ('prompt','x',?1) RETURNING id",
+        )
+        .bind(now - 86_400)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let cutoff = now - 30 * 86_400;
+        let ids = expired_ids(&pool, cutoff).await.unwrap();
+        assert_eq!(ids, vec![old], "仅 40 天前的项到期，1 天前的项保留");
+    }
 }

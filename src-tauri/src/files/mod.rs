@@ -95,12 +95,64 @@ pub fn generate_thumbnail(src: &Path, dest: &Path) -> AppResult<(u32, u32)> {
     Ok((w, h))
 }
 
-/// 输出文件名：`参考图名_YYMMDD_编号无连字符.JPG`（技术文档 14.3）。
-/// 例：`productA_260708_DZ0001.JPG`。参考图名做文件系统安全清洗（保留中文）。
-pub fn output_filename(ref_name: &str, code: &str, date_yymmdd: &str) -> String {
+/// 上传副本长边上限（E41）：超过则生成压缩副本用于上传，原图仅展示。
+const UPLOAD_MAX_EDGE: u32 = 2048;
+/// 上传副本触发阈值（E41）：原图字节数超过此值也压缩（即便分辨率不高）。
+const UPLOAD_MAX_BYTES: u64 = 3 * 1024 * 1024;
+/// 上传副本 JPEG 质量。
+const UPLOAD_QUALITY: u8 = 85;
+
+/// 文件内容 hash（E30b 去重）：SipHash64(全字节) + 字节数前缀，十六进制字符串。
+/// 非加密哈希，仅用于「同一文件」判定：同内容必同值，异内容碰撞概率对个人库可忽略。
+pub fn content_hash(src: &Path) -> AppResult<String> {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(src)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(format!("{:x}-{:016x}", bytes.len(), h.finish()))
+}
+
+/// 为超限图片生成上传用压缩副本（E41）：长边缩到 <=2048，转 JPEG q85。
+/// 返回 `Some((副本路径, 字节数))`；若原图未超限则返回 `None`（上传直接用原图）。
+pub fn make_upload_copy(src: &Path, dest: &Path) -> AppResult<Option<u64>> {
+    let orig_size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+    let img = ImageReader::open(src)?.with_guessed_format()?.decode()?;
+    let (w, h) = (img.width(), img.height());
+    let oversize = w > UPLOAD_MAX_EDGE || h > UPLOAD_MAX_EDGE || orig_size > UPLOAD_MAX_BYTES;
+    if !oversize {
+        return Ok(None);
+    }
+
+    let scaled = if w > UPLOAD_MAX_EDGE || h > UPLOAD_MAX_EDGE {
+        img.thumbnail(UPLOAD_MAX_EDGE, UPLOAD_MAX_EDGE)
+    } else {
+        img
+    };
+    let rgb = scaled.to_rgb8();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(dest)?;
+    let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), UPLOAD_QUALITY);
+    encoder
+        .encode(
+            &rgb,
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(AppError::from)?;
+    let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    Ok(Some(size))
+}
+
+/// 输出文件名：`参考图名_YYMMDD_编号无连字符_抽卡序号.JPG`（需求 14.3 / E17 D2）。
+/// 例：`productA_260708_DZ0001_2.JPG`。抽卡序号避免同组合多张通过时文件名冲突。
+/// 参考图名做文件系统安全清洗（保留中文）。
+pub fn output_filename(ref_name: &str, code: &str, date_yymmdd: &str, draw_index: i64) -> String {
     let safe = sanitize_filename(ref_name);
     let code_nohyphen = code.replace('-', "");
-    format!("{safe}_{date_yymmdd}_{code_nohyphen}.JPG")
+    format!("{safe}_{date_yymmdd}_{code_nohyphen}_{draw_index}.JPG")
 }
 
 /// Unix 秒 → `YYMMDD`（本地按 UTC 近似；输出命名用）。
@@ -178,13 +230,21 @@ mod tests {
     #[test]
     fn output_filename_strips_hyphen_and_keeps_chinese() {
         assert_eq!(
-            output_filename("productA", "DZ-0001", "260708"),
-            "productA_260708_DZ0001.JPG"
+            output_filename("productA", "DZ-0001", "260708", 1),
+            "productA_260708_DZ0001_1.JPG"
         );
         assert_eq!(
-            output_filename("商品主图", "DZ-0128", "260101"),
-            "商品主图_260101_DZ0128.JPG"
+            output_filename("商品主图", "DZ-0128", "260101", 2),
+            "商品主图_260101_DZ0128_2.JPG"
         );
+    }
+
+    // E17 D2：同一组合不同抽卡序号的文件名不冲突。
+    #[test]
+    fn output_filename_draw_index_avoids_collision() {
+        let a = output_filename("productA", "DZ-0001", "260708", 1);
+        let b = output_filename("productA", "DZ-0001", "260708", 2);
+        assert_ne!(a, b, "同组合两次抽卡的输出文件名必须不同");
     }
 
     #[test]
@@ -229,6 +289,45 @@ mod tests {
         assert!(thumb.width() <= THUMB_MAX && thumb.height() <= THUMB_MAX);
         assert_eq!(thumb.width(), 512, "长边应缩到 512");
         assert_eq!(thumb.height(), 307, "按比例 600*512/1000≈307");
+    }
+
+    // E30b：同内容文件 hash 一致，异内容不一致。
+    #[test]
+    fn content_hash_matches_same_bytes_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.bin");
+        let b = tmp.path().join("b.bin");
+        let c = tmp.path().join("c.bin");
+        std::fs::write(&a, b"same-content").unwrap();
+        std::fs::write(&b, b"same-content").unwrap();
+        std::fs::write(&c, b"different").unwrap();
+        let ha = content_hash(&a).unwrap();
+        assert_eq!(ha, content_hash(&b).unwrap(), "同内容 hash 一致");
+        assert_ne!(ha, content_hash(&c).unwrap(), "异内容 hash 不同");
+    }
+
+    // E41：超长边图片生成压缩副本（长边 <=2048）；小图返回 None。
+    #[test]
+    fn make_upload_copy_compresses_oversize_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 3000x1000 超长边 → 应压缩。
+        let big = tmp.path().join("big.png");
+        image::RgbImage::new(3000, 1000).save(&big).unwrap();
+        let up = tmp.path().join("big_up.jpg");
+        let out = make_upload_copy(&big, &up).unwrap();
+        assert!(out.is_some(), "超限图应生成副本");
+        let copy = image::open(&up).unwrap();
+        assert!(copy.width() <= UPLOAD_MAX_EDGE && copy.height() <= UPLOAD_MAX_EDGE);
+        assert_eq!(copy.width(), 2048, "长边缩到 2048");
+
+        // 500x500 小图 → 无需副本。
+        let small = tmp.path().join("small.png");
+        image::RgbImage::new(500, 500).save(&small).unwrap();
+        let up2 = tmp.path().join("small_up.jpg");
+        assert!(
+            make_upload_copy(&small, &up2).unwrap().is_none(),
+            "小图不压缩"
+        );
     }
 
     #[test]

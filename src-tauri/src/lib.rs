@@ -39,21 +39,35 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings::pick_image_files,
             commands::settings::open_logs_dir,
             commands::settings::open_path_in_folder,
+            commands::settings::diagnostics_info,
             // api_keys 域
             commands::api_keys::list_api_keys,
             commands::api_keys::add_api_key,
             commands::api_keys::update_api_key,
             commands::api_keys::set_api_key_enabled,
+            commands::api_keys::recover_api_key,
             commands::api_keys::delete_api_key,
+            commands::api_keys::test_api_key,
+            commands::api_keys::test_api_key_saved,
             // refs 域
             commands::refs::import_ref_images,
+            commands::refs::scan_ref_imports,
             commands::refs::list_ref_images,
             commands::refs::set_ref_image_group,
+            commands::refs::set_ref_images_group,
             commands::refs::get_ref_image,
             commands::refs::replace_ref_image_file,
             commands::refs::trash_ref_image,
+            commands::refs::trash_ref_images,
             // prompts 域
             commands::prompts::list_prompt_groups,
+            commands::prompts::create_prompt_group,
+            commands::prompts::rename_prompt_group,
+            commands::prompts::delete_prompt_group,
+            commands::prompts::merge_prompt_groups,
+            commands::prompts::move_prompts_to_group,
+            commands::prompts::set_prompts_favorite,
+            commands::prompts::trash_prompts,
             commands::prompts::list_prompts,
             commands::prompts::search_prompts,
             commands::prompts::get_prompt,
@@ -62,11 +76,17 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::prompts::trash_prompt,
             commands::prompts::parse_prompt_txt,
             commands::prompts::commit_prompt_import,
+            commands::prompts::save_prompt_template,
             // batches / tasks 域（引擎）
             commands::batches::create_batch,
+            commands::batches::estimate_task_seconds,
+            commands::batches::cancel_batch_pending,
             commands::batches::list_batches,
+            commands::batches::get_batch_config,
+            commands::batches::rename_batch,
             commands::batches::pause_queue,
             commands::batches::resume_queue,
+            commands::batches::open_batch_output_dir,
             commands::tasks::list_tasks,
             commands::tasks::get_task,
             commands::tasks::retry_task,
@@ -84,6 +104,15 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::get_work,
             commands::works::toggle_work_favorite,
             commands::works::trash_work,
+            commands::works::file_exists,
+            commands::works::reexport_work,
+            commands::works::set_works_favorite,
+            commands::works::trash_works,
+            commands::works::export_works,
+            // stats 域（E25）
+            commands::stats::list_group_stats,
+            commands::stats::prompt_stats,
+            commands::stats::production_overview,
             // trash 域
             commands::trash::list_trash,
             commands::trash::purge_trash_items,
@@ -92,6 +121,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // updater 域
             commands::updater::check_update_now,
             commands::updater::install_update,
+            // backup 域（E19 数据备份与数据目录可见性）
+            commands::backup::data_dir_info,
+            commands::backup::open_data_dir,
+            commands::backup::export_backup,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,
@@ -99,6 +132,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             engine::events::BatchSummary,
             engine::events::KeyHealth,
             commands::updater::UpdateStateChanged,
+            commands::backup::BackupProgress,
         ])
 }
 
@@ -131,6 +165,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -197,6 +232,14 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings.paused,
         secrets.clone(),
     ))?;
+    engine.set_global_fail_threshold(settings.global_fail_threshold.max(0) as u32);
+
+    // E22/E40（决策 D3）：启动时到期自动清理归档批次与废纸篓（0 天 = 关闭）。
+    tauri::async_runtime::block_on(commands::trash::run_startup_cleanup(
+        &pool,
+        settings.batch_retention_days,
+        settings.trash_retention_days,
+    ));
 
     app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
 
@@ -206,7 +249,47 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         {
             let _ = window.set_decorations(false);
         }
-        let _ = window;
+
+        // E26：关闭窗口拦截——有未完成任务（排队/生成中/重试中）时先确认，
+        // 避免误退中断跑批；空闲时直接关闭无打扰。确认退出走既有中断恢复路径
+        // （下次启动 run/retry → Interrupted，可一键继续）。
+        let handle = window.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = handle.app_handle();
+                let state = app.state::<state::AppState>();
+                let pending: i64 = tauri::async_runtime::block_on(async {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM tasks WHERE status IN ('q','run','retry')",
+                    )
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or(0)
+                });
+                if pending == 0 {
+                    return; // 空闲：不拦截
+                }
+                api.prevent_close();
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                let win = handle.clone();
+                handle
+                    .dialog()
+                    .message(format!(
+                        "仍有 {pending} 个任务未完成，退出将中断当前生成。\
+                         下次启动可继续未完成的任务。确定退出吗？"
+                    ))
+                    .title("确认退出")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "退出".into(),
+                        "取消".into(),
+                    ))
+                    .show(move |confirmed| {
+                        if confirmed {
+                            let _ = win.destroy();
+                        }
+                    });
+            }
+        });
     }
 
     Ok(())

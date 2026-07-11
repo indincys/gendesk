@@ -105,15 +105,18 @@ pub async fn retry_task(
     Ok(())
 }
 
-/// 重试某批次全部失败任务。
+/// 重试某批次全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
+/// 应走「改词重试」E34 单独处理）。
 #[tauri::command]
 #[specta::specta]
 pub async fn retry_failed_tasks(state: State<'_, AppState>, batch_id: i64) -> AppResult<i64> {
-    let ids: Vec<i64> =
-        sqlx::query_scalar("SELECT id FROM tasks WHERE batch_id = ?1 AND status = 'fail'")
-            .bind(batch_id)
-            .fetch_all(&state.db)
-            .await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE batch_id = ?1 AND status = 'fail' \
+         AND (error_type IS NULL OR error_type != 'ContentPolicy')",
+    )
+    .bind(batch_id)
+    .fetch_all(&state.db)
+    .await?;
     for id in &ids {
         repo::requeue(&state.db, *id).await?;
     }

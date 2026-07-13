@@ -4,8 +4,11 @@
 //! 两段式：`parse`（纯函数，不落库）→ 命令层 `commit`（落库 + 号池发放）。
 //!
 //! 格式约定（宽泛解析，多种写法并存；目标：常见 txt 结构无需改格式即可正确识别）：
-//! - 显式分组头：`分组: 名称`（半/全角冒号）**或** `分组【名称】`（括号内联）→ 开启新分组；
-//!   一个文件含多个 `分组` 头即按分组自动拆分。
+//! - 显式分组头：关键字 `分组`/`组`/`group`（大小写不敏感）后接以下任一分隔即开启新分组——
+//!   冒号 `分组: 名称`（半/全角）· 短横线/等号 `分组-名称`/`分组=名称` · 内联括号 `分组【名称】`
+//!   · 空白 `分组 名称`（仅 ≥2 字关键字，避免单字 `组` 误伤正文）；一个文件多头即按分组自动拆分。
+//! - **括号包裹的分组头**：整行括号块内部本身是分组头（如 `【分组：鹿晗】`/`[组-A]`）→ 直接作分组，
+//!   不参与下述前瞻判层。这样「`【分组：X】` 换行 正文…」这类把「分组：」一起括起来的写法也能识别。
 //! - **裸括号自动判层**：独占一行的括号块 `【名称】`（亦支持 `[名称]`/`［名称］`/`〖名称〗`），
 //!   若其下一条非空行是「正文」→ 视为该正文的**小标题**；否则（下一条是另一括号块 / 元信息头）
 //!   → 视为**分组头**。这样图中「`【分组】` 换行 `【小标题】` 换行 `1．正文`」结构可零配置识别。
@@ -156,6 +159,16 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
         //   下一条是括号/元信息头 → 本行是分组头；
         //   已到文件尾（无下一条）→ 视为悬空小标题（结尾告警）。
         if let Some(inner) = parse_bracket_line(trimmed) {
+            // 括号内部本身即分组头（如 `【分组：鹿晗】`）→ 直接作分组，忽略前瞻判层。
+            if let Some(name) = parse_group_header(&inner) {
+                warn_dangling(&mut warnings, pending_title.take());
+                if let Some(g) = cur.take() {
+                    groups.push(g);
+                }
+                cur = Some(new_group(name));
+                seen_group_header = true;
+                continue;
+            }
             match lines.get(i + 1) {
                 Some(&(_, next)) if is_body_line(next) => {
                     warn_dangling(&mut warnings, pending_title.replace((inner, line)));
@@ -210,28 +223,52 @@ fn is_body_line(line: &str) -> bool {
         && parse_bracket_line(line).is_none()
 }
 
-/// 识别分组头：`分组: 名称` / `分组：名称` / `分组【名称】`（含 `组`/`group` 同义）。
+/// 识别分组头：关键字 `分组`/`组`/`group`（大小写不敏感）后接冒号(半/全角)、
+/// 短横线/等号、内联括号或空白分隔。例：`分组: 名称`·`分组-名称`·`分组【名称】`·`分组 名称`。
 fn parse_group_header(line: &str) -> Option<String> {
-    for kw in ["分组", "组", "group", "Group"] {
-        if let Some(rest) = line.strip_prefix(kw) {
-            let rest = rest.trim_start();
-            // 内联括号形式：分组【名称】
-            if let Some(inner) = bracket_inner(rest) {
-                let name = inner.trim();
-                if !name.is_empty() {
-                    return Some(name.to_string());
-                }
+    // 长关键字在前，`组` 最后（单字，仅允许显式分隔，不吃空白）。
+    for kw in ["分组", "组", "group"] {
+        let Some(rest) = strip_prefix_ci(line, kw) else {
+            continue;
+        };
+        let rest_trimmed = rest.trim_start();
+        // 内联括号形式：分组【名称】 / 分组 【名称】。
+        if let Some(inner) = bracket_inner(rest_trimmed) {
+            let name = inner.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
             }
-            // 冒号形式：分组: 名称
-            if let Some(after) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) {
-                let name = after.trim();
-                if !name.is_empty() {
-                    return Some(name.to_string());
-                }
+            continue;
+        }
+        // 冒号 / 短横线 / 等号分隔（半/全角）：分组：名称 · 分组-名称 · 分组＝名称。
+        if let Some(after) = rest_trimmed.strip_prefix([':', '：', '-', '－', '—', '=', '＝'])
+        {
+            let name = after.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+            continue;
+        }
+        // 纯空白分隔：分组 名称（仅 ≥2 字关键字，避免单字 `组` 误伤以「组」起头的正文）。
+        if kw.chars().count() >= 2 && rest.starts_with(|c: char| c.is_whitespace()) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
             }
         }
     }
     None
+}
+
+/// 前缀匹配：ASCII 关键字大小写不敏感，非 ASCII 关键字精确匹配。返回剥离关键字后的剩余串。
+fn strip_prefix_ci<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    if kw.is_ascii() {
+        let n = kw.len();
+        (line.is_char_boundary(n) && line.as_bytes()[..n].eq_ignore_ascii_case(kw.as_bytes()))
+            .then(|| &line[n..])
+    } else {
+        line.strip_prefix(kw)
+    }
 }
 
 /// 支持的成对括号（宽泛识别常见标题/分组括号；不含 `「」`/`《》` 以免误伤正文引用）。
@@ -603,6 +640,61 @@ mod tests {
             flat(&out.groups[0]),
             vec![(Some("标题一"), "正文一"), (Some("标题二"), "正文二")]
         );
+    }
+
+    // 用户真实格式：`【分组：名称】` —— 把「分组：」一起括进方括号，且分组下直接跟正文（无小标题）。
+    // 旧逻辑因前瞻到下一行是正文而误判为小标题，全部塌进默认分组；此处应正确按分组拆分。
+    #[test]
+    fn bracket_wrapped_group_header_with_direct_body() {
+        let doc = "\
+【分组：鹿晗】
+
+奶油蜂蜜生日派对餐桌正文。
+柠檬汽水气泡池正文。
+
+【分组：鞠婧祎】
+
+玻璃汽水瓶瓶底寻宝正文。
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2, "括号包裹的分组头应按分组拆分");
+        assert_eq!(out.groups[0].name, "鹿晗");
+        assert_eq!(
+            texts(&out.groups[0]),
+            vec!["奶油蜂蜜生日派对餐桌正文。", "柠檬汽水气泡池正文。"]
+        );
+        assert_eq!(out.groups[1].name, "鞠婧祎");
+        assert_eq!(texts(&out.groups[1]), vec!["玻璃汽水瓶瓶底寻宝正文。"]);
+        // 分组已识别 → 不应再落默认分组并告警。
+        assert!(out.warnings.is_empty(), "不应误判为默认分组");
+    }
+
+    // 分组头分隔符更宽泛：空白 / 短横线 / 等号 / 大小写不敏感 group / 括号包裹的短横线形式。
+    #[test]
+    fn flexible_group_header_separators() {
+        assert_eq!(parse_group_header("分组 鹿晗").as_deref(), Some("鹿晗"));
+        assert_eq!(parse_group_header("分组-鞠婧祎").as_deref(), Some("鞠婧祎"));
+        assert_eq!(
+            parse_group_header("分组＝邓紫棋").as_deref(),
+            Some("邓紫棋")
+        );
+        assert_eq!(parse_group_header("GROUP: alpha").as_deref(), Some("alpha"));
+        assert_eq!(parse_group_header("Group【beta】").as_deref(), Some("beta"));
+        // 括号包裹的关键字（含短横线分隔）。
+        let out = parse("[组-甲]\n正文一\n正文二".as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "甲");
+        assert_eq!(texts(&out.groups[0]), vec!["正文一", "正文二"]);
+    }
+
+    // 防误伤：单字 `组` 不吃空白分隔；以「组」「分组」起头的正文不被当作分组头。
+    #[test]
+    fn group_header_does_not_swallow_body() {
+        assert_eq!(parse_group_header("组 图排版说明"), None);
+        assert_eq!(parse_group_header("组合成一张图"), None);
+        assert_eq!(parse_group_header("分组内的说明文字"), None);
+        // `组：X` 单字关键字 + 显式冒号仍识别。
+        assert_eq!(parse_group_header("组：临时").as_deref(), Some("临时"));
     }
 
     // 序号剥离：括号数字 `(1)`/`（2）` 与圆圈数字 `③`。

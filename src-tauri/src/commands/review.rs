@@ -127,8 +127,19 @@ pub async fn accept_tasks(
             continue; // 无结果图，跳过
         };
 
-        // 输出到 outputs/{批次}/参考图名_YYMMDD_编号.JPG
-        let out_dir = state.dirs.outputs().join(row.batch_id.to_string());
+        // 任务6：输出到 outputs/{批次}/{分组}/参考图名_YYMMDD_编号.EXT。
+        // 按提示词分组分文件夹存放，多分组批次天然各归各处而非全混一处。
+        // 分组名做文件系统安全清洗，空分组归入「未分组」。
+        let group_folder = if row.group_name.trim().is_empty() {
+            "未分组".to_string()
+        } else {
+            files::sanitize_filename(&row.group_name)
+        };
+        let out_dir = state
+            .dirs
+            .outputs()
+            .join(row.batch_id.to_string())
+            .join(&group_folder);
         std::fs::create_dir_all(&out_dir)?;
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);

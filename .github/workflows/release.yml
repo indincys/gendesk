@@ -20,9 +20,9 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - platform: macos-latest # Apple Silicon + Intel（universal）
-            args: "--target universal-apple-darwin"
-          - platform: windows-latest # x64 NSIS per-user
+          - platform: macos-latest # Apple Silicon 专用（不再构建 Intel/universal）
+            args: "--target aarch64-apple-darwin"
+          - platform: windows-latest # x64 NSIS per-user（Windows 10/11）
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
@@ -36,7 +36,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -83,7 +83,7 @@ jobs:
           if [ "$ver" != "$expected" ]; then
             echo "✗ latest.json version=$ver 与 tag=$expected 不一致"; exit 1
           fi
-          for p in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+          for p in darwin-aarch64 windows-x86_64; do
             u=$(echo "$json" | python3 -c "import sys,json;d=json.load(sys.stdin)['platforms'];print(d['$p']['url'] if '$p' in d else '')")
             if [ -z "$u" ]; then
               echo "✗ latest.json 缺少平台 $p（更新链对该平台断裂，请 rerun 失败的构建）"; exit 1
@@ -94,4 +94,4 @@ jobs:
               echo "✗ $p 更新产物不可下载（HTTP $code）"; exit 1
             fi
           done
-          echo "✓ latest.json 平台完整（darwin-aarch64/darwin-x86_64/windows-x86_64），更新产物均可下载"
+          echo "✓ latest.json 平台完整（darwin-aarch64/windows-x86_64），更新产物均可下载"

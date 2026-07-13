@@ -89,6 +89,18 @@ async openLogsDir() : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * 任务5：一键打开图片输出根目录（`outputs/`，各批次/分组子目录都在其下）。
+ * 目录不存在（尚无输出）时先创建，避免打开失败。
+ */
+async openOutputDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_output_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 在系统文件管理器中显示指定路径（打开所在文件夹）。
  */
 async openPathInFolder(path: string) : Promise<Result<null, AppError>> {
@@ -1271,7 +1283,12 @@ export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; m
 /**
  * None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。
  */
-rpmLimit: number | null }
+rpmLimit: number | null; 
+/**
+ * 轮换密钥：None/空串 = 保持原 Key 不变；Some(非空) = 覆写钥匙串中的密钥。
+ * 编辑弹窗里留空即不改 Key，只改元数据。
+ */
+key: string | null }
 /**
  * `update://state`
  */

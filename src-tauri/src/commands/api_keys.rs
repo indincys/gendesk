@@ -58,6 +58,9 @@ pub struct UpdateApiKeyPatch {
     pub concurrency_limit: Option<i64>,
     /// None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。
     pub rpm_limit: Option<i64>,
+    /// 轮换密钥：None/空串 = 保持原 Key 不变；Some(非空) = 覆写钥匙串中的密钥。
+    /// 编辑弹窗里留空即不改 Key，只改元数据。
+    pub key: Option<String>,
 }
 
 /// base_url 尾部 `/` 归一化（R6：约定已含 /v1）。
@@ -166,6 +169,15 @@ pub async fn update_api_key(
     let row = repo::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
+    // 密钥轮换：仅当传入非空 Key 时覆写钥匙串（沿用原 keyring 账户名）。
+    if let Some(new_key) = patch
+        .key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        state.secrets.set(&row.keyring_account, new_key)?;
+    }
     let view = to_view(&state, row).await?;
     let _ = state
         .engine

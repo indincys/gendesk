@@ -285,6 +285,18 @@ pub async fn open_logs_dir(state: State<'_, AppState>, app: AppHandle) -> AppRes
         .map_err(|e| AppError::Io(e.to_string()))
 }
 
+/// 任务5：一键打开图片输出根目录（`outputs/`，各批次/分组子目录都在其下）。
+/// 目录不存在（尚无输出）时先创建，避免打开失败。
+#[tauri::command]
+#[specta::specta]
+pub async fn open_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+    let dir = state.dirs.outputs();
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+
 /// 在系统文件管理器中显示指定路径（打开所在文件夹）。
 #[tauri::command]
 #[specta::specta]

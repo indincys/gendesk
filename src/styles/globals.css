@@ -1123,20 +1123,52 @@ a:hover {
 }
 
 /* E24 验收聚类分段小标题（跨整行）。 */
+/* 任务7：验收分组头做成醒目的整宽色带（左侧强调条 + 底纹），成组识别更清晰。 */
 .rclhead {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--t2);
-  letter-spacing: 0.03em;
-  padding: 6px 2px 2px;
-  border-bottom: 1px solid var(--line);
-  margin-top: 4px;
+  color: var(--t1);
+  letter-spacing: 0.01em;
+  padding: 7px 11px;
+  margin: 16px 0 11px;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--acc2);
+  border-radius: 9px;
   /* 任务3：瀑布流多列下跨全部列（替代原 grid 的整行跨列）。 */
   column-span: all;
   break-inside: avoid;
+}
+/* 首个分组头贴顶，避免与工具栏之间空隙过大（消除错位观感）。 */
+.rclhead:first-child {
+  margin-top: 2px;
+}
+.rcltag {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--t3);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  letter-spacing: 0.02em;
+}
+.rclname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rclcnt {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t3);
 }
 .rdet {
   position: absolute;
@@ -1608,6 +1640,26 @@ a:hover {
   gap: 8px;
   margin-bottom: 10px;
 }
+/* 任务4：可折叠区块头（点击展开/收起）。 */
+.sechead.collh {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 2px;
+  margin: -4px -2px 6px;
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+.sechead.collh:hover {
+  background: var(--sub);
+}
+.chevr {
+  color: var(--t3);
+  transition: transform 0.15s;
+  transform: rotate(-90deg);
+}
+.chevr.open {
+  transform: rotate(0deg);
+}
 .krow {
   border: 1px solid var(--line);
   border-radius: 11px;
@@ -1700,9 +1752,10 @@ a:hover {
 }
 .kline {
   display: grid;
-  grid-template-columns: 170px minmax(110px, 1fr) 80px 84px 54px 104px 56px 34px 26px;
+  /* 任务3：末尾新增「编辑」图标列（26px），略收其余列宽以容纳。 */
+  grid-template-columns: 158px minmax(92px, 1fr) 70px 80px 46px 86px 50px 34px 26px 26px;
   align-items: center;
-  column-gap: 10px;
+  column-gap: 9px;
   padding: 0 12px;
   height: 40px;
   font-size: 12px;

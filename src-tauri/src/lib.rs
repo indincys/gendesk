@@ -38,6 +38,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings::pick_txt_file,
             commands::settings::pick_image_files,
             commands::settings::open_logs_dir,
+            commands::settings::open_output_dir,
             commands::settings::open_path_in_folder,
             commands::settings::diagnostics_info,
             // api_keys 域

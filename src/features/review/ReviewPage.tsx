@@ -18,7 +18,8 @@ export function ReviewPage() {
   const [pending, setPending] = useState<Set<number>>(new Set());
   const [onlyPending, setOnlyPending] = useState(false);
   // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
-  const [sortMode, setSortMode] = useState<"time" | "ref" | "group">("time");
+  // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
+  const [sortMode, setSortMode] = useState<"time" | "ref" | "group">("group");
   // E38：shift 范围多选锚点（索引进 displayed）。
   const lastClicked = useRef<number | null>(null);
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
@@ -152,6 +153,17 @@ export function ReviewPage() {
   // E24：聚类模式下某项所属的分段键（时间序无分段）。
   const clusterKey = (it: ReviewItemView): string | null =>
     sortMode === "ref" ? it.refName : sortMode === "group" ? it.groupName : null;
+
+  // 任务7：每个分组的待验收张数（分组头右侧显示）。
+  const clusterCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    if (sortMode === "time") return m;
+    for (const it of displayed) {
+      const k = sortMode === "ref" ? it.refName : it.groupName;
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  }, [displayed, sortMode]);
 
   // 大图逐张模式键盘
   useEffect(() => {
@@ -370,7 +382,11 @@ export function ReviewPage() {
                 <Fragment key={it.id}>
                   {showHeader && (
                     <div className="rclhead">
-                      {sortMode === "ref" ? "参考图" : "提示词组"} · {ck}
+                      <span className="rcltag">{sortMode === "ref" ? "参考图" : "提示词组"}</span>
+                      <span className="rclname" title={ck ?? ""}>
+                        {ck}
+                      </span>
+                      <span className="rclcnt">{clusterCounts.get(ck ?? "") ?? 0} 张</span>
                     </div>
                   )}
                   <div

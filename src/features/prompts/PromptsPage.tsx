@@ -10,7 +10,7 @@ import {
   subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
-import { cn, promptLabel } from "@/lib/utils";
+import { cn, promptLabel, sortGroupsByPinyin } from "@/lib/utils";
 import { CheckSquare, FileUp, FolderInput, MoreHorizontal, Plus, Search, Star } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -30,6 +30,9 @@ export function PromptsPage() {
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   // E25：各分组产出统计（合格率）。
   const [stats, setStats] = useState<Record<number, GroupStat>>({});
+
+  // 分组排序：默认按拼音首字母升序；可切回导入/创建的原始顺序。
+  const [sortByPinyin, setSortByPinyin] = useState(true);
 
   // E36 多选态
   const [selectMode, setSelectMode] = useState(false);
@@ -79,8 +82,10 @@ export function PromptsPage() {
 
   // 全部标签（去重，来自各分组绑定）。
   const allTags = Array.from(new Set(groups.flatMap((g) => g.tags))).sort();
-  // 应用标签筛选后的分组。
-  const shownGroups = tagFilter == null ? groups : groups.filter((g) => g.tags.includes(tagFilter));
+  // 应用标签筛选后的分组，再按排序模式排列（默认拼音首字母）。
+  const filteredGroups =
+    tagFilter == null ? groups : groups.filter((g) => g.tags.includes(tagFilter));
+  const shownGroups = sortByPinyin ? sortGroupsByPinyin(filteredGroups) : filteredGroups;
 
   // 多选：当前可选提示词的扁平序（用于 shift 范围）。搜索态下为搜索结果，否则为 shownGroups 顺序。
   const flat: PromptView[] = searchResults
@@ -265,6 +270,20 @@ export function PromptsPage() {
           </>
         ) : (
           <>
+            <div className="seg" title="分组排序方式">
+              <span
+                className={cn("sgi", sortByPinyin && "on")}
+                onClick={() => setSortByPinyin(true)}
+              >
+                拼音
+              </span>
+              <span
+                className={cn("sgi", !sortByPinyin && "on")}
+                onClick={() => setSortByPinyin(false)}
+              >
+                默认
+              </span>
+            </div>
             <button
               type="button"
               className="btn sm gho"

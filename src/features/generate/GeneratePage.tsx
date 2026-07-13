@@ -13,7 +13,7 @@ import {
   subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
-import { cn, promptLabel } from "@/lib/utils";
+import { cn, promptLabel, sortGroupsByPinyin } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
@@ -83,7 +83,9 @@ export function GeneratePage() {
 
   const load = useCallback(async () => {
     try {
-      setGroups(await unwrap(commands.listPromptGroups()));
+      // 提示词组默认按拼音首字母排序：左栏词组卡、右侧参考图挂靠弹层、
+      // 「选择提示词组」弹窗均沿用此序（配色仍按选中先后，稳定不乱）。
+      setGroups(sortGroupsByPinyin(await unwrap(commands.listPromptGroups())));
       setRefs(await unwrap(commands.listRefImages()));
       setKeys(await unwrap(commands.listApiKeys()));
       setOverview(await unwrap(commands.productionOverview()).catch(() => null));

@@ -1,7 +1,7 @@
 # GenDesk · 内部图片生产工具
 
 本地批量图生图流水线：参考图素材库 → 提示词分组 → 批量生成 → 进度追踪 → 人工验收 → 合格图输出归档。
-Windows 10/11 与 macOS 12+ 双端，Tauri 2 + React 19 + Rust。
+Windows 10/11（x64）与 macOS 12+（Apple Silicon）双端，Tauri 2 + React 19 + Rust。**不支持 Intel 芯片 Mac。**
 
 ## 开发
 

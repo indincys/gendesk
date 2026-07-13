@@ -12,7 +12,7 @@ import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useSettingsStore } from "@/stores/settings";
-import { FolderOpen, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,7 +24,10 @@ export function SettingsPage() {
   const version = useAppVersion();
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [editing, setEditing] = useState<ApiKeyView | null>(null);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
+  // 任务4：API Key 区块默认折叠，减少设置页初始噪音。
+  const [apiOpen, setApiOpen] = useState(false);
   // E19：数据目录信息 + 备份导出进度。
   const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
   const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
@@ -84,6 +87,7 @@ export function SettingsPage() {
           baseUrl: null,
           model: null,
           rpmLimit: null,
+          key: null,
         }),
       );
     } catch {
@@ -128,98 +132,122 @@ export function SettingsPage() {
   return (
     <PageScaffold title="设置" caption="API Key · 调度与重试 · 输出 · 通用">
       <div className="swrap">
-        {/* ---------------- API Key ---------------- */}
+        {/* ---------------- API Key（任务4：默认折叠） ---------------- */}
         <section className="sec">
-          <div className="sechead">
+          <div
+            className="sechead collh"
+            onClick={() => setApiOpen((v) => !v)}
+            title={apiOpen ? "收起" : "展开"}
+          >
+            <ChevronDown className={cn("ic12 chevr", apiOpen && "open")} />
             <span className="fw6 fs13">API Key</span>
             <span className="cnt">
               {enabledCount}/{keys.length} 启用
             </span>
             <div className="f1" />
-            <button type="button" className="btn sm" onClick={() => setShowAdd(true)}>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setApiOpen(true);
+                setShowAdd(true);
+              }}
+            >
               <Plus className="ic12" />
               添加 Key
             </button>
           </div>
-          <div className="klist">
-            <div className="kline khd">
-              <span>Key</span>
-              <span>Base URL</span>
-              <span>模型</span>
-              <span>并发 1–10</span>
-              <span>成功率</span>
-              <span>状态</span>
-              <span />
-              <span />
-              <span />
-            </div>
-            {keys.map((k) => (
-              <div className="kline" key={k.id}>
-                <span className="fx ac gap7 ohide">
-                  <i className={cn("kd", k.enabled ? "kd-ok" : "kd-off")} />
-                  <span className="fw5 nowrap ohide" title={k.maskedKey}>
-                    {k.name || "未命名"}
+          {apiOpen && (
+            <div className="klist">
+              <div className="kline khd">
+                <span>Key</span>
+                <span>Base URL</span>
+                <span>模型</span>
+                <span>并发 1–10</span>
+                <span>成功率</span>
+                <span>状态</span>
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
+              {keys.map((k) => (
+                <div className="kline" key={k.id}>
+                  <span className="fx ac gap7 ohide">
+                    <i className={cn("kd", k.enabled ? "kd-ok" : "kd-off")} />
+                    <span className="fw5 nowrap ohide" title={k.maskedKey}>
+                      {k.name || "未命名"}
+                    </span>
                   </span>
-                </span>
-                <span className="mono fs10 t3 nowrap ohide">{k.baseUrl}</span>
-                <span className="mono fs10 t3 nowrap ohide">{k.model}</span>
-                <span>
-                  <Stepper
-                    value={k.concurrencyLimit}
-                    min={1}
-                    max={10}
-                    onChange={(v) => patchKeyConcurrency(k, v)}
-                  />
-                </span>
-                <span className="mono fs11 t2">
-                  {k.sampleCount > 0 ? `${Math.round(k.successRate * 100)}%` : "—"}
-                </span>
-                <span className="fx ac gap6 ohide">
+                  <span className="mono fs10 t3 nowrap ohide">{k.baseUrl}</span>
+                  <span className="mono fs10 t3 nowrap ohide">{k.model}</span>
+                  <span>
+                    <Stepper
+                      value={k.concurrencyLimit}
+                      min={1}
+                      max={10}
+                      onChange={(v) => patchKeyConcurrency(k, v)}
+                    />
+                  </span>
+                  <span className="mono fs11 t2">
+                    {k.sampleCount > 0 ? `${Math.round(k.successRate * 100)}%` : "—"}
+                  </span>
+                  <span className="fx ac gap6 ohide">
+                    {k.circuitBroken ? (
+                      <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
+                        已熔断
+                      </span>
+                    ) : (
+                      <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
+                        {k.enabled ? "启用" : "停用"}
+                      </span>
+                    )}
+                    {k.rpmLimit != null && <span className="fs10 t3 nowrap">{k.rpmLimit}/min</span>}
+                  </span>
                   {k.circuitBroken ? (
-                    <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
-                      已熔断
-                    </span>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => recoverKey(k)}
+                      title="清除熔断并重新启用"
+                    >
+                      恢复
+                    </button>
                   ) : (
-                    <span className={cn("bdg", k.enabled ? "b-green" : "b-gray")}>
-                      {k.enabled ? "启用" : "停用"}
-                    </span>
+                    <button
+                      type="button"
+                      className="btn sm gho"
+                      disabled={testingId === k.id}
+                      onClick={() => testSaved(k)}
+                      title="测试连接"
+                    >
+                      {testingId === k.id ? "测试中…" : "测试"}
+                    </button>
                   )}
-                  {k.rpmLimit != null && <span className="fs10 t3 nowrap">{k.rpmLimit}/min</span>}
-                </span>
-                {k.circuitBroken ? (
+                  <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
+                  <button type="button" className="icb" onClick={() => setEditing(k)} title="编辑">
+                    <Pencil className="ic12" />
+                  </button>
                   <button
                     type="button"
-                    className="btn sm"
-                    onClick={() => recoverKey(k)}
-                    title="清除熔断并重新启用"
+                    className="icb"
+                    onClick={() => setConfirmDel(k)}
+                    title="删除"
                   >
-                    恢复
+                    <Trash2 className="ic12" />
                   </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn sm gho"
-                    disabled={testingId === k.id}
-                    onClick={() => testSaved(k)}
-                    title="测试连接"
-                  >
-                    {testingId === k.id ? "测试中…" : "测试"}
-                  </button>
-                )}
-                <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
-                <button type="button" className="icb" onClick={() => setConfirmDel(k)} title="删除">
-                  <Trash2 className="ic12" />
-                </button>
-              </div>
-            ))}
-            {keys.length === 0 && (
-              <div className="kline">
-                <span className="t3 fs12" style={{ gridColumn: "1 / -1" }}>
-                  尚未添加 API Key — 点击右上「添加 Key」接入 GPT-Image 2 兼容端点
-                </span>
-              </div>
-            )}
-          </div>
+                </div>
+              ))}
+              {keys.length === 0 && (
+                <div className="kline">
+                  <span className="t3 fs12" style={{ gridColumn: "1 / -1" }}>
+                    尚未添加 API Key — 点击右上「添加 Key」接入 GPT-Image 2 兼容端点
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {/* ---------------- 调度与重试 ---------------- */}
@@ -315,6 +343,17 @@ export function SettingsPage() {
           </div>
           <div className="fx ac gap10">
             <div className="pathwell f1">{settings?.outputDir || "（默认输出目录）"}</div>
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() =>
+                void unwrap(commands.openOutputDir()).catch((e) => toast.error(String(e)))
+              }
+              title="在文件管理器中打开输出文件夹"
+            >
+              <FolderOpen className="ic12" />
+              打开文件夹
+            </button>
             <button
               type="button"
               className="btn sm"
@@ -573,6 +612,16 @@ export function SettingsPage() {
           }}
         />
       )}
+      {editing && (
+        <EditKeyModal
+          apiKey={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            void loadKeys();
+          }}
+        />
+      )}
       {confirmDel && (
         <ConfirmModal
           title="删除 API Key"
@@ -669,6 +718,140 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
           <input
             className="inp mono"
             placeholder="sk-…"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+          />
+        </Field>
+        <Field label="Base URL">
+          <input
+            className="inp mono"
+            placeholder="https://api.example.com/v1"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+        </Field>
+        <div className="fx gap10">
+          <div className="col gap4 f1">
+            <span className="fs11 t3">模型</span>
+            <input className="inp mono" value={model} onChange={(e) => setModel(e.target.value)} />
+          </div>
+          <div className="col gap4" style={{ width: 90 }}>
+            <span className="fs11 t3">并发上限</span>
+            <input
+              className="inp mono"
+              value={concurrency}
+              onChange={(e) => setConcurrency(e.target.value)}
+            />
+          </div>
+          <div className="col gap4" style={{ width: 110 }}>
+            <span className="fs11 t3">RPM（可选）</span>
+            <input
+              className="inp mono"
+              placeholder="不限"
+              value={rpm}
+              onChange={(e) => setRpm(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function EditKeyModal({
+  apiKey,
+  onClose,
+  onSaved,
+}: { apiKey: ApiKeyView; onClose: () => void; onSaved: () => void }) {
+  const [alias, setAlias] = useState(apiKey.name);
+  // 留空 = 不修改密钥（后端不会覆写钥匙串）。
+  const [key, setKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState(apiKey.baseUrl);
+  const [model, setModel] = useState(apiKey.model);
+  const [concurrency, setConcurrency] = useState(String(apiKey.concurrencyLimit));
+  const [rpm, setRpm] = useState(apiKey.rpmLimit != null ? String(apiKey.rpmLimit) : "");
+  const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    setTesting(true);
+    try {
+      // 填了新 Key 就用新 Key 探活；否则测试已保存的密钥。
+      if (key.trim()) {
+        if (!baseUrl.trim()) {
+          toast.error("请先填写 Base URL");
+          return;
+        }
+        await unwrap(commands.testApiKey(baseUrl.trim(), key.trim()));
+      } else {
+        await unwrap(commands.testApiKeySaved(apiKey.id));
+      }
+      toast.success("连接正常");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const save = async () => {
+    if (!baseUrl.trim()) {
+      toast.error("Base URL 必填");
+      return;
+    }
+    setBusy(true);
+    try {
+      await unwrap(
+        commands.updateApiKey(apiKey.id, {
+          name: alias.trim(),
+          baseUrl: baseUrl.trim(),
+          model: model.trim() || "gpt-image-2",
+          concurrencyLimit: Number(concurrency) || apiKey.concurrencyLimit,
+          // 空 rpm → 传 0（<=0 清除限速 = 不限）；否则设为该值。
+          rpmLimit: rpm.trim() ? Number(rpm) : 0,
+          // 空 → null（保持原 Key）；否则轮换。
+          key: key.trim() ? key.trim() : null,
+        }),
+      );
+      toast.success("已保存修改");
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="编辑 API Key"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">Key 留空则不修改，仅更新其余信息</span>
+          <div className="f1" />
+          <button type="button" className="btn" onClick={test} disabled={testing || busy}>
+            {testing ? "测试中…" : "测试连接"}
+          </button>
+          <button type="button" className="btn pri" onClick={save} disabled={busy}>
+            保存
+          </button>
+        </>
+      }
+    >
+      <div className="col gap10">
+        <Field label="别名">
+          <input
+            className="inp"
+            placeholder="例如：主力 · 直连"
+            value={alias}
+            onChange={(e) => setAlias(e.target.value)}
+          />
+        </Field>
+        <Field label="API Key（留空 = 不修改）">
+          <input
+            className="inp mono"
+            placeholder={`保持不变：${apiKey.maskedKey}`}
             value={key}
             onChange={(e) => setKey(e.target.value)}
           />

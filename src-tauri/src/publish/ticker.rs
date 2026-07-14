@@ -106,8 +106,9 @@ pub async fn run_catchup(pool: &SqlitePool, app: &AppHandle) -> Vec<String> {
 }
 
 /// 启动定时循环：立即补跑一次，此后每 5 分钟一轮（P3 会在此加超时扫描）。
-pub fn spawn(pool: SqlitePool, app: AppHandle) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+/// 用 tauri::async_runtime::spawn 委托 Tauri 全局运行时，可从 setup（非 Tokio 运行时上下文）安全调用。
+pub fn spawn(pool: SqlitePool, app: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
         loop {
             run_catchup(&pool, &app).await;
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;

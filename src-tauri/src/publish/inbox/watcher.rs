@@ -25,7 +25,9 @@ const QUIET: Duration = Duration::from_millis(2000);
 /// 运行中的收件箱监听。drop 即停止（watcher 析构 + 通道关闭令 worker 退出）。
 pub struct PublishWatcher {
     _watcher: notify::RecommendedWatcher,
-    _worker: tokio::task::JoinHandle<()>,
+    // tauri::async_runtime::spawn 委托 Tauri 全局运行时，故 start/start_pkg 可从 setup
+    // （主线程、非 Tokio 运行时上下文）安全调用，不再 `there is no reactor running` panic。
+    _worker: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// 在指定本机根目录上启动监听。root 下不存在 收件箱/ 时先建。
@@ -45,7 +47,7 @@ pub fn start(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<Publi
         .watch(&inbox_dir, RecursiveMode::Recursive)
         .map_err(|e| AppError::Io(format!("监听收件箱目录失败：{e}")))?;
 
-    let worker = tokio::spawn(async move {
+    let worker = tauri::async_runtime::spawn(async move {
         run_worker(rx, pool, root, app).await;
     });
 
@@ -69,7 +71,7 @@ pub fn start_pkg(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<P
     watcher
         .watch(&pkg_dir, RecursiveMode::Recursive)
         .map_err(|e| AppError::Io(format!("监听任务包目录失败：{e}")))?;
-    let worker = tokio::spawn(async move {
+    let worker = tauri::async_runtime::spawn(async move {
         let mut rx = rx;
         loop {
             if rx.recv().await.is_none() {

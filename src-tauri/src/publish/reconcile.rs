@@ -186,7 +186,10 @@ pub enum SuspectOutcome {
     /// 已发布（补录链接）。
     Published { url: Option<String> },
     /// 未发出，定为失败。
-    Failed { fail_kind: String },
+    Failed {
+        #[serde(rename = "failKind")]
+        fail_kind: String,
+    },
 }
 
 /// 人工定态一个疑似已发任务（§6.4：唯一改动 suspect 的路径）。

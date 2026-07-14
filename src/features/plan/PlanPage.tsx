@@ -11,7 +11,7 @@ import {
   commands,
   unwrap,
 } from "@/lib/ipc";
-import { pubTaskVisual, sheetVisual } from "@/lib/status";
+import { failKindLabel, pubTaskVisual, sheetVisual } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-react";
@@ -58,7 +58,14 @@ export function PlanPage() {
         <div className="f1" />
       </div>
 
-      {tab === "board" && <BoardStub />}
+      {tab === "board" && (
+        <Board
+          onOpenSheet={(id) => {
+            setTab("sheets");
+            setOpenSheet(id);
+          }}
+        />
+      )}
       {tab === "sheets" &&
         (openSheet == null ? (
           <SheetList onOpen={setOpenSheet} />
@@ -70,12 +77,233 @@ export function PlanPage() {
   );
 }
 
-function BoardStub() {
+function todayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
+  const [dash, setDash] = useState<import("@/lib/ipc").DashboardView | null>(null);
+  const [report, setReport] = useState<import("@/lib/ipc").ReportView | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  const date = todayStr();
+
+  const load = useCallback(async () => {
+    try {
+      setDash(await unwrap(commands.getDashboard(date)));
+    } catch {
+      setDash(null);
+    }
+  }, [date]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!dash) {
+    return (
+      <div className="bigempty" style={{ padding: "72px 20px" }}>
+        <div className="fs13 fw5 t2">今日暂无任务单</div>
+        <div className="fs12 t3">配置根目录并生成任务单后，看板展示今日发布进度</div>
+      </div>
+    );
+  }
+
+  const sid = dash.sheetId;
+  const openReport = async () => {
+    if (sid == null) return;
+    const r = await unwrap(commands.getReport(sid));
+    setReport(r);
+    setShowReport(true);
+  };
+
   return (
-    <div className="bigempty" style={{ padding: "72px 20px" }}>
-      <div className="fs13 fw5 t2">看板将在回执闭环阶段上线</div>
-      <div className="fs12 t3">今日计划/已发布/失败/待核对计数与账号健康，随 P3 回执对账接入</div>
+    <div className="pbody">
+      <div className="statrow">
+        <div className="statcard">
+          <div className="stnum">{dash.plan}</div>
+          <div className="stlbl">今日计划任务</div>
+        </div>
+        <div className="statcard">
+          <div className="stnum" style={{ color: "var(--ok)" }}>
+            {dash.published}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--ok)" }} />
+            已发布
+          </div>
+        </div>
+        <div className="statcard">
+          <div className="stnum" style={{ color: "var(--er)" }}>
+            {dash.failed}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--er)" }} />
+            失败
+          </div>
+        </div>
+        <div
+          className={cn("statcard", dash.suspect > 0 && "hl")}
+          onClick={() => dash.sheetId != null && dash.suspect > 0 && onOpenSheet(dash.sheetId)}
+        >
+          <div className="stnum" style={{ color: "var(--wr)" }}>
+            {dash.suspect}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--wr)" }} />
+            待核对 · 疑似已发
+          </div>
+        </div>
+      </div>
+
+      {dash.suspect > 0 && (
+        <div className="ban" style={{ margin: "10px 18px 0" }}>
+          <span className="f1">
+            {dash.suspect} 个任务疑似已发 — 疑似已发绝不自动重发，需人工到平台后台核实后定态
+          </span>
+          {sid != null && (
+            <button type="button" className="btn sm" onClick={() => onOpenSheet(sid)}>
+              去核对
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="fx gap12" style={{ padding: "14px 18px 0", alignItems: "flex-start" }}>
+        <div className="card f1" style={{ minWidth: 0 }}>
+          <div className="chead">
+            <span className="fw6 fs13">按平台完成率</span>
+          </div>
+          {dash.platforms.map((p) => (
+            <div
+              key={p.platform}
+              className="fx ac gap10"
+              style={{ padding: "7px 14px", borderTop: "1px solid var(--line)" }}
+            >
+              <span className="fs12 fw5 nowrap" style={{ width: 52 }}>
+                {p.platformZh}
+              </span>
+              <div className="pbarw">
+                <i style={{ width: `${p.pct}%` }} />
+              </div>
+              <span className="mono fs11 t2 nowrap" style={{ width: 64, textAlign: "right" }}>
+                {p.done}/{p.total}
+              </span>
+            </div>
+          ))}
+          {dash.platforms.length === 0 && <div className="txrow t3 fs12">今日无任务</div>}
+        </div>
+        <div className="card f1" style={{ minWidth: 0 }}>
+          <div className="chead">
+            <span className="fw6 fs13">账号健康</span>
+            <span className="cnt">{dash.accounts.length}</span>
+          </div>
+          {dash.accounts.map((a) => (
+            <div
+              key={a.id}
+              className="fx ac gap8"
+              style={{ padding: "6px 14px", borderTop: "1px solid var(--line)", minHeight: 34 }}
+            >
+              <span className="bdg b-gray">{a.platformZh}</span>
+              <span className="fs12 fw5 f1 nowrap ohide">{a.name}</span>
+              <span className="mono fs11 t3 nowrap">
+                {a.used}/{a.dailyLimit}
+              </span>
+              <span
+                className={cn(
+                  "bdg",
+                  a.health === "normal" ? "b-green" : a.health === "circuit" ? "b-red" : "b-gray",
+                )}
+              >
+                {a.health === "normal" ? "正常" : a.health === "circuit" ? "当日熔断" : "停用"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {dash.hasReport && (
+        <div className="card" style={{ margin: "12px 18px 24px" }}>
+          <div className="chead">
+            <span className="fw6 fs13">日报</span>
+            <span className="pcap">任务单全部终态后自动关闭并生成</span>
+            <div className="f1" />
+            <button type="button" className="btn sm" onClick={() => void openReport()}>
+              查看日报
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showReport && report && <ReportModal report={report} onClose={() => setShowReport(false)} />}
     </div>
+  );
+}
+
+function ReportModal({
+  report,
+  onClose,
+}: {
+  report: import("@/lib/ipc").ReportView;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      title={`日报 · ${report.date}`}
+      width="w640"
+      onClose={onClose}
+      headerExtra={
+        <span className="bdg b-green">
+          <span className="dt" />
+          已关闭
+        </span>
+      }
+    >
+      <div className="fx gap10">
+        {[
+          ["计划", report.plan, undefined],
+          ["成功", report.published, "var(--ok)"],
+          ["失败", report.failed, "var(--er)"],
+          ["成功率", `${report.successRate}%`, undefined],
+        ].map(([label, val, color]) => (
+          <div key={String(label)} className="rc">
+            <div className="stnum" style={{ fontSize: 20, color: color as string }}>
+              {val}
+            </div>
+            <div className="stlbl">{label}</div>
+          </div>
+        ))}
+      </div>
+      {report.fails.length > 0 && (
+        <>
+          <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+            失败清单
+          </div>
+          <div className="mt6 col gap6">
+            {report.fails.map((f) => (
+              <div key={f.taskCode} className="fx ac gap8">
+                <span className="pid">{f.taskCode}</span>
+                <span className="bdg b-red">{failKindLabel(f.kind)}</span>
+                <span className="fs12 f1 nowrap ohide">{f.skuCode}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {report.shortage.length > 0 && (
+        <>
+          <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+            缺料清单
+          </div>
+          <div className="fs12 mt6">{report.shortage.join("、")}</div>
+        </>
+      )}
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        明日建议
+      </div>
+      <div className="fs12 mt6" style={{ lineHeight: 1.8 }}>
+        {report.tips}
+      </div>
+    </Modal>
   );
 }
 
@@ -171,6 +399,7 @@ function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
 function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void }) {
   const [detail, setDetail] = useState<SheetDetail | null>(null);
   const [timeEdit, setTimeEdit] = useState<TaskRowView | null>(null);
+  const [verify, setVerify] = useState<TaskRowView | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [confirmExport, setConfirmExport] = useState(false);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
@@ -228,7 +457,32 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
             增补任务行
           </button>
         )}
+        {isExported && (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() =>
+              void act(async () => {
+                const r = await unwrap(commands.importReceipts(sheetId));
+                toast.success(`对账完成：已发布 ${r.published} · 失败 ${r.failed}`);
+              })
+            }
+            title="从任务包 xlsx 手动导入回执对账"
+          >
+            <RefreshCw className="ic12" />
+            导入回执
+          </button>
+        )}
       </div>
+
+      {detail.rows.some((r) => r.status === "suspect") && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            {detail.rows.filter((r) => r.status === "suspect").length} 个任务疑似已发 —
+            超时无回写。绝不自动重发；请人工到平台后台核实后定态
+          </span>
+        </div>
+      )}
 
       {detail.shortage.length > 0 && (
         <div className="ban" style={{ margin: "10px 18px 0" }}>
@@ -297,8 +551,19 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
                     >
                       {r.plannedTime ?? "立即发"}
                     </span>
-                    <span className={cn("bdg", st.badgeClass)}>{st.label}</span>
-                    <span className="tract">
+                    <span className={cn("bdg", st.badgeClass)}>
+                      {st.label}
+                      {r.status === "failed" && r.failKind ? ` · ${failKindLabel(r.failKind)}` : ""}
+                    </span>
+                    <span
+                      className="tract"
+                      style={r.status === "suspect" ? { opacity: 1 } : undefined}
+                    >
+                      {r.status === "suspect" && (
+                        <button type="button" className="btn sm" onClick={() => setVerify(r)}>
+                          核对
+                        </button>
+                      )}
                       {isDraft && r.status === "pending" && (
                         <button
                           type="button"
@@ -409,7 +674,76 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
           onClose={() => setConfirmExport(false)}
         />
       )}
+      {verify && (
+        <VerifyModal
+          row={verify}
+          onClose={() => setVerify(null)}
+          onResolved={() => {
+            setVerify(null);
+            void act(async () => {});
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function VerifyModal({
+  row,
+  onClose,
+  onResolved,
+}: {
+  row: TaskRowView;
+  onClose: () => void;
+  onResolved: () => void;
+}) {
+  const resolve = async (outcome: import("@/lib/ipc").SuspectOutcome) => {
+    try {
+      await unwrap(commands.resolveSuspect(row.id, outcome));
+      onResolved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Modal
+      title="核对疑似已发"
+      onClose={onClose}
+      headerExtra={<span className="pid">{row.taskCode}</span>}
+      footer={
+        <>
+          <span className="fs11 t3">定态后写入使用台账</span>
+          <div className="f1" />
+          <button
+            type="button"
+            className="btn sm dng"
+            onClick={() => void resolve({ kind: "failed", failKind: "other" })}
+          >
+            未发出 · 定为失败
+          </button>
+          <button
+            type="button"
+            className="btn pri sm"
+            onClick={() => void resolve({ kind: "published", url: null })}
+          >
+            已发布 · 补录
+          </button>
+        </>
+      }
+    >
+      <div className="susban">
+        <b className="fw6">超时无回执，内容可能已实际发出。</b>
+        <br />
+        系统绝不自动重发 — 重发会触发平台查重，比失败更糟。请到平台后台人工核实后定态。
+      </div>
+      <div className="fx ac gap6 mt10 wrap">
+        <span className="pid">{row.skuCode}</span>
+        <span className="fs12">{row.styleName}</span>
+        <span className="bdg b-gray">{row.platformZh}</span>
+        <span className="chip">{row.accountName}</span>
+        <span className="chip">计划 {row.plannedTime ?? "立即发"}</span>
+      </div>
+    </Modal>
   );
 }
 

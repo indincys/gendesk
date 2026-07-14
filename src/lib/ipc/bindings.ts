@@ -1962,7 +1962,7 @@ export type SuspectOutcome =
 /**
  * 未发出，定为失败。
  */
-{ kind: "failed"; fail_kind: string }
+{ kind: "failed"; failKind: string }
 /**
  * `task://progress`（250ms 节流）
  */

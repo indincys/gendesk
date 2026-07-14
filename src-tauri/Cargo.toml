@@ -56,6 +56,12 @@ image = "0.25"
 encoding_rs = "0.8"
 chardetng = "0.1"
 
+# 发布模块：收件箱/任务包文件监听、任务单 xlsx 读写、日期/时段计算
+notify = "8"
+rust_xlsxwriter = "0.90"
+calamine = "0.31"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
 # 数据备份打包（E19，DB + 资产目录 → zip）
 zip = { version = "2", default-features = false, features = ["deflate", "time"] }
 walkdir = "2"

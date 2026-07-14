@@ -44,18 +44,54 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # T4：自签名根默认不受信任（CSSMERR_TP_NOT_TRUSTED），tauri 打包器用
+      # `security find-identity -v -p codesigning`（只列受信任的有效身份）解析签名身份，
+      # 未信任则报 "failed to resolve signing identity"。故这里全手动配置签名钥匙串：
+      # 建库→导入 .p12→放行 codesign→设默认+搜索列表→把公钥证书加为 admin 域 trustRoot
+      # 代码签名根（全局生效使身份 -v 有效）。tauri-action 只带 APPLE_SIGNING_IDENTITY，
+      # 从默认钥匙串解析身份（故下方不再给它传 APPLE_CERTIFICATE，避免它另建库覆盖搜索列表）。
+      - name: 配置 macOS 自签名签名钥匙串
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: actions-tmp
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "未配置签名 Secret，跳过（按现状不签名）"; exit 0
+          fi
+          P12="$RUNNER_TEMP/gendesk-cert.p12"
+          PEM="$RUNNER_TEMP/gendesk-cert.pem"
+          KC="$RUNNER_TEMP/gendesk-sign.keychain-db"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
+          security import "$P12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KC"
+          security list-keychains -d user -s "$KC" login.keychain
+          security default-keychain -s "$KC"
+          security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$KC" > "$PEM"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$PEM"
+          rm -f "$P12" "$PEM"
+          echo "有效代码签名身份："
+          security find-identity -v -p codesigning "$KC" | grep -F "$APPLE_SIGNING_IDENTITY"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # minisign 私钥与密码存于仓库 Secrets（私钥丢失 = 更新链断裂，另做离线备份）。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # T4：macOS 自签名代码签名证书（同一张证书 → 代码签名 leaf 指纹稳定 → DR 稳定
-          # → keychain「始终允许」一次永久生效，根治更新后反复弹窗）。不设 APPLE_ID/
-          # APPLE_PASSWORD/APPLE_TEAM_ID → tauri-action 只签名不公证；证书自动导入临时钥匙串。
-          # 未配置这些 Secret 时行为同现状（不签名），不阻塞构建。不动 tauri.conf.json。
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # T4：macOS 自签名代码签名（同一张证书 → 代码签名 leaf 指纹稳定 → DR 稳定 →
+          # keychain「始终允许」一次永久生效，根治更新后反复弹窗）。签名钥匙串由上一步全手动
+          # 配置（含信任），这里只传身份名，tauri-action 从默认钥匙串解析；故不传 APPLE_CERTIFICATE
+          # （避免它另建库覆盖搜索列表）。不设 APPLE_ID/PASSWORD/TEAM_ID → 只签名不公证。
+          # 未配置 Secret 时上一步跳过、此处身份名为空 → 行为同现状不签名，不阻塞构建。
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           tagName: ${{ github.ref_name }}

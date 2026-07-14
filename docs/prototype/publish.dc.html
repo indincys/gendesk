@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+:root{--bg:oklch(96.4% .004 255);--panel:#fff;--sub:oklch(97.9% .003 255);--inset:oklch(95.1% .005 255);--line:oklch(32% .02 260/.08);--line2:oklch(32% .02 260/.16);--t1:oklch(27% .018 262);--t2:oklch(47% .016 262);--t3:oklch(62% .014 262);--acc:oklch(58% .18 257);--acc2:oklch(48% .17 257);--accbg:oklch(58% .18 257/.1);--accbg2:oklch(58% .18 257/.18);--accln:oklch(58% .18 257/.45);--ok:oklch(55% .1 155);--okbg:oklch(55% .1 155/.11);--wr:oklch(58% .11 75);--wrbg:oklch(70% .13 80/.15);--er:oklch(54% .15 25);--erbg:oklch(54% .15 25/.09);--mono:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;--sh1:0 1px 2px oklch(20% .02 260/.06);--sh2:0 1px 2px oklch(20% .02 260/.04),0 3px 14px oklch(20% .02 260/.05);--sh3:0 2px 8px oklch(20% .02 260/.07),0 20px 60px oklch(24% .03 262/.18)}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei UI",sans-serif;font-size:13px;color:var(--t1);background:var(--bg);overflow:hidden;-webkit-font-smoothing:antialiased;user-select:none}
+a{color:var(--acc2);text-decoration:none}a:hover{color:var(--acc);text-decoration:underline}
+::selection{background:var(--accbg2)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:oklch(32% .02 260/.16);border:3px solid transparent;background-clip:content-box;border-radius:6px}::-webkit-scrollbar-thumb:hover{background-color:oklch(32% .02 260/.28)}::-webkit-scrollbar-corner{background:transparent}
+:focus-visible{outline:2px solid var(--accln);outline-offset:1px}
+.ic{width:15px;height:15px;flex:none}.ic12{width:12px;height:12px;flex:none}.ic18{width:18px;height:18px;flex:none}
+.app{height:100vh;display:flex;flex-direction:column;background:radial-gradient(1100px 320px at 22% -8%,oklch(98.6% .007 262/.85),transparent 62%),var(--bg);min-width:1180px}
+.tbar{height:44px;display:flex;align-items:center;gap:12px;padding:0 14px;flex:none}
+.app.win .tbar{padding-right:0}
+.tlc{width:12px;height:12px;border-radius:99px;display:inline-block;box-shadow:inset 0 0 0 .5px oklch(0% 0 0/.12)}
+.tlr{background:#ec6a5e}.tly{background:#f5bf4f}.tlg{background:#61c554}
+.wb{width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--t2);cursor:pointer;transition:background .1s}
+.wb:hover{background:oklch(91% .008 260)}
+.wbx:hover{background:oklch(58% .19 25);color:#fff}
+.logo{width:22px;height:22px;border-radius:7px;background:linear-gradient(145deg,oklch(62% .17 257),oklch(50% .18 257));display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 2px oklch(40% .12 262/.4),inset 0 1px 0 oklch(100% 0 0/.2);flex:none}
+.tbtn{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 9px;border-radius:8px;border:none;background:transparent;color:var(--t3);cursor:pointer;font-family:inherit;font-size:12px;transition:background .12s,color .12s}
+.tbtn:hover{background:oklch(93% .006 258/.8);color:var(--t2)}
+.shell{flex:1;display:flex;min-height:0;padding:0 10px 10px;gap:2px}
+.side{width:212px;flex:none;display:flex;flex-direction:column;padding:2px 8px 2px 4px;min-height:0}
+.sbtn{display:flex;align-items:center;gap:8px;height:30px;border-radius:8px;border:1px solid var(--line);background:oklch(100% 0 0/.55);color:var(--t3);font-size:12px;padding:0 9px;cursor:pointer;box-shadow:var(--sh1);transition:color .12s,background .12s;font-family:inherit;margin-bottom:6px}
+.sbtn:hover{color:var(--t2);background:#fff}
+.nsec{font-size:10.5px;font-weight:600;letter-spacing:.07em;color:var(--t3);padding:12px 8px 5px}
+.nv{display:flex;align-items:center;gap:9px;height:29px;padding:0 8px;border-radius:8px;color:var(--t2);cursor:pointer;transition:background .1s,color .1s;font-size:13px}
+.nv:hover{background:oklch(93.5% .006 258/.75);color:var(--t1)}
+.nv.on{background:var(--accbg);color:var(--acc2);font-weight:500}
+.nv .kbd{opacity:0;transition:opacity .1s}
+.nv:hover .kbd{opacity:1}
+.nv:hover .nbdg{display:none}
+.nbdg{font:500 10.5px var(--mono);color:var(--t3);background:var(--inset);border-radius:99px;padding:2px 7px;display:inline-flex;align-items:center;gap:5px}
+.nb-amb{color:oklch(45% .1 70);background:var(--wrbg)}
+.sfoot{font-size:10.5px;color:var(--t3);padding:10px 8px 4px}
+.main{flex:1;min-width:0;background:linear-gradient(180deg,#fff,oklch(99.4% .002 255));border:1px solid var(--line);border-radius:13px;box-shadow:var(--sh2);display:flex;flex-direction:column;overflow:hidden;position:relative}
+.phd{min-height:50px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--line);flex:none}
+.ptt{font-size:14px;font-weight:600;white-space:nowrap}
+.pcap{font-size:12px;color:var(--t3)}
+.pbody{flex:1;overflow:auto;min-height:0}
+.cwrap{max-width:1020px;margin:0 auto;padding:18px 24px 26px}
+.kbd{font:500 10px var(--mono);color:var(--t3);border:1px solid var(--line2);border-bottom-width:2px;border-radius:5px;padding:1px 5px;background:#fff;white-space:nowrap}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh1)}
+.chead{display:flex;align-items:center;gap:8px;padding:0 12px;min-height:46px}
+.cnt{font-size:11px;color:var(--t3);background:var(--sub);border:1px solid var(--line);padding:2px 8px;border-radius:99px;white-space:nowrap}
+.bdg{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;border-radius:6px;font-size:11px;font-weight:500;white-space:nowrap;flex:none}
+.b-gray{background:var(--inset);color:var(--t2)}
+.b-blue{background:var(--accbg);color:var(--acc2)}
+.b-amber{background:var(--wrbg);color:oklch(43% .1 70)}
+.b-red{background:var(--erbg);color:var(--er)}
+.b-green{background:var(--okbg);color:oklch(40% .1 155)}
+.dt{width:6px;height:6px;border-radius:99px;background:currentColor;flex:none}
+.chip{font:500 10.5px var(--mono);color:var(--t2);background:var(--sub);border:1px solid var(--line);border-radius:5px;padding:2px 6px;white-space:nowrap}
+.btn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line2);background:linear-gradient(180deg,#fff,oklch(98.6% .002 255));color:var(--t1);font-size:12.5px;font-weight:500;font-family:inherit;display:inline-flex;align-items:center;gap:6px;cursor:pointer;box-shadow:var(--sh1);transition:border-color .12s,background .12s,transform .05s;white-space:nowrap}
+.btn:hover{border-color:oklch(32% .02 260/.3);background:#fff}
+.btn:active{transform:translateY(.5px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none;transform:none}
+.sm{height:26px;padding:0 9px;font-size:12px;border-radius:7px}
+.pri{background:linear-gradient(180deg,oklch(63% .17 256),oklch(56% .19 257));border-color:oklch(48% .18 257);color:#fff;box-shadow:0 1px 2px oklch(42% .16 257/.45),inset 0 1px 0 oklch(100% 0 0/.18)}
+.pri:hover{background:linear-gradient(180deg,oklch(65% .17 256),oklch(58% .19 257));border-color:oklch(48% .18 257)}
+.gho{background:transparent;border-color:transparent;box-shadow:none;color:var(--t2)}
+.gho:hover{background:var(--inset);border-color:transparent;color:var(--t1)}
+.dng{color:var(--er)}
+.dng:hover{background:var(--erbg);color:var(--er)}
+.icb{width:26px;height:26px;border-radius:7px;border:none;background:transparent;color:var(--t3);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .12s,color .12s;flex:none}
+.icb:hover{background:var(--inset);color:var(--t1)}
+.inp{height:30px;border:1px solid var(--line2);border-radius:8px;background:#fff;padding:0 10px;font-size:12.5px;font-family:inherit;color:var(--t1);outline:none;transition:border-color .12s,box-shadow .12s}
+.inp:focus{border-color:var(--accln);box-shadow:0 0 0 3px var(--accbg)}
+.srch{position:relative;display:flex;align-items:center}
+.srch .ic{position:absolute;left:9px;color:var(--t3);pointer-events:none}
+.srch .inp{padding-left:30px;width:190px}
+.th{height:32px;font-size:11px;font-weight:500;color:var(--t3);border-bottom:1px solid var(--line);position:sticky;top:0;background:#fff;z-index:2}
+.tr{min-height:46px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .1s;font-size:12.5px}
+.tr:hover{background:var(--sub)}
+.tract{opacity:0;display:flex;gap:2px;justify-content:flex-end;transition:opacity .1s}
+.tr:hover .tract{opacity:1}.wrow:hover .tract{opacity:1}
+.thumb{width:26px;height:26px;border-radius:6px;border:1px solid var(--line);flex:none}
+.ph{position:relative;overflow:hidden}
+.ph:after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(-45deg,oklch(30% .03 262/.03) 0 1.5px,transparent 1.5px 10px)}
+.phl{position:absolute;left:6px;bottom:5px;font:500 9px var(--mono);letter-spacing:.05em;color:oklch(35% .03 262/.55);z-index:1;background:oklch(100% 0 0/.6);padding:2px 5px;border-radius:4px}
+.pid{font:500 10.5px var(--mono);color:var(--acc2);background:var(--accbg);border:1px solid oklch(58% .17 257/.24);border-radius:5px;padding:2px 6px;white-space:nowrap}
+.seg{display:inline-flex;background:var(--inset);border-radius:8px;padding:2px;gap:2px}
+.sgi{height:24px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:background .12s,color .12s;white-space:nowrap}
+.sgi.on{background:#fff;color:var(--t1);box-shadow:var(--sh1)}
+.sgi.dis{opacity:.4;cursor:not-allowed}
+.ban{display:flex;align-items:center;gap:9px;margin:12px 18px 0;padding:8px 12px;border:1px solid oklch(60% .11 75/.4);background:var(--wrbg);border-radius:9px;font-size:12px;color:oklch(40% .09 70)}
+.sw{width:32px;height:19px;border-radius:99px;background:oklch(88% .008 260);border:1px solid var(--line2);position:relative;cursor:pointer;transition:background .15s,border-color .15s;flex:none}
+.sw i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:99px;background:#fff;box-shadow:0 1px 2px oklch(20% .02 260/.25);transition:left .15s}
+.sw.on{background:var(--acc);border-color:var(--acc2)}
+.sw.on i{left:15px}
+.stp{display:inline-flex;align-items:center;border:1px solid var(--line2);border-radius:7px;background:#fff;height:24px}
+.stpb{width:24px;height:100%;border:none;background:transparent;color:var(--t2);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;font-family:inherit}
+.stpb:hover{color:var(--t1);background:var(--sub)}
+.stpv{min-width:30px;text-align:center;font:500 12px var(--mono)}
+.rc{flex:1;border:1px solid var(--line2);border-radius:10px;padding:12px 14px;background:#fff}
+.pathwell{font:500 11.5px var(--mono);background:var(--sub);border:1px solid var(--line);border-radius:8px;padding:8px 11px;color:var(--t2);user-select:text}
+.ovl{position:fixed;inset:0;background:oklch(22% .02 262/.3);display:flex;align-items:flex-start;justify-content:center;z-index:50;animation:fin .13s;padding:0 20px}
+.mdl{background:#fff;border-radius:13px;border:1px solid var(--line);box-shadow:var(--sh3);margin-top:9vh;animation:pop .18s cubic-bezier(.2,.9,.3,1);display:flex;flex-direction:column;max-height:78vh;width:560px;max-width:100%}
+.w360{width:360px}.w420{width:420px}.w640{width:640px}.w700{width:700px}
+.mhead{display:flex;align-items:center;gap:9px;padding:13px 16px 11px;border-bottom:1px solid var(--line);flex:none}
+.mbody{padding:14px 16px;overflow:auto;min-height:0}
+.mfoot{display:flex;align-items:center;gap:8px;padding:11px 16px;border-top:1px solid var(--line);flex:none;background:var(--sub);border-radius:0 0 13px 13px}
+.pickrow{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:9px;cursor:pointer;transition:background .1s}
+.pickrow:hover{background:var(--sub)}
+.ckb{width:17px;height:17px;border-radius:6px;border:1px solid var(--line2);background:#fff;display:flex;align-items:center;justify-content:center;color:transparent;transition:background .12s;flex:none}
+.ckb.on{background:var(--acc);border-color:var(--acc2);color:#fff}
+.ovtop{align-items:flex-start}
+.plt{width:600px;max-width:92vw;background:#fff;border-radius:13px;border:1px solid var(--line);box-shadow:var(--sh3);margin-top:14vh;overflow:hidden;animation:pop .16s cubic-bezier(.2,.9,.3,1)}
+.plin{display:flex;align-items:center;gap:10px;padding:0 15px;height:46px;border-bottom:1px solid var(--line);color:var(--t3)}
+.plinp{flex:1;border:none;outline:none;font-size:13.5px;font-family:inherit;color:var(--t1);background:transparent;height:100%}
+.pllist{max-height:320px;overflow:auto;padding:6px}
+.pltit{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:8px;cursor:pointer;font-size:12.5px}
+.pltit:hover{background:var(--sub)}
+.pltit.on{background:var(--accbg)}
+.plcat{font-size:11px;color:var(--t3);width:52px;flex:none}
+.tstwrap{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:80;pointer-events:none}
+.tst{display:flex;align-items:center;gap:8px;background:oklch(25% .015 262);color:oklch(96% .003 255);font-size:12.5px;font-weight:500;padding:9px 13px;border-radius:10px;box-shadow:var(--sh3);animation:tin .22s cubic-bezier(.2,.9,.3,1)}
+.tsi{color:oklch(75% .1 155)}
+.bigempty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 20px;color:var(--t3);gap:9px;text-align:center}
+.emic{width:34px;height:34px;border-radius:10px;background:var(--inset);color:var(--t3);display:flex;align-items:center;justify-content:center;margin:0 auto 10px}
+.mono{font-family:var(--mono)}
+.t2{color:var(--t2)}.t3{color:var(--t3)}
+.mt4{margin-top:4px}.mt6{margin-top:6px}.mt10{margin-top:10px}.mt14{margin-top:14px}.mt20{margin-top:20px}
+.gap4{gap:4px}.gap6{gap:6px}.gap7{gap:7px}.gap9{gap:9px}.gap14{gap:14px}
+.fs10{font-size:10.5px}
+.swrap{max-width:768px;margin:0 auto;padding:20px 24px 48px}
+.sec{margin-bottom:28px}
+.sechead{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.klist{border:1px solid var(--line);border-radius:11px;overflow:hidden;box-shadow:var(--sh1);background:#fff}
+.kline{display:grid;grid-template-columns:170px minmax(110px,1fr) 80px 84px 54px 104px 34px;align-items:center;column-gap:10px;padding:0 12px;height:40px;font-size:12px}
+.kline+.kline{border-top:1px solid var(--line)}
+.kline.khd{height:26px;background:var(--sub);font-size:10.5px;color:var(--t3)}
+.kd{width:7px;height:7px;border-radius:99px}
+.kd-ok{background:var(--ok)}.kd-lim{background:var(--wr)}.kd-off{background:oklch(82% .008 260)}
+.statrow{display:flex;gap:12px;padding:16px 18px 4px}
+.statcard{flex:1;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh1);padding:13px 15px;min-width:0}
+.statcard.hl{cursor:pointer;transition:border-color .12s,box-shadow .12s}
+.statcard.hl:hover{border-color:oklch(60% .11 75/.5);box-shadow:var(--sh2)}
+.stnum{font:600 24px/1.1 var(--mono);letter-spacing:-.02em}
+.stlbl{font-size:11px;color:var(--t3);margin-top:7px;display:flex;align-items:center;gap:6px}
+.pbarw{height:5px;border-radius:99px;background:var(--inset);overflow:hidden;flex:1}
+.pbarw i{display:block;height:100%;border-radius:99px;background:var(--acc);transition:width .3s ease}
+.sgrid{display:grid;grid-template-columns:110px minmax(190px,1fr) 48px 176px 118px 92px 16px;align-items:center;column-gap:10px;padding:0 16px}
+.pooln{font:500 12px var(--mono);color:var(--t2);display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.pooln b{font-weight:500;font-family:inherit;color:var(--t3);font-size:10.5px}
+.pwarn{color:oklch(45% .1 70);font-weight:600}
+.pwarn b{color:oklch(45% .1 70)}
+.droff{opacity:.55}
+.skcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px;padding:14px 18px 30px}
+.skc{background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:var(--sh1);padding:11px 12px;cursor:pointer;transition:border-color .12s,box-shadow .12s;min-width:0}
+.skc:hover{border-color:var(--line2);box-shadow:var(--sh2)}
+.packgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(126px,1fr));gap:12px;padding:14px 16px 16px}
+.packc{min-width:0;cursor:pointer}
+.packimg{aspect-ratio:4/5;border-radius:9px;border:1px solid var(--line)}
+.packn{position:absolute;right:5px;top:5px;font:500 9.5px var(--mono);background:oklch(20% .02 260/.55);color:#fff;padding:2px 5px;border-radius:4px;z-index:1}
+.packc.dim .packimg{opacity:.45;filter:grayscale(.6)}
+.txrow{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12.5px;min-height:38px}
+.txrow:last-child{border-bottom:none}
+.txrow .tract{opacity:0}
+.txrow:hover .tract{opacity:1}
+.shrow{display:flex;align-items:center;gap:12px;min-height:54px;padding:6px 18px;border-bottom:1px solid var(--line);cursor:pointer;transition:background .1s}
+.shrow:hover{background:var(--sub)}
+.wgrp{border:1px solid var(--line);border-radius:11px;background:#fff;box-shadow:var(--sh1);margin:0 18px 12px;overflow:hidden}
+.wgh{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--sub);border-bottom:1px solid var(--line)}
+.wrow{display:grid;grid-template-columns:44px 58px minmax(130px,170px) 40px minmax(150px,1fr) 96px 78px;align-items:center;column-gap:10px;padding:5px 12px;min-height:37px;font-size:12.5px}
+.wrow+.wrow{border-top:1px solid var(--line)}
+.tlrow{display:grid;grid-template-columns:44px 30px minmax(120px,160px) 58px minmax(130px,170px) minmax(140px,1fr) 96px 78px;align-items:center;column-gap:10px;padding:5px 18px;min-height:40px;border-bottom:1px solid var(--line);font-size:12.5px}
+.tlrow:hover .tract{opacity:1}
+.susban{border:1px solid oklch(60% .11 75/.5);background:var(--wrbg);border-radius:10px;padding:10px 12px;font-size:12px;color:oklch(38% .09 70);line-height:1.7}
+.agrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:10px}
+.acard{background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:var(--sh1);padding:11px 12px;min-width:0}
+.tagchip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:6px;background:var(--sub);border:1px solid var(--line);font-size:11.5px;color:var(--t2);white-space:nowrap}
+.tagchip .rmx{cursor:pointer;color:var(--t3);font-size:12px;line-height:1}
+.tagchip .rmx:hover{color:var(--er)}
+.arow{display:grid;grid-template-columns:120px 1fr;column-gap:14px;row-gap:9px;align-items:baseline;font-size:12.5px}
+.arow>b{font-weight:500;color:var(--t3);font-size:11.5px}
+.genbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid var(--line);background:linear-gradient(180deg,oklch(99.2% .002 255),#fff);flex:none}
+.fchip{font:500 11px var(--mono);color:var(--t2);background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:3px 8px;white-space:nowrap}
+.fchip.warn{color:oklch(45% .1 70);background:var(--wrbg);border-color:oklch(60% .11 75/.4)}
+.gpick{border:1px solid var(--line);border-radius:11px;padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:border-color .12s,background .12s,box-shadow .12s;background:#fff}
+.gpick:hover{border-color:var(--line2)}
+.gpick.sel{border-color:var(--accln);background:var(--accbg);box-shadow:0 0 0 1px var(--accln)}
+.gpick.dis{opacity:.55;cursor:not-allowed}
+.ptile{min-width:0;cursor:pointer;position:relative}
+.ptimg{aspect-ratio:4/5;border-radius:9px;border:1px solid var(--line);transition:box-shadow .12s,transform .1s}
+.ptile.sel .ptimg{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--acc)}
+.ptile.dis{opacity:.5;cursor:not-allowed}
+.terr{font-size:11.5px;color:var(--er);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmp .tr{min-height:40px}.cmp .nv{height:26px}.cmp .phd{min-height:44px}.cmp .wrow{min-height:33px}.cmp .txrow{min-height:34px}.cmp .shrow{min-height:46px}
+@keyframes fin{from{opacity:0}}
+@keyframes pop{from{opacity:0;transform:scale(.97) translateY(6px)}}
+@keyframes tin{from{opacity:0;transform:translateY(8px) scale(.97)}}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+</helmet>
+<div class="app {{shellCls}}">
+<div class="tbar">
+<sc-if value="{{isMac}}" hint-placeholder-val="{{true}}"><div class="fx ac gap8 noshrink"><i class="tlc tlr"></i><i class="tlc tly"></i><i class="tlc tlg"></i></div></sc-if>
+<div class="fx ac gap7"><span class="logo"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2 9.7 6.3 14 8 9.7 9.7 8 14 6.3 9.7 2 8 6.3 6.3Z"></path></svg></span><span class="fw6 fs13 nowrap">GenDesk</span><span class="t3 fs11 nowrap">图片生产 · 本地</span></div>
+<div class="f1"></div>
+<button class="tbtn" onClick="{{palOpenFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg>跳转<span class="kbd">{{mod}} K</span></button>
+<sc-if value="{{isWin}}" hint-placeholder-val="{{false}}"><div class="fx ac noshrink"><span class="wb"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.2"><path d="M4 8h8"></path></svg></span><span class="wb"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="4.5" y="4.5" width="7" height="7" rx="1"></rect></svg></span><span class="wb wbx"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.2"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></span></div></sc-if>
+</div>
+<div class="shell">
+<div class="side">
+<button class="sbtn" onClick="{{palOpenFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><span class="f1" style="text-align:left">搜索或跳转…</span><span class="kbd">{{mod}} K</span></button>
+<div class="nsec">制作</div>
+<div class="nv {{navGen.cls}}" onClick="{{navGen.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2 9.7 6.3 14 8 9.7 9.7 8 14 6.3 9.7 2 8 6.3 6.3Z"></path></svg><span class="f1">图片生成</span><span class="kbd">{{mod}}1</span></div>
+<div class="nv {{navTasks.cls}}" onClick="{{navTasks.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5.5 4h8M5.5 8h8M5.5 12h8"></path><circle cx="2.7" cy="4" r=".4" fill="currentColor" stroke="none"></circle><circle cx="2.7" cy="8" r=".4" fill="currentColor" stroke="none"></circle><circle cx="2.7" cy="12" r=".4" fill="currentColor" stroke="none"></circle></svg><span class="f1">任务队列</span><span class="kbd">{{mod}}2</span></div>
+<div class="nv {{navRev.cls}}" onClick="{{navRev.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"></circle><path d="M5.4 8.2 7.2 10l3.4-3.8"></path></svg><span class="f1">图片验收</span><span class="kbd">{{mod}}3</span></div>
+<div class="nsec">资产</div>
+<div class="nv {{navLib.cls}}" onClick="{{navLib.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="2.5" width="4.6" height="4.6" rx="1.3"></rect><rect x="8.9" y="2.5" width="4.6" height="4.6" rx="1.3"></rect><rect x="2.5" y="8.9" width="4.6" height="4.6" rx="1.3"></rect><rect x="8.9" y="8.9" width="4.6" height="4.6" rx="1.3"></rect></svg><span class="f1">作品库</span><span class="kbd">{{mod}}4</span></div>
+<div class="nv {{navPrm.cls}}" onClick="{{navPrm.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4.5h10M3 8h10M3 11.5h5.5"></path></svg><span class="f1">提示词库</span><span class="kbd">{{mod}}5</span></div>
+<div class="nv {{navRef.cls}}" onClick="{{navRef.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1.6"></rect><circle cx="6" cy="6.5" r="1.1"></circle><path d="M4 12.5 8.5 8l5 4.5"></path></svg><span class="f1">参考图库</span><span class="kbd">{{mod}}6</span></div>
+<div class="nv {{navAst.cls}}" onClick="{{navAst.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.2 8 2.5l5.5 2.7L8 7.9 2.5 5.2Z"></path><path d="M2.5 8.2 8 10.9l5.5-2.7M2.5 11 8 13.7 13.5 11"></path></svg><span class="f1">资产库</span><sc-if value="{{navAst.hasB}}" hint-placeholder-val="{{false}}"><span class="nbdg nb-amb">{{navAst.bdg}}</span></sc-if><span class="kbd">{{mod}}9</span></div>
+<div class="nsec">发布</div>
+<div class="nv {{navPub.cls}}" onClick="{{navPub.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5 7 9M13.5 2.5l-4 11-2.5-4.5L2.5 6.5l11-4Z"></path></svg><span class="f1">发布计划</span><sc-if value="{{navPub.hasB}}" hint-placeholder-val="{{false}}"><span class="nbdg nb-amb">{{navPub.bdg}}</span></sc-if><span class="kbd">{{mod}}0</span></div>
+<div class="f1"></div>
+<div class="nv {{navTrash.cls}}" onClick="{{navTrash.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg><span class="f1">废纸篓</span><span class="kbd">{{mod}}7</span></div>
+<div class="nv {{navSet.cls}}" onClick="{{navSet.go}}"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 5h11M2.5 11h11"></path><circle cx="6" cy="5" r="1.7" fill="#fff"></circle><circle cx="10" cy="11" r="1.7" fill="#fff"></circle></svg><span class="f1">设置</span><span class="kbd">{{mod}}8</span></div>
+<div class="sfoot">GenDesk v1.2.0 · 发布模块原型</div>
+</div>
+<div class="main">
+<sc-if value="{{ph_is}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="现有页面"><div class="phd"><span class="ptt">{{ph_title}}</span><span class="pcap">现有功能 · 不在本模块改动范围</span></div><div class="bigempty"><div class="emic"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"></circle><path d="M8 5v3.5"></path><circle cx="8" cy="11" r=".6" fill="currentColor" stroke="none"></circle></svg></div><div class="fs13 fw5 t2">「{{ph_title}}」是现有八页之一，本模块不改动</div><div class="fs12 t3">本原型聚焦新增的「资产库 / 发布计划」两页与设置的「发布与同步」区块</div><a class="btn mt10" href="原有原型 · 八页.dc.html">打开原有八页原型</a></div></div>
+</sc-if>
+<sc-if value="{{a_is}}" hint-placeholder-val="{{true}}">
+<div class="col f1 ohide" data-screen-label="资产库">
+<div class="phd"><span class="ptt">资产库</span><span class="pcap">{{a_cap}}</span><div class="f1"></div><div class="seg"><span class="sgi {{a_segSkuCls}}" onClick="{{a_goSku}}">SKU 资产</span><span class="sgi {{a_segInbCls}}" onClick="{{a_goInb}}">收件箱<sc-if value="{{a_inbHas}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber" style="height:16px;padding:0 5px">{{a_inbN}}</span></sc-if></span></div></div>
+<sc-if value="{{a_isSku}}" hint-placeholder-val="{{true}}">
+<div class="fx ac gap8" style="padding:10px 18px 8px">
+<div class="seg"><span class="sgi {{a_fAll}}" onClick="{{a_goAll}}">全部</span><span class="sgi {{a_fHot}}" onClick="{{a_goHot}}">热款</span><span class="sgi {{a_fWarm}}" onClick="{{a_goWarm}}">温款</span><span class="sgi {{a_fCold}}" onClick="{{a_goCold}}">冷款</span><span class="sgi {{a_fWarn}}" onClick="{{a_goWarn}}">预警 {{a_warnN}}</span><span class="sgi {{a_fOff}}" onClick="{{a_goOff}}">停发</span></div>
+<div class="srch"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><input class="inp" style="width:170px" placeholder="搜索编码或款式名…" value="{{a_q}}" onInput="{{a_onQ}}"/></div>
+<div class="f1"></div>
+<div class="seg"><span class="sgi {{a_vT}}" onClick="{{a_setT}}">表格</span><span class="sgi {{a_vC}}" onClick="{{a_setC}}">卡片</span></div>
+<button class="btn sm" onClick="{{a_newFn}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>新建 SKU</button>
+</div>
+<div class="f1" style="overflow:auto;min-height:0">
+<sc-if value="{{a_isTable}}" hint-placeholder-val="{{true}}">
+<div class="sgrid th"><span>SKU 编码</span><span>款式 / 商品名</span><span>分层</span><span>三池余量</span><span>预警 / 状态</span><span>最近发布</span><span></span></div>
+<sc-for list="{{a_rows}}" as="s" hint-placeholder-count="10">
+<div class="sgrid tr {{s.dim}}" onClick="{{s.open}}"><span class="pid">{{s.code}}</span><span class="ohide"><span class="fw5 nowrap ohide" style="display:block">{{s.name}}</span><span class="fs10 t3 nowrap ohide" style="display:block">{{s.prod}}</span></span><span><span class="bdg {{s.tierCls}}">{{s.tier}}</span></span><span class="fx ac gap10"><span class="pooln {{s.matCls}}"><b>素</b>{{s.mat}}</span><span class="pooln {{s.titCls}}"><b>题</b>{{s.tit}}</span><span class="pooln {{s.bodCls}}"><b>文</b>{{s.bod}}</span></span><span class="fx ac gap6"><sc-if value="{{s.warnShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber"><span class="dt"></span>{{s.warnTxt}}</span></sc-if><sc-if value="{{s.offShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-gray">停发</span></sc-if></span><span class="fs11 t3 nowrap">{{s.last}}</span><span class="t3 fs12">›</span></div>
+</sc-for>
+</sc-if>
+<sc-if value="{{a_isCards}}" hint-placeholder-val="{{false}}">
+<div class="skcards"><sc-for list="{{a_rows}}" as="s" hint-placeholder-count="8">
+<div class="skc {{s.dim}}" onClick="{{s.open}}"><div class="fx ac gap8"><span class="pid">{{s.code}}</span><span class="bdg {{s.tierCls}}">{{s.tier}}</span><div class="f1"></div><sc-if value="{{s.offShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-gray">停发</span></sc-if></div><div class="fw5 fs13 mt10 nowrap ohide">{{s.name}}</div><div class="fs10 t3 nowrap ohide mt4">{{s.prod}}</div><div class="fx ac gap10 mt10"><span class="pooln {{s.matCls}}"><b>素</b>{{s.mat}}</span><span class="pooln {{s.titCls}}"><b>题</b>{{s.tit}}</span><span class="pooln {{s.bodCls}}"><b>文</b>{{s.bod}}</span></div><div class="fx ac gap6 mt10"><span class="fs10 t3 f1 nowrap">{{s.last}}</span><sc-if value="{{s.warnShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber"><span class="dt"></span>{{s.warnTxt}}</span></sc-if></div></div>
+</sc-for></div>
+</sc-if>
+</div>
+</sc-if>
+<sc-if value="{{a_isInb}}" hint-placeholder-val="{{false}}">
+<div class="pbody"><div class="cwrap" style="max-width:860px">
+<div class="card">
+<div class="chead"><span class="fw6 fs13">待认领</span><span class="cnt">{{ib_claimN}} 条</span><span class="pcap">无法关联到已知 SKU 的收件箱内容 · 不会被丢弃</span></div>
+<sc-for list="{{ib_claims}}" as="c" hint-placeholder-count="2"><div class="txrow" style="border-top:1px solid var(--line);border-bottom:none"><span class="chip">{{c.name}}</span><span class="bdg b-gray">{{c.kind}}</span><span class="fs11 t3 f1 nowrap ohide">{{c.reason}}</span><button class="btn sm" onClick="{{c.claim}}">指认 SKU</button><button class="btn sm gho dng" onClick="{{c.drop}}">丢弃</button></div></sc-for>
+<sc-if value="{{ib_claimEmpty}}" hint-placeholder-val="{{false}}"><div class="txrow t3 fs12" style="border-top:1px solid var(--line);border-bottom:none">没有待认领的内容</div></sc-if>
+</div>
+<div class="card mt14">
+<div class="chead"><span class="fw6 fs13">解析失败</span><span class="cnt">{{ib_failN}} 条</span><span class="pcap">格式不符合收录规范 · 原文件已保留</span></div>
+<sc-for list="{{ib_fails}}" as="c" hint-placeholder-count="1"><div class="txrow" style="border-top:1px solid var(--line);border-bottom:none"><span class="chip">{{c.name}}</span><span class="terr f1">{{c.reason}}</span><button class="btn sm gho" onClick="{{c.view}}">查看原文件</button><button class="btn sm" onClick="{{c.retry}}">重试解析</button></div></sc-for>
+<sc-if value="{{ib_failEmpty}}" hint-placeholder-val="{{false}}"><div class="txrow t3 fs12" style="border-top:1px solid var(--line);border-bottom:none">没有解析失败的文件</div></sc-if>
+</div>
+<div class="fs11 t3 mt14" style="line-height:1.8">收件箱监听根目录 <span class="chip">收件箱/</span> — Claude/Codex 生成的 TXT 与外部 AI 图片落盘后自动收录：按 文件头【SKU】 › 文件名前缀 › 文件夹名 三处冗余识别归属；成功收录的原文件移入 <span class="chip">收件箱/已收录/</span> 归档。</div>
+</div></div>
+</sc-if>
+</div>
+</sc-if>
+<sc-if value="{{d_is}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="资产库 · SKU 详情">
+<div class="phd"><button class="icb" onClick="{{d_back}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m10 4-4 4 4 4"></path></svg></button><span class="pid">{{d_code}}</span><span class="ptt">{{d_name}}</span><span class="bdg {{d_tierCls}}">{{d_tier}}</span><sc-if value="{{d_offShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-gray">停发 · 不参与排期</span></sc-if><sc-if value="{{d_warnShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber"><span class="dt"></span>{{d_warnTxt}}</span></sc-if><div class="f1"></div><button class="btn sm gho" onClick="{{d_editFn}}">编辑档案</button><button class="btn sm gho" onClick="{{d_togFn}}">{{d_togLabel}}</button></div>
+<div class="pbody"><div class="cwrap">
+<div class="card" style="padding:13px 16px"><div class="arow"><b>商品名称</b><span>{{d_prod}}</span><b>固定话题标签</b><span class="fx ac gap6 wrap"><sc-for list="{{d_tags}}" as="t" hint-placeholder-count="4"><span class="tagchip">#{{t.t}}</span></sc-for><span class="fs11 t3">前 5 个进任务单话题列 · 全平台共用</span></span><b>最近发布</b><span class="fs12">{{d_last}}</span></div></div>
+<div class="fx ac gap8 mt14"><div class="seg"><span class="sgi {{d_tabPk}}" onClick="{{d_goPk}}">素材池 {{d_pkN}}</span><span class="sgi {{d_tabTi}}" onClick="{{d_goTi}}">标题池 {{d_tiN}}</span><span class="sgi {{d_tabBo}}" onClick="{{d_goBo}}">正文池 {{d_boN}}</span><span class="sgi {{d_tabHi}}" onClick="{{d_goHi}}">发布历史</span></div><div class="f1"></div><sc-if value="{{d_isPk}}" hint-placeholder-val="{{true}}"><span class="fs11 t3">生命周期由使用台账自动驱动</span><button class="btn sm" onClick="{{d_packFn}}">从作品库打包入库</button></sc-if><sc-if value="{{d_isTx}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{d_addTxFn}}">手动新增</button></sc-if></div>
+<div class="card mt10">
+<sc-if value="{{d_isPk}}" hint-placeholder-val="{{true}}">
+<div class="packgrid"><sc-for list="{{d_packs}}" as="p" hint-placeholder-count="5">
+<div class="packc {{p.dim}}" onClick="{{p.open}}"><div class="ph ptimg packimg" style="background:{{p.bg}}"><span class="packn">{{p.tag}}</span><span class="phl">{{p.id}}</span></div><div class="fx ac gap6 mt6"><span class="bdg {{p.lifeCls}}">{{p.life}}</span><span class="fs10 t3 f1 nowrap ohide">{{p.sub}}</span></div></div>
+</sc-for></div>
+<sc-if value="{{d_pkEmpty}}" hint-placeholder-val="{{false}}"><div class="bigempty" style="padding:44px 20px"><div class="fs13 fw5 t2">素材池为空</div><div class="fs12 t3">收件箱放入该 SKU 的图片/视频会自动入池；也可从作品库打包入库</div></div></sc-if>
+</sc-if>
+<sc-if value="{{d_isTi}}" hint-placeholder-val="{{false}}">
+<sc-for list="{{d_titles}}" as="x" hint-placeholder-count="5"><div class="txrow"><span class="f1 nowrap ohide">{{x.t}}</span><span class="bdg b-gray">{{x.plat}}</span><span class="chip">{{x.src}}</span><span class="fs11 t3 nowrap" style="width:56px;text-align:right">用过 {{x.n}} 次</span><span class="tract"><button class="btn sm gho" onClick="{{x.off}}">停用</button></span></div></sc-for>
+</sc-if>
+<sc-if value="{{d_isBo}}" hint-placeholder-val="{{false}}">
+<sc-for list="{{d_bodies}}" as="x" hint-placeholder-count="3"><div class="txrow" style="align-items:flex-start;padding-top:10px;padding-bottom:10px"><span class="f1" style="line-height:1.7;user-select:text">{{x.t}}</span><span class="bdg b-gray">{{x.plat}}</span><span class="fs11 t3 nowrap" style="width:56px;text-align:right">用过 {{x.n}} 次</span><span class="tract"><button class="btn sm gho" onClick="{{x.off}}">停用</button></span></div></sc-for>
+<sc-if value="{{d_boEmpty}}" hint-placeholder-val="{{false}}"><div class="bigempty" style="padding:44px 20px"><div class="fs13 fw5 t2">正文池为空</div><div class="fs12 t3">该 SKU 若不排图文任务则无需正文；图文任务需要 标题 + 正文</div></div></sc-if>
+</sc-if>
+<sc-if value="{{d_isHi}}" hint-placeholder-val="{{false}}">
+<sc-for list="{{d_hist}}" as="h" hint-placeholder-count="4"><div class="txrow"><span class="fs11 t3 nowrap" style="width:96px">{{h.d}}</span><span class="bdg b-gray">{{h.plat}}</span><span class="fs12 nowrap ohide" style="width:150px">{{h.acct}}</span><span class="pid">{{h.tid}}</span><span class="chip">{{h.pack}}</span><span class="f1"></span><a class="fs11" onClick="{{h.link}}">发布链接 ↗</a></div></sc-for>
+<sc-if value="{{d_hiEmpty}}" hint-placeholder-val="{{false}}"><div class="bigempty" style="padding:44px 20px"><div class="fs13 fw5 t2">尚无发布记录</div><div class="fs12 t3">执行器回执对账成功后，使用台账会记录到这里</div></div></sc-if>
+</sc-if>
+</div>
+</div></div>
+</div>
+</sc-if>
+<sc-if value="{{p_is}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="发布计划">
+<div class="phd"><span class="ptt">发布计划</span><div class="seg" style="margin-left:6px"><span class="sgi {{p_tabKb}}" onClick="{{p_goKb}}">看板</span><span class="sgi {{p_tabSh}}" onClick="{{p_goSh}}">任务单<sc-if value="{{p_shBdgShow}}" hint-placeholder-val="{{false}}"><span class="bdg b-amber" style="height:16px;padding:0 5px">{{p_shBdg}}</span></sc-if></span><span class="sgi {{p_tabSt}}" onClick="{{p_goSt}}">策略与账号</span></div><div class="f1"></div><span class="pcap">{{p_cap}}</span></div>
+<sc-if value="{{p_isKb}}" hint-placeholder-val="{{true}}">
+<div class="pbody">
+<div class="statrow">
+<div class="statcard"><div class="stnum">{{kb_plan}}</div><div class="stlbl">今日计划任务</div></div>
+<div class="statcard"><div class="stnum" style="color:oklch(40% .1 155)">{{kb_pub}}</div><div class="stlbl"><span class="dt" style="background:var(--ok)"></span>已发布</div></div>
+<div class="statcard"><div class="stnum" style="color:var(--er)">{{kb_fail}}</div><div class="stlbl"><span class="dt" style="background:var(--er)"></span>失败</div></div>
+<div class="statcard hl" onClick="{{kb_susGo}}"><div class="stnum" style="color:oklch(48% .11 75)">{{kb_sus}}</div><div class="stlbl"><span class="dt" style="background:var(--wr)"></span>待核对 · 疑似已发</div></div>
+</div>
+<sc-if value="{{kb_hasSus}}" hint-placeholder-val="{{false}}"><div class="ban"><svg class="ic12 noshrink" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 2.5 14.5 13H1.5L8 2.5Z" stroke-linejoin="round"></path><path d="M8 6.8v2.6"></path><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"></circle></svg><span class="f1">{{kb_susTxt}} — 疑似已发绝不自动重发，需人工到平台后台核实后定态</span><button class="btn sm" onClick="{{kb_susGo}}">去核对</button></div></sc-if>
+<div class="fx gap12" style="padding:14px 18px 0;align-items:flex-start">
+<div class="card f1" style="min-width:0">
+<div class="chead"><span class="fw6 fs13">按平台完成率</span></div>
+<sc-for list="{{kb_plats}}" as="p" hint-placeholder-count="4"><div class="fx ac gap10" style="padding:7px 14px 7px;border-top:1px solid var(--line)"><span class="fs12 fw5 nowrap" style="width:52px">{{p.name}}</span><div class="pbarw"><i style="width:{{p.pct}}%"></i></div><span class="mono fs11 t2 nowrap" style="width:64px;text-align:right">{{p.txt}}</span></div></sc-for>
+</div>
+<div class="card f1" style="min-width:0">
+<div class="chead"><span class="fw6 fs13">账号健康</span><span class="cnt">{{kb_acctCap}}</span></div>
+<sc-for list="{{kb_accts}}" as="a" hint-placeholder-count="5"><div class="fx ac gap8" style="padding:6px 14px;border-top:1px solid var(--line);min-height:34px"><span class="bdg b-gray">{{a.plat}}</span><span class="fs12 fw5 f1 nowrap ohide">{{a.name}}</span><span class="mono fs11 t3 nowrap">{{a.use}}</span><span class="bdg {{a.cls}}">{{a.label}}</span></div></sc-for>
+</div>
+</div>
+<div class="card" style="margin:12px 18px 24px">
+<div class="chead"><span class="fw6 fs13">日报</span><span class="pcap">任务单全部终态后自动关闭并生成</span><div class="f1"></div><button class="btn sm" onClick="{{kb_repFn}}">查看昨日日报 · 7月12日</button></div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{p_isSh}}" hint-placeholder-val="{{false}}">
+<sc-if value="{{w_isList}}" hint-placeholder-val="{{true}}">
+<div class="fx ac gap8" style="padding:10px 18px 8px"><span class="fs11 t3">每晚 {{sl_genTime}} 自动生成明日任务单草稿 · 也可手动触发</span><div class="f1"></div><button class="btn sm" onClick="{{sl_genFn}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>生成明日任务单</button></div>
+<div class="f1" style="overflow:auto;min-height:0">
+<sc-for list="{{sl_rows}}" as="r" hint-placeholder-count="4">
+<div class="shrow" onClick="{{r.open}}"><span class="fw6 fs13 nowrap" style="width:76px">{{r.date}}</span><span class="fs11 t3 nowrap" style="width:34px">{{r.cap}}</span><span class="bdg {{r.stCls}}"><span class="dt"></span>{{r.st}}</span><span class="fs11 t3 nowrap ohide f1">{{r.sub}}</span><sc-for list="{{r.chips}}" as="c" hint-placeholder-count="3"><span class="bdg {{c.cls}}">{{c.t}}</span></sc-for><span class="t3 fs12">›</span></div>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{w_is}}" hint-placeholder-val="{{false}}">
+<div class="fx ac gap8" style="padding:10px 18px 0"><button class="icb" onClick="{{w_back}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m10 4-4 4 4 4"></path></svg></button><span class="fw6 fs13 nowrap">任务单 · {{w_date}}</span><span class="fs11 t3">{{w_cap}}</span><span class="bdg {{w_stCls}}"><span class="dt"></span>{{w_st}}</span><div class="f1"></div><div class="seg"><span class="sgi {{w_vSku}}" onClick="{{w_setSku}}">按 SKU 分组</span><span class="sgi {{w_vTl}}" onClick="{{w_setTl}}">时间轴</span></div><sc-if value="{{w_isDraft}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{w_addFn}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>增补任务行</button></sc-if></div>
+<sc-if value="{{w_lackShow}}" hint-placeholder-val="{{false}}"><div class="ban"><svg class="ic12 noshrink" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"></circle><path d="M8 4.8v3.8"></path><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"></circle></svg><span class="f1">缺料清单：{{w_lackTxt}} — 缺料不是报错，有料 SKU 已正常出草稿；缺料 SKU 今日未排任务</span><button class="btn sm" onClick="{{w_lackGo}}">去资产库补料</button></div></sc-if>
+<sc-if value="{{w_susShow}}" hint-placeholder-val="{{false}}"><div class="ban"><svg class="ic12 noshrink" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 2.5 14.5 13H1.5L8 2.5Z" stroke-linejoin="round"></path><path d="M8 6.8v2.6"></path><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"></circle></svg><span class="f1">{{w_susTxt}} — 超过回执超时（4 小时）无回写。绝不自动重发；请人工到平台后台核实后定态</span></div></sc-if>
+<div class="f1 mt10" style="overflow:auto;min-height:0;padding-bottom:8px">
+<sc-if value="{{w_isSku}}" hint-placeholder-val="{{true}}">
+<sc-for list="{{w_grps}}" as="g" hint-placeholder-count="3">
+<div class="wgrp"><div class="wgh"><span class="ph thumb" style="background:{{g.bg}}"></span><span class="pid">{{g.code}}</span><span class="fw6 fs13 nowrap">{{g.name}}</span><span class="chip">{{g.pack}}</span><span class="fs12 t2 nowrap ohide f1" title="{{g.title}}">「{{g.title}}」</span><sc-if value="{{g.hasBody}}" hint-placeholder-val="{{false}}"><span class="bdg b-gray">正文 ✓</span></sc-if><span class="fs11 t3 nowrap">{{g.n}} 个任务 · 当日统一套装</span><sc-if value="{{w_isDraft}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{g.swap}}">换套装</button></sc-if></div>
+<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="3"><div class="wrow"><span class="mono fs11 t2">{{r.time}}</span><span><span class="bdg b-gray">{{r.plat}}</span></span><span class="fs12 nowrap ohide">{{r.acct}}</span><span class="fs11 t3">{{r.type}}</span><span class="fx ac gap6 ohide"><sc-if value="{{r.hasCat}}" hint-placeholder-val="{{false}}"><span class="bdg b-red">{{r.cat}}</span></sc-if><span class="fs11 {{r.exCls}} nowrap ohide">{{r.extra}}</span><sc-if value="{{r.hasLink}}" hint-placeholder-val="{{false}}"><a class="fs11 noshrink" onClick="{{r.linkFn}}">链接 ↗</a><span class="chip">{{r.shot}}</span></sc-if></span><span><span class="bdg {{r.stCls}}">{{r.st}}</span></span><span class="fx gap2" style="justify-content:flex-end"><sc-if value="{{r.canVerify}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{r.verifyFn}}">核对</button></sc-if><sc-if value="{{w_isDraft}}" hint-placeholder-val="{{false}}"><span class="tract"><button class="icb" title="改时间" onClick="{{r.timeFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"></circle><path d="M8 4.8V8l2.2 1.6"></path></svg></button><button class="icb" title="删除任务行" onClick="{{r.delFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg></button></span></sc-if></span></div></sc-for>
+</div>
+</sc-for>
+</sc-if>
+<sc-if value="{{w_isTl}}" hint-placeholder-val="{{false}}">
+<sc-for list="{{w_flat}}" as="r" hint-placeholder-count="8"><div class="tlrow"><span class="mono fs11 t2">{{r.time}}</span><span class="ph thumb" style="background:{{r.bg}}"></span><span class="fx ac gap6 ohide"><span class="fs12 fw5 nowrap ohide">{{r.sku}}</span></span><span><span class="bdg b-gray">{{r.plat}}</span></span><span class="fs12 nowrap ohide">{{r.acct}}</span><span class="fx ac gap6 ohide"><span class="fs11 t3">{{r.type}}</span><sc-if value="{{r.hasCat}}" hint-placeholder-val="{{false}}"><span class="bdg b-red">{{r.cat}}</span></sc-if><span class="fs11 {{r.exCls}} nowrap ohide">{{r.extra}}</span></span><span><span class="bdg {{r.stCls}}">{{r.st}}</span></span><span class="fx gap2" style="justify-content:flex-end"><sc-if value="{{r.canVerify}}" hint-placeholder-val="{{false}}"><button class="btn sm" onClick="{{r.verifyFn}}">核对</button></sc-if><sc-if value="{{w_isDraft}}" hint-placeholder-val="{{false}}"><span class="tract"><button class="icb" title="改时间" onClick="{{r.timeFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"></circle><path d="M8 4.8V8l2.2 1.6"></path></svg></button><button class="icb" title="删除任务行" onClick="{{r.delFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.3 4.5V3h3.4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"></path></svg></button></span></sc-if></span></div></sc-for>
+</sc-if>
+</div>
+<div class="genbar"><span class="fs12 t2 nowrap">{{w_sum}}</span><sc-if value="{{w_lackShow}}" hint-placeholder-val="{{false}}"><span class="fchip warn">缺料 {{w_lackN}} SKU</span></sc-if><div class="f1"></div><sc-if value="{{w_actReopen}}" hint-placeholder-val="{{false}}"><button class="btn" onClick="{{w_reopenFn}}">重新打开</button></sc-if><sc-if value="{{w_actConfirm}}" hint-placeholder-val="{{false}}"><span class="fs11 t3">确认后任务单锁定，素材包同步锁定</span><button class="btn pri" onClick="{{w_confirmFn}}">确认任务单</button></sc-if><sc-if value="{{w_actExport}}" hint-placeholder-val="{{false}}"><button class="btn pri" onClick="{{w_exportFn}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5V11M4.8 7.8 8 11l3.2-3.2M3.5 13h9"></path></svg>导出任务包</button></sc-if><sc-if value="{{w_actSim}}" hint-placeholder-val="{{false}}"><span class="fs11 t3">已导出 · 等待执行器回写 xlsx 第 20–22 列</span><button class="btn" onClick="{{w_simFn}}">{{w_simLabel}}</button></sc-if><sc-if value="{{w_actRecv}}" hint-placeholder-val="{{false}}"><span class="fs11 t3">{{w_recvTxt}}</span><button class="btn sm gho" onClick="{{w_manualFn}}">手动导入回执</button><sc-if value="{{w_hasSim}}" hint-placeholder-val="{{false}}"><button class="btn" onClick="{{w_simFn}}">{{w_simLabel}}</button></sc-if></sc-if><sc-if value="{{w_actClosed}}" hint-placeholder-val="{{false}}"><span class="fs11 t3">全部终态 · 已自动关闭并归档</span><button class="btn" onClick="{{w_repFn}}">查看日报</button></sc-if></div>
+</sc-if>
+</sc-if>
+<sc-if value="{{p_isSt}}" hint-placeholder-val="{{false}}">
+<div class="pbody"><div class="swrap" style="max-width:860px">
+<div class="sec"><div class="sechead"><span class="fw6 fs13">分层频率</span><span class="pcap">调整立即影响后续排期 · 不追溯已生成任务单</span></div>
+<div class="fx gap10">
+<div class="rc"><div class="fx ac gap8"><span class="bdg b-amber">热款</span><div class="f1"></div><span class="stp"><button class="stpb" onClick="{{sg_hotDec}}">−</button><span class="stpv">{{sg_hot}}</span><button class="stpb" onClick="{{sg_hotInc}}">+</button></span></div><div class="fs11 t3 mt10" style="line-height:1.6">每天 {{sg_hot}} 次 × 启用平台集 · 当前 {{sg_hotN}} 个热款</div></div>
+<div class="rc"><div class="fx ac gap8"><span class="bdg b-blue">温款</span><div class="f1"></div><span class="stp"><button class="stpb" onClick="{{sg_warmDec}}">−</button><span class="stpv">{{sg_warm}}</span><button class="stpb" onClick="{{sg_warmInc}}">+</button></span></div><div class="fs11 t3 mt10" style="line-height:1.6">每周 {{sg_warm}} 次 · 当前 {{sg_warmN}} 个温款</div></div>
+<div class="rc"><div class="fx ac gap8"><span class="bdg b-gray">冷款</span><div class="f1"></div><span class="stp"><button class="stpb" onClick="{{sg_coldDec}}">−</button><span class="stpv">{{sg_cold}}</span><button class="stpb" onClick="{{sg_coldInc}}">+</button></span></div><div class="fs11 t3 mt10" style="line-height:1.6">轮播池每周轮出 {{sg_cold}} 款 · 当前 {{sg_coldN}} 个冷款</div></div>
+</div></div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">平台矩阵</span><span class="pcap">全局启用清单 · 单个 SKU 可在档案中覆盖</span></div>
+<div class="klist"><sc-for list="{{sg_plats}}" as="p" hint-placeholder-count="4"><div class="fx ac gap10 kline" style="grid-template-columns:none;display:flex"><span class="fw5 fs12" style="width:64px">{{p.name}}</span><span class="fs11 t3 f1">{{p.sub}}</span><span class="mono fs11 t3">{{p.acctN}} 个账号</span><span class="sw {{p.swCls}}" onClick="{{p.togg}}"><i></i></span></div></sc-for></div></div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">账号档案</span><span class="cnt">{{sg_acctCap}}</span><span class="pcap">「平台账号名称」列以此为准 · 执行器据此选账号</span></div>
+<div class="agrid"><sc-for list="{{sg_accts}}" as="a" hint-placeholder-count="6">
+<div class="acard"><div class="fx ac gap7"><span class="bdg b-gray">{{a.plat}}</span><span class="fw5 fs12 f1 nowrap ohide">{{a.name}}</span><span class="sw {{a.swCls}}" onClick="{{a.togg}}"><i></i></span></div><div class="fx ac gap8 mt10"><span class="fs11 t3">每日上限</span><span class="stp"><button class="stpb" onClick="{{a.dec}}">−</button><span class="stpv">{{a.cap}}</span><button class="stpb" onClick="{{a.inc}}">+</button></span><div class="f1"></div><span class="bdg {{a.stCls}}">{{a.stLabel}}</span></div><div class="fs10 t3 mt6 mono nowrap ohide">{{a.slots}}</div><sc-if value="{{a.fused}}" hint-placeholder-val="{{false}}"><div class="fs11 mt6" style="color:oklch(45% .1 70)">今日风控熔断 · 剩余任务已改期至明日，明日自动恢复</div></sc-if></div>
+</sc-for></div></div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">时段模板</span><span class="pcap">分配「定时发布时间」时在时段内随机抖动 · 同平台多账号最小间隔 {{sg_gap}} 分钟</span></div>
+<div class="fx ac gap8 wrap"><sc-for list="{{sg_slots}}" as="s" hint-placeholder-count="3"><span class="tagchip mono">{{s.t}}<span class="rmx" onClick="{{s.rm}}">×</span></span></sc-for><button class="btn sm gho" onClick="{{sg_addSlot}}">+ 添加时段</button></div></div>
+</div></div>
+</sc-if>
+</div>
+</sc-if>
+<sc-if value="{{s_is}}" hint-placeholder-val="{{false}}">
+<div class="col f1 ohide" data-screen-label="设置">
+<div class="phd"><span class="ptt">设置</span><span class="pcap">API Key · 调度与重试 · 输出 · 发布与同步 · 通用</span></div>
+<div class="pbody"><div class="swrap">
+<div class="sec"><div class="sechead"><span class="fw6 fs13">API Key</span><span class="cnt">{{se_keySum}}</span><div class="f1"></div><button class="btn sm" onClick="{{se_addKey}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"></path></svg>添加 Key</button></div>
+<div class="klist"><div class="kline khd"><span>Key</span><span>Base URL</span><span>模型</span><span>并发 1–10</span><span>成功率</span><span>状态</span><span></span></div><sc-for list="{{se_keys}}" as="k" hint-placeholder-count="3"><div class="kline"><span class="fx ac gap7 ohide"><i class="kd {{k.dotCls}}"></i><span class="fw5 nowrap ohide">{{k.alias}}</span><span class="chip">{{k.id}}</span></span><span class="mono fs10 t3 nowrap ohide">{{k.url}}</span><span class="mono fs10 t3 nowrap ohide">{{k.model}}</span><span><span class="stp"><button class="stpb" onClick="{{k.dec}}">−</button><span class="stpv">{{k.cap}}</span><button class="stpb" onClick="{{k.inc}}">+</button></span></span><span class="mono fs11 t2">{{k.rate}}</span><span><span class="bdg {{k.stCls}}">{{k.stLabel}}</span></span><span class="sw {{k.swCls}}" onClick="{{k.togg}}"><i></i></span></div></sc-for></div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">发布与同步</span><span class="bdg b-blue">新增</span><span class="pcap">资产库 · 任务包 · 回执对账的路径与阈值</span></div>
+<div class="fs11 fw6 t3" style="letter-spacing:.05em;margin-bottom:6px">根目录</div>
+<div class="fx ac gap10"><div class="pathwell f1">{{se_root}}</div><button class="btn sm" onClick="{{se_rootFn}}">更改目录</button></div>
+<div class="fs11 t3 mt6" style="line-height:1.7">GenDesk 在根目录内管理四个分区：<span class="chip">资产库/</span> <span class="chip">收件箱/</span> <span class="chip">任务包/</span>（回执在任务包内）。目录与文件名只用 ASCII；数据库只存相对路径。</div>
+<div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em;margin-bottom:6px">执行机根路径 · 导出时唯一转换点</div>
+<div class="fx ac gap10"><div class="pathwell f1">{{se_exroot}}</div><button class="btn sm" onClick="{{se_sameFn}}">同本机</button><div class="seg"><span class="sgi on">Windows \</span><span class="sgi dis">macOS /</span></div></div>
+<div class="fx ac gap8 mt10 wrap"><span class="fs11 t3">拼接示例</span><span class="chip">{{se_exroot}}</span><span class="t3">+</span><span class="chip">任务包\20260714\素材\SF-YD-201</span><span class="t3 fs12">→</span><span class="chip" style="color:var(--acc2)">{{se_pathEx}}</span></div>
+<div class="fx gap14 mt14 wrap">
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">查重窗口</span><span class="stp"><button class="stpb" onClick="{{se_dedupDec}}">−</button><span class="stpv">{{se_dedup}}</span><button class="stpb" onClick="{{se_dedupInc}}">+</button></span><span class="fs11 t3">天 · 同素材包同平台最短复用间隔</span></div>
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">回执超时</span><span class="stp"><button class="stpb" onClick="{{se_toDec}}">−</button><span class="stpv">{{se_to}}</span><button class="stpb" onClick="{{se_toInc}}">+</button></span><span class="fs11 t3">小时 · 超时未回写标记疑似已发</span></div>
+</div>
+<div class="fx gap14 mt10 wrap">
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">每日生成时间</span><span class="chip" style="font-size:11.5px">{{se_gen}}</span><button class="btn sm gho" onClick="{{se_genFn}}">修改</button></div>
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">余量预警</span><span class="fs11 t3">素材 &lt;</span><span class="stp"><button class="stpb" onClick="{{se_wmDec}}">−</button><span class="stpv">{{se_wm}}</span><button class="stpb" onClick="{{se_wmInc}}">+</button></span><span class="fs11 t3">标题 &lt;</span><span class="stp"><button class="stpb" onClick="{{se_wtDec}}">−</button><span class="stpv">{{se_wt}}</span><button class="stpb" onClick="{{se_wtInc}}">+</button></span></div>
+</div>
+<div class="fx gap14 mt10 wrap">
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">账号默认日上限</span><span class="stp"><button class="stpb" onClick="{{se_acDec}}">−</button><span class="stpv">{{se_ac}}</span><button class="stpb" onClick="{{se_acInc}}">+</button></span></div>
+<div class="fx ac gap8"><span class="fs12 t2 nowrap">同平台多账号最小间隔</span><span class="stp"><button class="stpb" onClick="{{se_gapDec}}">−</button><span class="stpv">{{se_gap}}</span><button class="stpb" onClick="{{se_gapInc}}">+</button></span><span class="fs11 t3">分钟</span></div>
+</div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">输出与归档</span></div>
+<div class="fx ac gap10"><div class="pathwell f1">~/GenDesk/输出/批次_14</div><button class="btn sm" onClick="{{se_dirFn}}">更改目录</button></div>
+<div class="fs11 t3 mt10">仅验收通过的图片会输出到本地；按生成批次自动创建输出子文件夹。</div>
+</div>
+<div class="sec"><div class="sechead"><span class="fw6 fs13">通用</span></div>
+<div class="fx ac gap10"><span class="fs12 t2" style="width:72px">主题</span><div class="seg"><span class="sgi on">浅色</span><span class="sgi dis">深色 · V2</span></div></div>
+<div class="fx ac gap10 mt10"><span class="fs12 t2" style="width:72px">动效</span><div class="seg"><span class="sgi on">标准</span><span class="sgi">减弱</span></div><span class="fs11 t3">跟随系统 prefers-reduced-motion 自动降级</span></div>
+<div class="fx ac gap10 mt14"><span class="fs12 t2" style="width:72px">更新</span><span class="fs12 nowrap">当前 v1.2.0</span><button class="btn sm" onClick="{{se_updFn}}">检查更新</button></div>
+</div>
+</div></div>
+</div>
+</sc-if>
+</div>
+</div>
+</div>
+<sc-if value="{{m_claim}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">指认 SKU</span><span class="chip">{{mc_file}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody" style="padding:8px"><sc-for list="{{mc_rows}}" as="o" hint-placeholder-count="6"><div class="pickrow" onClick="{{o.pick}}"><span class="pid">{{o.code}}</span><span class="fw5 fs12 f1 nowrap ohide">{{o.name}}</span><span class="bdg {{o.tierCls}}">{{o.tier}}</span></div></sc-for></div><div class="mfoot"><span class="fs11 t3">指认后内容立即入该 SKU 对应内容池</span><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">取消</button></div></div></div></sc-if>
+<sc-if value="{{m_sku}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">{{me_title}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody col gap10"><div class="col gap4"><span class="fs11 t3">SKU 编码（ASCII · 唯一）</span><input class="inp mono" defaultValue="{{me_code}}" placeholder="SF-YD-2xx" disabled="{{me_codeLock}}"/></div><div class="col gap4"><span class="fs11 t3">款式名</span><input class="inp" defaultValue="{{me_name}}" onInput="{{me_onName}}"/></div><div class="col gap4"><span class="fs11 t3">冷热分层</span><div class="seg"><span class="sgi {{me_tHot}}" onClick="{{me_setHot}}">热款</span><span class="sgi {{me_tWarm}}" onClick="{{me_setWarm}}">温款</span><span class="sgi {{me_tCold}}" onClick="{{me_setCold}}">冷款</span></div></div><div class="col gap4"><span class="fs11 t3">固定话题标签（有序 · 前 5 进任务单）</span><div class="fx ac gap6 wrap"><sc-for list="{{me_tags}}" as="t" hint-placeholder-count="4"><span class="tagchip">#{{t.t}}<span class="rmx" onClick="{{t.rm}}">×</span></span></sc-for><button class="btn sm gho" onClick="{{me_addTag}}">+ 标签</button></div></div></div><div class="mfoot"><span class="fs11 t3">收件箱 TXT 带【话题】时：无标签则采纳前 5，已有则忽略并提示差异</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{me_save}}">保存</button></div></div></div></sc-if>
+<sc-if value="{{m_pack}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13 mono">{{mp_id}}</span><span class="bdg {{mp_lifeCls}}">{{mp_life}}</span><sc-if value="{{mp_locked}}" hint-placeholder-val="{{false}}"><span class="bdg b-blue">被未关闭任务单引用 · 已锁定</span></sc-if><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fx gap14"><div style="width:250px;flex:none"><div class="ph" style="background:{{mp_bg}};aspect-ratio:4/5;border-radius:10px;border:1px solid var(--line)"><span class="phl">{{mp_tag}}</span></div></div><div class="f1" style="min-width:0"><div class="fs11 fw6 t3" style="letter-spacing:.05em">包内文件 · ASCII 规范化命名</div><div class="mt6 col gap4"><sc-for list="{{mp_files}}" as="f" hint-placeholder-count="3"><span class="chip" style="align-self:flex-start">{{f.n}}</span></sc-for></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">生命周期</div><div class="fs12 mt6" style="line-height:1.8">{{mp_lifeDesc}}</div><div class="fx ac gap6 mt10 wrap"><span class="chip">发过 {{mp_used}} 次</span><span class="chip">原始文件名已存档</span></div></div></div></div><div class="mfoot"><span class="fs11 t3">新入库 → 可用 → 已用尽（窗口期满自动回可用）· 退役为人工终态</span><div class="f1"></div><sc-if value="{{mp_canRetire}}" hint-placeholder-val="{{false}}"><button class="btn sm gho dng" onClick="{{mp_retire}}">退役</button></sc-if><button class="btn sm" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{m_swap}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w700" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">更换当日套装</span><span class="pid">{{ms_code}}</span><span class="fs12 t2">{{ms_name}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fs11 fw6 t3" style="letter-spacing:.05em">素材包 · 查重窗口 30 天已过滤</div><div class="grid mt6" style="grid-template-columns:repeat(5,1fr);gap:10px"><sc-for list="{{ms_packs}}" as="p" hint-placeholder-count="4"><div class="ptile {{p.cls}}" onClick="{{p.pick}}"><div class="ph ptimg" style="background:{{p.bg}}"><span class="packn">{{p.tag}}</span></div><div class="fx ac gap5 mt4"><span class="bdg {{p.lifeCls}}" style="height:17px;font-size:10px">{{p.life}}</span><span class="fs10 t3 nowrap ohide">{{p.sub}}</span></div></div></sc-for></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">标题 · 最少使用优先</div><div class="mt4"><sc-for list="{{ms_titles}}" as="t" hint-placeholder-count="3"><div class="pickrow" onClick="{{t.pick}}"><span class="ckb {{t.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="fs12 f1 nowrap ohide">{{t.t}}</span><span class="bdg b-gray">{{t.plat}}</span><span class="fs11 t3 nowrap">用过 {{t.n}} 次</span></div></sc-for></div><sc-if value="{{ms_hasBody}}" hint-placeholder-val="{{false}}"><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">正文 · 图文任务用</div><div class="mt4"><sc-for list="{{ms_bodies}}" as="t" hint-placeholder-count="2"><div class="pickrow" onClick="{{t.pick}}"><span class="ckb {{t.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="fs12 f1 nowrap ohide">{{t.t}}</span><span class="bdg b-gray">{{t.plat}}</span><span class="fs11 t3 nowrap">用过 {{t.n}} 次</span></div></sc-for></div></sc-if></div><div class="mfoot"><span class="fs11 t3">该 SKU 当天全部 {{ms_n}} 个任务行统一换用新套装</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{ms_ok}}">确认更换</button></div></div></div></sc-if>
+<sc-if value="{{m_time}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w360" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">调整发布时间</span><span class="pid">{{mt_id}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fs11 t3" style="margin-bottom:8px">在时段模板内选择 · 留空 = 立即发布（人工改出）</div><div class="fx ac gap6 wrap"><sc-for list="{{mt_opts}}" as="o" hint-placeholder-count="6"><button class="btn sm {{o.cls}}" onClick="{{o.pick}}">{{o.t}}</button></sc-for></div></div></div></div></sc-if>
+<sc-if value="{{m_add}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">增补任务行</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fs11 fw6 t3" style="letter-spacing:.05em">选择 SKU · 使用其当日套装</div><div class="mt4"><sc-for list="{{ma_skus}}" as="o" hint-placeholder-count="4"><div class="pickrow" onClick="{{o.pick}}"><span class="ckb {{o.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="pid">{{o.code}}</span><span class="fs12 f1 nowrap ohide">{{o.name}}</span></div></sc-for></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">选择账号 · 已用 / 日上限</div><div class="mt4"><sc-for list="{{ma_accts}}" as="o" hint-placeholder-count="4"><div class="pickrow" onClick="{{o.pick}}"><span class="ckb {{o.ck}}"><svg class="ic12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg></span><span class="bdg b-gray">{{o.plat}}</span><span class="fs12 f1 nowrap ohide">{{o.name}}</span><span class="mono fs11 t3">{{o.use}}</span></div></sc-for></div></div><div class="mfoot"><span class="fs11 t3">时间自动分配到最近可用时段</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" disabled="{{ma_blocked}}" onClick="{{ma_ok}}">增补</button></div></div></div></sc-if>
+<sc-if value="{{m_verify}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w420" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">核对疑似已发</span><span class="pid">{{mv_id}}</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="susban"><b class="fw6">超时 {{mv_to}} 小时无回执，内容可能已实际发出。</b><br/>系统绝不自动重发 — 重发会触发平台查重，比失败更糟。请到平台后台人工核实后定态。</div><div class="fx ac gap6 mt10 wrap"><span class="pid">{{mv_sku}}</span><span class="fs12">{{mv_skuName}}</span><span class="bdg b-gray">{{mv_plat}}</span><span class="chip">{{mv_acct}}</span><span class="chip">计划 {{mv_time}}</span></div></div><div class="mfoot"><span class="fs11 t3">定态后写入使用台账</span><div class="f1"></div><button class="btn sm dng" onClick="{{mv_fail}}">未发出 · 定为失败</button><button class="btn pri sm" onClick="{{mv_pub}}">已发布 · 补录</button></div></div></div></sc-if>
+<sc-if value="{{m_export}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">导出任务包</span><span class="chip">任务包/{{mx_dir}}/</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="pathwell" style="white-space:pre-wrap;line-height:1.9">{{mx_tree}}</div><div class="fx ac gap6 mt10 wrap"><span class="fchip">{{mx_rows}} 行任务</span><span class="fchip">{{mx_skus}} 个 SKU 素材 · 每 SKU 一份</span><span class="fchip">正文物化为 body.txt</span><span class="fchip warn">READY.txt 最后写入</span></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">执行机路径拼接示例（第 11 列 · 素材本地路径）</div><div class="pathwell mt6">{{mx_path}}</div></div><div class="mfoot"><span class="fs11 t3">导出后 xlsx 写方移交执行器 · 只回写第 20–22 列</span><div class="f1"></div><button class="btn" onClick="{{mClose}}">取消</button><button class="btn pri" onClick="{{mx_ok}}">确认导出</button></div></div></div></sc-if>
+<sc-if value="{{m_report}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w640" onClick="{{stop}}"><div class="mhead"><span class="fw6 fs13">日报 · {{mr_date}}</span><span class="bdg b-green"><span class="dt"></span>已关闭</span><div class="f1"></div><button class="icb" onClick="{{mClose}}"><svg class="ic12" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"></path></svg></button></div><div class="mbody"><div class="fx gap10"><div class="rc"><div class="stnum" style="font-size:20px">{{mr_plan}}</div><div class="stlbl">计划</div></div><div class="rc"><div class="stnum" style="font-size:20px;color:oklch(40% .1 155)">{{mr_ok}}</div><div class="stlbl">成功</div></div><div class="rc"><div class="stnum" style="font-size:20px;color:var(--er)">{{mr_fail}}</div><div class="stlbl">失败</div></div><div class="rc"><div class="stnum" style="font-size:20px">{{mr_rate}}</div><div class="stlbl">成功率</div></div></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">失败清单</div><div class="mt6 col gap6"><sc-for list="{{mr_fails}}" as="f" hint-placeholder-count="1"><div class="fx ac gap8"><span class="pid">{{f.id}}</span><span class="bdg b-red">{{f.cat}}</span><span class="fs12 f1 nowrap ohide">{{f.sku}}</span><span class="fs11 t3 nowrap ohide">{{f.act}}</span></div></sc-for></div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">缺料清单</div><div class="fs12 mt6" style="line-height:1.8">{{mr_lack}}</div><div class="fs11 fw6 t3 mt14" style="letter-spacing:.05em">明日建议</div><div class="fs12 mt6" style="line-height:1.8">{{mr_tips}}</div></div><div class="mfoot"><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">关闭</button></div></div></div></sc-if>
+<sc-if value="{{m_confirm}}" hint-placeholder-val="{{false}}"><div class="ovl" onClick="{{mClose}}"><div class="mdl w360" onClick="{{stop}}"><div class="mbody" style="padding:18px 18px 4px"><div class="fw6 fs13">{{mf_title}}</div><div class="fs12 t2 mt6" style="line-height:1.7">{{mf_desc}}</div></div><div class="mfoot" style="border-top:none;background:#fff;border-radius:0 0 13px 13px"><div class="f1"></div><button class="btn sm" onClick="{{mClose}}">取消</button><button class="btn sm {{mf_cls}}" onClick="{{mf_yes}}">{{mf_label}}</button></div></div></div></sc-if>
+<sc-if value="{{pal_open}}" hint-placeholder-val="{{false}}"><div class="ovl ovtop" onClick="{{pal_close}}"><div class="plt" onClick="{{stop}}"><div class="plin"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.4 10.4 3 3"></path></svg><input class="plinp" placeholder="跳转页面或执行操作…" value="{{pal_q}}" onInput="{{pal_onQ}}" autoFocus="{{true}}"/><span class="kbd">esc</span></div><div class="pllist"><sc-for list="{{pal_items}}" as="c" hint-placeholder-count="6"><div class="pltit {{c.cls}}" onClick="{{c.run}}"><span class="plcat">{{c.cat}}</span><span class="f1 fw5">{{c.t}}</span><sc-if value="{{c.hasK}}" hint-placeholder-val="{{false}}"><span class="kbd">{{c.k}}</span></sc-if></div></sc-for></div></div></div></sc-if>
+<div class="tstwrap"><sc-for list="{{ts_list}}" as="t" hint-placeholder-count="0"><div class="tst"><svg class="ic12 tsi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"></path></svg><span>{{t.msg}}</span></div></sc-for></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;platform&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;mac&quot;,&quot;win&quot;],&quot;default&quot;:&quot;mac&quot;,&quot;tsType&quot;:&quot;'mac'|'win'&quot;,&quot;section&quot;:&quot;环境&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;standard&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;standard&quot;,&quot;tsType&quot;:&quot;'standard'|'compact'&quot;,&quot;section&quot;:&quot;环境&quot;}}">
+class Component extends DCLogic {
+  state = this.seed();
+  seed(){
+    const T=(t,plat,n)=>({t,plat,n,src:'收件箱',on:true});
+    const skus=[
+      {code:'SF-YD-201',name:'深蓝法式连体泳衣',prod:'法式复古深蓝连体泳衣 遮肚显瘦 温泉度假',tier:'hot',tags:['连体泳衣','显瘦泳衣','温泉泳衣','度假穿搭','夏日出游'],on:true,hue:245,last:'今天 12:05',needBody:true,
+       packs:[{id:'P1',t:'v',dur:'14s',life:'ok',used:3},{id:'P2',t:'g',n:6,life:'ok',used:1},{id:'P3',t:'v',dur:'11s',life:'cool',back:'8月2日',used:5},{id:'P4',t:'g',n:5,life:'new',used:0},{id:'P5',t:'v',dur:'9s',life:'ok',used:0}],
+       titles:[T('风再大也想去海边，深蓝连体安排上','抖音',4),T('梨形身材的夏天被这件深蓝连体救了','通用',3),T('去三亚前一晚下单也来得及','抖音',2),T('显瘦十斤不是玄学，是剪裁','小红书',2),T('温泉季必备，遮肚又高级','通用',1),T('法式复古泳衣，拍照赢麻了','小红书',1),T('一件泳衣的自信，谁穿谁知道','通用',0),T('今夏回购率最高的一件','快手',0)],
+       bodies:[T('温泉度假拍照全靠它！深蓝色显白到犯规，收腰剪裁+荷叶边遮胯，梨形身材直接闭眼入。面料加厚不透，下水也不怕走光。','小红书',2),T('夏天的仪式感是从一件好看的泳衣开始的。这件法式深蓝连体，遮肚显瘦，海边温泉两相宜。','通用',1),T('真实身材实测：160 / 55kg 穿 M 码刚好，胸垫加厚可拆，肩带可调不勒。','小红书',1),T('出游清单第一位！一件搞定海边 + 温泉 + 泳池，深蓝显白经得起直出。','通用',0)],
+       hist:[{d:'7月13日 11:35',plat:'抖音',acct:'主号 · 官方旗舰',tid:'T260713-001',pack:'P1 · video 14s'},{d:'7月13日 12:05',plat:'小红书',acct:'种草主号',tid:'T260713-002',pack:'P1'},{d:'7月11日 12:40',plat:'快手',acct:'快手主号',tid:'T260711-004',pack:'P3'},{d:'7月8日 18:20',plat:'抖音',acct:'主号 · 官方旗舰',tid:'T260708-002',pack:'P3'}]},
+      {code:'SF-YD-203',name:'玫红荷叶边连体泳衣',prod:'玫红荷叶边连体泳衣 小胸显大 温泉出片',tier:'hot',tags:['连体泳衣','玫红','小胸友好','出片泳衣'],on:true,hue:350,last:'今天 18:10',needBody:false,
+       packs:[{id:'P1',t:'v',dur:'12s',life:'ok',used:2},{id:'P2',t:'v',dur:'15s',life:'cool',back:'7月19日',used:4}],
+       titles:[T('玫红色一上身，气色直接赢','抖音',3),T('小胸姐妹的显大神器','小红书',2),T('荷叶边的温柔杀','通用',1),T('这个夏天最上镜的颜色','通用',1),T('拍照发光体本体','快手',0)],
+       bodies:[T('玫红色真的太提气色了！荷叶边设计小胸显大，腰线剪裁遮小肚腩。','小红书',1),T('温泉出片神器，玫红色在水汽里绝美。','通用',0)],
+       hist:[{d:'7月13日 12:30',plat:'快手',acct:'快手主号',tid:'T260713-003',pack:'P1 · video 12s'},{d:'7月10日 19:05',plat:'抖音',acct:'清仓折扣号',tid:'T260710-006',pack:'P2'}]},
+      {code:'SF-BK-105',name:'黑白撞色分体比基尼',prod:'黑白撞色分体比基尼 高腰遮胯 海边度假',tier:'warm',tags:['比基尼','黑白配色','高腰泳衣'],on:true,hue:262,last:'今天 18:50',needBody:false,
+       packs:[{id:'P1',t:'g',n:6,life:'ok',used:2},{id:'P2',t:'v',dur:'10s',life:'ok',used:1},{id:'P3',t:'g',n:4,life:'new',used:0}],
+       titles:[T('黑白撞色，怎么拍都高级','小红书',2),T('高腰版型遮胯显腿长','抖音',2),T('经典配色永远不会错','通用',1),T('海边穿它回头率翻倍','抖音',1),T('分体比基尼的正确打开方式','通用',0),T('去海岛必带的一套','快手',0)],
+       bodies:[],
+       hist:[{d:'7月13日 12:45',plat:'抖音',acct:'清仓折扣号',tid:'T260713-004',pack:'P1 · 图集 6 张'}]},
+      {code:'SF-LQ-118',name:'白色镂空防晒罩衫',prod:'白色镂空针织防晒罩衫 泳衣外搭 沙滩度假',tier:'cold',tags:['防晒罩衫','泳衣外搭','沙滩'],on:true,hue:85,last:'6月30日',needBody:false,
+       packs:[{id:'P1',t:'g',n:5,life:'cool',back:'7月28日',used:3},{id:'P2',t:'v',dur:'8s',life:'ret',used:6}],
+       titles:[T('泳衣外面永远要有一件它','通用',3),T('镂空针织，防晒也要美','小红书',2),T('白色罩衫是海边照片的灵魂','通用',1),T('一件让泳衣高级三倍的外搭','抖音',1)],
+       bodies:[],
+       hist:[{d:'6月30日 12:10',plat:'小红书',acct:'种草主号',tid:'T260630-008',pack:'P1 · 图集 5 张'}]},
+      {code:'SF-SQ-062',name:'渐变扎染沙滩裙',prod:'渐变扎染吊带沙滩裙 度假长裙 海边拍照',tier:'warm',tags:['沙滩裙','扎染','度假长裙','海边拍照'],on:true,hue:190,last:'今天 19:05',needBody:true,
+       packs:[{id:'P1',t:'g',n:6,life:'ok',used:1},{id:'P2',t:'g',n:5,life:'ok',used:0}],
+       titles:[T('风一吹就是大片的裙子','小红书',2),T('渐变蓝绿，把海穿在身上','通用',1),T('度假长裙的天花板','抖音',0)],
+       bodies:[T('这条扎染长裙是真的绝！渐变蓝绿像把海水穿在身上，吊带设计露肩显瘦，裙摆超大随手一拍都是海报感。','小红书',1),T('沙滩裙选它就对了：不闷汗、不透、防晒，配泳衣配吊带都好看。','通用',1),T('身高 155-170 都能驾驭的长度，收腰抽绳可调。','小红书',0)],
+       hist:[{d:'7月13日 18:25',plat:'小红书',acct:'穿搭分享号',tid:'T260713-006',pack:'P1 · 图集 6 张'}]},
+      {code:'GEN-000',name:'通用 · 节日与活动',prod:'不挂具体 SKU 的通用内容（节日文案等）',tier:'gen',tags:[],on:true,hue:60,last:'—',needBody:true,
+       packs:[],
+       titles:[T('七夕来了，给夏天一点仪式感','通用',1),T('暑期大促最后三天','通用',2),T('今晚 8 点直播间见','通用',0),T('立秋前的最后一波清凉','通用',0)],
+       bodies:[T('暑期大促倒计时！全店泳装第二件半价，收藏加购的姐妹别错过。','通用',1),T('七夕限定：下单送防水收纳袋，数量有限。','通用',0)],
+       hist:[]}
+    ];
+    const GN=[['SF-YD-206','珊瑚橘吊带连体泳衣','warm',30,4,6,0],['SF-YD-208','奶油白温泉泳衣','hot',75,3,1,0],['SF-YD-212','雾紫褶皱连体泳衣','warm',300,2,5,0],['SF-BK-108','黑金链条比基尼','warm',48,3,4,0],['SF-BK-112','海盐蓝条纹分体泳衣','cold',215,2,3,0],['SF-SQ-065','绿野碎花沙滩裙','warm',130,4,5,3],['SF-SQ-071','月光白镂空沙滩裙','cold',270,2,4,2],['SF-LQ-121','焦糖色针织罩衫','cold',55,1,4,0],['SF-LQ-125','橄榄绿系带罩衫','cold',110,2,3,0],['SF-YD-215','雾霾蓝长袖冲浪服','warm',230,3,6,0],['SF-YD-218','香槟缎面度假衬衫','cold',90,2,5,0],['SF-BK-115','奶咖拼色三角比基尼','off',20,2,4,0]];
+    GN.forEach((g,i)=>{const off=g[2]==='off';const tier=off?'warm':g[2];const packs=[];for(let k=0;k<g[4];k++)packs.push({id:'P'+(k+1),t:k%2?'g':'v',n:k%2?4+k:0,dur:k%2?'':(8+k*2)+'s',life:'ok',used:k});
+      const titles=[];for(let k=0;k<g[5];k++)titles.push(T(['新款上身效果绝了','这个颜色今夏真的很戳我','显瘦显白一步到位','度假感直接拉满','回购率超高的一件','评论区都在问链接'][k%6],['通用','抖音','小红书','快手'][k%4],(k*3)%5));
+      const bodies=[];for(let k=0;k<g[6];k++)bodies.push(T('详细种草正文：版型 / 面料 / 尺码建议与场景搭配，收件箱 TXT 自动收录。',['小红书','通用'][k%2],k%3));
+      skus.push({code:g[0],name:g[1],prod:g[1]+' 夏季新款 海边度假',tier,tags:['泳装','度假','显瘦'],on:!off,hue:g[3],last:['7月11日','7月9日','7月6日','6月28日'][i%4],needBody:g[6]>0,packs,titles,bodies,hist:[]});});
+    const accounts=[
+      {id:'A1',plat:'抖音',name:'主号 · 官方旗舰',cap:3,slots:'11:30–13:00 / 18:00–20:00',on:true,fused:false},
+      {id:'A2',plat:'抖音',name:'潮流小铺',cap:3,slots:'18:00–20:00 / 21:00–22:30',on:true,fused:true},
+      {id:'A3',plat:'抖音',name:'清仓折扣号',cap:2,slots:'11:30–13:00',on:true,fused:false},
+      {id:'A4',plat:'小红书',name:'种草主号',cap:2,slots:'12:00–13:00 / 21:00–22:30',on:true,fused:false},
+      {id:'A5',plat:'小红书',name:'穿搭分享号',cap:2,slots:'18:00–20:00',on:true,fused:false},
+      {id:'A6',plat:'快手',name:'快手主号',cap:2,slots:'18:00–20:00',on:true,fused:false},
+      {id:'A7',plat:'视频号',name:'视频号主号',cap:1,slots:'21:00–22:30',on:false,fused:false}];
+    const R=(n,time,plat,acct,sku,type,st,ex)=>Object.assign({id:n,time,plat,acct,sku,type,st},ex||{});
+    const sheets=[
+      {id:'0714',date:'7月14日',cap:'明日',st:'draft',sim:0,
+       sets:{'SF-YD-201':{pack:'P1',ti:6,bi:3},'SF-YD-203':{pack:'P1',ti:4},'SF-BK-105':{pack:'P2',ti:4},'SF-SQ-062':{pack:'P2',ti:2,bi:2}},
+       lack:[{sku:'SF-LQ-118',why:'素材可用 0（1 个冷却中 · 回可用 7月28日）'},{sku:'SF-YD-208',why:'标题仅剩 1，低于阈值 3'}],
+       tasks:[R('T260714-001','12:30','抖音','主号 · 官方旗舰','SF-YD-201','视频','wait'),R('T260714-002','18:20','抖音','潮流小铺','SF-YD-201','视频','wait'),R('T260714-003','12:10','快手','快手主号','SF-YD-201','视频','wait'),R('T260714-004','12:40','小红书','种草主号','SF-YD-201','图文','wait'),R('T260714-005','21:15','小红书','穿搭分享号','SF-YD-201','图文','wait'),R('T260714-006','11:50','抖音','主号 · 官方旗舰','SF-YD-203','视频','wait'),R('T260714-007','19:10','抖音','清仓折扣号','SF-YD-203','视频','wait'),R('T260714-008','18:40','快手','快手主号','SF-YD-203','视频','wait'),R('T260714-009','19:30','抖音','潮流小铺','SF-BK-105','视频','wait'),R('T260714-010','12:50','抖音','清仓折扣号','SF-BK-105','视频','wait'),R('T260714-011','12:15','小红书','种草主号','SF-SQ-062','图文','wait'),R('T260714-012','21:40','小红书','穿搭分享号','SF-SQ-062','图文','wait')]},
+      {id:'0713',date:'7月13日',cap:'今天',st:'recv',sim:9,
+       sets:{'SF-YD-201':{pack:'P1',ti:0,bi:0},'SF-YD-203':{pack:'P1',ti:0},'SF-BK-105':{pack:'P1',ti:1},'SF-SQ-062':{pack:'P1',ti:0,bi:0}},
+       lack:[],
+       tasks:[R('T260713-001','11:35','抖音','主号 · 官方旗舰','SF-YD-201','视频','pub'),R('T260713-002','12:05','小红书','种草主号','SF-YD-201','图文','pub'),R('T260713-003','12:30','快手','快手主号','SF-YD-203','视频','pub'),R('T260713-004','12:45','抖音','清仓折扣号','SF-BK-105','视频','pub'),R('T260713-005','18:10','抖音','主号 · 官方旗舰','SF-YD-203','视频','pub'),R('T260713-006','18:25','小红书','穿搭分享号','SF-SQ-062','图文','pub'),R('T260713-007','18:50','快手','快手主号','SF-BK-105','视频','pub'),R('T260713-008','19:05','小红书','种草主号','SF-SQ-062','图文','pub'),R('T260713-009','12:20','抖音','潮流小铺','SF-YD-201','视频','fail',{cat:'风控拦截',note:'账号当日熔断 · 剩余 2 个任务已改期至明日'}),R('T260713-010','18:35','小红书','穿搭分享号','SF-YD-203','视频','fail',{cat:'素材不合规',note:'封面疑似违规 · 素材包已标记，转人工复核'}),R('T260713-011','12:30','抖音','潮流小铺','SF-BK-105','视频','sus'),R('T260713-012','12:55','抖音','潮流小铺','SF-SQ-062','图文','sus'),R('T260713-013','21:15','抖音','主号 · 官方旗舰','SF-YD-201','视频','wait'),R('T260713-014','21:40','小红书','穿搭分享号','SF-YD-201','图文','wait')]},
+      {id:'0712',date:'7月12日',cap:'',st:'closed',sim:9,sets:{},lack:[],tasks:[],
+       report:{plan:16,ok:14,fail:1,rate:'87.5%',fails:[{id:'T260712-009',cat:'网络超时',sku:'SF-LQ-118 白色镂空防晒罩衫',act:'已自动重排至 7月13日'}],lack:'SF-LQ-118 素材可用 0（冷却中）',tips:'SF-YD-203 素材即将用尽（可用 1），建议本周补充；冷款轮播池可排 3 款，低于建议值 4。'}},
+      {id:'0711',date:'7月11日',cap:'',st:'closed',sim:9,sets:{},lack:[],tasks:[],
+       report:{plan:15,ok:15,fail:0,rate:'100%',fails:[],lack:'无',tips:'全部平台完成率 100%，无需干预。'}}];
+    return {route:'assets',astSeg:'sku',astView:'table',astFlt:'all',astQ:'',sku:null,dtTab:'pk',
+      pbTab:'kb',wb:null,wbView:'sku',modal:null,pal:{open:false,q:''},toasts:[],
+      skus,accounts,sheets,
+      inbox:{claim:[{id:'C1',name:'标题_夏末清仓_0712.txt',kind:'标题 × 6',reason:'【SKU】缺失，文件名前缀与文件夹名均未命中'},{id:'C2',name:'IMG_2841 – 2846.jpg',kind:'图片 × 6',reason:'外部 AI 出图，文件夹名「新款白裙」无法匹配编码'}],fail:[{id:'F1',name:'正文_SF-YD-201_0711.txt',reason:'==== 分隔符缺失，多条正文粘连，无法切分'}]},
+      keys:[{id:'K-A',alias:'主力 · 直连',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:4,on:true,hl:'ok',rate:'98.6%'},{id:'K-B',alias:'主力 · 备份',url:'https://api.oai-proxy.com/v1',model:'gpt-image-2',cap:3,on:true,hl:'ok',rate:'97.1%'},{id:'K-C',alias:'中转 · 极速',url:'https://fast.relay-img.cn/v1',model:'gpt-image-2',cap:2,on:true,hl:'lim',rate:'91.4%'},{id:'K-D',alias:'备用 · 低价',url:'https://cheap.gate-ai.net/v1',model:'gpt-image-2',cap:2,on:true,hl:'ok',rate:'95.0%'}],
+      cfg:{root:'~/Desktop/视频发布',exroot:'D:\\视频发布',dedup:30,to:4,gen:'22:00',wm:2,wt:3,ac:3,gap:60},
+      sg:{hot:1,warm:3,cold:4,plats:{'抖音':true,'小红书':true,'快手':true,'视频号':false},slots:['11:30–13:00','18:00–20:00','21:00–22:30']}};
+  }
+  componentDidMount(){this._k=e=>this.onKey(e);window.addEventListener('keydown',this._k);}
+  componentWillUnmount(){window.removeEventListener('keydown',this._k);}
+  bg(h,d){const l1=d?90.5:93.5,l2=d?86:89.5;return 'linear-gradient(145deg,oklch('+l1+'% .032 '+h+'),oklch('+l2+'% .05 '+((h+42)%360)+'))';}
+  skuOf(code){return this.state.skus.find(s=>s.code===code);}
+  toast(msg){this._tid=(this._tid||0)+1;const id=this._tid;this.setState(s=>({toasts:[...s.toasts,{id,msg}]}));setTimeout(()=>this.setState(s=>({toasts:s.toasts.filter(x=>x.id!==id)})),3400);}
+  go(r){this.setState({route:r});}
+  openM(m){this.setState({modal:m});}
+  closeM(){this.setState({modal:null});}
+  onKey(e){
+    const s=this.state,mod=e.metaKey||e.ctrlKey;
+    if(mod&&(e.key==='k'||e.key==='K')){e.preventDefault();this.setState({pal:{open:!s.pal.open,q:''}});return;}
+    if(s.pal.open){if(e.key==='Escape')this.setState({pal:{open:false,q:''}});else if(e.key==='Enter'){const it=this.palItems()[0];if(it){this.setState({pal:{open:false,q:''}});it.fn();}}return;}
+    const tag=(e.target&&e.target.tagName)||'';if(tag==='INPUT'||tag==='TEXTAREA')return;
+    if(mod&&e.key>='1'&&e.key<='9'){e.preventDefault();const r=['generate','tasks','review','library','prompts','refs','trash','settings','assets'][+e.key-1];if(r==='assets')this.setState({route:'assets',sku:null});else this.go(r);return;}
+    if(mod&&e.key==='0'){e.preventDefault();this.go('publish');return;}
+    if(e.key==='Escape'){if(s.modal)return this.closeM();if(s.sku)return this.setState({sku:null});if(s.wb)return this.setState({wb:null});}
+  }
+  warnOf(sku){
+    if(!sku.on||sku.tier==='gen')return null;
+    const c=this.state.cfg;const mat=sku.packs.filter(p=>p.life==='ok').length;
+    if(mat<c.wm)return '素材 '+mat;
+    if(sku.titles.length<c.wt)return '标题 '+sku.titles.length;
+    if(sku.needBody&&sku.bodies.length<2)return '正文 '+sku.bodies.length;
+    return null;
+  }
+  tierBdg(t){return {hot:{cls:'b-amber',label:'热款'},warm:{cls:'b-blue',label:'温款'},cold:{cls:'b-gray',label:'冷款'},gen:{cls:'b-gray',label:'通用'}}[t];}
+  lifeBdg(l){return {new:{cls:'b-gray',label:'新入库'},ok:{cls:'b-green',label:'可用'},cool:{cls:'b-amber',label:'冷却中'},ret:{cls:'b-gray',label:'退役'}}[l];}
+  stBdg(st){return {wait:{cls:'b-gray',label:'待执行'},pub:{cls:'b-green',label:'已发布'},fail:{cls:'b-red',label:'失败'},sus:{cls:'b-amber',label:'疑似已发'},canc:{cls:'b-gray',label:'已取消'}}[st];}
+  shStBdg(st){return {draft:{cls:'b-gray',label:'草稿'},conf:{cls:'b-blue',label:'已确认'},exp:{cls:'b-blue',label:'已导出'},recv:{cls:'b-blue',label:'回收中'},closed:{cls:'b-green',label:'已关闭'}}[st];}
+  sheet(id){return this.state.sheets.find(x=>x.id===id);}
+  patchSheet(id,fn){this.setState(s=>({sheets:s.sheets.map(x=>x.id===id?Object.assign({},x,fn(x)):x)}));}
+  patchTask(sid,tid,fn){this.patchSheet(sid,sh=>({tasks:sh.tasks.map(t=>t.id===tid?Object.assign({},t,fn(t)):t)}));}
+  patchSku(code,fn){this.setState(s=>({skus:s.skus.map(x=>x.code===code?Object.assign({},x,fn(x)):x)}));}
+  maybeClose(sid){
+    const sh=this.sheet(sid);if(!sh)return;
+    const open=sh.tasks.some(t=>t.st==='wait'||t.st==='sus');
+    if(!open&&sh.st!=='closed'&&sh.tasks.length){
+      const ok=sh.tasks.filter(t=>t.st==='pub').length,fl=sh.tasks.filter(t=>t.st==='fail').length;
+      const rep={plan:sh.tasks.length,ok,fail:fl,rate:Math.round(ok/sh.tasks.length*1000)/10+'%',fails:sh.tasks.filter(t=>t.st==='fail').map(t=>({id:t.id,cat:t.cat||'其他',sku:t.sku+' '+(this.skuOf(t.sku)||{name:''}).name,act:t.note||'转人工'})),lack:'无',tips:'素材消耗正常；关注冷却中素材包的回可用日期。'};
+      this.patchSheet(sid,()=>({st:'closed',report:rep}));
+      this.toast('任务单 '+sid+' 全部终态 · 已自动关闭并生成日报');
+      setTimeout(()=>this.openM({t:'report',sid}),400);
+    }
+  }
+  verify(sid,tid,pub){
+    if(pub){this.patchTask(sid,tid,()=>({st:'pub',note:'人工核实 · 补录'}));this.toast(tid+' 已定态为已发布 · 已写入使用台账');}
+    else{this.patchTask(sid,tid,()=>({st:'fail',cat:'人工核实',note:'核实未发出 · 已按失败归档'}));this.toast(tid+' 已定态为失败');}
+    this.closeM();setTimeout(()=>this.maybeClose(sid),200);
+  }
+  simRecv(sid){
+    const sh=this.sheet(sid);if(!sh)return;
+    if(sh.st==='exp'){
+      this.patchSheet(sid,x=>({st:'recv',tasks:x.tasks.map((t,i)=>{
+        if(i<7)return Object.assign({},t,{st:'pub'});
+        if(i===7)return Object.assign({},t,{st:'fail',cat:'网络超时',note:'上传中断 · 已自动重排至次日'});
+        return t;})}));
+      this.toast('检测到任务单 xlsx 变更 · 已对账 8 行，7 成功 1 失败');
+    }else{
+      this.patchSheet(sid,x=>({tasks:x.tasks.map(t=>{
+        if(t.st==='wait'&&t.id.endsWith('9'))return Object.assign({},t,{st:'sus'});
+        if(t.st==='wait')return Object.assign({},t,{st:'pub'});
+        return t;})}));
+      this.toast('已对账剩余行 · 1 个任务超时无回执，标记疑似已发');
+      setTimeout(()=>this.maybeClose(sid),200);
+    }
+  }
+  palItems(){
+    const q=(this.state.pal.q||'').toLowerCase();
+    const P=[['assets','资产库','9'],['publish','发布计划','0'],['generate','图片生成','1'],['tasks','任务队列','2'],['review','图片验收','3'],['library','作品库','4'],['prompts','提示词库','5'],['refs','参考图库','6'],['trash','废纸篓','7'],['settings','设置','8']].map(p=>({cat:'跳转',t:p[1],hasK:true,k:(this.props.platform==='win'?'Ctrl':'⌘')+p[2],fn:()=>{if(p[0]==='assets')this.setState({route:'assets',sku:null});else this.go(p[0]);}}));
+    const A=[{cat:'操作',t:'生成明日任务单',fn:()=>{this.setState({route:'publish',pbTab:'sh',wb:null});this.toast('明日任务单已存在（草稿 · 12 行）');}},{cat:'操作',t:'打开明日任务单工作台',fn:()=>this.setState({route:'publish',pbTab:'sh',wb:'0714'})},{cat:'操作',t:'核对疑似已发',fn:()=>this.setState({route:'publish',pbTab:'sh',wb:'0713'})}];
+    return P.concat(A).filter(c=>!q||c.t.toLowerCase().includes(q));
+  }
+  shellVals(){
+    const s=this.state;const plat=this.props.platform??'mac';const mac=plat!=='win';
+    const dens=(this.props.density??'standard')==='compact'?'cmp':'';
+    const N=r=>({cls:s.route===r?'on':'',go:()=>{if(r==='assets')this.setState({route:'assets',sku:null});else this.go(r);}});
+    const warnN=s.skus.filter(x=>this.warnOf(x)).length;
+    const astB=s.inbox.claim.length+s.inbox.fail.length+warnN;
+    const draftN=s.sheets.filter(x=>x.st==='draft').length;
+    const susN=s.sheets.reduce((a,x)=>a+x.tasks.filter(t=>t.st==='sus').length,0);
+    return {shellCls:(mac?'mac':'win')+' '+dens,isMac:mac,isWin:!mac,mod:mac?'⌘':'Ctrl',
+    navGen:N('generate'),navTasks:N('tasks'),navRev:N('review'),navLib:N('library'),navPrm:N('prompts'),navRef:N('refs'),navTrash:N('trash'),navSet:N('settings'),
+    navAst:Object.assign(N('assets'),{cls:s.route==='assets'?'on':'',hasB:astB>0,bdg:String(astB)}),
+    navPub:Object.assign(N('publish'),{hasB:(draftN+susN)>0,bdg:String(draftN+susN)}),
+    palOpenFn:()=>this.setState({pal:{open:true,q:''}}),stop:e=>e.stopPropagation(),mClose:()=>this.closeM()};
+  }
+  phVals(){
+    const s=this.state;
+    const M={generate:'图片生成',tasks:'任务队列',review:'图片验收',library:'作品库',prompts:'提示词库',refs:'参考图库',trash:'废纸篓'};
+    return {ph_is:!!M[s.route],ph_title:M[s.route]||''};
+  }
+  astVals(){
+    const s=this.state;const onList=s.route==='assets'&&!s.sku;
+    const warnN=s.skus.filter(x=>this.warnOf(x)).length;
+    const F={all:x=>x.on,hot:x=>x.on&&x.tier==='hot',warm:x=>x.on&&x.tier==='warm',cold:x=>x.on&&x.tier==='cold',warn:x=>!!this.warnOf(x),off:x=>!x.on}[s.astFlt];
+    const q=s.astQ.toLowerCase();
+    const rows=s.skus.filter(F).filter(x=>!q||x.code.toLowerCase().includes(q)||x.name.includes(s.astQ)).map(x=>{
+      const w=this.warnOf(x);const tb=this.tierBdg(x.tier);const mat=x.packs.filter(p=>p.life==='ok').length;
+      const wm=mat<this.state.cfg.wm&&x.tier!=='gen';const wt=x.titles.length<this.state.cfg.wt&&x.tier!=='gen';const wb=x.needBody&&x.bodies.length<2;
+      return {code:x.code,name:x.name,prod:x.prod,tier:tb.label,tierCls:tb.cls,mat:String(mat),tit:String(x.titles.length),bod:x.needBody?String(x.bodies.length):'—',
+      matCls:wm?'pwarn':'',titCls:wt?'pwarn':'',bodCls:wb?'pwarn':'',warnShow:!!w&&x.on,warnTxt:w||'',offShow:!x.on,dim:x.on?'':'droff',last:x.last,
+      open:()=>this.setState({sku:x.code,dtTab:'pk'})};});
+    const seg=(k)=>s.astFlt===k?'on':'';
+    return {a_is:onList,a_cap:s.skus.filter(x=>x.on).length+' 个在售 SKU · '+warnN+' 预警 · '+s.skus.filter(x=>!x.on).length+' 停发',
+    a_segSkuCls:s.astSeg==='sku'?'on':'',a_segInbCls:s.astSeg==='inb'?'on':'',a_goSku:()=>this.setState({astSeg:'sku'}),a_goInb:()=>this.setState({astSeg:'inb'}),
+    a_inbHas:(s.inbox.claim.length+s.inbox.fail.length)>0,a_inbN:String(s.inbox.claim.length+s.inbox.fail.length),
+    a_isSku:s.astSeg==='sku',a_isInb:s.astSeg==='inb',
+    a_fAll:seg('all'),a_fHot:seg('hot'),a_fWarm:seg('warm'),a_fCold:seg('cold'),a_fWarn:seg('warn'),a_fOff:seg('off'),a_warnN:String(warnN),
+    a_goAll:()=>this.setState({astFlt:'all'}),a_goHot:()=>this.setState({astFlt:'hot'}),a_goWarm:()=>this.setState({astFlt:'warm'}),a_goCold:()=>this.setState({astFlt:'cold'}),a_goWarn:()=>this.setState({astFlt:'warn'}),a_goOff:()=>this.setState({astFlt:'off'}),
+    a_q:s.astQ,a_onQ:e=>this.setState({astQ:e.target.value}),
+    a_vT:s.astView==='table'?'on':'',a_vC:s.astView==='cards'?'on':'',a_setT:()=>this.setState({astView:'table'}),a_setC:()=>this.setState({astView:'cards'}),
+    a_isTable:s.astView==='table',a_isCards:s.astView==='cards',a_rows:rows,
+    a_newFn:()=>this.openM({t:'sku',code:null,draft:{name:'',tier:'warm',tags:['泳装','度假']}}),
+    ib_claims:s.inbox.claim.map(c=>({name:c.name,kind:c.kind,reason:c.reason,claim:()=>this.openM({t:'claim',item:c.id,file:c.name}),drop:()=>{this.setState(st=>({inbox:Object.assign({},st.inbox,{claim:st.inbox.claim.filter(x=>x.id!==c.id)})}));this.toast('已丢弃 · 原文件保留在收件箱/已收录/丢弃/');}})),
+    ib_fails:s.inbox.fail.map(c=>({name:c.name,reason:c.reason,view:()=>this.toast('模拟 · 已用系统默认应用打开原文件'),retry:()=>{this.setState(st=>({inbox:Object.assign({},st.inbox,{fail:st.inbox.fail.filter(x=>x.id!==c.id)})}));this.toast('重试解析成功 · 已收录 3 条正文到 SF-YD-201');}})),
+    ib_claimN:String(s.inbox.claim.length),ib_failN:String(s.inbox.fail.length),ib_claimEmpty:s.inbox.claim.length===0,ib_failEmpty:s.inbox.fail.length===0};
+  }
+  dtVals(){
+    const s=this.state;const sku=s.sku?this.skuOf(s.sku):null;
+    if(!sku||s.route!=='assets')return {d_is:false};
+    const tb=this.tierBdg(sku.tier);const w=this.warnOf(sku);
+    const packs=sku.packs.map((p,i)=>{const lb=this.lifeBdg(p.life);
+      return {id:sku.code+'/'+p.id,bg:this.bg((sku.hue+i*37)%360),tag:p.t==='v'?'▶ '+p.dur:p.n+' 图',life:lb.label,lifeCls:lb.cls,dim:p.life==='ret'?'dim':'',
+      sub:p.life==='cool'?'回可用 '+p.back:(p.life==='new'?'待完善 · 未参与排期':'发过 '+p.used+' 次'),
+      open:()=>this.openM({t:'pack',code:sku.code,pid:p.id})};});
+    const tx=(list,pool)=>list.map((x,i)=>({t:x.t,plat:x.plat,n:String(x.n),src:x.src||'收件箱',off:()=>this.toast('已停用该条 · 不再参与套装选取')}));
+    return {d_is:true,d_back:()=>this.setState({sku:null}),d_code:sku.code,d_name:sku.name,d_prod:sku.prod,d_tier:tb.label,d_tierCls:tb.cls,
+    d_offShow:!sku.on,d_warnShow:!!w&&sku.on,d_warnTxt:(w||'')+' · 低于阈值',d_last:sku.last,
+    d_tags:sku.tags.map(t=>({t})),
+    d_togLabel:sku.on?'停发':'恢复在售',d_togFn:()=>{this.patchSku(sku.code,x=>({on:!x.on}));this.toast(sku.on?sku.code+' 已停发 · 资产保留，不再参与排期':sku.code+' 已恢复在售');},
+    d_editFn:()=>this.openM({t:'sku',code:sku.code,draft:{name:sku.name,tier:sku.tier,tags:[...sku.tags]}}),
+    d_tabPk:s.dtTab==='pk'?'on':'',d_tabTi:s.dtTab==='ti'?'on':'',d_tabBo:s.dtTab==='bo'?'on':'',d_tabHi:s.dtTab==='hi'?'on':'',
+    d_goPk:()=>this.setState({dtTab:'pk'}),d_goTi:()=>this.setState({dtTab:'ti'}),d_goBo:()=>this.setState({dtTab:'bo'}),d_goHi:()=>this.setState({dtTab:'hi'}),
+    d_pkN:String(sku.packs.length),d_tiN:String(sku.titles.length),d_boN:String(sku.bodies.length),
+    d_isPk:s.dtTab==='pk',d_isTi:s.dtTab==='ti',d_isBo:s.dtTab==='bo',d_isHi:s.dtTab==='hi',d_isTx:s.dtTab==='ti'||s.dtTab==='bo',
+    d_packs:packs,d_pkEmpty:sku.packs.length===0,d_titles:tx(sku.titles),d_bodies:tx(sku.bodies),d_boEmpty:sku.bodies.length===0,
+    d_hist:sku.hist.map(h=>({d:h.d,plat:h.plat,acct:h.acct,tid:h.tid,pack:h.pack,link:()=>this.toast('模拟 · 已在浏览器打开发布链接')})),d_hiEmpty:sku.hist.length===0,
+    d_packFn:()=>this.toast('模拟 · 从作品库选择已验收图片，打包为图集型素材包'),d_addTxFn:()=>this.toast('模拟 · 打开手动新增条目表单')};
+  }
+  pbVals(){
+    const s=this.state;const on=s.route==='publish';
+    const today=this.sheet('0713');
+    const cnt=st=>today.tasks.filter(t=>t.st===st).length;
+    const susAll=s.sheets.reduce((a,x)=>a+x.tasks.filter(t=>t.st==='sus').length,0);
+    const draftN=s.sheets.filter(x=>x.st==='draft').length;
+    const plats=['抖音','小红书','快手'].map(p=>{const T=today.tasks.filter(t=>t.plat===p);const ok=T.filter(t=>t.st==='pub').length;
+      return {name:p,pct:T.length?Math.round(ok/T.length*100):0,txt:ok+' / '+T.length};});
+    const accts=s.accounts.map(a=>{const T=today.tasks.filter(t=>t.acct===a.name);const ok=T.filter(t=>t.st==='pub').length;
+      const st=!a.on?{cls:'b-gray',label:'停用'}:(a.fused?{cls:'b-red',label:'当日熔断'}:{cls:'b-green',label:'正常'});
+      return {name:a.name,plat:a.plat,use:ok+' / '+T.length+' 完成',cls:st.cls,label:st.label};});
+    const sl_rows=s.sheets.map(sh=>{const b=this.shStBdg(sh.st);const n=sh.tasks.length;
+      const chips=[];
+      if(sh.st==='closed'&&sh.report)chips.push({cls:'b-green',t:'成功率 '+sh.report.rate});
+      else if(n){const p=sh.tasks.filter(t=>t.st==='pub').length,f=sh.tasks.filter(t=>t.st==='fail').length,su=sh.tasks.filter(t=>t.st==='sus').length;
+        if(p)chips.push({cls:'b-green',t:'发布 '+p});if(f)chips.push({cls:'b-red',t:'失败 '+f});if(su)chips.push({cls:'b-amber',t:'待核对 '+su});}
+      if(sh.lack.length)chips.push({cls:'b-amber',t:'缺料 '+sh.lack.length});
+      return {date:sh.date,cap:sh.cap,st:b.label,stCls:b.cls,sub:n?(n+' 行 · '+Object.keys(sh.sets).length+' 个 SKU 套装'):'已归档 · 明细已入使用台账',chips,
+      open:()=>{if(sh.st==='closed'&&!sh.tasks.length)this.openM({t:'report',sid:sh.id});else this.setState({wb:sh.id});}};});
+    return Object.assign({p_is:on,p_isKb:s.pbTab==='kb',p_isSh:s.pbTab==='sh',p_isSt:s.pbTab==='st',
+    p_tabKb:s.pbTab==='kb'?'on':'',p_tabSh:s.pbTab==='sh'?'on':'',p_tabSt:s.pbTab==='st'?'on':'',
+    p_goKb:()=>this.setState({pbTab:'kb'}),p_goSh:()=>this.setState({pbTab:'sh'}),p_goSt:()=>this.setState({pbTab:'st'}),
+    p_shBdgShow:(draftN+susAll)>0,p_shBdg:String(draftN+susAll),
+    p_cap:'2026年7月13日 · 执行由外部 RPA 承担',
+    kb_plan:String(today.tasks.length),kb_pub:String(cnt('pub')),kb_fail:String(cnt('fail')),kb_sus:String(cnt('sus')),
+    kb_hasSus:cnt('sus')>0,kb_susTxt:cnt('sus')+' 个任务超时无回执（抖音 · 潮流小铺）',
+    kb_susGo:()=>this.setState({pbTab:'sh',wb:'0713'}),
+    kb_plats:plats,kb_accts:accts,kb_acctCap:s.accounts.filter(a=>a.on).length+' 启用 / '+s.accounts.length,
+    kb_repFn:()=>this.openM({t:'report',sid:'0712'}),
+    sl_rows,sl_genTime:s.cfg.gen,sl_genFn:()=>this.toast('明日任务单已存在（草稿 · 12 行）· 每晚 '+s.cfg.gen+' 自动重新生成'),
+    w_isList:!s.wb},this.wbVals(),this.sgVals());
+  }
+  wbVals(){
+    const s=this.state;const sh=s.wb?this.sheet(s.wb):null;
+    if(!sh)return {w_is:false};
+    const b=this.shStBdg(sh.st);const isDraft=sh.st==='draft';
+    const mkRow=t=>{const sb=this.stBdg(t.st);
+      let extra='',exCls='t3',hasCat=false,cat='';
+      if(t.st==='wait')extra=sh.st==='draft'?'草稿 · 待确认':'排队待执行';
+      if(t.st==='pub')extra='回写 '+t.time+' 后 4 分钟';
+      if(t.st==='fail'){hasCat=true;cat=t.cat;extra=t.note;exCls='terr';}
+      if(t.st==='sus')extra='超时无回执 · 禁止重发';
+      if(t.st==='sus')exCls='';
+      return {id:t.id,time:t.time,plat:t.plat,acct:t.acct,type:t.type,st:sb.label,stCls:sb.cls,extra,exCls,hasCat,cat,
+      hasLink:t.st==='pub',linkFn:()=>this.toast('模拟 · 已打开发布链接'),shot:t.id+'.png',
+      canVerify:t.st==='sus',verifyFn:()=>this.openM({t:'verify',sid:sh.id,tid:t.id}),
+      timeFn:()=>this.openM({t:'time',sid:sh.id,tid:t.id}),
+      delFn:()=>this.openM({t:'confirm',title:'删除任务行 '+t.id+'？',desc:'仅从本任务单草稿移除；套装与素材不受影响。',label:'删除',cls:'dng',yes:()=>{this.patchSheet(sh.id,x=>({tasks:x.tasks.filter(y=>y.id!==t.id)}));this.closeM();this.toast(t.id+' 已删除');}})};};
+    const grps=Object.keys(sh.sets).map(code=>{const sku=this.skuOf(code);const set=sh.sets[code];const rows=sh.tasks.filter(t=>t.sku===code);
+      const pk=sku.packs.find(p=>p.id===set.pack)||sku.packs[0];
+      return {code,name:sku.name,bg:this.bg(sku.hue),pack:set.pack+' · '+(pk&&pk.t==='v'?'video '+pk.dur:'图集 '+(pk?pk.n:0)+' 张'),
+      title:(sku.titles[set.ti]||sku.titles[0]||{t:'—'}).t,hasBody:set.bi!=null,n:String(rows.length),
+      swap:()=>this.openM({t:'swap',sid:sh.id,code,pack:set.pack,ti:set.ti,bi:set.bi}),
+      rows:rows.map(mkRow)};});
+    const flat=[...sh.tasks].sort((x,y)=>x.time<y.time?-1:1).map(t=>{const r=mkRow(t);const sku=this.skuOf(t.sku);r.sku=sku?sku.name:t.sku;r.bg=this.bg(sku?sku.hue:0);return r;});
+    const susN=sh.tasks.filter(t=>t.st==='sus').length;
+    const pubN=sh.tasks.filter(t=>t.st==='pub').length;
+    const doneN=sh.tasks.filter(t=>t.st!=='wait').length;
+    return {w_is:true,w_isList:false,w_date:sh.date,w_cap:sh.cap,w_st:b.label,w_stCls:b.cls,
+    w_back:()=>this.setState({wb:null}),
+    w_vSku:s.wbView==='sku'?'on':'',w_vTl:s.wbView==='tl'?'on':'',w_setSku:()=>this.setState({wbView:'sku'}),w_setTl:()=>this.setState({wbView:'tl'}),
+    w_isSku:s.wbView==='sku',w_isTl:s.wbView==='tl',w_isDraft:isDraft,
+    w_addFn:()=>this.openM({t:'add',sid:sh.id,sku:null,acct:null}),
+    w_lackShow:isDraft&&sh.lack.length>0,w_lackTxt:sh.lack.map(l=>l.sku+'（'+l.why+'）').join('；'),w_lackN:String(sh.lack.length),
+    w_lackGo:()=>this.setState({route:'assets',sku:null,astSeg:'sku',astFlt:'warn'}),
+    w_susShow:sh.st==='recv'&&susN>0,w_susTxt:susN+' 个任务疑似已发',
+    w_grps:grps,w_flat:flat,
+    w_sum:sh.tasks.length+' 行 · '+Object.keys(sh.sets).length+' 个 SKU · 同 SKU 当日统一套装',
+    w_actConfirm:sh.st==='draft',w_confirmFn:()=>{this.patchSheet(sh.id,()=>({st:'conf'}));this.toast('任务单已确认锁定 · 引用的素材包禁止改名/删除/退役');},
+    w_actReopen:sh.st==='conf',w_reopenFn:()=>{this.patchSheet(sh.id,()=>({st:'draft'}));this.toast('已重新打开为草稿');},
+    w_actExport:sh.st==='conf',w_exportFn:()=>this.openM({t:'export',sid:sh.id}),
+    w_actSim:sh.st==='exp',w_simFn:()=>this.simRecv(sh.id),w_simLabel:sh.st==='exp'?'模拟执行器回写':'继续对账剩余行',
+    w_actRecv:sh.st==='recv',w_recvTxt:'回收中 · 已回执 '+doneN+' / '+sh.tasks.length+'（成功 '+pubN+'）',w_manualFn:()=>this.toast('模拟 · 手动选择 xlsx 导入回执，按任务 ID 逐行对账'),
+    w_hasSim:sh.tasks.some(t=>t.st==='wait'),
+    w_actClosed:sh.st==='closed',w_repFn:()=>this.openM({t:'report',sid:sh.id})};
+  }
+  sgVals(){
+    const s=this.state;const sg=s.sg;
+    const stp=(k,min,max)=>({dec:()=>this.setState(st=>({sg:Object.assign({},st.sg,{[k]:Math.max(min,st.sg[k]-1)})})),inc:()=>this.setState(st=>({sg:Object.assign({},st.sg,{[k]:Math.min(max,st.sg[k]+1)})}))});
+    const nOf=t=>s.skus.filter(x=>x.on&&x.tier===t).length;
+    return {sg_hot:String(sg.hot),sg_warm:String(sg.warm),sg_cold:String(sg.cold),
+    sg_hotDec:stp('hot',1,3).dec,sg_hotInc:stp('hot',1,3).inc,sg_warmDec:stp('warm',1,7).dec,sg_warmInc:stp('warm',1,7).inc,sg_coldDec:stp('cold',1,10).dec,sg_coldInc:stp('cold',1,10).inc,
+    sg_hotN:String(nOf('hot')),sg_warmN:String(nOf('warm')),sg_coldN:String(nOf('cold')),
+    sg_plats:Object.keys(sg.plats).map(p=>({name:p,sub:{'抖音':'短视频为主 · 支持图文','小红书':'图文为主 · 支持视频','快手':'短视频','视频号':'短视频 · 暂未启用'}[p],acctN:String(s.accounts.filter(a=>a.plat===p).length),swCls:sg.plats[p]?'on':'',togg:()=>{this.setState(st=>({sg:Object.assign({},st.sg,{plats:Object.assign({},st.sg.plats,{[p]:!st.sg.plats[p]})})}));}})),
+    sg_accts:s.accounts.map(a=>({plat:a.plat,name:a.name,cap:String(a.cap),slots:a.slots,swCls:a.on?'on':'',fused:a.fused&&a.on,
+      stCls:!a.on?'b-gray':(a.fused?'b-red':'b-green'),stLabel:!a.on?'停用':(a.fused?'当日熔断':'正常'),
+      togg:()=>{this.setState(st=>({accounts:st.accounts.map(x=>x.id===a.id?Object.assign({},x,{on:!x.on}):x)}));},
+      dec:()=>this.setState(st=>({accounts:st.accounts.map(x=>x.id===a.id?Object.assign({},x,{cap:Math.max(1,x.cap-1)}):x)})),
+      inc:()=>this.setState(st=>({accounts:st.accounts.map(x=>x.id===a.id?Object.assign({},x,{cap:Math.min(9,x.cap+1)}):x)}))})),
+    sg_acctCap:s.accounts.filter(a=>a.on).length+' 启用 / '+s.accounts.length,
+    sg_slots:sg.slots.map((t,i)=>({t,rm:()=>{this.setState(st=>({sg:Object.assign({},st.sg,{slots:st.sg.slots.filter((_,j)=>j!==i)})}));this.toast('已移除时段 '+t);}})),
+    sg_addSlot:()=>{this.setState(st=>({sg:Object.assign({},st.sg,{slots:[...st.sg.slots,'14:00–15:30']})}));this.toast('已添加时段 14:00–15:30（模拟）');},
+    sg_gap:String(s.cfg.gap)};
+  }
+  seVals(){
+    const s=this.state;const c=s.cfg;
+    const cf=(k,min,max)=>({dec:()=>this.setState(st=>({cfg:Object.assign({},st.cfg,{[k]:Math.max(min,st.cfg[k]-1)})})),inc:()=>this.setState(st=>({cfg:Object.assign({},st.cfg,{[k]:Math.min(max,st.cfg[k]+1)})}))});
+    const g=(k,mi,ma)=>{const o=cf(k,mi,ma);return o;};
+    const dd=g('dedup',7,90),to=g('to',1,24),wm=g('wm',1,10),wt=g('wt',1,10),ac=g('ac',1,9),gp=g('gap',15,240);
+    return {s_is:s.route==='settings',
+    se_keys:s.keys.map(k=>({id:k.id,alias:k.alias,url:k.url,model:k.model,cap:String(k.cap),rate:k.rate,dotCls:k.on?(k.hl==='lim'?'kd-lim':'kd-ok'):'kd-off',
+      stLabel:k.on?(k.hl==='lim'?'限流退避中':'正常'):'已停用',stCls:k.on?(k.hl==='lim'?'b-amber':'b-green'):'b-gray',swCls:k.on?'on':'',
+      togg:()=>this.setState(st=>({keys:st.keys.map(x=>x.id===k.id?Object.assign({},x,{on:!x.on}):x)})),
+      dec:()=>this.setState(st=>({keys:st.keys.map(x=>x.id===k.id?Object.assign({},x,{cap:Math.max(1,x.cap-1)}):x)})),
+      inc:()=>this.setState(st=>({keys:st.keys.map(x=>x.id===k.id?Object.assign({},x,{cap:Math.min(10,x.cap+1)}):x)}))})),
+    se_keySum:s.keys.length+' 个 Key · '+s.keys.filter(k=>k.on).length+' 启用',se_addKey:()=>this.toast('模拟 · 打开添加 Key 表单'),
+    se_root:c.root,se_rootFn:()=>this.toast('模拟 · 打开系统目录选择器'),
+    se_exroot:c.exroot,se_sameFn:()=>{this.setState(st=>({cfg:Object.assign({},st.cfg,{exroot:st.cfg.root})}));this.toast('执行机根路径已设为同本机（拓扑 B · 同一台 Windows）');},
+    se_pathEx:c.exroot+'\\任务包\\20260714\\素材\\SF-YD-201',
+    se_dedup:String(c.dedup),se_dedupDec:dd.dec,se_dedupInc:dd.inc,
+    se_to:String(c.to),se_toDec:to.dec,se_toInc:to.inc,
+    se_gen:c.gen,se_genFn:()=>this.toast('模拟 · 打开时间选择器'),
+    se_wm:String(c.wm),se_wmDec:wm.dec,se_wmInc:wm.inc,se_wt:String(c.wt),se_wtDec:wt.dec,se_wtInc:wt.inc,
+    se_ac:String(c.ac),se_acDec:ac.dec,se_acInc:ac.inc,se_gap:String(c.gap),se_gapDec:gp.dec,se_gapInc:gp.inc,
+    se_dirFn:()=>this.toast('模拟 · 打开系统目录选择器'),se_updFn:()=>this.toast('已是最新版本 v1.2.0')};
+  }
+  mdlVals(){
+    const s=this.state;const m=s.modal||{};const T=m.t;
+    const v={m_claim:T==='claim',m_sku:T==='sku',m_pack:T==='pack',m_swap:T==='swap',m_time:T==='time',m_add:T==='add',m_verify:T==='verify',m_export:T==='export',m_report:T==='report',m_confirm:T==='confirm'};
+    if(T==='claim'){v.mc_file=m.file;v.mc_rows=s.skus.filter(x=>x.on).slice(0,10).map(x=>{const tb=this.tierBdg(x.tier);return {code:x.code,name:x.name,tier:tb.label,tierCls:tb.cls,pick:()=>{this.setState(st=>({inbox:Object.assign({},st.inbox,{claim:st.inbox.claim.filter(i=>i.id!==m.item)})}));this.closeM();this.toast('已指认到 '+x.code+' · 内容已入对应池，原文件移入已收录归档');}};});}
+    if(T==='sku'){const isNew=!m.code;const d=m.draft;
+      v.me_title=isNew?'新建 SKU 档案':'编辑档案 · '+m.code;v.me_code=m.code||'';v.me_codeLock=!isNew;v.me_name=d.name;
+      v.me_onName=e=>{d.name=e.target.value;};
+      v.me_tHot=d.tier==='hot'?'on':'';v.me_tWarm=d.tier==='warm'?'on':'';v.me_tCold=d.tier==='cold'?'on':'';
+      v.me_setHot=()=>this.openM(Object.assign({},m,{draft:Object.assign({},d,{tier:'hot'})}));
+      v.me_setWarm=()=>this.openM(Object.assign({},m,{draft:Object.assign({},d,{tier:'warm'})}));
+      v.me_setCold=()=>this.openM(Object.assign({},m,{draft:Object.assign({},d,{tier:'cold'})}));
+      v.me_tags=d.tags.map((t,i)=>({t,rm:()=>this.openM(Object.assign({},m,{draft:Object.assign({},d,{tags:d.tags.filter((_,j)=>j!==i)})}))}));
+      v.me_addTag=()=>this.openM(Object.assign({},m,{draft:Object.assign({},d,{tags:[...d.tags,'新标签'+(d.tags.length+1)]})}));
+      v.me_save=()=>{if(isNew){this.setState(st=>({skus:[{code:'SF-YD-2'+(20+st.skus.length),name:d.name||'未命名款式',prod:(d.name||'未命名款式')+' 夏季新款',tier:d.tier,tags:d.tags,on:true,hue:200,last:'—',needBody:false,packs:[],titles:[],bodies:[],hist:[]},...st.skus]}));this.toast('已新建 SKU · 三池为空，等待收件箱补料');}else{this.patchSku(m.code,()=>({name:d.name,tier:d.tier,tags:d.tags}));this.toast('档案已保存 · 分层调整立即影响后续排期');}this.closeM();};}
+    if(T==='pack'){const sku=this.skuOf(m.code);const p=sku.packs.find(x=>x.id===m.pid);const lb=this.lifeBdg(p.life);
+      const locked=this.state.sheets.some(sh=>['draft','conf','exp','recv'].includes(sh.st)&&sh.sets[m.code]&&sh.sets[m.code].pack===p.id);
+      const files=p.t==='v'?[{n:'video.mp4 · '+p.dur},{n:'cover.jpg（可选）'}]:Array.from({length:Math.min(p.n||3,4)},(_,i)=>({n:'img_0'+(i+1)+'.jpg'})).concat(p.n>4?[{n:'… img_0'+p.n+'.jpg'}]:[]);
+      Object.assign(v,{mp_id:m.code+' / '+p.id,mp_bg:this.bg(sku.hue+17),mp_tag:p.t==='v'?'视频型 · '+p.dur:'图集型 · '+p.n+' 张',mp_life:lb.label,mp_lifeCls:lb.cls,mp_locked:locked,mp_files:files,mp_used:String(p.used),
+      mp_lifeDesc:{new:'新入库：待完善，未参与排期。补齐封面/确认可用后转为可用。',ok:'可用：参与套装选取。全部目标平台均进入查重窗口后转已用尽。',cool:'已用尽 · 冷却中：'+(p.back?'查重窗口 30 天，'+p.back+' 自动回可用。':''),ret:'退役：人工终态，不再排期，文件保留可追溯。'}[p.life],
+      mp_canRetire:!locked&&p.life!=='ret',mp_retire:()=>{this.patchSku(m.code,x=>({packs:x.packs.map(y=>y.id===p.id?Object.assign({},y,{life:'ret'}):y)}));this.closeM();this.toast(p.id+' 已退役 · 不再参与排期');}});}
+    if(T==='swap'){const sku=this.skuOf(m.code);const sh=this.sheet(m.sid);
+      v.ms_code=m.code;v.ms_name=sku.name;v.ms_n=String(sh.tasks.filter(t=>t.sku===m.code).length);
+      v.ms_packs=sku.packs.map((p,i)=>{const lb=this.lifeBdg(p.life);const ok=p.life==='ok'||p.life==='new';
+        return {bg:this.bg((sku.hue+i*37)%360),tag:p.t==='v'?'▶ '+p.dur:p.n+' 图',life:lb.label,lifeCls:lb.cls,sub:p.life==='cool'?'回可用 '+p.back:p.id,
+        cls:(m.pack===p.id?'sel ':'')+(ok?'':'dis'),pick:()=>{if(ok)this.openM(Object.assign({},m,{pack:p.id}));}};});
+      v.ms_titles=sku.titles.map((t,i)=>({t:t.t,plat:t.plat,n:String(t.n),ck:m.ti===i?'on':'',pick:()=>this.openM(Object.assign({},m,{ti:i}))}));
+      v.ms_hasBody=m.bi!=null;
+      v.ms_bodies=sku.bodies.map((t,i)=>({t:t.t,plat:t.plat,n:String(t.n),ck:m.bi===i?'on':'',pick:()=>this.openM(Object.assign({},m,{bi:i}))}));
+      v.ms_ok=()=>{this.patchSheet(m.sid,x=>({sets:Object.assign({},x.sets,{[m.code]:{pack:m.pack,ti:m.ti,bi:m.bi}})}));this.closeM();this.toast(m.code+' 当日套装已更换 · '+v.ms_n+' 个任务行同步更新');};}
+    if(T==='time'){const sh=this.sheet(m.sid);const t=sh.tasks.find(x=>x.id===m.tid);
+      v.mt_id=m.tid;
+      v.mt_opts=['11:50','12:10','12:40','18:20','19:00','21:15','22:00','立即发布'].map(o=>({t:o,cls:t.time===o?'pri':'',pick:()=>{this.patchTask(m.sid,m.tid,()=>({time:o==='立即发布'?'—':o}));this.closeM();this.toast(m.tid+' 发布时间已改为 '+o);}}));}
+    if(T==='add'){const sh=this.sheet(m.sid);
+      v.ma_skus=Object.keys(sh.sets).map(code=>({code,name:this.skuOf(code).name,ck:m.sku===code?'on':'',pick:()=>this.openM(Object.assign({},m,{sku:code}))}));
+      v.ma_accts=s.accounts.filter(a=>a.on).map(a=>{const used=sh.tasks.filter(t=>t.acct===a.name).length;
+        return {plat:a.plat,name:a.name,use:used+' / '+a.cap,ck:m.acct===a.id?'on':'',pick:()=>this.openM(Object.assign({},m,{acct:a.id}))};});
+      v.ma_blocked=!m.sku||!m.acct;
+      v.ma_ok=()=>{const a=s.accounts.find(x=>x.id===m.acct);const set=sh.sets[m.sku];const sku=this.skuOf(m.sku);
+        const n=sh.tasks.length+1;const id='T26'+sh.id+'-'+String(n).padStart(3,'0');
+        this.patchSheet(m.sid,x=>({tasks:[...x.tasks,{id,time:'19:40',plat:a.plat,acct:a.name,sku:m.sku,type:(set.bi!=null&&a.plat==='小红书')?'图文':'视频',st:'wait'}]}));
+        this.closeM();this.toast('已增补 '+id+' · '+sku.name+' × '+a.name);};}
+    if(T==='verify'){const sh=this.sheet(m.sid);const t=sh.tasks.find(x=>x.id===m.tid);const sku=this.skuOf(t.sku);
+      Object.assign(v,{mv_id:t.id,mv_to:String(s.cfg.to),mv_sku:t.sku,mv_skuName:sku.name,mv_plat:t.plat,mv_acct:t.acct,mv_time:t.time,
+      mv_pub:()=>this.verify(m.sid,m.tid,true),mv_fail:()=>this.verify(m.sid,m.tid,false)});}
+    if(T==='export'){const sh=this.sheet(m.sid);const codes=Object.keys(sh.sets);
+      const tree='任务包/2026'+sh.id+'/\n├── 任务单.xlsx          ← '+sh.tasks.length+' 行 · 22 列 · 执行器就地回写\n├── 执行说明.md          ← 执行器操作约定，自动生成\n├── READY.txt            ← 全部文件落盘后最后写入\n├── 素材/\n'+codes.map((c,i)=>{const set=sh.sets[c];const sku=this.skuOf(c);const p=sku.packs.find(x=>x.id===set.pack);const f=p&&p.t==='v'?'video.mp4 + cover.jpg':'img_01…0'+(p?p.n:4)+'.jpg';return (i===codes.length-1?'│   └── ':'│   ├── ')+c+'/  '+f+(set.bi!=null?' + body.txt':'');}).join('\n')+'\n└── 回执截图/            ← 执行器写入，按任务 ID 命名';
+      Object.assign(v,{mx_dir:'2026'+sh.id,mx_tree:tree,mx_rows:String(sh.tasks.length),mx_skus:String(codes.length),
+      mx_path:s.cfg.exroot+'\\任务包\\2026'+sh.id+'\\素材\\'+codes[0],
+      mx_ok:()=>{this.patchSheet(m.sid,()=>({st:'exp'}));this.closeM();this.toast('任务包已导出 · READY.txt 已写入，xlsx 写方移交执行器');}});}
+    if(T==='report'){const sh=this.sheet(m.sid);const r=sh.report||{plan:0,ok:0,fail:0,rate:'—',fails:[],lack:'无',tips:'—'};
+      Object.assign(v,{mr_date:sh.date,mr_plan:String(r.plan),mr_ok:String(r.ok),mr_fail:String(r.fail),mr_rate:r.rate,mr_fails:r.fails,mr_lack:r.lack,mr_tips:r.tips});}
+    if(T==='confirm'){v.mf_title=m.title;v.mf_desc=m.desc;v.mf_label=m.label||'确认';v.mf_cls=m.cls==='dng'?'dng':'pri';v.mf_yes=()=>{m.yes&&m.yes();};}
+    return v;
+  }
+  palVals(){
+    const s=this.state;const items=this.palItems().map((c,i)=>({cat:c.cat,t:c.t,hasK:!!c.hasK,k:c.k||'',cls:i===0?'on':'',run:()=>{this.setState({pal:{open:false,q:''}});c.fn();}}));
+    return {pal_open:s.pal.open,pal_q:s.pal.q,pal_onQ:e=>this.setState({pal:{open:true,q:e.target.value}}),pal_close:()=>this.setState({pal:{open:false,q:''}}),pal_items:items};
+  }
+  renderVals(){
+    return Object.assign({},this.shellVals(),this.phVals(),this.astVals(),this.dtVals(),this.pbVals(),this.seVals(),this.mdlVals(),this.palVals(),{ts_list:this.state.toasts});
+  }
+}
+</script>
+</body>
+</html>

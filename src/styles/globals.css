@@ -1829,11 +1829,13 @@ a:hover {
   padding: 14px 16px;
   overflow: auto;
   min-height: 0;
+  overscroll-behavior: contain;
 }
 .mlist {
   padding: 6px 8px;
   overflow: auto;
   min-height: 0;
+  overscroll-behavior: contain;
 }
 .mfoot {
   display: flex;
@@ -2535,6 +2537,9 @@ a:hover {
   padding: 5px;
   z-index: 15;
   animation: slup 0.15s ease;
+  max-height: min(320px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .apopi {
   display: flex;

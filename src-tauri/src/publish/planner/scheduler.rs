@@ -228,8 +228,82 @@ mod tests {
             })
         );
         assert_eq!(parse_slot("13:00-11:00"), None); // 逆序
+        assert_eq!(parse_slot("12:00-12:00"), None); // 零长（start == end 非法）
         assert_eq!(parse_slot("25:00-26:00"), None); // 越界
         assert_eq!(parse_slot("abc"), None);
+    }
+
+    // 容量充足时全部行分到时段内、两两 ≥ gap、点数 = 行数（约束 available_points 网格生成）。
+    #[test]
+    fn assigns_times_within_slots_when_capacity_ample() {
+        let due: Vec<DueSet> = (1..=3)
+            .map(|i| DueSet {
+                sku_id: i,
+                platforms: vec!["xhs".into()],
+                content_kind: "video".into(),
+            })
+            .collect();
+        let inp = ScheduleInput {
+            due,
+            accounts: vec![SchedAccount {
+                id: 10,
+                platform: "xhs".into(),
+                daily_limit: 3,
+            }],
+            global_slots: vec![parse_slot("08:00-22:00").unwrap()], // 14h 宽裕
+            min_gap_minutes: 60,
+            seed: 5,
+        };
+        let r = schedule(&inp);
+        assert_eq!(r.rows.len(), 3);
+        assert!(
+            r.rows.iter().all(|row| row.planned_minute.is_some()),
+            "容量充足时应全部排上时间，而非留空"
+        );
+        let mut times: Vec<i64> = r.rows.iter().filter_map(|row| row.planned_minute).collect();
+        times.sort();
+        assert!(
+            times.iter().all(|&t| (480..=1320).contains(&t)),
+            "时间须落在 08:00–22:00"
+        );
+        for w in times.windows(2) {
+            assert!(w[1] - w[0] >= 60, "两两间隔 ≥ 60");
+        }
+        times.dedup();
+        assert_eq!(times.len(), 3, "三行三个不同时刻");
+    }
+
+    // 窄时段容量不足 → 超出的行留空（立即发），而非违反间隔。
+    #[test]
+    fn overflow_rows_get_none() {
+        let due: Vec<DueSet> = (1..=3)
+            .map(|i| DueSet {
+                sku_id: i,
+                platforms: vec!["xhs".into()],
+                content_kind: "video".into(),
+            })
+            .collect();
+        let inp = ScheduleInput {
+            due,
+            accounts: vec![SchedAccount {
+                id: 10,
+                platform: "xhs".into(),
+                daily_limit: 3,
+            }],
+            global_slots: vec![parse_slot("12:00-12:30").unwrap()], // 30min，gap 60 → 至多 1 点
+            min_gap_minutes: 60,
+            seed: 5,
+        };
+        let r = schedule(&inp);
+        let with_time = r
+            .rows
+            .iter()
+            .filter(|row| row.planned_minute.is_some())
+            .count();
+        assert_eq!(
+            with_time, 1,
+            "30 分钟时段按 60 分钟间隔只排得下 1 个，其余立即发"
+        );
     }
 
     #[test]

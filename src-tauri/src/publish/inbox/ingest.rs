@@ -15,23 +15,29 @@ use crate::publish::inbox::parser;
 use crate::publish::paths::{self, RelPath};
 use crate::publish::platform;
 
-/// 单文件收录结果（供事件与报告使用）。
+/// 单文件收录结果（供事件与报告使用）。camelCase 字段名个别指定（specta 不识别 rename_all_fields）。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum IngestOutcome {
     /// 成功入库并归档。
     Ingested {
+        #[serde(rename = "skuCode")]
         sku_code: String,
         kind: String,
         titles: usize,
         bodies: usize,
         /// 采纳的话题（SKU 原先无话题时）。
+        #[serde(rename = "topicsAdopted")]
         topics_adopted: Vec<String>,
         /// 话题差异提示（SKU 已有话题、忽略了本文件话题）。
+        #[serde(rename = "topicDiff")]
         topic_diff: Option<String>,
     },
     /// 识别不出已知 SKU，待认领。
-    Unclaimed { sku_code: Option<String> },
+    Unclaimed {
+        #[serde(rename = "skuCode")]
+        sku_code: Option<String>,
+    },
     /// 解析失败，待人工确认。
     Failed { reason: String },
 }
@@ -554,7 +560,7 @@ pub async fn build_gallery_from_paths(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // 测试断言失败即测试失败，是期望行为
 mod tests {
     use super::*;
     use crate::commands::publish_settings::ensure_partitions;

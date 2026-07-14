@@ -237,7 +237,7 @@ pub fn dedupe_name(base: &str, taken: &dyn Fn(&str) -> bool) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即测试失败，是期望行为
 mod tests {
     use super::*;
     use std::collections::HashSet;

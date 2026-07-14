@@ -1321,6 +1321,30 @@ async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
 }
 },
 /**
+ * 删除账号。**被任何历史任务引用的账号不可删**——删了它，那些任务行的
+ * `JOIN accounts` 就查不到名字，历史任务单与台账会整行消失。请改用「停用」。
+ */
+async deleteAccount(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_account", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除文本条目。**被日内容套装引用的不可删**——任务单/台账里那些行 `JOIN text_items`
+ * 会查不到标题正文，历史整行消失。已用过的条目请改用「停用」（不再被选中，历史仍在）。
+ */
+async deleteTextItem(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_text_item", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 导出预检（纯读）：素材齐备 / 路径长度 / 账号在用 / 重导出回执保护。
  * 前端在导出确认弹窗打开时调用，逐条渲染；有 error 时禁用「确认导出」。
  */
@@ -1767,6 +1791,11 @@ export type PackPatch = { note: string | null;
  */
 cover: string | null }
 export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
+/**
+ * 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
+ * 无封面的视频包为 None（V1 不抽帧）。
+ */
+thumbPath: string | null; 
 /**
  * 存储态：new|active|retired。
  */

@@ -16,7 +16,7 @@ import { failKindLabel, isShortage, pubTaskVisual, sheetVisual, shortageLabel } 
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 type Tab = "board" | "sheets" | "strategy";
@@ -89,6 +89,8 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
   const [showReport, setShowReport] = useState(false);
   const date = todayStr();
 
+  const sheetRev = usePublishStore((s) => s.sheetRev);
+
   const load = useCallback(async () => {
     try {
       setDash(await unwrap(commands.getDashboard(date)));
@@ -96,9 +98,10 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
       setDash(null);
     }
   }, [date]);
+  // 任务单有任何变化（watcher 对账 / 导出 / 人工定态）→ 看板自动跟着走。
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, sheetRev]);
 
   if (!dash) {
     return (
@@ -314,6 +317,7 @@ function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
   const [sheets, setSheets] = useState<SheetSummary[]>([]);
   const [genTime, setGenTime] = useState("22:00");
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
+  const sheetRev = usePublishStore((s) => s.sheetRev);
 
   const load = useCallback(async () => {
     setSheets(await unwrap(commands.listSheets()));
@@ -326,7 +330,7 @@ function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
   }, []);
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, sheetRev]);
 
   const genTomorrow = async () => {
     const d = new Date();
@@ -406,12 +410,19 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   const [cancelRow, setCancelRow] = useState<TaskRowView | null>(null);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
 
+  const lastSheetChanged = usePublishStore((s) => s.lastSheetChanged);
+
   const load = useCallback(async () => {
     setDetail(await unwrap(commands.getSheet(sheetId)));
   }, [sheetId]);
   useEffect(() => {
     void load();
   }, [load]);
+
+  // watcher 对账（回执落盘 → 2s 防抖 → SheetChangedEvent）时自动刷新，只认自己这一单。
+  useEffect(() => {
+    if (lastSheetChanged?.sheetId === sheetId) void load();
+  }, [lastSheetChanged, sheetId, load]);
 
   if (!detail) return <div className="col f1" />;
   const v = sheetVisual(detail.status);
@@ -958,12 +969,20 @@ function AddRowModal({
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [skuId, setSkuId] = useState<number | null>(null);
   const [accountId, setAccountId] = useState<number | null>(null);
+  const [q, setQ] = useState("");
   useEffect(() => {
     void unwrap(commands.listSchedulableSkus()).then((v) =>
       setSkus(v.map((s) => ({ id: s.id, code: s.code, styleName: s.styleName }))),
     );
     void unwrap(commands.listAccounts()).then(setAccounts);
   }, []);
+  // 100+ SKU 时长列表里靠肉眼找是不可能的（D6）。
+  const filtered = useMemo(() => {
+    const key = q.trim().toLowerCase();
+    return skus.filter(
+      (s) => !key || s.code.toLowerCase().includes(key) || s.styleName.toLowerCase().includes(key),
+    );
+  }, [skus, q]);
   const submit = async () => {
     if (skuId == null || accountId == null) return;
     try {
@@ -998,14 +1017,22 @@ function AddRowModal({
       <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
         选择 SKU
       </div>
-      <div className="mt4" style={{ maxHeight: 160, overflow: "auto" }}>
-        {skus.map((s) => (
+      <input
+        className="inp mt4"
+        style={{ width: "100%" }}
+        placeholder="搜索编码 / 款式名…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <div className="mt4" style={{ maxHeight: 260, overflow: "auto" }}>
+        {filtered.map((s) => (
           <div key={s.id} className="pickrow" onClick={() => setSkuId(s.id)}>
             <span className={cn("ckb", skuId === s.id && "on")}>✓</span>
             <span className="pid">{s.code}</span>
             <span className="fs12 f1 nowrap ohide">{s.styleName}</span>
           </div>
         ))}
+        {filtered.length === 0 && <div className="fs12 t3 pa8">没有匹配的 SKU</div>}
       </div>
       <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
         选择账号
@@ -1031,6 +1058,7 @@ function StrategyTab() {
   const [s, setS] = useState<PublishSettings | null>(null);
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [addAcct, setAddAcct] = useState(false);
+  const [editAcct, setEditAcct] = useState<AccountView | null>(null);
 
   const load = useCallback(async () => {
     setS(await unwrap(commands.getPublishSettings()));
@@ -1041,26 +1069,32 @@ function StrategyTab() {
   }, [load]);
 
   const patch = async (p: Partial<PublishSettingsPatch>) => {
-    const next = await unwrap(
-      commands.updatePublishSettings({
-        rootLocal: null,
-        rootExec: null,
-        pathStyle: null,
-        dedupDays: null,
-        receiptTimeoutHours: null,
-        autogenTime: null,
-        warnMaterial: null,
-        warnTitle: null,
-        warnBody: null,
-        accountDailyLimitDefault: null,
-        minGapMinutes: null,
-        platformMatrix: null,
-        tierRules: null,
-        timeSlots: null,
-        ...p,
-      }),
-    );
-    setS(next);
+    try {
+      const next = await unwrap(
+        commands.updatePublishSettings({
+          rootLocal: null,
+          rootExec: null,
+          pathStyle: null,
+          dedupDays: null,
+          receiptTimeoutHours: null,
+          autogenTime: null,
+          warnMaterial: null,
+          warnTitle: null,
+          warnBody: null,
+          accountDailyLimitDefault: null,
+          minGapMinutes: null,
+          platformMatrix: null,
+          tierRules: null,
+          timeSlots: null,
+          ...p,
+        }),
+      );
+      setS(next);
+    } catch (e) {
+      // 后端拒绝（如非法时段）→ 提示并回读，避免界面停在没存进去的值上。
+      toast.error(String(e));
+      await load();
+    }
   };
 
   if (!s) return <div className="col f1" />;
@@ -1156,10 +1190,18 @@ function StrategyTab() {
               <span className="bdg b-gray">{a.platformZh}</span>
               <span className="fw5 fs12 f1 nowrap ohide">{a.name}</span>
               <span className="fs11 t3 nowrap">日限 {a.dailyLimit}</span>
+              {a.slots && a.slots.length > 0 && (
+                <span className="chip" title="该账号的可用时段（覆盖全局模板）">
+                  {a.slots.join(" ")}
+                </span>
+              )}
               <span className={cn("bdg", a.status === "active" ? "b-green" : "b-gray")}>
                 {a.status === "active" ? "正常" : "停用"}
               </span>
               <span className="tract">
+                <button type="button" className="btn sm gho" onClick={() => setEditAcct(a)}>
+                  编辑
+                </button>
                 <button
                   type="button"
                   className="btn sm gho"
@@ -1182,21 +1224,11 @@ function StrategyTab() {
           )}
         </div>
 
-        <div className="card mt14" style={{ padding: "13px 16px" }}>
-          <div className="fw6 fs13" style={{ marginBottom: 8 }}>
-            时段模板
-          </div>
-          <div className="fx ac gap6 wrap">
-            {timeSlots.map((slot) => (
-              <span key={slot} className="fchip">
-                {slot}
-              </span>
-            ))}
-            <span className="fs11 t3">
-              分配时在时段内随机抖动 · 同平台多账号最小间隔 {s.minGapMinutes} 分钟
-            </span>
-          </div>
-        </div>
+        <SlotsCard
+          slots={timeSlots}
+          minGap={s.minGapMinutes ?? 60}
+          onSave={(next) => patch({ timeSlots: next })}
+        />
       </div>
 
       {addAcct && (
@@ -1208,7 +1240,229 @@ function StrategyTab() {
           }}
         />
       )}
+      {editAcct && (
+        <EditAccountModal
+          account={editAcct}
+          onClose={() => setEditAcct(null)}
+          onSaved={() => {
+            setEditAcct(null);
+            void load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/** `HH:MM-HH:MM`，开始早于结束（与后端 `scheduler::parse_slot` 同一套规则）。 */
+function parseSlotErr(v: string): string | null {
+  const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(v.trim());
+  if (!m) return "格式应为 HH:MM-HH:MM";
+  const [h1, m1, h2, m2] = m.slice(1).map(Number) as [number, number, number, number];
+  const ok = (h: number, mi: number) => h >= 0 && h < 24 && mi >= 0 && mi < 60;
+  if (!ok(h1, m1) || !ok(h2, m2)) return "时间超出范围（00:00–23:59）";
+  const a = h1 * 60 + m1;
+  const b = h2 * 60 + m2;
+  if (a >= b) return "暂不支持跨午夜时段，请拆成 21:00-23:59";
+  return null;
+}
+
+/** 时段模板编辑：chips 可删，回车新增。空列表 = 全部立即发（保存时明确警告）。 */
+function SlotsCard({
+  slots,
+  minGap,
+  onSave,
+}: {
+  slots: string[];
+  minGap: number;
+  onSave: (next: string[]) => Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState("");
+  const err = draft.trim() ? parseSlotErr(draft) : null;
+
+  const add = async () => {
+    const v = draft.trim();
+    if (!v || parseSlotErr(v)) return;
+    if (slots.includes(v)) {
+      setDraft("");
+      return;
+    }
+    await onSave([...slots, v].sort());
+    setDraft("");
+  };
+  const remove = async (slot: string) => {
+    const next = slots.filter((s) => s !== slot);
+    if (next.length === 0) toast.warning("时段模板已清空：所有任务将变成「立即发」");
+    await onSave(next);
+  };
+
+  return (
+    <div className="card mt14" style={{ padding: "13px 16px" }}>
+      <div className="fw6 fs13" style={{ marginBottom: 8 }}>
+        时段模板
+      </div>
+      <div className="fx ac gap6 wrap">
+        {slots.map((slot) => (
+          <span key={slot} className="fchip">
+            {slot}
+            <button
+              type="button"
+              className="icb"
+              style={{ width: 16, height: 16, marginLeft: 4 }}
+              aria-label={`删除时段 ${slot}`}
+              onClick={() => void remove(slot)}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          className="inp mono"
+          style={{ width: 130, ...(err ? { borderColor: "var(--er)" } : {}) }}
+          placeholder="09:00-11:00"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void add()}
+        />
+        <button
+          type="button"
+          className="btn sm"
+          disabled={!draft.trim() || !!err}
+          onClick={() => void add()}
+        >
+          添加时段
+        </button>
+      </div>
+      <div className={cn("fs11 mt6", err ? "terr" : "t3")}>
+        {err ??
+          (slots.length === 0
+            ? "时段为空 → 所有任务立即发（不定时）"
+            : `分配时在时段内随机抖动 · 同平台多账号最小间隔 ${minGap} 分钟`)}
+      </div>
+    </div>
+  );
+}
+
+/** 账号编辑：改名 / 日限 / 可用时段（覆盖全局模板）/ 删除。 */
+function EditAccountModal({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: AccountView;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(account.name);
+  const [limit, setLimit] = useState(account.dailyLimit);
+  const [slots, setSlots] = useState<string[]>(account.slots ?? []);
+  const [draft, setDraft] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const err = draft.trim() ? parseSlotErr(draft) : null;
+
+  const addSlot = () => {
+    const v = draft.trim();
+    if (!v || parseSlotErr(v) || slots.includes(v)) return;
+    setSlots([...slots, v].sort());
+    setDraft("");
+  };
+  const save = async () => {
+    try {
+      await unwrap(
+        commands.updateAccount(account.id, {
+          name: name.trim() || null,
+          dailyLimit: limit,
+          // 空数组 = 清除覆盖，跟随全局时段模板。
+          slots: slots.length > 0 ? slots : null,
+        }),
+      );
+      onSaved();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+  const del = async () => {
+    try {
+      await unwrap(commands.deleteAccount(account.id));
+      toast.success("账号已删除");
+      onSaved();
+    } catch (e) {
+      toast.error(String(e));
+      setConfirmDel(false);
+    }
+  };
+
+  return (
+    <>
+      <Modal
+        title="编辑账号"
+        onClose={onClose}
+        headerExtra={<span className="bdg b-gray">{account.platformZh}</span>}
+        footer={
+          <>
+            <button type="button" className="btn sm gho dng" onClick={() => setConfirmDel(true)}>
+              删除
+            </button>
+            <div className="f1" />
+            <button type="button" className="btn sm" onClick={onClose}>
+              取消
+            </button>
+            <button type="button" className="btn sm pri" onClick={() => void save()}>
+              保存
+            </button>
+          </>
+        }
+      >
+        <div className="col gap10">
+          <div className="col gap4">
+            <span className="fs11 t3">账号名称（任务单「平台账号名称」列的值）</span>
+            <input className="inp" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="fx ac gap8">
+            <span className="fs12 t2 nowrap">日发布上限</span>
+            <Stepper value={limit} min={1} max={100} onChange={setLimit} />
+            <span className="fs11 t3">条</span>
+          </div>
+          <div className="col gap4">
+            <span className="fs11 t3">可用时段（留空 = 跟随全局时段模板）</span>
+            <div className="fx ac gap6 wrap">
+              {slots.map((slot) => (
+                <span key={slot} className="fchip">
+                  {slot}
+                  <button
+                    type="button"
+                    className="icb"
+                    style={{ width: 16, height: 16, marginLeft: 4 }}
+                    aria-label={`删除时段 ${slot}`}
+                    onClick={() => setSlots(slots.filter((s) => s !== slot))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <input
+                className="inp mono"
+                style={{ width: 130, ...(err ? { borderColor: "var(--er)" } : {}) }}
+                placeholder="09:00-11:00"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addSlot()}
+              />
+            </div>
+            {err && <span className="fs11 terr">{err}</span>}
+          </div>
+        </div>
+      </Modal>
+      {confirmDel && (
+        <ConfirmModal
+          title="删除账号"
+          desc={`删除「${account.name}」。有历史任务的账号删不掉（会让历史记录失去归属），请改用「停用」。`}
+          confirmLabel="确认删除"
+          onConfirm={() => void del()}
+          onClose={() => setConfirmDel(false)}
+        />
+      )}
+    </>
   );
 }
 

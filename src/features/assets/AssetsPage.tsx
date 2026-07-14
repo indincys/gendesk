@@ -1,4 +1,7 @@
-import { Modal } from "@/components/ui/Modal";
+import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { Toggle } from "@/components/ui/Stepper";
+import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
+import { assetSrc } from "@/lib/img";
 import {
   type InboxItemView,
   type MappingImportReport,
@@ -13,7 +16,8 @@ import { packLifeVisual, tierVisual } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 type Tier = "" | "hot" | "warm" | "cold";
 
@@ -41,11 +45,14 @@ function AssetsList({
 }) {
   const badges = usePublishStore((s) => s.badges);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
+  const inboxRev = usePublishStore((s) => s.inboxRev);
   const [view, setView] = useState<"table" | "cards">("table");
   const [tier, setTier] = useState<Tier>("");
   const [warnOnly, setWarnOnly] = useState(false);
   const [showOff, setShowOff] = useState(false);
   const [query, setQuery] = useState("");
+  // 打字不再每一键都发一次全量查询（D6）。
+  const debouncedQuery = useDebouncedValue(query, 300);
   const [rows, setRows] = useState<SkuView[]>([]);
   const [editing, setEditing] = useState<SkuView | "new" | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -103,7 +110,7 @@ function AssetsList({
           tier: tier || null,
           warnOnly: warnOnly || null,
           status: showOff ? "paused" : null,
-          query: query || null,
+          query: debouncedQuery || null,
         }),
       );
       setRows(list);
@@ -111,11 +118,12 @@ function AssetsList({
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
-  }, [tier, warnOnly, showOff, query]);
+  }, [tier, warnOnly, showOff, debouncedQuery]);
 
+  // 收件箱有新收录 → SKU 三池余量变了，列表跟着刷新（事件驱动，不轮询）。
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, inboxRev]);
 
   const warnCount = badges.warn;
 
@@ -523,30 +531,37 @@ function InboxPanel({ onChanged }: { onChanged: () => void }) {
   const [claims, setClaims] = useState<InboxItemView[]>([]);
   const [fails, setFails] = useState<InboxItemView[]>([]);
   const [claimTarget, setClaimTarget] = useState<InboxItemView | null>(null);
+  const inboxRev = usePublishStore((s) => s.inboxRev);
 
   const load = useCallback(async () => {
     setClaims(await unwrap(commands.listInboxItems("unclaimed")));
     setFails(await unwrap(commands.listInboxItems("failed")));
   }, []);
+  // watcher 收录（2s 防抖后）→ 面板自动跟着更新。
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, inboxRev]);
 
-  const rescan = async () => {
-    await unwrap(commands.rescanInbox());
-    await load();
-    onChanged();
+  /** 操作一律带错误处理：失败静默是最难查的那种 bug（用户以为点了没反应）。 */
+  const act = async (fn: () => Promise<unknown>, ok?: string) => {
+    try {
+      await fn();
+      if (ok) toast.success(ok);
+      await load();
+      onChanged();
+    } catch (e) {
+      toast.error(String(e));
+    }
   };
-  const discard = async (id: number) => {
-    await unwrap(commands.discardInboxItem(id));
-    await load();
-    onChanged();
-  };
-  const retry = async (id: number) => {
-    await unwrap(commands.retryInboxItem(id));
-    await load();
-    onChanged();
-  };
+
+  const rescan = () =>
+    act(async () => {
+      const r = await unwrap(commands.rescanInbox());
+      toast.success(`重扫完成：入库 ${r.ingested} · 待认领 ${r.unclaimed} · 失败 ${r.failed}`);
+    });
+  const discard = (id: number) =>
+    act(() => unwrap(commands.discardInboxItem(id)), "已丢弃（文件移入 收件箱/已丢弃/）");
+  const retry = (id: number) => act(() => unwrap(commands.retryInboxItem(id)));
 
   return (
     <div className="pbody">
@@ -657,15 +672,34 @@ function ClaimModal({
   onDone: () => void;
 }) {
   const [skus, setSkus] = useState<SkuView[]>([]);
+  const [q, setQ] = useState("");
   useEffect(() => {
     void unwrap(commands.listSkus({ tier: null, warnOnly: null, status: null, query: null })).then(
       setSkus,
     );
   }, []);
   const pick = async (code: string) => {
-    await unwrap(commands.claimInboxItem(item.id, code));
-    onDone();
+    try {
+      await unwrap(commands.claimInboxItem(item.id, code));
+      onDone();
+    } catch (e) {
+      toast.error(String(e));
+    }
   };
+  // 100+ SKU 时靠肉眼在长列表里找是不可能的（D6）。
+  const filtered = useMemo(() => {
+    const key = q.trim().toLowerCase();
+    return skus
+      .filter((s) => !s.isGeneral)
+      .filter(
+        (s) =>
+          !key ||
+          s.code.toLowerCase().includes(key) ||
+          s.styleName.toLowerCase().includes(key) ||
+          s.productName.toLowerCase().includes(key),
+      );
+  }, [skus, q]);
+
   return (
     <Modal
       title="指认 SKU"
@@ -682,18 +716,28 @@ function ClaimModal({
       }
     >
       <div style={{ padding: 8 }}>
-        {skus
-          .filter((s) => !s.isGeneral)
-          .map((s) => {
-            const t = tierVisual(s.tier);
-            return (
-              <div key={s.id} className="pickrow" onClick={() => void pick(s.code)}>
-                <span className="pid">{s.code}</span>
-                <span className="fw5 fs12 f1 nowrap ohide">{s.styleName}</span>
-                <span className={cn("bdg", t.badgeClass)}>{t.label}</span>
-              </div>
-            );
-          })}
+        <input
+          className="inp"
+          style={{ width: "100%", marginBottom: 8 }}
+          placeholder="搜索编码 / 款式名 / 商品名…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        {filtered.map((s) => {
+          const t = tierVisual(s.tier);
+          return (
+            <div key={s.id} className="pickrow" onClick={() => void pick(s.code)}>
+              <span className="pid">{s.code}</span>
+              <span className="fw5 fs12 f1 nowrap ohide">{s.styleName}</span>
+              {/* 三池余量：指认前先看一眼这个 SKU 缺不缺料 */}
+              <span className="fs10 t3 nowrap">
+                素材 {s.materialCount} · 标题 {s.titleCount} · 正文 {s.bodyCount}
+              </span>
+              <span className={cn("bdg", t.badgeClass)}>{t.label}</span>
+            </div>
+          );
+        })}
+        {filtered.length === 0 && <div className="fs12 t3 pa8">没有匹配的 SKU</div>}
       </div>
     </Modal>
   );
@@ -897,11 +941,23 @@ function PackGrid({ packs, onOpen }: { packs: PackView[]; onOpen: (p: PackView) 
       {packs.map((p) => {
         const life = packLifeVisual(p.derived);
         const dim = p.derived === "retired" || p.derived === "exhausted";
+        const thumb = p.thumbPath ? assetSrc(p.thumbPath) : null;
         return (
           <div key={p.id} className={cn("packc", dim && "dim")} onClick={() => onOpen(p)}>
-            <div className="packimg" style={{ background: "var(--inset)" }}>
+            <div
+              className="packimg"
+              style={
+                thumb
+                  ? {
+                      backgroundImage: `url("${thumb}")`,
+                      backgroundSize: "cover",
+                      backgroundPosition: "center",
+                    }
+                  : { background: "var(--inset)" }
+              }
+            >
               <span className="packn">{p.kind === "video" ? "视频" : `图 ${p.fileCount}`}</span>
-              <span className="phl t3 fs11">{p.kind === "video" ? "▶" : "🖼"}</span>
+              {!thumb && <span className="phl t3 fs11">{p.kind === "video" ? "▶" : "🖼"}</span>}
             </div>
             <div className="fx ac gap6 mt6">
               <span className={cn("bdg", life.badgeClass)}>{life.label}</span>
@@ -923,6 +979,29 @@ function TextList({
   onChanged: () => Promise<void> | void;
   bodyEmpty?: boolean;
 }) {
+  const [editing, setEditing] = useState<TextItemView | null>(null);
+  const [deleting, setDeleting] = useState<TextItemView | null>(null);
+
+  const toggle = async (id: number, enabled: boolean) => {
+    try {
+      await unwrap(commands.setTextItemEnabled(id, enabled));
+      await onChanged();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+  const del = async (id: number) => {
+    try {
+      await unwrap(commands.deleteTextItem(id));
+      toast.success("已删除");
+      setDeleting(null);
+      await onChanged();
+    } catch (e) {
+      toast.error(String(e));
+      setDeleting(null);
+    }
+  };
+
   if (items.length === 0) {
     return (
       <div className="bigempty" style={{ padding: "44px 20px" }}>
@@ -935,10 +1014,6 @@ function TextList({
       </div>
     );
   }
-  const toggle = async (id: number, enabled: boolean) => {
-    await unwrap(commands.setTextItemEnabled(id, enabled));
-    await onChanged();
-  };
   return (
     <>
       {items.map((x) => (
@@ -954,11 +1029,16 @@ function TextList({
             {x.text}
           </span>
           <span className="bdg b-gray">{x.platformZh}</span>
+          {/* 来源：收件箱自动收录 vs 手动新增 —— 排查「这条哪来的」时很有用 */}
+          <span className="chip">{x.source === "inbox" ? "收件箱" : "手动"}</span>
           {!x.enabled && <span className="chip">已停用</span>}
           <span className="fs11 t3 nowrap" style={{ width: 56, textAlign: "right" }}>
             用过 {x.useCount} 次
           </span>
           <span className="tract">
+            <button type="button" className="btn sm gho" onClick={() => setEditing(x)}>
+              编辑
+            </button>
             <button
               type="button"
               className="btn sm gho"
@@ -966,10 +1046,106 @@ function TextList({
             >
               {x.enabled ? "停用" : "启用"}
             </button>
+            <button type="button" className="btn sm gho dng" onClick={() => setDeleting(x)}>
+              删
+            </button>
           </span>
         </div>
       ))}
+
+      {editing && (
+        <EditTextModal
+          item={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            void onChanged();
+          }}
+        />
+      )}
+      {deleting && (
+        <ConfirmModal
+          title="删除文本条目"
+          desc={
+            deleting.useCount > 0
+              ? `这条已被用过 ${deleting.useCount} 次。被任务单引用的条目删不掉（会让历史记录失去内容）；那种情况请改用「停用」。`
+              : "删除后不可恢复。"
+          }
+          confirmLabel="确认删除"
+          onConfirm={() => void del(deleting.id)}
+          onClose={() => setDeleting(null)}
+        />
+      )}
     </>
+  );
+}
+
+/** 文本条目编辑：正文/标题内容 + 平台标签。 */
+function EditTextModal({
+  item,
+  onClose,
+  onSaved,
+}: {
+  item: TextItemView;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [text, setText] = useState(item.text);
+  const [platform, setPlatform] = useState(item.platform);
+  const [platforms, setPlatforms] = useState<{ code: string; zh: string }[]>([]);
+  useEffect(() => {
+    void commands.publishPlatforms().then((r) => {
+      if (r.status === "ok") setPlatforms(r.data);
+    });
+  }, []);
+
+  const save = async () => {
+    if (!text.trim()) return;
+    try {
+      await unwrap(commands.updateTextItem(item.id, { text: text.trim(), platform }));
+      onSaved();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  return (
+    <Modal
+      title={item.kind === "title" ? "编辑标题" : "编辑正文"}
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">平台标签决定它能发到哪些平台（通用 = 全平台可用）</span>
+          <div className="f1" />
+          <button type="button" className="btn sm" onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className="btn sm pri" onClick={() => void save()}>
+            保存
+          </button>
+        </>
+      }
+    >
+      <div className="col gap10">
+        <textarea
+          className="inp"
+          rows={item.kind === "title" ? 2 : 6}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="col gap4">
+          <span className="fs11 t3">平台标签</span>
+          <select className="inp" value={platform} onChange={(e) => setPlatform(e.target.value)}>
+            <option value="general">通用（全平台）</option>
+            {platforms.map((p) => (
+              <option key={p.code} value={p.code}>
+                {p.zh}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -1004,6 +1180,12 @@ function HistoryList({ detail }: { detail: SkuDetail }) {
 }
 
 // ─────────────────────────────────────────────────────── 弹层
+
+/** 同目录下的兄弟文件绝对路径（后端只给了缩略图一条绝对路径，其余成员据此拼）。 */
+function siblingPath(abs: string, name: string): string {
+  const i = Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"));
+  return i < 0 ? name : abs.slice(0, i + 1) + name;
+}
 
 function PackModal({
   pack,
@@ -1045,6 +1227,8 @@ function PackModal({
   const dirty = note !== pack.note || cover !== pack.cover;
   // 图片成员可当封面；视频文件不行。
   const coverChoices = pack.files.filter((f) => /\.(jpe?g|png|webp)$/i.test(f.name));
+  const imgFiles = coverChoices;
+  const thumbPath = pack.thumbPath;
 
   return (
     <Modal
@@ -1091,7 +1275,35 @@ function PackModal({
         </>
       }
     >
-      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+      {thumbPath && imgFiles.length > 0 && (
+        <div
+          className="mt6"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))",
+            gap: 6,
+          }}
+        >
+          {imgFiles.map((f) => (
+            <img
+              key={f.name}
+              src={assetSrc(siblingPath(thumbPath, f.name))}
+              alt={f.name}
+              loading="lazy"
+              title={f.name}
+              style={{
+                width: "100%",
+                aspectRatio: "1",
+                objectFit: "cover",
+                borderRadius: 6,
+                border: f.name === cover ? "2px solid var(--ac)" : "1px solid var(--line)",
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
         包内文件 · ASCII 规范化命名
       </div>
       <div className="mt6 col gap4">
@@ -1167,7 +1379,22 @@ function SkuEditModal({
   const [tags, setTags] = useState<string[]>(sku?.topics ?? []);
   const [alias, setAlias] = useState(sku?.folderAlias ?? "");
   const [newTag, setNewTag] = useState("");
+  const [note, setNote] = useState(sku?.note ?? "");
+  // null = 跟随全局矩阵；数组 = 该 SKU 只发这些平台。
+  const [override, setOverride] = useState<string[] | null>(sku?.platforms ?? null);
+  const [allPlatforms, setAllPlatforms] = useState<{ code: string; zh: string }[]>([]);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    void commands.publishPlatforms().then((r) => {
+      if (r.status === "ok") setAllPlatforms(r.data);
+    });
+  }, []);
+
+  const togglePlatform = (code: string) => {
+    const cur = override ?? [];
+    setOverride(cur.includes(code) ? cur.filter((c) => c !== code) : [...cur, code]);
+  };
 
   const save = async () => {
     try {
@@ -1179,8 +1406,8 @@ function SkuEditModal({
             productName: product || null,
             tier,
             topics: tags,
-            platforms: null,
-            note: null,
+            platforms: override,
+            note: note || null,
             folderAlias: alias.trim() || null,
           }),
         );
@@ -1191,8 +1418,9 @@ function SkuEditModal({
             productName: product,
             tier,
             topics: tags,
-            platforms: null,
-            note: null,
+            // Some(None) = 清除覆盖 → 跟随全局；Some(Some) = 设置覆盖。
+            platforms: override,
+            note,
             folderAlias: alias.trim(),
           }),
         );
@@ -1299,6 +1527,41 @@ function SkuEditModal({
               />
             )}
           </div>
+        </div>
+
+        <div className="col gap4">
+          <div className="fx ac gap8">
+            <span className="fs11 t3 f1">发布平台</span>
+            <span className="fs11 t3">跟随全局矩阵</span>
+            <Toggle
+              on={override == null}
+              onClick={() => setOverride(override == null ? [] : null)}
+            />
+          </div>
+          {override != null && (
+            <div className="fx ac gap10 wrap mt6">
+              {allPlatforms.map((p) => (
+                <div key={p.code} className="fx ac gap6">
+                  <Toggle on={override.includes(p.code)} onClick={() => togglePlatform(p.code)} />
+                  <span className="fs12">{p.zh}</span>
+                </div>
+              ))}
+              {override.length === 0 && (
+                <span className="fs11 terr">一个平台都没选 → 该 SKU 不会被排期</span>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="col gap4">
+          <span className="fs11 t3">备注</span>
+          <textarea
+            className="inp"
+            rows={2}
+            value={note}
+            placeholder="只在档案卡展示，不进任务单"
+            onChange={(e) => setNote(e.target.value)}
+          />
         </div>
       </div>
     </Modal>

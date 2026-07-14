@@ -76,3 +76,12 @@ pub async fn set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), 
         .await?;
     Ok(())
 }
+
+/// 物理删除账号（引用校验在命令层：有历史任务的账号不可删，只能停用）。
+pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM accounts WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

@@ -144,3 +144,21 @@ pub async fn set_account_status(
     repo::set_status(&state.db, id, &status).await?;
     Ok(())
 }
+
+/// 删除账号。**被任何历史任务引用的账号不可删**——删了它，那些任务行的
+/// `JOIN accounts` 就查不到名字，历史任务单与台账会整行消失。请改用「停用」。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_account(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publish_tasks WHERE account_id = ?1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    if used > 0 {
+        return Err(AppError::InvalidInput(format!(
+            "该账号已有 {used} 条历史任务，删除会让这些记录失去归属；请改用「停用」（停用后不再排新任务）"
+        )));
+    }
+    repo::delete(&state.db, id).await?;
+    Ok(())
+}

@@ -129,3 +129,12 @@ pub async fn bump_use_count(conn: &mut SqliteConnection, id: i64) -> Result<(), 
         .await?;
     Ok(())
 }
+
+/// 物理删除文本条目（引用校验在命令层：被套装引用的不可删，只能停用）。
+pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM text_items WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

@@ -32,6 +32,9 @@ pub struct PackView {
     pub dir_rel: String,
     pub files: Vec<PackFileView>,
     pub cover: Option<String>,
+    /// 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
+    /// 无封面的视频包为 None（V1 不抽帧）。
+    pub thumb_path: Option<String>,
     /// 存储态：new|active|retired。
     pub lifecycle: String,
     /// 派生态：new|active|exhausted|retired。
@@ -142,6 +145,29 @@ async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> App
 
     let locked = repo::is_locked(&state.db, r.id).await?;
 
+    // 缩略图：封面优先，否则包内首张图片（视频包无封面时没有缩略图，V1 不抽帧）。
+    let thumb_name = r.cover.clone().or_else(|| {
+        files
+            .iter()
+            .find(|f| {
+                matches!(
+                    crate::publish::paths::ascii_ext(&f.name).as_str(),
+                    "jpg" | "jpeg" | "png" | "webp"
+                )
+            })
+            .map(|f| f.name.clone())
+    });
+    let thumb_path = match (
+        publish_settings::root_local(&state.db).await.ok(),
+        thumb_name,
+    ) {
+        (Some(root), Some(name)) => {
+            let p = RelPath::new(&r.dir_rel).join(&name).to_local(&root);
+            Some(p.to_string_lossy().to_string())
+        }
+        _ => None,
+    };
+
     Ok(PackView {
         id: r.id,
         sku_id: r.sku_id,
@@ -150,6 +176,7 @@ async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> App
         file_count: files.len() as i64,
         files,
         cover: r.cover,
+        thumb_path,
         lifecycle: r.lifecycle,
         derived,
         available_at,

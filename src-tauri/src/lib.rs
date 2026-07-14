@@ -181,6 +181,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_planning::add_task_row,
             commands::publish_planning::reroll_set,
             commands::publish_planning::list_schedulable_skus,
+            commands::publish_accounts::delete_account,
+            commands::publish_texts::delete_text_item,
             commands::publish_planning::preflight_export,
             commands::publish_planning::export_package,
             commands::publish_planning::open_package_dir,

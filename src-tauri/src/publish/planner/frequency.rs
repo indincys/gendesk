@@ -11,6 +11,8 @@ use chrono::{Datelike, NaiveDate};
 /// 分层频率规则（对应 PublishSettings.tier_rules 扁平字段）。
 #[derive(Debug, Clone, Copy)]
 pub struct FreqRules {
+    /// 热款每日发布开关：`>= 1` 即每天一次（× 平台集）。**大于 1 无额外效果**——
+    /// 同 SKU 同日多套装是 V2 的事；设置层已把它夹到 0/1，UI 是开关。
     pub hot_daily: i64,
     pub warm_weekly: i64,
     pub cold_weekly_rotate: i64,
@@ -81,9 +83,12 @@ pub fn due_skus(date: &str, skus: &[SkuFreq], rules: &FreqRules) -> Vec<i64> {
     let cold_window: Vec<i64> = if rules.cold_weekly_rotate <= 0 || cold.is_empty() {
         Vec::new()
     } else {
-        let m = (rules.cold_weekly_rotate as usize).min(cold.len());
-        let start = ((wk.rem_euclid(cold.len() as i64)) as usize) % cold.len();
-        (0..m).map(|k| cold[(start + k) % cold.len()]).collect()
+        let len = cold.len();
+        let m = (rules.cold_weekly_rotate as usize).min(len);
+        // 窗口每周前移 **m 个**（而不是 1 个）：前移 1 会让相邻两周重叠 m-1 个，
+        // 全池覆盖周期从 ⌈len/m⌉ 周退化成 len 周。
+        let start = ((wk.wrapping_mul(m as i64)).rem_euclid(len as i64)) as usize;
+        (0..m).map(|k| cold[(start + k) % len]).collect()
     };
 
     for s in skus {
@@ -153,22 +158,66 @@ mod tests {
         assert_eq!(due_days_in_week(2, &skus, &rules), 0);
     }
 
-    #[test]
-    fn cold_rotation_covers_pool_over_weeks() {
-        // 5 个冷款，每周轮出 2；若干周内每个都应至少被轮到一次。
-        let skus: Vec<SkuFreq> = (1..=5).map(|i| sku(i, "cold")).collect();
-        let mut seen = std::collections::HashSet::new();
-        let base = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(); // 周一
-        for w in 0..10 {
-            for off in 0..7 {
-                let d = base + chrono::Duration::days(w * 7 + off);
-                let date = d.format("%Y-%m-%d").to_string();
-                for id in due_skus(&date, &skus, &RULES) {
-                    seen.insert(id);
+    /// 与 `week_index` 边界对齐的起始日（每 7 天一个 week_index 块）。
+    fn week_aligned_base() -> NaiveDate {
+        let mut d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        while d.num_days_from_ce() % 7 != 0 {
+            d += chrono::Duration::days(1);
+        }
+        d
+    }
+
+    /// 第 w 个 week_index 块内被轮到的冷款集合（块内 7 天含每个周内日各一次）。
+    fn cold_window_of_week(
+        base: NaiveDate,
+        w: i64,
+        skus: &[SkuFreq],
+        rules: &FreqRules,
+    ) -> Vec<i64> {
+        let mut seen = Vec::new();
+        for off in 0..7 {
+            let d = base + chrono::Duration::days(w * 7 + off);
+            let date = d.format("%Y-%m-%d").to_string();
+            for id in due_skus(&date, skus, rules) {
+                if !seen.contains(&id) {
+                    seen.push(id);
                 }
             }
         }
-        assert_eq!(seen.len(), 5, "10 周内 5 个冷款都应被轮到");
+        seen
+    }
+
+    // C3：窗口每周前移 M 个 → 覆盖周期 ⌈len/M⌉ 周。5 冷款 × 每周 2 → 3 周内全覆盖。
+    // 旧实现每周只前移 1 位，需要 5 周（相邻两周重叠 1 个），全池覆盖被拖慢。
+    #[test]
+    fn cold_rotation_covers_pool_in_ceil_len_over_m_weeks() {
+        let skus: Vec<SkuFreq> = (1..=5).map(|i| sku(i, "cold")).collect();
+        let base = week_aligned_base();
+        let mut seen = std::collections::HashSet::new();
+        for w in 0..3 {
+            for id in cold_window_of_week(base, w, &skus, &RULES) {
+                seen.insert(id);
+            }
+        }
+        assert_eq!(seen.len(), 5, "5 个冷款、每周 2 个 → 3 周内应全部轮到一遍");
+    }
+
+    // 连续两周窗口的重叠：整除时为 0；非整除时首尾衔接最多重叠 m-1 个（宽容版断言）。
+    #[test]
+    fn adjacent_weeks_barely_overlap() {
+        let skus: Vec<SkuFreq> = (1..=5).map(|i| sku(i, "cold")).collect();
+        let base = week_aligned_base();
+        let m = RULES.cold_weekly_rotate as usize;
+        for w in 0..8 {
+            let a = cold_window_of_week(base, w, &skus, &RULES);
+            let b = cold_window_of_week(base, w + 1, &skus, &RULES);
+            let overlap = a.iter().filter(|id| b.contains(id)).count();
+            assert!(
+                overlap <= m.saturating_sub(1),
+                "第 {w} 周与下周重叠 {overlap} 个（上限 {}）",
+                m - 1
+            );
+        }
     }
 
     #[test]

@@ -85,6 +85,48 @@ pub async fn pack_platform_last(
     .await
 }
 
+/// 一个素材包的台账汇总（列表视图用，批量取，避免 N+1）。
+#[derive(Debug, Clone, Default)]
+pub struct PackUsage {
+    /// 各平台最近发布时间。
+    pub last_by_platform: Vec<(String, i64)>,
+    /// 总发布次数。
+    pub publish_count: i64,
+    /// 最近一次发布（任意平台）。
+    pub last_published: Option<i64>,
+}
+
+/// **批量**取多个素材包的台账汇总：一条 GROUP BY 查询，替代「每个包一次查询」。
+/// SKU 详情页有几十个包时，N+1 会把 100ms 变成 2 秒。
+pub async fn pack_usage_batch(
+    pool: &SqlitePool,
+    pack_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, PackUsage>, sqlx::Error> {
+    use std::collections::HashMap;
+    let mut out: HashMap<i64, PackUsage> = HashMap::new();
+    if pack_ids.is_empty() {
+        return Ok(out);
+    }
+    // sqlx 不支持数组绑定，占位符按数量拼（pack_ids 是内部 i64，无注入面）。
+    let placeholders = vec!["?"; pack_ids.len()].join(",");
+    let sql = format!(
+        "SELECT pack_id, platform, MAX(published_at) AS last_at, COUNT(*) AS n
+         FROM usage_ledger WHERE pack_id IN ({placeholders})
+         GROUP BY pack_id, platform"
+    );
+    let mut q = sqlx::query_as::<_, (i64, String, i64, i64)>(&sql);
+    for id in pack_ids {
+        q = q.bind(id);
+    }
+    for (pack_id, platform, last_at, n) in q.fetch_all(pool).await? {
+        let e = out.entry(pack_id).or_default();
+        e.last_by_platform.push((platform, last_at));
+        e.publish_count += n;
+        e.last_published = Some(e.last_published.map_or(last_at, |x: i64| x.max(last_at)));
+    }
+    Ok(out)
+}
+
 /// 查重窗口占用：某素材包在某平台、`since`（Unix 秒）之后的最近一次发布时间。
 /// 用于「已用尽/回可用日期」派生（前置事实 5/6）。
 pub async fn last_publish_in_window(

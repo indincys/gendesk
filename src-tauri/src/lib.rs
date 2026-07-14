@@ -142,6 +142,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_skus::get_sku_detail,
             commands::publish_skus::get_publish_badges,
             commands::publish_skus::import_sku_mappings,
+            commands::publish_skus::pick_mapping_file,
+            commands::publish_skus::save_sku_mapping_template,
             // texts 域
             commands::publish_texts::list_text_items,
             commands::publish_texts::add_text_item,
@@ -179,6 +181,15 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_planning::add_task_row,
             commands::publish_planning::reroll_set,
             commands::publish_planning::list_schedulable_skus,
+            commands::publish_accounts::delete_account,
+            commands::publish_texts::delete_text_item,
+            commands::publish_skus::restock_prompt,
+            commands::publish_assets::import_text_file,
+            commands::publish_assets::pack_history,
+            commands::publish_insights::preview_schedule,
+            commands::publish_insights::calendar_month,
+            commands::publish_insights::daily_brief,
+            commands::publish_planning::preflight_export,
             commands::publish_planning::export_package,
             commands::publish_planning::open_package_dir,
             // reconcile 域（P3）
@@ -198,6 +209,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             publish::events::PublishBadgesEvent,
             publish::events::InboxIngestEvent,
             publish::events::SheetChangedEvent,
+            publish::events::ExportProgressEvent,
         ])
 }
 

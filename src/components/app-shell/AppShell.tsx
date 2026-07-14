@@ -1,4 +1,5 @@
 import { CommandPalette } from "@/components/CommandPalette";
+import { DailyBrief } from "@/components/DailyBrief";
 import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
@@ -66,6 +67,7 @@ export function AppShell() {
       </div>
       <CommandPalette />
       <HelpPanel />
+      <DailyBrief />
     </div>
   );
 }

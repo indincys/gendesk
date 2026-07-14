@@ -92,6 +92,14 @@ pub async fn add_text_item(state: State<'_, AppState>, input: AddTextItemInput) 
         .platform
         .map(|p| platform::text_platform_tag(&p))
         .unwrap_or_else(|| platform::GENERAL_TAG.to_string());
+    // 与收录管线同一套查重：同 SKU 同类型同文本不重复入池。
+    let mut conn = state.db.acquire().await?;
+    if repo::exists_same(&mut conn, input.sku_id, &input.kind, &text).await? {
+        return Err(AppError::InvalidInput(
+            "该文本已在池中（同 SKU 同类型完全相同）".into(),
+        ));
+    }
+    drop(conn);
     let id = repo::insert(
         &state.db,
         &repo::NewTextItem {
@@ -126,5 +134,24 @@ pub async fn set_text_item_enabled(
     enabled: bool,
 ) -> AppResult<()> {
     repo::set_enabled(&state.db, id, enabled).await?;
+    Ok(())
+}
+
+/// 删除文本条目。**被日内容套装引用的不可删**——任务单/台账里那些行 `JOIN text_items`
+/// 会查不到标题正文，历史整行消失。已用过的条目请改用「停用」（不再被选中，历史仍在）。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_text_item(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let used: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daily_sets WHERE title_id = ?1 OR body_id = ?1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    if used > 0 {
+        return Err(AppError::InvalidInput(
+            "该文本已被任务单使用，删除会让历史记录失去内容；请改用「停用」".into(),
+        ));
+    }
+    repo::delete(&state.db, id).await?;
     Ok(())
 }

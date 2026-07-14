@@ -53,6 +53,7 @@ export type {
   SkuFilter,
   CreateSkuInput,
   SkuPatch,
+  MappingImportReport,
   HistoryItem,
   PublishBadges,
   TextItemView,
@@ -74,6 +75,12 @@ export type {
   AddTaskRowInput,
   ShortageItem,
   ExportResult,
+  PreflightReport,
+  PackHistoryItem,
+  PreviewDay,
+  PreviewEntry,
+  CalendarDay,
+  BriefView,
   DashboardView,
   PlatformStat,
   AccountStat,
@@ -84,6 +91,7 @@ export type {
   PublishBadgesEvent,
   InboxIngestEvent,
   SheetChangedEvent,
+  ExportProgressEvent,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -158,6 +166,18 @@ export async function subscribePublish(handlers: {
 }
 
 /**
+ * 订阅任务包导出进度（复制视频可达数百 MB，导出期间需要交代进度）。
+ * 仅导出弹窗打开期间临时挂载。
+ */
+export async function subscribeExportProgress(
+  handler: (e: import("./bindings").ExportProgressEvent) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.exportProgressEvent.listen((e) => handler(e.payload));
+  return () => un();
+}
+
+/**
  * 转发前端未捕获错误到 Rust 统一日志流。
  * 本函数自身绝不抛错（避免错误处理链再次崩溃）。
  */
@@ -194,6 +214,35 @@ export async function subscribeFileDrop(handler: (paths: string[]) => void): Pro
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
   const un = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type === "drop") handler(event.payload.paths);
+  });
+  return () => un();
+}
+
+/** 拖放位置（物理像素，需除以 devicePixelRatio 才是 CSS 像素）。 */
+export interface DropPosition {
+  x: number;
+  y: number;
+}
+
+/**
+ * 订阅带**位置**的文件拖放（F7 拖放直投）。
+ *
+ * Tauri 的原生拖放不经过 DOM，`dragover`/`drop` 那套 DOM 事件根本不会触发；
+ * 想知道「用户把文件拖到了哪一行」，只能靠事件里的窗口坐标做命中测试。
+ * 坐标是物理像素，调用方需自行换算（见 `AssetsPage` 的 `hitTestSku`）。
+ */
+export async function subscribeFileDropWithPosition(handlers: {
+  onOver?: (pos: DropPosition) => void;
+  onLeave?: () => void;
+  onDrop?: (paths: string[], pos: DropPosition) => void;
+}): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const un = await getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === "over") handlers.onOver?.(p.position);
+    else if (p.type === "drop") handlers.onDrop?.(p.paths, p.position);
+    else handlers.onLeave?.();
   });
   return () => un();
 }

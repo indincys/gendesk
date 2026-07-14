@@ -907,6 +907,7 @@ async pickPublishRoot() : Promise<Result<string | null, AppError>> {
 },
 /**
  * 拓扑 B「同本机」一键：把执行机根路径设为本机根路径。
+ * 路径风格同步跟随本机——执行机就是本机，还留着 `windows` 会拼出 `\` 分隔的假路径。
  */
 async useLocalAsExecRoot() : Promise<Result<PublishSettings, AppError>> {
     try {
@@ -976,12 +977,36 @@ async getPublishBadges() : Promise<Result<PublishBadges, AppError>> {
 }
 },
 /**
- * 批量导入 SKU 映射：每行 `编码[<Tab/逗号>别名][<Tab/逗号>话题]`。
- * 别名一对一（唯一），话题为显式设置/替换（区别于收件箱的「绝不覆盖」）。SKU 需已存在。
+ * 批量导入 SKU 映射表：**编码不存在则新建，存在则就地更新，空单元格一律不动**。
+ * 
+ * 接受 `.xlsx/.csv/.tsv/.txt`（UTF-8/GBK 自动探测）；表头可选，见 [`sku_mapping`]。
+ * `dry_run=true` 只返回预检报告不落库——前端先预览、用户确认后再以 `false` 落库。
  */
-async importSkuMappings(path: string) : Promise<Result<MappingImportReport, AppError>> {
+async importSkuMappings(path: string, dryRun: boolean) : Promise<Result<MappingImportReport, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_sku_mappings", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("import_sku_mappings", { path, dryRun }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选择映射表文件（xlsx / csv / tsv / txt）。
+ */
+async pickMappingFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_mapping_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出映射表模板 CSV（UTF-8 BOM，Excel 双击即用）。返回落盘路径；用户取消则 `None`。
+ */
+async saveSkuMappingTemplate() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_sku_mapping_template") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1066,7 +1091,10 @@ async restorePack(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 删除素材包：校验锁定 → 物理删目录 + 删记录。
+ * 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
+ * 
+ * **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
+ * 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
  */
 async deletePack(id: number) : Promise<Result<null, AppError>> {
     try {
@@ -1107,7 +1135,7 @@ async listInboxItems(filterState: string | null) : Promise<Result<InboxItemView[
 }
 },
 /**
- * 认领：人工指认 SKU 后走正常收录管线。
+ * 认领：人工指认 SKU 后走正常收录管线（TXT 走解析入库，媒体文件夹走归集建包）。
  */
 async claimInboxItem(id: number, skuCode: string) : Promise<Result<IngestOutcome, AppError>> {
     try {
@@ -1118,7 +1146,10 @@ async claimInboxItem(id: number, skuCode: string) : Promise<Result<IngestOutcome
 }
 },
 /**
- * 丢弃待认领/失败记录（删记录，文件留原位不动）。
+ * 丢弃待认领/失败条目：文件/文件夹**移入 `收件箱/已丢弃/{日期}/`**，记录转 discarded。
+ * 
+ * 不能只删 DB 行——文件留在原位，下一次收件箱事件触发 rescan 就会把它重新收录，
+ * 「丢弃」的东西复活。归档目录被 rescan 排除，故移档即真正丢弃（且可追溯）。
  */
 async discardInboxItem(id: number) : Promise<Result<null, AppError>> {
     try {
@@ -1236,6 +1267,13 @@ async updateTaskRow(id: number, patch: TaskRowPatch) : Promise<Result<null, AppE
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 人工取消一行（只允许待执行）。
+ * 
+ * 硬性红线（需求 §6.4）：published/failed/**suspect** 都是已定态的，取消它们等于
+ * 绕过 `resolve_suspect` 这条唯一定态路径。取消后立即尝试关单——否则取消掉最后一个
+ * 待执行行的单会永远停在「回收中」，不出日报。
+ */
 async cancelTaskRow(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_task_row", { id }) };
@@ -1286,7 +1324,110 @@ async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
 }
 },
 /**
- * 导出任务包（confirmed → exported；重导出=整包覆盖）。
+ * 删除账号。**被任何历史任务引用的账号不可删**——删了它，那些任务行的
+ * `JOIN accounts` 就查不到名字，历史任务单与台账会整行消失。请改用「停用」。
+ */
+async deleteAccount(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_account", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除文本条目。**被日内容套装引用的不可删**——任务单/台账里那些行 `JOIN text_items`
+ * 会查不到标题正文，历史整行消失。已用过的条目请改用「停用」（不再被选中，历史仍在）。
+ */
+async deleteTextItem(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_text_item", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 补料提示词（F1）：把缺料 SKU 变成一段可直接粘贴给 Claude/Codex 的 prompt。
+ * `kind`：`title` | `body` | 其它（=两者都要）。
+ */
+async restockPrompt(skuIds: number[], kind: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restock_prompt", { skuIds, kind }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 拖放直投 TXT（F7）：复制进 `收件箱/{SKU}/` 后走收录管线（强制该 SKU，跳过三冗余识别）。
+ */
+async importTextFile(skuId: number, path: string) : Promise<Result<IngestOutcome, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_text_file", { skuId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async packHistory(packId: number) : Promise<Result<PackHistoryItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pack_history", { packId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 未来 N 天排期预演（F4）。**不选套装、不落库**——只按频率 × 平台 × 账号推演分布，
+ * 所以改了 warmWeekly / 平台矩阵 / 账号，点一下就能看到影响，不必真去生成任务单。
+ * 
+ * 因为不选套装，它也**不反映缺料**：一个没素材的 SKU 照样出现在预演里。
+ */
+async previewSchedule(days: number) : Promise<Result<PreviewDay[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_schedule", { days }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 某月的发布月历（F5）。`yyyy_mm` 形如 `2026-07`。
+ */
+async calendarMonth(yyyyMm: string) : Promise<Result<CalendarDay[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("calendar_month", { yyyyMm }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 开屏晨报（F6）：昨天怎么样、今天要做什么、有什么卡住了。全部现有查询拼装。
+ */
+async dailyBrief() : Promise<Result<BriefView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("daily_brief") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出预检（纯读）：素材齐备 / 路径长度 / 账号在用 / 重导出回执保护。
+ * 前端在导出确认弹窗打开时调用，逐条渲染；有 error 时禁用「确认导出」。
+ */
+async preflightExport(sheetId: number) : Promise<Result<PreflightReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preflight_export", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出任务包（confirmed → exported；重导出=整包覆盖，但已有回执时被预检拒绝）。
  */
 async exportPackage(sheetId: number) : Promise<Result<ExportResult, AppError>> {
     try {
@@ -1359,6 +1500,7 @@ async getReport(sheetId: number) : Promise<Result<ReportView | null, AppError>> 
 export const events = __makeEvents__<{
 backupProgress: BackupProgress,
 batchSummary: BatchSummary,
+exportProgressEvent: ExportProgressEvent,
 inboxIngestEvent: InboxIngestEvent,
 keyHealth: KeyHealth,
 publishBadgesEvent: PublishBadgesEvent,
@@ -1369,6 +1511,7 @@ updateStateChanged: UpdateStateChanged
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
+exportProgressEvent: "export-progress-event",
 inboxIngestEvent: "inbox-ingest-event",
 keyHealth: "key-health",
 publishBadgesEvent: "publish-badges-event",
@@ -1503,6 +1646,36 @@ firstThumbPath: string | null;
  * 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
  */
 requestCount: number }
+export type BriefView = { today: string; 
+/**
+ * 昨日。
+ */
+yesterdayPublished: number; yesterdayFailed: number; yesterdaySuccessRate: number | null; 
+/**
+ * 今日。
+ */
+todayPlanned: number; todaySuspect: number; todayShortage: number; todaySheetId: number | null; 
+/**
+ * 待认领（收件箱）。
+ */
+unclaimed: number; 
+/**
+ * 跑道告警的 SKU 数（素材 ≤ 7 天见底）。
+ */
+runwayWarn: number }
+export type CalendarDay = { date: string; 
+/**
+ * 实发数（台账）。
+ */
+published: number; 
+/**
+ * 计划数（任务单）。
+ */
+planned: number; failed: number; sheetId: number | null; 
+/**
+ * 当日涉及的 SKU 编码（去重，最多 6 个，供格子悬停展示）。
+ */
+skus: string[] }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -1517,7 +1690,19 @@ export type CreateSkuInput = { code: string; styleName: string; productName: str
  * 收件箱文件夹别名（可选，中文亦可）。
  */
 folderAlias: string | null }
-export type DashboardView = { date: string; sheetId: number | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean }
+export type DashboardView = { date: string; sheetId: number | null; status: string | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean; 
+/**
+ * 同步链路（F9）：导出时刻 / 执行器首次回写 / 最近一次回写（Unix 秒）。
+ */
+exportedAt: number | null; firstReceiptAt: number | null; lastReceiptAt: number | null; 
+/**
+ * 已导出超过 1 小时仍无任何回写 —— 优先怀疑同步软件没把包送到执行机。
+ */
+syncStalled: boolean; 
+/**
+ * 昨日成功率（读昨日日报；无则 null）。
+ */
+yesterdaySuccessRate: number | null }
 /**
  * 数据目录信息（E19：暴露落盘位置）。
  */
@@ -1526,6 +1711,10 @@ export type DataDirInfo = { root: string; dbPath: string }
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */
 export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
+/**
+ * `publish://export-progress`：任务包导出进度（复制视频可达数百 MB，UI 需要交代）。
+ */
+export type ExportProgressEvent = { sheetId: number; done: number; total: number }
 /**
  * 导出结果。
  */
@@ -1537,7 +1726,11 @@ pkgDirRel: string; rowCount: number; skuCount: number; fileCount: number;
 /**
  * 是否有超 Windows 长度上限的拼接路径（告警）。
  */
-longPathWarn: boolean }
+longPathWarn: boolean; 
+/**
+ * 源文件缺失清单（预检通过后正常应为空；冗余上报便于排查）。
+ */
+missingFiles: string[] }
 /**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */
@@ -1638,13 +1831,21 @@ detail: string | null; createdAt: number }
  */
 export type IngestOutcome = 
 /**
- * 成功入库并归档。
+ * TXT 成功入库并归档。
  */
-{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; topicsAdopted: string[]; topicDiff: string | null } | 
+{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; duplicates: number; topicsAdopted: string[]; topicDiff: string | null } | 
 /**
- * 识别不出已知 SKU，待认领。
+ * 媒体文件夹成包入库（自动归集或人工认领后）。
+ */
+{ state: "ingestedMedia"; skuCode: string; packs: number } | 
+/**
+ * TXT 识别不出已知 SKU，待认领。
  */
 { state: "unclaimed"; skuCode: string | null } | 
+/**
+ * 媒体文件夹识别不出已知 SKU，整个文件夹一条待认领（需求 §3.6：进队列由人工处理，不丢弃）。
+ */
+{ state: "unclaimedMedia"; folder: string; files: number } | 
 /**
  * 解析失败，待人工确认。
  */
@@ -1658,24 +1859,65 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 /**
- * 批量映射导入结果。
+ * 批量映射导入结果（`dryRun` 时为预检，不落库）。
  */
 export type MappingImportReport = { 
 /**
- * 至少设置了别名或话题的 SKU 行数。
+ * 本次是否只预检不落库。
  */
-updated: number; aliasSet: number; topicsSet: number; 
+dryRun: boolean; 
 /**
- * 跳过/出错行的说明（编码不存在、别名冲突等）。
+ * 探测到的文件编码（xlsx 为 `XLSX`）。
  */
-skipped: string[] }
+encoding: string; 
+/**
+ * 是否识别到表头行（否则按位置 `编码,别名,话题` 解析）。
+ */
+hadHeader: boolean; 
+/**
+ * 可导入的数据行数。
+ */
+rows: number; 
+/**
+ * 将新建 / 已新建的 SKU 数。
+ */
+created: number; 
+/**
+ * 有字段变更的既有 SKU 数。
+ */
+updated: number; 
+/**
+ * 与库内完全一致、无需改动的行。
+ */
+unchanged: number; aliasSet: number; topicsSet: number; 
+/**
+ * 新建 SKU 的编码（预览用，最多 200 个）。
+ */
+createdCodes: string[]; 
+/**
+ * 冲突：仅该格被跳过，行内其余字段照常导入。
+ */
+conflicts: string[]; 
+/**
+ * 无法导入的行，以及被忽略的单元格。
+ */
+errors: string[] }
 export type PackFileView = { name: string; origName: string; bytes: number }
+/**
+ * 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
+ */
+export type PackHistoryItem = { date: string; platformZh: string; taskCode: string; url: string | null; publishedAt: number }
 export type PackPatch = { note: string | null; 
 /**
  * `Some(None)` = 清除封面；`Some(Some)` = 设为该包内文件名。
  */
 cover: string | null }
 export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
+/**
+ * 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
+ * 无封面的视频包为 None（V1 不抽帧）。
+ */
+thumbPath: string | null; 
 /**
  * 存储态：new|active|retired。
  */
@@ -1691,7 +1933,15 @@ availableAt: number | null;
 /**
  * 被未关闭任务单引用（锁定）。
  */
-locked: boolean; source: string; note: string; fileCount: number; createdAt: number; updatedAt: number }
+locked: boolean; 
+/**
+ * 累计发布次数（台账）。
+ */
+publishCount: number; 
+/**
+ * 最近一次发布（Unix 秒；从未发布为 null）。
+ */
+lastPublished: number | null; source: string; note: string; fileCount: number; createdAt: number; updatedAt: number }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 /**
  * 平台标签信息（暴露给前端做矩阵/选择器渲染，避免前端重复中文映射）。
@@ -1702,6 +1952,32 @@ export type PlatformInfo = { code: string; zh: string }
  */
 export type PlatformMatrix = { douyin: boolean; xhs: boolean; kuaishou: boolean; shipinhao: boolean; bilibili: boolean }
 export type PlatformStat = { platform: string; platformZh: string; done: number; total: number; pct: number }
+/**
+ * 导出预检报告：errors 非空即阻断导出。
+ */
+export type PreflightReport = { 
+/**
+ * 阻断级问题（导出会被拒绝）。
+ */
+errors: string[]; 
+/**
+ * 提醒级问题（导出照常，但值得看一眼）。
+ */
+warnings: string[]; rowCount: number; skuCount: number }
+export type PreviewDay = { date: string; entries: PreviewEntry[]; totalRows: number; 
+/**
+ * 超出账号日限、会被裁掉的行数。
+ */
+trimmed: number }
+export type PreviewEntry = { skuId: number; skuCode: string; styleName: string; tier: string; 
+/**
+ * 该 SKU 当日会展开到的平台（中文）。
+ */
+platforms: string[]; 
+/**
+ * 展开行数（平台 × 该平台在用账号数，日限裁剪前）。
+ */
+rows: number }
 /**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
@@ -1801,11 +2077,20 @@ minGapMinutes?: number; platformMatrix?: PlatformMatrix; tierRules?: TierRules;
 /**
  * 时段模板（`HH:MM-HH:MM`）。
  */
-timeSlots?: string[] }
+timeSlots?: string[]; 
+/**
+ * 归档保留天数（收件箱已收录/已丢弃、已关闭的任务包）；0 = 永久保留。
+ */
+archiveRetentionDays?: number; 
+/**
+ * 暂停排期（节假日）：ticker 不再自动生成草稿，但**超时扫描与对账照常**
+ * ——回收闭环不能停，否则暂停期间已导出的单永远收不回来。
+ */
+schedulePaused?: boolean }
 /**
  * 设置补丁（部分更新）。
  */
-export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null }
+export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
 /**
  * 对账结果汇总。
  */
@@ -1813,7 +2098,15 @@ export type ReconcileResult = { published: number; failed: number;
 /**
  * 风控熔断连带取消的任务数。
  */
-canceledByRisk: number; matched: number; unmatched: number; closed: boolean }
+canceledByRisk: number; matched: number; unmatched: number; closed: boolean; 
+/**
+ * 因「素材不合规」失败而退役的素材包数（需求 §6.3 content 处置）。
+ */
+retiredPacks: number; 
+/**
+ * 登录失效的账号名（需求 §6.3 login 处置：转人工，不自动重试）。
+ */
+loginFailAccounts: string[] }
 /**
  * 参考图详情（含使用统计）。
  */
@@ -1909,16 +2202,29 @@ export type SheetChangedEvent = { sheetId: number; date: string; status: string;
  * 汇总计数（待执行/已发布/失败/疑似/已取消）。
  */
 pending: number; published: number; failed: number; suspect: number; canceled: number }
-export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[] }
+export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[]; 
+/**
+ * 生成之后有过人工调整（改时间/增补行/换套装）。重生成会清掉这些改动，
+ * 前端据此在「重新生成」前弹确认。
+ */
+edited: boolean }
 export type SheetSummary = { id: number; date: string; status: string; taskCount: number; shortageCount: number; 
 /**
  * 各状态计数（待执行/已发布/失败/疑似/已取消）。
  */
 pending: number; published: number; failed: number; suspect: number; canceled: number }
 /**
- * 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ * 缺料/提示清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ * 
+ * `reason` 为机器码，中文由前端 `shortageLabel()` 单点映射：
+ * `no_pack` 无可用素材包 · `no_title` 无可用标题 · `no_body` 无可用正文 ·
+ * `timeout_backfill` 昨日超时失败，今日已补排（**不是缺料，是提示**）。
  */
-export type ShortageItem = { skuId: number; code: string; reason: string }
+export type ShortageItem = { skuId: number; code: string; reason: string; 
+/**
+ * 相关平台（部分原因有意义，如无账号/查重冲突）；无则空。
+ */
+platforms?: string[] }
 /**
  * SKU 详情：档案视图 + 发布历史（池明细由 assets/texts 域命令单独取）。
  */
@@ -1958,7 +2264,12 @@ warnMaterial: boolean; warnTitle: boolean; warnBody: boolean;
 /**
  * 任一池预警。
  */
-warn: boolean }
+warn: boolean; 
+/**
+ * 资产跑道（F3）：按分层频率 + 查重窗口推演「还能撑几天」。
+ * null = 60 天内不会断（或该 SKU 不排期）。
+ */
+materialDays: number | null; titleDays: number | null; bodyDays: number | null }
 /**
  * 5 视觉组计数。
  */
@@ -2012,7 +2323,15 @@ export type TaskRowView = { id: number; taskCode: string; skuId: number; skuCode
 /**
  * 封面绝对本地路径（前端 convertFileSrc）；无封面为 null。
  */
-coverPath: string | null; platform: string; platformZh: string; accountName: string; contentKind: string; plannedTime: string | null; status: string; failKind: string | null; resultUrl: string | null; resultMsg: string | null }
+coverPath: string | null; platform: string; platformZh: string; accountName: string; contentKind: string; plannedTime: string | null; status: string; failKind: string | null; resultUrl: string | null; resultMsg: string | null; 
+/**
+ * 回执截图绝对本地路径（执行器回传时才有；F2 核对时内嵌展示）。
+ */
+screenshotPath: string | null; 
+/**
+ * 取消原因：manual（人工）| risk（风控熔断）。
+ */
+cancelKind: string | null }
 export type TaskStatus = 
 /**
  * 待生成
@@ -2065,7 +2384,11 @@ platformZh: string; source: string; enabled: boolean; useCount: number; createdA
  */
 export type TierRules = { 
 /**
- * 热款：每天次数（× 平台集）。
+ * 热款：**每日发布开关**（1=每日发，0=不发）。
+ * 
+ * 引擎语义是「热款每天发一次（× 平台集）」——同 SKU 同日多套装是 V2 的事。
+ * 故这里只有 0/1 两态（sanitize 夹紧），UI 是开关而不是 0–5 的 Stepper：
+ * 一个调到 3 却毫无作用的数字框比没有更糟。
  */
 hotDaily: number; 
 /**

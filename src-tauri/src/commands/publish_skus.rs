@@ -2,15 +2,19 @@
 //!
 //! 列表聚合一次出三池余量 + 最近发布 + 预警标记；预警阈值读发布设置。
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::publish_settings;
 use crate::db::repo::{inbox, ledger, skus as repo};
 use crate::error::{AppError, AppResult};
-use crate::publish::paths;
+use crate::publish::planner::runway;
 use crate::publish::platform::Platform;
+use crate::publish::{paths, sku_mapping};
 use crate::state::AppState;
 
 /// SKU 列表/详情视图。
@@ -41,6 +45,11 @@ pub struct SkuView {
     pub warn_body: bool,
     /// 任一池预警。
     pub warn: bool,
+    /// 资产跑道（F3）：按分层频率 + 查重窗口推演「还能撑几天」。
+    /// null = 60 天内不会断（或该 SKU 不排期）。
+    pub material_days: Option<i64>,
+    pub title_days: Option<i64>,
+    pub body_days: Option<i64>,
 }
 
 /// 一条发布历史（读台账）。
@@ -132,6 +141,14 @@ async fn apply_alias(db: &sqlx::SqlitePool, id: i64, alias: &str) -> AppResult<(
 }
 
 fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuView {
+    to_view_with_runway(row, s, None)
+}
+
+fn to_view_with_runway(
+    row: &repo::SkuAggRow,
+    s: &publish_settings::PublishSettings,
+    runway: Option<runway::RunwayView>,
+) -> SkuView {
     let has_gallery = row.gallery_count > 0;
     let warn_material = row.material_count < s.warn_material;
     let warn_title = row.title_count < s.warn_title;
@@ -161,6 +178,9 @@ fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuV
         warn_title: !is_general && warn_title,
         warn_body: !is_general && warn_body,
         warn,
+        material_days: runway.as_ref().and_then(|r| r.material_days),
+        title_days: runway.as_ref().and_then(|r| r.title_days),
+        body_days: runway.as_ref().and_then(|r| r.body_days),
     }
 }
 
@@ -174,15 +194,106 @@ fn validate_platforms(platforms: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+/// 全部 SKU 的资产跑道（F3）。三条查询（包 / 台账批量 / 无），与 SKU 数无关——
+/// 跑道是列表页的常驻列，绝不能引入 N+1。
+async fn runways(
+    db: &sqlx::SqlitePool,
+    rows: &[repo::SkuAggRow],
+    s: &publish_settings::PublishSettings,
+) -> AppResult<HashMap<i64, runway::RunwayView>> {
+    use crate::db::repo::{assets, ledger};
+    use crate::publish::planner::frequency::FreqRules;
+
+    let now = crate::db::now_unix();
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let rules = FreqRules {
+        hot_daily: s.tier_rules.hot_daily,
+        warm_weekly: s.tier_rules.warm_weekly,
+        cold_weekly_rotate: s.tier_rules.cold_weekly_rotate,
+    };
+
+    // 一次拿全部在用包 + 一次批量拿它们的台账。
+    let mut packs_by_sku: HashMap<i64, Vec<assets::PackRow>> = HashMap::new();
+    let mut all_pack_ids: Vec<i64> = Vec::new();
+    for r in rows.iter().filter(|r| r.is_general == 0) {
+        let packs: Vec<assets::PackRow> = assets::list_by_sku(db, r.id)
+            .await?
+            .into_iter()
+            .filter(|p| p.lifecycle == "active")
+            .collect();
+        all_pack_ids.extend(packs.iter().map(|p| p.id));
+        packs_by_sku.insert(r.id, packs);
+    }
+    let usage = ledger::pack_usage_batch(db, &all_pack_ids).await?;
+
+    let mut out = HashMap::new();
+    for r in rows
+        .iter()
+        .filter(|r| r.is_general == 0 && r.status == "active")
+    {
+        let platforms = enabled_platforms_of(r, s);
+        let packs = packs_by_sku.remove(&r.id).unwrap_or_default();
+        let input = runway::RunwayInput {
+            sku_id: r.id,
+            tier: r.tier.clone(),
+            platforms,
+            packs: packs
+                .iter()
+                .map(|p| runway::RunwayPack {
+                    last_pub: usage
+                        .get(&p.id)
+                        .map(|u| u.last_by_platform.clone())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+            title_count: r.title_count,
+            body_count: r.body_count,
+            needs_body: r.gallery_count > 0,
+            dedup_days: s.dedup_days,
+            rules,
+            start_date: today.clone(),
+            now,
+        };
+        out.insert(r.id, runway::runway(&input));
+    }
+    Ok(out)
+}
+
+/// SKU 生效平台（覆盖优先，否则全局矩阵）。
+fn enabled_platforms_of(
+    row: &repo::SkuAggRow,
+    s: &publish_settings::PublishSettings,
+) -> Vec<String> {
+    if let Some(over) = parse_platforms(row.platforms_json.as_deref()) {
+        return over;
+    }
+    let m = &s.platform_matrix;
+    Platform::ALL
+        .into_iter()
+        .filter(|p| match p {
+            Platform::Douyin => m.douyin,
+            Platform::Xhs => m.xhs,
+            Platform::Kuaishou => m.kuaishou,
+            Platform::Shipinhao => m.shipinhao,
+            Platform::Bilibili => m.bilibili,
+        })
+        .map(|p| p.code().to_string())
+        .collect()
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn list_skus(state: State<'_, AppState>, filter: SkuFilter) -> AppResult<Vec<SkuView>> {
     let settings = publish_settings::load(&state.db).await?;
     let rows = repo::list_agg(&state.db).await?;
+    let rw = runways(&state.db, &rows, &settings).await?;
     let q = filter.query.as_deref().map(str::to_lowercase);
     let views = rows
         .iter()
-        .map(|r| to_view(r, &settings))
+        .map(|r| to_view_with_runway(r, &settings, rw.get(&r.id).cloned()))
         .filter(|v| {
             if let Some(t) = &filter.tier {
                 if !v.is_general && &v.tier != t {
@@ -214,12 +325,18 @@ pub async fn list_skus(state: State<'_, AppState>, filter: SkuFilter) -> AppResu
 pub async fn create_sku(state: State<'_, AppState>, input: CreateSkuInput) -> AppResult<i64> {
     let code = input.code.trim().to_string();
     if !paths::is_valid_sku_code(&code) {
-        return Err(AppError::InvalidInput(
-            "SKU 编码只能包含字母、数字与 - _ .（无空格）".into(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "SKU 编码只能包含字母、数字与 - _ .（无空格，不超过 {} 字符），\
+             且不能是 . / .. 或 Windows 保留名（CON/PRN/AUX/NUL/COM1–9/LPT1–9）",
+            paths::SKU_CODE_MAX
+        )));
     }
-    if repo::find_by_code(&state.db, &code).await?.is_some() {
-        return Err(AppError::InvalidInput(format!("SKU 编码已存在：{code}")));
+    // NOCASE 查重：Windows 上 `sf-1` 与 `SF-1` 会争抢资产库同一个目录。
+    if let Some(existing) = repo::find_by_code(&state.db, &code).await? {
+        return Err(AppError::InvalidInput(format!(
+            "SKU 编码已存在：{}（编码不区分大小写）",
+            existing.code
+        )));
     }
     let tier = input
         .tier
@@ -367,134 +484,539 @@ pub async fn get_sku_detail(state: State<'_, AppState>, id: i64) -> AppResult<Sk
     Ok(SkuDetail { sku, history })
 }
 
-/// 批量映射导入结果。
-#[derive(Debug, Clone, Serialize, Type)]
+/// 批量映射导入结果（`dryRun` 时为预检，不落库）。
+#[derive(Debug, Clone, Default, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MappingImportReport {
-    /// 至少设置了别名或话题的 SKU 行数。
+    /// 本次是否只预检不落库。
+    pub dry_run: bool,
+    /// 探测到的文件编码（xlsx 为 `XLSX`）。
+    pub encoding: String,
+    /// 是否识别到表头行（否则按位置 `编码,别名,话题` 解析）。
+    pub had_header: bool,
+    /// 可导入的数据行数。
+    pub rows: i64,
+    /// 将新建 / 已新建的 SKU 数。
+    pub created: i64,
+    /// 有字段变更的既有 SKU 数。
     pub updated: i64,
+    /// 与库内完全一致、无需改动的行。
+    pub unchanged: i64,
     pub alias_set: i64,
     pub topics_set: i64,
-    /// 跳过/出错行的说明（编码不存在、别名冲突等）。
-    pub skipped: Vec<String>,
+    /// 新建 SKU 的编码（预览用，最多 200 个）。
+    pub created_codes: Vec<String>,
+    /// 冲突：仅该格被跳过，行内其余字段照常导入。
+    pub conflicts: Vec<String>,
+    /// 无法导入的行，以及被忽略的单元格。
+    pub errors: Vec<String>,
 }
 
-/// 一行按 Tab 优先、否则逗号切列并去空白。
-fn split_cols(line: &str) -> Vec<String> {
-    let parts: Vec<&str> = if line.contains('\t') {
-        line.split('\t').collect()
-    } else {
-        line.split(',').collect()
+/// 一行的待写字段（`None` = 不动）。
+#[derive(Debug, Default)]
+struct UpdateFields {
+    style_name: Option<String>,
+    product_name: Option<String>,
+    tier: Option<String>,
+    topics_json: Option<String>,
+    /// `Some(None)` = 清除平台覆盖；`Some(Some(..))` = 设置覆盖。
+    platforms_json: Option<Option<String>>,
+    note: Option<String>,
+}
+
+impl UpdateFields {
+    fn is_empty(&self) -> bool {
+        self.style_name.is_none()
+            && self.product_name.is_none()
+            && self.tier.is_none()
+            && self.topics_json.is_none()
+            && self.platforms_json.is_none()
+            && self.note.is_none()
+    }
+}
+
+/// 一行的执行计划（预检与落库共用，保证「预览说什么、执行就做什么」）。
+enum RowPlan {
+    Create {
+        new: repo::NewSku,
+        alias: Option<String>,
+        status: Option<String>,
+    },
+    Update {
+        id: i64,
+        fields: UpdateFields,
+        alias: Option<String>,
+        status: Option<String>,
+    },
+}
+
+/// 解析结果 + 库内现状 → 逐行计划 + 报告（纯读，不写库）。
+async fn plan_mappings(
+    db: &sqlx::SqlitePool,
+    parsed: &sku_mapping::ParsedMapping,
+) -> AppResult<(Vec<RowPlan>, MappingImportReport)> {
+    let mut report = MappingImportReport {
+        encoding: parsed.encoding.clone(),
+        had_header: parsed.had_header,
+        errors: parsed.errors.clone(),
+        ..Default::default()
     };
-    parts.iter().map(|s| s.trim().to_string()).collect()
-}
+    let existing = repo::list_agg(db).await?;
+    // 别名归属与各 SKU 当前别名：随计划推进而更新，故「先改走 A 的别名、再把 A 给 B」不会误报冲突。
+    // 别名 → 持有者编码（原样，供报错文案）；编码键（小写）→ 当前别名。
+    let mut alias_owner: HashMap<String, String> = existing
+        .iter()
+        .filter(|r| !r.folder_alias.is_empty())
+        .map(|r| (r.folder_alias.clone(), r.code.clone()))
+        .collect();
+    let mut alias_of: HashMap<String, String> = existing
+        .iter()
+        .map(|r| (r.code.to_ascii_lowercase(), r.folder_alias.clone()))
+        .collect();
+    // 编码键一律小写：库内编码大小写唯一（idx_skus_code_nocase），映射表里的
+    // `sf-1` 必须命中库里的 `SF-1` 走更新，而不是新建出一个撞索引的行。
+    let by_code: HashMap<String, &repo::SkuAggRow> = existing
+        .iter()
+        .map(|r| (r.code.to_ascii_lowercase(), r))
+        .collect();
 
-/// 解析话题列：空白分隔、去 `#`、去重、最多 5 个。
-fn parse_topic_field(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for tok in s.split_whitespace() {
-        let t = tok.trim_start_matches('#').trim();
-        if !t.is_empty() && !out.iter().any(|x| x == t) {
-            out.push(t.to_string());
+    let mut plans: Vec<RowPlan> = Vec::new();
+    for row in &parsed.rows {
+        let line = row.line;
+        let cur = by_code.get(&row.code.to_ascii_lowercase()).copied();
+        if cur.map(|c| c.is_general != 0) == Some(true) {
+            report
+                .errors
+                .push(format!("第 {line} 行：内置「通用」分组不可通过映射表修改"));
+            continue;
         }
-        if out.len() >= 5 {
-            break;
+        report.rows += 1;
+
+        // 别名：占用冲突则只跳过这一格；与现值相同则不算变更。
+        let code_key = row.code.to_ascii_lowercase();
+        let mut alias_to_set: Option<String> = None;
+        if let Some(a) = &row.alias {
+            match alias_owner.get(a) {
+                Some(owner) if !owner.eq_ignore_ascii_case(&row.code) => {
+                    report.conflicts.push(format!(
+                        "第 {line} 行：别名「{a}」已被 SKU {owner} 占用，本行别名未写入"
+                    ));
+                }
+                _ => {
+                    let same = alias_of.get(&code_key).map(String::as_str) == Some(a.as_str());
+                    if !same {
+                        if let Some(old) = alias_of.get(&code_key) {
+                            alias_owner.remove(old);
+                        }
+                        alias_owner.insert(a.clone(), row.code.clone());
+                        alias_of.insert(code_key.clone(), a.clone());
+                        alias_to_set = Some(a.clone());
+                        report.alias_set += 1;
+                    }
+                }
+            }
+        }
+
+        match cur {
+            // 编码不存在 → 新建（款式名缺省取别名，再缺省取编码；分层缺省温款）。
+            None => {
+                let style_name = row
+                    .style_name
+                    .clone()
+                    .or_else(|| row.alias.clone())
+                    .unwrap_or_else(|| row.code.clone());
+                let topics = row.topics.clone().unwrap_or_default();
+                if !topics.is_empty() {
+                    report.topics_set += 1;
+                }
+                let platforms_json = match &row.platforms {
+                    Some(Some(ps)) => Some(serde_json::to_string(ps)?),
+                    _ => None,
+                };
+                report.created += 1;
+                if report.created_codes.len() < 200 {
+                    report.created_codes.push(row.code.clone());
+                }
+                plans.push(RowPlan::Create {
+                    new: repo::NewSku {
+                        code: row.code.clone(),
+                        style_name,
+                        product_name: row.product_name.clone().unwrap_or_default(),
+                        tier: row.tier.clone().unwrap_or_else(|| "warm".into()),
+                        topics_json: serde_json::to_string(&topics)?,
+                        platforms_json,
+                        note: row.note.clone().unwrap_or_default(),
+                    },
+                    alias: alias_to_set,
+                    status: row.status.clone().filter(|s| s == "paused"),
+                });
+            }
+            // 编码已存在 → 就地更新，只写「有值且与现值不同」的格子。
+            Some(c) => {
+                let mut f = UpdateFields::default();
+                let diff = |new: &Option<String>, old: &str| -> Option<String> {
+                    new.clone().filter(|v| v != old)
+                };
+                f.style_name = diff(&row.style_name, &c.style_name);
+                f.product_name = diff(&row.product_name, &c.product_name);
+                f.tier = diff(&row.tier, &c.tier);
+                f.note = diff(&row.note, &c.note);
+                if let Some(ts) = &row.topics {
+                    if ts != &parse_topics(&c.topics_json) {
+                        f.topics_json = Some(serde_json::to_string(ts)?);
+                        report.topics_set += 1;
+                    }
+                }
+                if let Some(target) = &row.platforms {
+                    let old = parse_platforms(c.platforms_json.as_deref());
+                    if target != &old {
+                        f.platforms_json = Some(match target {
+                            Some(ps) => Some(serde_json::to_string(ps)?),
+                            None => None,
+                        });
+                    }
+                }
+                let status = row.status.clone().filter(|s| s != &c.status);
+                let touched = !f.is_empty() || alias_to_set.is_some() || status.is_some();
+                if touched {
+                    report.updated += 1;
+                } else {
+                    report.unchanged += 1;
+                }
+                plans.push(RowPlan::Update {
+                    id: c.id,
+                    fields: f,
+                    alias: alias_to_set,
+                    status,
+                });
+            }
         }
     }
-    out
+    Ok((plans, report))
 }
 
-/// 批量导入 SKU 映射：每行 `编码[<Tab/逗号>别名][<Tab/逗号>话题]`。
-/// 别名一对一（唯一），话题为显式设置/替换（区别于收件箱的「绝不覆盖」）。SKU 需已存在。
+/// 批量导入 SKU 映射表：**编码不存在则新建，存在则就地更新，空单元格一律不动**。
+///
+/// 接受 `.xlsx/.csv/.tsv/.txt`（UTF-8/GBK 自动探测）；表头可选，见 [`sku_mapping`]。
+/// `dry_run=true` 只返回预检报告不落库——前端先预览、用户确认后再以 `false` 落库。
 #[tauri::command]
 #[specta::specta]
 pub async fn import_sku_mappings(
     state: State<'_, AppState>,
     path: String,
+    dry_run: bool,
 ) -> AppResult<MappingImportReport> {
-    let content = std::fs::read(&path)?;
-    let text = String::from_utf8_lossy(&content);
-    let mut report = MappingImportReport {
-        updated: 0,
-        alias_set: 0,
-        topics_set: 0,
-        skipped: Vec::new(),
-    };
-    for (i, raw) in text.lines().enumerate() {
-        let line = raw.trim().trim_start_matches('\u{feff}');
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        let cols = split_cols(line);
-        let code = cols.first().map(String::as_str).unwrap_or("").trim();
-        if code.is_empty() {
-            continue;
-        }
-        let Some(sku) = repo::find_by_code(&state.db, code).await? else {
-            report
-                .skipped
-                .push(format!("第 {} 行：SKU 编码不存在「{code}」", i + 1));
-            continue;
-        };
-        let alias = cols.get(1).map(String::as_str).unwrap_or("").trim();
-        let topics_field = cols.get(2).map(String::as_str).unwrap_or("").trim();
-        let mut touched = false;
-        // 别名（唯一性冲突则跳过别名、仍尝试话题）。
-        if !alias.is_empty() {
-            match repo::find_by_alias(&state.db, alias).await? {
-                Some(other) if other.id != sku.id => {
-                    report.skipped.push(format!(
-                        "第 {} 行：别名「{alias}」已被 SKU {} 占用",
-                        i + 1,
-                        other.code
-                    ));
-                }
-                _ => {
-                    repo::set_alias(&state.db, sku.id, alias).await?;
-                    report.alias_set += 1;
-                    touched = true;
-                }
-            }
-        }
-        // 话题（显式设置/替换）。
-        if !topics_field.is_empty() {
-            let topics = parse_topic_field(topics_field);
-            let json = serde_json::to_string(&topics)?;
-            repo::set_topics(&state.db, sku.id, &json).await?;
-            report.topics_set += 1;
-            touched = true;
-        }
-        if touched {
-            report.updated += 1;
-        }
+    let parsed = sku_mapping::parse_mapping_file(std::path::Path::new(&path))?;
+    let (plans, mut report) = plan_mappings(&state.db, &parsed).await?;
+    report.dry_run = dry_run;
+    if !dry_run {
+        execute_plans(&state.db, plans).await?;
     }
     Ok(report)
 }
 
+/// 落库：按行序执行计划（别名换绑依赖行序，故不可并发）。
+async fn execute_plans(db: &sqlx::SqlitePool, plans: Vec<RowPlan>) -> AppResult<()> {
+    for plan in plans {
+        match plan {
+            RowPlan::Create { new, alias, status } => {
+                let id = repo::insert(db, &new).await?;
+                if let Some(a) = alias {
+                    repo::set_alias(db, id, &a).await?;
+                }
+                if let Some(s) = status {
+                    repo::set_status(db, id, &s).await?;
+                }
+            }
+            RowPlan::Update {
+                id,
+                fields,
+                alias,
+                status,
+            } => {
+                if !fields.is_empty() {
+                    repo::update_fields(
+                        db,
+                        id,
+                        fields.style_name.as_deref(),
+                        fields.product_name.as_deref(),
+                        fields.tier.as_deref(),
+                        fields.topics_json.as_deref(),
+                        fields.platforms_json.as_ref().map(|o| o.as_deref()),
+                        fields.note.as_deref(),
+                    )
+                    .await?;
+                }
+                if let Some(a) = alias {
+                    repo::set_alias(db, id, &a).await?;
+                }
+                if let Some(s) = status {
+                    repo::set_status(db, id, &s).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 选择映射表文件（xlsx / csv / tsv / txt）。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_mapping_file(app: AppHandle) -> AppResult<Option<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("映射表", &["xlsx", "xlsm", "csv", "tsv", "txt"])
+        .blocking_pick_file();
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 补料提示词（F1）：把缺料 SKU 变成一段可直接粘贴给 Claude/Codex 的 prompt。
+/// `kind`：`title` | `body` | 其它（=两者都要）。
+#[tauri::command]
+#[specta::specta]
+pub async fn restock_prompt(
+    state: State<'_, AppState>,
+    sku_ids: Vec<i64>,
+    kind: String,
+) -> AppResult<String> {
+    use crate::publish::restock::{build_restock_prompt, RestockKind, RestockSku};
+    let rows = repo::list_agg(&state.db).await?;
+    let picked: Vec<RestockSku> = rows
+        .iter()
+        .filter(|r| sku_ids.contains(&r.id) && r.is_general == 0)
+        .map(|r| RestockSku {
+            code: r.code.clone(),
+            style_name: r.style_name.clone(),
+            product_name: r.product_name.clone(),
+            topics: parse_topics(&r.topics_json),
+            title_count: r.title_count,
+            body_count: r.body_count,
+        })
+        .collect();
+    if picked.is_empty() {
+        return Err(AppError::InvalidInput("请先选择要补料的 SKU".into()));
+    }
+    Ok(build_restock_prompt(
+        &picked,
+        RestockKind::from_str_or_both(&kind),
+    ))
+}
+
+/// 导出映射表模板 CSV（UTF-8 BOM，Excel 双击即用）。返回落盘路径；用户取消则 `None`。
+#[tauri::command]
+#[specta::specta]
+pub async fn save_sku_mapping_template(app: AppHandle) -> AppResult<Option<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_file_name("SKU映射表模板.csv")
+        .add_filter("CSV", &["csv"])
+        .blocking_save_file();
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    std::fs::write(&path, sku_mapping::template_csv())?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即测试失败，是期望行为
 mod tests {
     use super::*;
+    use crate::db::test_support::test_pool;
 
-    #[test]
-    fn split_cols_tab_then_comma() {
+    /// 跑一遍导入：先预检、再落库，并断言两者报告一致（预览即执行）。
+    async fn import(
+        pool: &sqlx::SqlitePool,
+        csv: &str,
+        dir: &std::path::Path,
+    ) -> MappingImportReport {
+        let path = dir.join("m.csv");
+        std::fs::write(&path, csv).unwrap();
+        let parsed = sku_mapping::parse_mapping_file(&path).unwrap();
+        let (_, preview) = plan_mappings(pool, &parsed).await.unwrap();
+        let (plans, report) = plan_mappings(pool, &parsed).await.unwrap();
         assert_eq!(
-            split_cols("NFC-W-01\tA-敖瑞鹏-01\t#a #b"),
-            ["NFC-W-01", "A-敖瑞鹏-01", "#a #b"]
+            (preview.created, preview.updated, preview.unchanged),
+            (report.created, report.updated, report.unchanged),
+            "预检与执行的计划必须一致"
         );
-        assert_eq!(
-            split_cols("NFC-W-01, A-敖瑞鹏-01 , 沙发 家居"),
-            ["NFC-W-01", "A-敖瑞鹏-01", "沙发 家居"]
-        );
-        assert_eq!(split_cols("NFC-W-01"), ["NFC-W-01"]);
+        execute_plans(pool, plans).await.unwrap();
+        report
     }
 
-    #[test]
-    fn parse_topic_field_strips_hash_dedupes_caps_5() {
+    #[tokio::test]
+    async fn creates_missing_skus_instead_of_skipping() {
+        let (pool, dir) = test_pool().await;
+        let csv = "SKU编码,款式名,文件夹别名,话题,分层\n\
+                   NFC-W-01,敖瑞鹏01,A-敖瑞鹏-01,沙发 家居,热款\n\
+                   NFC-W-02,,B-敖瑞鹏-02,,\n";
+        let r = import(&pool, csv, dir.path()).await;
+        assert_eq!((r.created, r.updated, r.rows), (2, 0, 2));
+        assert_eq!(r.created_codes, ["NFC-W-01", "NFC-W-02"]);
+        assert!(r.errors.is_empty() && r.conflicts.is_empty());
+
+        let a = repo::find_by_code(&pool, "NFC-W-01")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.style_name, "敖瑞鹏01");
+        assert_eq!(a.folder_alias, "A-敖瑞鹏-01");
+        assert_eq!(a.tier, "hot");
+        assert_eq!(parse_topics(&a.topics_json), ["沙发", "家居"]);
+        // 款式名留空 → 取别名兜底；分层留空 → 温款。
+        let b = repo::find_by_code(&pool, "NFC-W-02")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.style_name, "B-敖瑞鹏-02");
+        assert_eq!(b.tier, "warm");
+        assert_eq!(b.status, "active");
+    }
+
+    #[tokio::test]
+    async fn empty_cells_never_overwrite_existing_values() {
+        let (pool, dir) = test_pool().await;
+        import(
+            &pool,
+            "SKU编码,款式名,文件夹别名,话题,备注\nNFC-W-01,原名,A-01,沙发,原备注\n",
+            dir.path(),
+        )
+        .await;
+        // 第二次只写话题，其余留空。
+        let r = import(
+            &pool,
+            "SKU编码,款式名,文件夹别名,话题,备注\nNFC-W-01,,,客厅 家居,\n",
+            dir.path(),
+        )
+        .await;
+        assert_eq!((r.created, r.updated, r.topics_set), (0, 1, 1));
+        let s = repo::find_by_code(&pool, "NFC-W-01")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.style_name, "原名", "留空不得清空款式名");
+        assert_eq!(s.folder_alias, "A-01", "留空不得清空别名");
+        assert_eq!(s.note, "原备注");
+        assert_eq!(parse_topics(&s.topics_json), ["客厅", "家居"]);
+    }
+
+    #[tokio::test]
+    async fn identical_rows_count_as_unchanged() {
+        let (pool, dir) = test_pool().await;
+        let csv = "SKU编码,款式名,文件夹别名,分层\nNFC-W-01,敖瑞鹏01,A-01,热款\n";
+        import(&pool, csv, dir.path()).await;
+        let r = import(&pool, csv, dir.path()).await;
+        assert_eq!((r.created, r.updated, r.unchanged), (0, 0, 1));
+        assert_eq!(r.alias_set, 0, "别名与现值相同不算改动");
+    }
+
+    #[tokio::test]
+    async fn alias_taken_by_another_sku_is_a_conflict_rest_of_row_still_imports() {
+        let (pool, dir) = test_pool().await;
+        import(&pool, "SKU编码,文件夹别名\nNFC-W-01,A-01\n", dir.path()).await;
+        let r = import(
+            &pool,
+            "SKU编码,文件夹别名,款式名\nNFC-W-02,A-01,新款\n",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(r.conflicts.len(), 1);
+        assert!(r.conflicts[0].contains("已被 SKU NFC-W-01 占用"));
+        let two = repo::find_by_code(&pool, "NFC-W-02")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(two.folder_alias, "", "冲突的别名不写入");
+        assert_eq!(two.style_name, "新款", "行内其余字段照常导入");
+        let one = repo::find_by_code(&pool, "NFC-W-01")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.folder_alias, "A-01", "原持有者不受影响");
+    }
+
+    #[tokio::test]
+    async fn alias_handover_within_one_file_is_not_a_false_conflict() {
+        let (pool, dir) = test_pool().await;
+        import(
+            &pool,
+            "SKU编码,文件夹别名\nNFC-W-01,A-01\nNFC-W-02,B-01\n",
+            dir.path(),
+        )
+        .await;
+        // 先把 A-01 让给 NFC-W-02（行序在前的 NFC-W-01 同时改走 C-01）。
+        let r = import(
+            &pool,
+            "SKU编码,文件夹别名\nNFC-W-01,C-01\nNFC-W-02,A-01\n",
+            dir.path(),
+        )
+        .await;
+        assert!(r.conflicts.is_empty(), "换绑不是冲突：{:?}", r.conflicts);
+        assert_eq!(r.alias_set, 2);
+        let one = repo::find_by_code(&pool, "NFC-W-01")
+            .await
+            .unwrap()
+            .unwrap();
+        let two = repo::find_by_code(&pool, "NFC-W-02")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            parse_topic_field("#沙发 #家居 沙发 #新品"),
-            ["沙发", "家居", "新品"]
+            (one.folder_alias.as_str(), two.folder_alias.as_str()),
+            ("C-01", "A-01")
         );
-        assert_eq!(parse_topic_field("a b c d e f g").len(), 5);
-        assert!(parse_topic_field("   ").is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_writes_nothing() {
+        let (pool, dir) = test_pool().await;
+        let path = dir.path().join("m.csv");
+        std::fs::write(&path, "SKU编码,文件夹别名\nNFC-W-01,A-01\n").unwrap();
+        let parsed = sku_mapping::parse_mapping_file(&path).unwrap();
+        let (_plans, report) = plan_mappings(&pool, &parsed).await.unwrap();
+        assert_eq!(report.created, 1);
+        assert!(
+            repo::find_by_code(&pool, "NFC-W-01")
+                .await
+                .unwrap()
+                .is_none(),
+            "预检不得落库"
+        );
+    }
+
+    // A5：编码大小写唯一 —— 映射表里的 `sf-1` 必须命中库里的 `SF-1` 走更新，
+    // 而不是新建出一个撞 idx_skus_code_nocase 唯一索引的行。
+    #[tokio::test]
+    async fn code_lookup_is_case_insensitive() {
+        let (pool, dir) = test_pool().await;
+        import(&pool, "SKU编码,款式名\nSF-1,原名\n", dir.path()).await;
+        let r = import(&pool, "SKU编码,款式名\nsf-1,新名\n", dir.path()).await;
+        assert_eq!((r.created, r.updated), (0, 1), "大小写不同视为同一个 SKU");
+        let all = repo::list_agg(&pool).await.unwrap();
+        assert_eq!(
+            all.iter().filter(|s| s.is_general == 0).count(),
+            1,
+            "不得建出第二个 SKU"
+        );
+        let s = repo::find_by_code(&pool, "SF-1").await.unwrap().unwrap();
+        assert_eq!(s.style_name, "新名");
+    }
+
+    #[tokio::test]
+    async fn general_group_is_protected() {
+        let (pool, dir) = test_pool().await;
+        let id = repo::general_id(&pool).await.unwrap();
+        let general = repo::get(&pool, id).await.unwrap().unwrap();
+        let csv = format!("SKU编码,款式名\n{},改名\n", general.code);
+        let r = import(&pool, &csv, dir.path()).await;
+        assert_eq!(r.rows, 0);
+        assert_eq!(r.errors.len(), 1);
+        assert!(r.errors[0].contains("通用"));
+        let after = repo::get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(after.style_name, general.style_name);
     }
 }

@@ -71,6 +71,26 @@ export function CommandPalette() {
             .catch((e) => toast.error(String(e)));
         },
       },
+      { cat: "操作", label: "打开今日看板", run: () => go("plan") },
+      {
+        cat: "操作",
+        label: "导入今日回执",
+        run: () => {
+          const d = new Date();
+          const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          void unwrap(commands.getDashboard(date))
+            .then(async (dash) => {
+              if (dash.sheetId == null) {
+                toast("今日没有任务单");
+                return;
+              }
+              const r = await unwrap(commands.importReceipts(dash.sheetId));
+              toast.success(`对账完成：已发布 ${r.published} · 失败 ${r.failed}`);
+              go("plan");
+            })
+            .catch((e) => toast.error(String(e)));
+        },
+      },
       { cat: "操作", label: "检查更新", run: () => toast("应用内更新将在发布链接入（M4）") },
     ];
     const q = query.trim().toLowerCase();

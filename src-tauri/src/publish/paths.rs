@@ -19,6 +19,11 @@ pub const INBOX: &str = "收件箱";
 pub const TASK_PACKAGES: &str = "任务包";
 /// 收件箱内的已收录归档子目录。
 pub const INGESTED: &str = "已收录";
+/// 收件箱内的已丢弃归档子目录（丢弃 = 移档，不删文件；rescan 排除，故不会复活）。
+pub const DISCARDED: &str = "已丢弃";
+
+/// 收件箱内 rescan 不进入的归档子目录。
+pub const INBOX_ARCHIVES: [&str; 2] = [INGESTED, DISCARDED];
 
 /// 四分区顶层目录（`init` 时创建；`INGESTED` 在 `收件箱/` 内按日期建）。
 pub const PARTITIONS: [&str; 3] = [ASSET_LIB, INBOX, TASK_PACKAGES];
@@ -68,18 +73,26 @@ impl PathStyle {
     }
 }
 
-/// 根目录内相对路径（真相载体）。内部一律正斜杠、无前导斜杠。
+/// 路径段是否可保留：丢弃空段与 `.`／`..`。
+/// `..` 会让 `to_local` 穿越出根目录（SKU 编码等外来输入会流进路径），故在
+/// 构造处剔除——`RelPath` 的构造签名不可失败，穿越段只能丢弃而非报错；编码层面的
+/// 拒绝由 [`is_valid_sku_code`] 负责（两道防线）。
+fn keep_seg(seg: &str) -> bool {
+    !seg.is_empty() && seg != "." && seg != ".."
+}
+
+/// 根目录内相对路径（真相载体）。内部一律正斜杠、无前导斜杠、无 `.`/`..` 段。
 /// repo 层只收此类型（类型强制而非散文约定）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RelPath(String);
 
 impl RelPath {
-    /// 由任意分隔风格的字符串构造：反斜杠 → 正斜杠，去首尾斜杠，折叠重复斜杠。
+    /// 由任意分隔风格的字符串构造：反斜杠 → 正斜杠，去首尾斜杠，折叠重复斜杠，剔除 `.`/`..`。
     pub fn new(raw: impl AsRef<str>) -> RelPath {
         let s = raw.as_ref().replace('\\', "/");
         let joined = s
             .split('/')
-            .filter(|seg| !seg.is_empty())
+            .filter(|seg| keep_seg(seg))
             .collect::<Vec<_>>()
             .join("/");
         RelPath(joined)
@@ -97,7 +110,7 @@ impl RelPath {
                 p.as_ref()
                     .replace('\\', "/")
                     .split('/')
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| keep_seg(s))
                     .map(str::to_string)
                     .collect::<Vec<_>>()
             })
@@ -183,14 +196,38 @@ pub fn is_ascii_safe_name(name: &str) -> bool {
         })
 }
 
-/// 校验 SKU 编码：ASCII 字母/数字/`-_.`，非空、无空格。
+/// SKU 编码长度上限（编码进目录名与 xlsx，留足 Windows 路径预算）。
+pub const SKU_CODE_MAX: usize = 64;
+
+/// Windows 保留设备名：这些名字（含带扩展名的形式，如 `con.txt`）在 Windows 上
+/// 无法创建为目录/文件，执行机上会整个 SKU 目录建不出来。
+const WIN_RESERVED: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// 校验 SKU 编码：ASCII 字母/数字/`-_.`，非空、无空格、≤64 字符；
+/// 拒绝纯点段（`.`/`..`，路径穿越入口）与 Windows 保留设备名。
+///
 /// 注：SKU 编码作为用户可见标识（xlsx 第 7 列 + 目录名），允许大写（如 `SF-YD-201`）；
-/// GenDesk 是目录结构唯一写方，大小写一致性由本单点保证，故不强制转小写。
+/// GenDesk 是目录结构唯一写方，但 Windows 文件系统大小写不敏感，故编码的**唯一性**
+/// 按大小写不敏感判定（`skus` 表 `idx_skus_code_nocase` 唯一索引 + repo 层 `COLLATE NOCASE`）。
 pub fn is_valid_sku_code(code: &str) -> bool {
-    !code.is_empty()
-        && code
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    if code.is_empty() || code.chars().count() > SKU_CODE_MAX {
+        return false;
+    }
+    if !code
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return false;
+    }
+    if code.chars().all(|c| c == '.') {
+        return false;
+    }
+    let lower = code.to_ascii_lowercase();
+    let stem = lower.split('.').next().unwrap_or(lower.as_str());
+    !WIN_RESERVED.contains(&stem)
 }
 
 /// 规范化扩展名（去点、转小写）；空则回退 `bin`。
@@ -258,6 +295,36 @@ mod tests {
         let root = std::path::Path::new("/tmp/root");
         let p = RelPath::new("资产库/sku/img_01.jpg").to_local(root);
         assert_eq!(p, std::path::Path::new("/tmp/root/资产库/sku/img_01.jpg"));
+    }
+
+    // A5：`..`/`.` 段一律剔除 → 任何外来输入都无法穿越出根目录。
+    #[test]
+    fn relpath_strips_traversal_segments() {
+        assert_eq!(RelPath::new("a/../../b").as_str(), "a/b");
+        assert_eq!(RelPath::new("./a/./b").as_str(), "a/b");
+        assert_eq!(RelPath::new("../../..").as_str(), "");
+        assert_eq!(RelPath::from_parts(["资产库", ".."]).as_str(), "资产库");
+        let root = std::path::Path::new("/tmp/root");
+        let escaped = RelPath::new("资产库/../../etc/passwd").to_local(root);
+        assert!(escaped.starts_with(root), "解析结果必须仍在根目录内");
+        assert_eq!(escaped, std::path::Path::new("/tmp/root/资产库/etc/passwd"));
+    }
+
+    #[test]
+    fn sku_code_rejects_traversal_reserved_and_overlong() {
+        assert!(is_valid_sku_code("SF-YD-201"));
+        assert!(is_valid_sku_code("sf_1.a"));
+        assert!(!is_valid_sku_code(".."));
+        assert!(!is_valid_sku_code("."));
+        assert!(!is_valid_sku_code("..."));
+        assert!(!is_valid_sku_code("CON"));
+        assert!(!is_valid_sku_code("com1"));
+        assert!(!is_valid_sku_code("nul.txt"), "带扩展名的保留名同样不可用");
+        assert!(!is_valid_sku_code(&"a".repeat(SKU_CODE_MAX + 1)));
+        assert!(is_valid_sku_code(&"a".repeat(SKU_CODE_MAX)));
+        assert!(!is_valid_sku_code("a b"));
+        assert!(!is_valid_sku_code(""));
+        assert!(is_valid_sku_code("console"), "只有恰好等于保留名才拒绝");
     }
 
     #[test]

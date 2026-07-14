@@ -32,6 +32,9 @@ pub struct PackView {
     pub dir_rel: String,
     pub files: Vec<PackFileView>,
     pub cover: Option<String>,
+    /// 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
+    /// 无封面的视频包为 None（V1 不抽帧）。
+    pub thumb_path: Option<String>,
     /// 存储态：new|active|retired。
     pub lifecycle: String,
     /// 派生态：new|active|exhausted|retired。
@@ -40,6 +43,10 @@ pub struct PackView {
     pub available_at: Option<i64>,
     /// 被未关闭任务单引用（锁定）。
     pub locked: bool,
+    /// 累计发布次数（台账）。
+    pub publish_count: i64,
+    /// 最近一次发布（Unix 秒；从未发布为 null）。
+    pub last_published: Option<i64>,
     pub source: String,
     pub note: String,
     pub file_count: i64,
@@ -101,7 +108,17 @@ fn enabled_platforms(sku_platforms: Option<&Vec<String>>, s: &PublishSettings) -
         .collect()
 }
 
-async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> AppResult<PackView> {
+/// 组装一个包视图（纯函数：台账/锁定/平台/根目录都由调用方**批量**取好后传入，
+/// 避免逐包各查一次——SKU 详情几十个包时 N+1 会把 100ms 拖成 2 秒）。
+fn to_view(
+    r: repo::PackRow,
+    s: &PublishSettings,
+    platforms: &[String],
+    usage: &ledger::PackUsage,
+    locked: bool,
+    root: Option<&std::path::Path>,
+    now: i64,
+) -> PackView {
     let files: Vec<PackFileView> = serde_json::from_str::<Vec<serde_json::Value>>(&r.files_json)
         .unwrap_or_default()
         .into_iter()
@@ -120,29 +137,38 @@ async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> App
         })
         .collect();
 
-    // 派生生命周期：读该 SKU 生效平台 + 该包各平台最近发布。
-    let sku = skus::get(&state.db, r.sku_id).await?;
-    let sku_platforms = sku
-        .as_ref()
-        .and_then(|s| s.platforms_json.as_deref())
-        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok());
-    let platforms = enabled_platforms(sku_platforms.as_ref(), s);
+    let (derived, available_at) = derive_lifecycle(
+        &r.lifecycle,
+        &usage.last_by_platform,
+        platforms,
+        s.dedup_days,
+        now,
+    );
 
-    let now = crate::db::now_unix();
-    let mut conn = state.db.acquire().await?;
-    let mut last_pub = Vec::new();
-    for p in &platforms {
-        if let Some(t) = ledger::last_publish_in_window(&mut conn, r.id, p, 0).await? {
-            last_pub.push((p.clone(), t));
-        }
-    }
-    drop(conn);
-    let (derived, available_at) =
-        derive_lifecycle(&r.lifecycle, &last_pub, &platforms, s.dedup_days, now);
+    // 缩略图：封面优先，否则包内首张图片（视频包无封面时没有缩略图，V1 不抽帧）。
+    let thumb_name = r.cover.clone().or_else(|| {
+        files
+            .iter()
+            .find(|f| {
+                matches!(
+                    crate::publish::paths::ascii_ext(&f.name).as_str(),
+                    "jpg" | "jpeg" | "png" | "webp"
+                )
+            })
+            .map(|f| f.name.clone())
+    });
+    let thumb_path = match (root, thumb_name) {
+        (Some(root), Some(name)) => Some(
+            RelPath::new(&r.dir_rel)
+                .join(&name)
+                .to_local(root)
+                .to_string_lossy()
+                .to_string(),
+        ),
+        _ => None,
+    };
 
-    let locked = repo::is_locked(&state.db, r.id).await?;
-
-    Ok(PackView {
+    PackView {
         id: r.id,
         sku_id: r.sku_id,
         kind: r.kind,
@@ -150,15 +176,52 @@ async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> App
         file_count: files.len() as i64,
         files,
         cover: r.cover,
+        thumb_path,
         lifecycle: r.lifecycle,
         derived,
         available_at,
         locked,
+        publish_count: usage.publish_count,
+        last_published: usage.last_published,
         source: r.source,
         note: r.note,
         created_at: r.created_at,
         updated_at: r.updated_at,
-    })
+    }
+}
+
+/// 一组包 → 视图（同 SKU）。三次查询（SKU / 台账批量 / 锁定批量），与包数无关。
+async fn views_of(
+    state: &AppState,
+    rows: Vec<repo::PackRow>,
+    s: &PublishSettings,
+) -> AppResult<Vec<PackView>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sku_id = rows[0].sku_id;
+    let sku = skus::get(&state.db, sku_id).await?;
+    let sku_platforms = sku
+        .as_ref()
+        .and_then(|s| s.platforms_json.as_deref())
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok());
+    let platforms = enabled_platforms(sku_platforms.as_ref(), s);
+
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let usage = ledger::pack_usage_batch(&state.db, &ids).await?;
+    let locked = repo::locked_ids(&state.db, &ids).await?;
+    let root = publish_settings::root_local(&state.db).await.ok();
+    let now = crate::db::now_unix();
+    let empty = ledger::PackUsage::default();
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let u = usage.get(&r.id).unwrap_or(&empty);
+            let is_locked = locked.contains(&r.id);
+            to_view(r, s, &platforms, u, is_locked, root.as_deref(), now)
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -166,11 +229,7 @@ async fn to_view(state: &AppState, r: repo::PackRow, s: &PublishSettings) -> App
 pub async fn list_asset_packs(state: State<'_, AppState>, sku_id: i64) -> AppResult<Vec<PackView>> {
     let s = publish_settings::load(&state.db).await?;
     let rows = repo::list_by_sku(&state.db, sku_id).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(to_view(&state, r, &s).await?);
-    }
-    Ok(out)
+    views_of(&state, rows, &s).await
 }
 
 /// 手动导入素材文件（走与收件箱相同的归集/命名管线）。
@@ -195,15 +254,46 @@ pub async fn import_media_files(
             std::fs::copy(src, inbox_abs.join(name))?;
         }
     }
-    let ids = ingest::collect_media(&state.db, &root, &sku.code).await?;
+    let ids = ingest::collect_media(&state.db, &root, &sku.code, Some(&sku.code)).await?;
     let s = publish_settings::load(&state.db).await?;
-    let mut out = Vec::new();
+    let mut rows = Vec::new();
     for id in ids {
         if let Some(r) = repo::get(&state.db, id).await? {
-            out.push(to_view(&state, r, &s).await?);
+            rows.push(r);
         }
     }
-    Ok(out)
+    views_of(&state, rows, &s).await
+}
+
+/// 拖放直投 TXT（F7）：复制进 `收件箱/{SKU}/` 后走收录管线（强制该 SKU，跳过三冗余识别）。
+#[tauri::command]
+#[specta::specta]
+pub async fn import_text_file(
+    state: State<'_, AppState>,
+    sku_id: i64,
+    path: String,
+) -> AppResult<ingest::IngestOutcome> {
+    let root = publish_settings::root_local(&state.db).await?;
+    let sku = skus::get(&state.db, sku_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("SKU 不存在".into()))?;
+    let src = std::path::Path::new(&path);
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::InvalidInput("文件名无效".into()))?;
+    if !name.to_ascii_lowercase().ends_with(".txt") {
+        return Err(AppError::InvalidInput("只支持 .txt 文本文件".into()));
+    }
+    let dir_rel = RelPath::from_parts([crate::publish::paths::INBOX, &sku.code]);
+    let dir_abs = dir_rel.to_local(&root);
+    std::fs::create_dir_all(&dir_abs)?;
+    // 同名去重，避免覆盖收件箱里已有的文件。
+    let final_name = crate::publish::paths::dedupe_name(name, &|n| dir_abs.join(n).exists());
+    std::fs::copy(src, dir_abs.join(&final_name))?;
+
+    let rel = dir_rel.join(&final_name);
+    ingest::ingest_txt(&state.db, &root, &rel, Some(&sku.code)).await
 }
 
 /// 作品库联动：把选中的输出图复制为一个图集包。
@@ -233,7 +323,7 @@ pub async fn pack_from_works(
             let r = repo::get(&state.db, id)
                 .await?
                 .ok_or_else(|| AppError::Internal("新建包读取失败".into()))?;
-            Ok(Some(to_view(&state, r, &s).await?))
+            Ok(views_of(&state, vec![r], &s).await?.into_iter().next())
         }
         None => Ok(None),
     }
@@ -263,11 +353,23 @@ pub async fn restore_pack(state: State<'_, AppState>, id: i64) -> AppResult<()> 
     Ok(())
 }
 
-/// 删除素材包：校验锁定 → 物理删目录 + 删记录。
+/// 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
+///
+/// **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
+/// 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_pack(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     ensure_unlocked(&state, id).await?;
+    let published: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_ledger WHERE pack_id = ?1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    if published > 0 {
+        return Err(AppError::InvalidInput(format!(
+            "该素材包已发布过 {published} 次，删除会让发布历史与查重窗口失真；请改用「退役」"
+        )));
+    }
     let pack = repo::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("素材包不存在".into()))?;
@@ -294,13 +396,49 @@ pub struct PackPatch {
 pub async fn update_pack(state: State<'_, AppState>, id: i64, patch: PackPatch) -> AppResult<()> {
     let cover_arg: Option<Option<&str>> = patch.cover.as_ref().map(|o| o.as_deref());
     repo::update_fields(&state.db, id, patch.note.as_deref(), cover_arg).await?;
-    // 素材包 new → active：首次维护封面/备注视为完善，可参与排期。
-    if let Some(p) = repo::get(&state.db, id).await? {
-        if p.lifecycle == "new" {
-            repo::set_lifecycle(&state.db, id, "active").await?;
-        }
-    }
+    // 生命周期只由显式路径改（activate_pack / retire_pack / restore_pack）：
+    // 改个备注就顺带让包参与排期是意料之外的副作用。
     Ok(())
+}
+
+/// 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackHistoryItem {
+    pub date: String,
+    pub platform_zh: String,
+    pub task_code: String,
+    pub url: Option<String>,
+    pub published_at: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn pack_history(
+    state: State<'_, AppState>,
+    pack_id: i64,
+) -> AppResult<Vec<PackHistoryItem>> {
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+        "SELECT date, platform, task_code, url, published_at FROM usage_ledger
+         WHERE pack_id = ?1 ORDER BY published_at DESC, id DESC LIMIT 100",
+    )
+    .bind(pack_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(date, platform, task_code, url, published_at)| PackHistoryItem {
+                date,
+                platform_zh: Platform::from_code(&platform)
+                    .map(|p| p.zh().to_string())
+                    .unwrap_or(platform),
+                task_code,
+                url,
+                published_at,
+            },
+        )
+        .collect())
 }
 
 /// 手动把 new 包标记为 active（可用）。

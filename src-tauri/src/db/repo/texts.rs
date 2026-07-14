@@ -129,3 +129,30 @@ pub async fn bump_use_count(conn: &mut SqliteConnection, id: i64) -> Result<(), 
         .await?;
     Ok(())
 }
+
+/// 物理删除文本条目（引用校验在命令层：被套装引用的不可删，只能停用）。
+pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM text_items WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 同 SKU、同类型、同文本是否已存在（入库查重：AI 反复生成同一句是常态）。
+pub async fn exists_same(
+    conn: &mut SqliteConnection,
+    sku_id: i64,
+    kind: &str,
+    text: &str,
+) -> Result<bool, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM text_items WHERE sku_id = ?1 AND kind = ?2 AND text = ?3",
+    )
+    .bind(sku_id)
+    .bind(kind)
+    .bind(text)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(n > 0)
+}

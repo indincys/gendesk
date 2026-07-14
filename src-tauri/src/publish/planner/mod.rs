@@ -5,6 +5,7 @@
 //! mod：generate_sheet 事务编排（DB 写在单事务内）。
 
 pub mod frequency;
+pub mod runway;
 pub mod scheduler;
 pub mod set_picker;
 
@@ -22,13 +23,39 @@ use crate::publish::planner::scheduler::{DueSet, SchedAccount, ScheduleInput};
 use crate::publish::planner::set_picker::{PackCand, PickInput, TextCand};
 use crate::publish::platform::Platform;
 
-/// 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+/// 缺料/提示清单一项（生成副产物，存入 task_sheets.shortage_json）。
+///
+/// `reason` 为机器码，中文由前端 `shortageLabel()` 单点映射：
+/// `no_pack` 无可用素材包 · `no_title` 无可用标题 · `no_body` 无可用正文 ·
+/// `timeout_backfill` 昨日超时失败，今日已补排（**不是缺料，是提示**）。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortageItem {
     pub sku_id: i64,
     pub code: String,
     pub reason: String,
+    /// 相关平台（部分原因有意义，如无账号/查重冲突）；无则空。
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+/// 前一日「网络超时」失败的 SKU → 今日无条件纳入应发（需求 §6.3 timeout 处置：
+/// 自动重排次日）。返回 (sku_id 集合, 用于提示的 (sku_id, platforms) 明细)。
+async fn timeout_backfill(pool: &SqlitePool, date: &str) -> AppResult<HashMap<i64, Vec<String>>> {
+    let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return Ok(HashMap::new());
+    };
+    let prev = (d - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    for (sku_id, platform, _account_id) in planning::timeout_fails_of_date(pool, &prev).await? {
+        let entry = out.entry(sku_id).or_default();
+        if !entry.contains(&platform) {
+            entry.push(platform);
+        }
+    }
+    Ok(out)
 }
 
 /// `YYYY-MM-DD` → `YYMMDD`（任务 ID 用）。
@@ -113,7 +140,16 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             tier: r.tier.clone(),
         })
         .collect();
-    let due_ids = frequency::due_skus(date, &freq_in, &rules);
+    let mut due_ids = frequency::due_skus(date, &freq_in, &rules);
+
+    // 昨日网络超时失败的 SKU：即便按频率今日不该发，也补进应发集（需求 §6.3）。
+    // 展开仍走正常约束（日限/间隔），补排不是插队。
+    let backfill = timeout_backfill(pool, date).await?;
+    for id in backfill.keys() {
+        if sched_skus.iter().any(|r| r.id == *id) && !due_ids.contains(id) {
+            due_ids.push(*id);
+        }
+    }
 
     let all_accts = accounts::list(pool).await?;
     let slots: Vec<scheduler::Slot> = s
@@ -123,6 +159,13 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
         .collect();
     let seed = date_seed(date);
     let now = crate::db::now_unix();
+    // 有在用账号的平台。没有账号的平台展开出来也是 0 行，必须进缺料清单说明原因，
+    // 否则任务单静默变空、没人知道为什么。
+    let active_platforms: Vec<String> = all_accts
+        .iter()
+        .filter(|a| a.status == "active")
+        .map(|a| a.platform.clone())
+        .collect();
 
     // 套装选取。
     struct Chosen {
@@ -142,16 +185,21 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             continue;
         }
         let packs = assets::list_by_sku(pool, r.id).await?;
-        let mut pack_cands = Vec::with_capacity(packs.len());
-        for p in &packs {
-            let last = ledger::pack_platform_last(pool, p.id).await?;
-            pack_cands.push(PackCand {
+        // 台账一次批量取（原来是每个包一次查询，300 SKU × 若干包时非常伤）。
+        let pack_ids: Vec<i64> = packs.iter().map(|p| p.id).collect();
+        let usage = ledger::pack_usage_batch(pool, &pack_ids).await?;
+        let pack_cands: Vec<PackCand> = packs
+            .iter()
+            .map(|p| PackCand {
                 id: p.id,
                 kind: p.kind.clone(),
                 lifecycle: p.lifecycle.clone(),
-                last_pub: last,
-            });
-        }
+                last_pub: usage
+                    .get(&p.id)
+                    .map(|u| u.last_by_platform.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
         let mut conn = pool.acquire().await?;
         let titles = texts::list_enabled(&mut conn, r.id, "title").await?;
         let bodies = texts::list_enabled(&mut conn, r.id, "body").await?;
@@ -167,15 +215,56 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             seed: seed ^ (r.id as u64),
         };
         match set_picker::pick(&input) {
-            Ok(pick) => chosen.push(Chosen {
-                sku_id: r.id,
-                pick,
-                platforms: target_platforms,
-            }),
+            Ok(pick) => {
+                if let Some(platforms) = backfill.get(&r.id) {
+                    // 工作台据此显示「补排」徽标，说明这个 SKU 今天为什么出现。
+                    shortage.push(ShortageItem {
+                        sku_id: r.id,
+                        code: r.code.clone(),
+                        reason: "timeout_backfill".into(),
+                        platforms: platforms.clone(),
+                    });
+                }
+                // 查重窗口冲突的平台从当日展开中剔除——包在这些平台上 30 天内发过。
+                let mut platforms = target_platforms.clone();
+                if !pick.conflicted_platforms.is_empty() {
+                    platforms.retain(|p| !pick.conflicted_platforms.contains(p));
+                    shortage.push(ShortageItem {
+                        sku_id: r.id,
+                        code: r.code.clone(),
+                        reason: "dedup_partial".into(),
+                        platforms: pick.conflicted_platforms.clone(),
+                    });
+                }
+                // 该 SKU 应发但某平台一个在用账号都没有 → 明说，不要静默少几行。
+                let missing: Vec<String> = platforms
+                    .iter()
+                    .filter(|p| !active_platforms.contains(*p))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    platforms.retain(|p| active_platforms.contains(p));
+                    shortage.push(ShortageItem {
+                        sku_id: r.id,
+                        code: r.code.clone(),
+                        reason: "no_account".into(),
+                        platforms: missing,
+                    });
+                }
+                if platforms.is_empty() {
+                    continue; // 无平台可发（原因已在 shortage 里说明）
+                }
+                chosen.push(Chosen {
+                    sku_id: r.id,
+                    pick,
+                    platforms,
+                });
+            }
             Err(e) => shortage.push(ShortageItem {
                 sku_id: r.id,
                 code: r.code.clone(),
-                reason: e.label().to_string(),
+                reason: e.code().to_string(),
+                platforms: Vec::new(),
             }),
         }
     }
@@ -196,6 +285,13 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             id: a.id,
             platform: a.platform.clone(),
             daily_limit: a.daily_limit,
+            // 账号可用时段（空 = 跟随全局）。存储格式与全局 time_slots 相同。
+            slots: a
+                .slots_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+                .map(|v| v.iter().filter_map(|t| scheduler::parse_slot(t)).collect())
+                .unwrap_or_default(),
         })
         .collect();
     let result = scheduler::schedule(&ScheduleInput {
@@ -260,6 +356,8 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
 
     let shortage_json = serde_json::to_string(&shortage)?;
     planning::set_shortage(&mut tx, sheet_id, &shortage_json).await?;
+    // 记下生成时刻：此后任务行的改动才算「人工调整」（重生成前要确认，见 E6）。
+    planning::mark_generated(&mut tx, sheet_id).await?;
     tx.commit().await?;
 
     let _ = rows; // 行数已由 sheet_rows 复算，无需回传
@@ -390,6 +488,116 @@ mod gen_tests {
         drop(conn);
         let err = generate_sheet(&pool, "2026-07-15", &s).await;
         assert!(err.is_err(), "已确认单不能重生成");
+    }
+
+    // C5：SKU 应发但该平台一个在用账号都没有 → 进缺料清单（reason=no_account），
+    // 而不是静默少几行、没人知道为什么任务单是空的。
+    #[tokio::test]
+    async fn missing_account_for_platform_goes_to_shortage() {
+        let (pool, _d) = test_pool().await;
+        seed(&pool).await; // SKU 平台覆盖 = xhs，账号 = xhs
+                           // 把 SKU 平台改成「只发抖音」——一个抖音账号都没有。
+        let sku = skus::find_by_code(&pool, "SF-1").await.unwrap().unwrap();
+        skus::update_fields(
+            &pool,
+            sku.id,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("[\"douyin\"]")),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let s = PublishSettings::default();
+        let sheet_id = generate_sheet(&pool, "2026-07-15", &s).await.unwrap();
+        let rows = planning::list_tasks_by_sheet(&pool, sheet_id)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "无账号 → 无任务行");
+        let sheet = planning::get_sheet(&pool, sheet_id).await.unwrap().unwrap();
+        let shortage: Vec<ShortageItem> = serde_json::from_str(&sheet.shortage_json).unwrap();
+        let item = shortage
+            .iter()
+            .find(|i| i.reason == "no_account")
+            .expect("应有 no_account 缺料项");
+        assert_eq!(item.code, "SF-1");
+        assert_eq!(item.platforms, vec!["douyin".to_string()]);
+    }
+
+    // C1 端到端：包在 xhs 窗口内、在 douyin 出窗 → 今日只展开 douyin，
+    // 且 shortage 记一条 dedup_partial 说明 xhs 为什么被跳过。
+    #[tokio::test]
+    async fn dedup_window_removes_only_the_conflicted_platform() {
+        let (pool, _d) = test_pool().await;
+        seed(&pool).await;
+        let sku = skus::find_by_code(&pool, "SF-1").await.unwrap().unwrap();
+        skus::update_fields(
+            &pool,
+            sku.id,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("[\"xhs\",\"douyin\"]")),
+            None,
+        )
+        .await
+        .unwrap();
+        accounts::insert(
+            &pool,
+            &accounts::NewAccount {
+                platform: "douyin".into(),
+                name: "抖音号".into(),
+                daily_limit: 3,
+                slots_json: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 该包 5 天前在 xhs 发过（30 天窗口内）。
+        let packs = assets::list_by_sku(&pool, sku.id).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        ledger::insert_conn(
+            &mut conn,
+            &ledger::NewLedger {
+                date: "2026-07-10".into(),
+                sku_id: sku.id,
+                pack_id: packs[0].id,
+                title_id: 1,
+                body_id: None,
+                platform: "xhs".into(),
+                account_id: 1,
+                task_code: "T260710-001".into(),
+                published_at: crate::db::now_unix() - 5 * 86_400,
+                url: None,
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let s = PublishSettings::default();
+        let sheet_id = generate_sheet(&pool, "2026-07-15", &s).await.unwrap();
+        let rows = planning::list_tasks_by_sheet(&pool, sheet_id)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().all(|r| r.platform == "douyin"),
+            "xhs 在查重窗口内，今天不能再用这个包发 xhs：{:?}",
+            rows.iter().map(|r| &r.platform).collect::<Vec<_>>()
+        );
+        assert!(!rows.is_empty(), "douyin 已出窗，应照常展开");
+        let sheet = planning::get_sheet(&pool, sheet_id).await.unwrap().unwrap();
+        let shortage: Vec<ShortageItem> = serde_json::from_str(&sheet.shortage_json).unwrap();
+        let item = shortage
+            .iter()
+            .find(|i| i.reason == "dedup_partial")
+            .expect("应说明 xhs 为何被跳过");
+        assert_eq!(item.platforms, vec!["xhs".to_string()]);
     }
 
     #[tokio::test]

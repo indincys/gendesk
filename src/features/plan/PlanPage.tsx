@@ -3,28 +3,64 @@ import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { assetSrc } from "@/lib/img";
 import {
   type AccountView,
+  type PreflightReport,
   type PublishSettings,
   type PublishSettingsPatch,
   type SheetDetail,
   type SheetSummary,
   type TaskRowView,
   commands,
+  subscribeExportProgress,
   unwrap,
 } from "@/lib/ipc";
-import { failKindLabel, pubTaskVisual, sheetVisual } from "@/lib/status";
+import { failKindLabel, isShortage, pubTaskVisual, sheetVisual, shortageLabel } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-type Tab = "board" | "sheets" | "strategy";
+type Tab = "board" | "sheets" | "calendar" | "strategy";
 
 /** 发布计划页（原型 publish.dc.html 发布计划三页签）。看板于 P3 充实。 */
 export function PlanPage() {
   const [tab, setTab] = useState<Tab>("sheets");
   const [openSheet, setOpenSheet] = useState<number | null>(null);
   const badges = usePublishStore((s) => s.badges);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    void unwrap(commands.getPublishSettings()).then((s) => setPaused(s.schedulePaused ?? false));
+  }, []);
+  const togglePause = async () => {
+    const next = !paused;
+    try {
+      await unwrap(
+        commands.updatePublishSettings({
+          rootLocal: null,
+          rootExec: null,
+          pathStyle: null,
+          dedupDays: null,
+          receiptTimeoutHours: null,
+          autogenTime: null,
+          warnMaterial: null,
+          warnTitle: null,
+          warnBody: null,
+          accountDailyLimitDefault: null,
+          minGapMinutes: null,
+          platformMatrix: null,
+          tierRules: null,
+          timeSlots: null,
+          archiveRetentionDays: null,
+          schedulePaused: next,
+        }),
+      );
+      setPaused(next);
+      toast.success(next ? "排期已暂停（对账与超时扫描照常）" : "排期已恢复");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
 
   return (
     <div className="col f1 ohide">
@@ -49,6 +85,12 @@ export function PlanPage() {
             )}
           </span>
           <span
+            className={cn("sgi", tab === "calendar" && "on")}
+            onClick={() => setTab("calendar")}
+          >
+            月历
+          </span>
+          <span
             className={cn("sgi", tab === "strategy" && "on")}
             onClick={() => setTab("strategy")}
           >
@@ -56,7 +98,22 @@ export function PlanPage() {
           </span>
         </div>
         <div className="f1" />
+        {/* 节假日暂停：只停自动生成草稿，超时扫描与对账照常——
+            回收闭环停了的话，暂停期间已导出的单永远收不回来。 */}
+        <span className="fs11 t3">排期</span>
+        <Toggle on={!paused} onClick={() => void togglePause()} />
+        <span className={cn("fs11", paused ? "b-amber" : "t3")}>
+          {paused ? "已暂停" : "运行中"}
+        </span>
       </div>
+
+      {paused && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            排期已暂停 — 不再自动生成明日草稿；回执对账与超时扫描照常，手动生成也仍可用
+          </span>
+        </div>
+      )}
 
       {tab === "board" && (
         <Board
@@ -72,6 +129,14 @@ export function PlanPage() {
         ) : (
           <Workbench sheetId={openSheet} onBack={() => setOpenSheet(null)} />
         ))}
+      {tab === "calendar" && (
+        <CalendarTab
+          onOpenSheet={(id) => {
+            setTab("sheets");
+            setOpenSheet(id);
+          }}
+        />
+      )}
       {tab === "strategy" && <StrategyTab />}
     </div>
   );
@@ -82,11 +147,135 @@ function todayStr(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// ─────────────────────────────────────────────── 月历（F5）
+
+/** 发布月历：一眼看清「哪天发了多少、哪天空着」。格子点进去就是那天的任务单。 */
+function CalendarTab({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
+  const now = new Date();
+  const [ym, setYm] = useState(
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
+  );
+  const [days, setDays] = useState<import("@/lib/ipc").CalendarDay[]>([]);
+  const sheetRev = usePublishStore((s) => s.sheetRev);
+
+  useEffect(() => {
+    void unwrap(commands.calendarMonth(ym))
+      .then(setDays)
+      .catch(() => setDays([]));
+  }, [ym, sheetRev]);
+
+  const shiftMonth = (delta: number) => {
+    const [y, m] = ym.split("-").map(Number) as [number, number];
+    const d = new Date(y, m - 1 + delta, 1);
+    setYm(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+
+  const [y, m] = ym.split("-").map(Number) as [number, number];
+  const first = new Date(y, m - 1, 1);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  // 周一为一周之首（与频率规则的周内日一致）。
+  const lead = (first.getDay() + 6) % 7;
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const max = Math.max(1, ...days.map((d) => d.published));
+
+  // 月初前的空格只是把 1 号推到正确的星期列上，不是数据。
+  const pads = Array.from({ length: lead }, (_, i) => `pad-${i}`);
+  const cells = Array.from({ length: daysInMonth }, (_, i) => {
+    const date = `${y}-${String(m).padStart(2, "0")}-${String(i + 1).padStart(2, "0")}`;
+    return (
+      byDate.get(date) ?? { date, published: 0, planned: 0, failed: 0, sheetId: null, skus: [] }
+    );
+  });
+
+  return (
+    <div className="pbody">
+      <div className="cwrap" style={{ maxWidth: 860 }}>
+        <div className="fx ac gap6" style={{ marginBottom: 12 }}>
+          <button type="button" className="icb" aria-label="上个月" onClick={() => shiftMonth(-1)}>
+            <ChevronLeft className="ic12" />
+          </button>
+          <span className="fw6 fs13 mono">{ym}</span>
+          <button type="button" className="icb" aria-label="下个月" onClick={() => shiftMonth(1)}>
+            <ChevronRight className="ic12" />
+          </button>
+          <div className="f1" />
+          <span className="fs11 t3">色块深浅 = 当日实发条数 · 点格子进当日任务单</span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+          {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
+            <div key={w} className="fs11 t3" style={{ textAlign: "center", paddingBottom: 4 }}>
+              {w}
+            </div>
+          ))}
+          {pads.map((k) => (
+            <div key={k} />
+          ))}
+          {cells.map((c) => {
+            const day = Number(c.date.slice(-2));
+            const density = c.published / max;
+            return (
+              <div
+                key={c.date}
+                className="card"
+                onClick={() => c.sheetId != null && onOpenSheet(c.sheetId)}
+                title={c.skus.length > 0 ? c.skus.join(" · ") : undefined}
+                style={{
+                  padding: "6px 8px",
+                  minHeight: 62,
+                  cursor: c.sheetId != null ? "pointer" : "default",
+                  background:
+                    c.published > 0
+                      ? `color-mix(in oklch, var(--ok) ${Math.round(12 + density * 30)}%, var(--card))`
+                      : undefined,
+                }}
+              >
+                <div className="fs11 t3">{day}</div>
+                {c.published > 0 && (
+                  <div className="fs12 fw6" style={{ color: "var(--ok)" }}>
+                    {c.published}
+                  </div>
+                )}
+                {c.failed > 0 && (
+                  <div className="fs10" style={{ color: "var(--er)" }}>
+                    失败 {c.failed}
+                  </div>
+                )}
+                {c.published === 0 && c.planned > 0 && (
+                  <div className="fs10 t3">计划 {c.planned}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Unix 秒 → `HH:MM`（同一天内的时刻，看板只关心几点）。 */
+function tsLabel(ts: number | null): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 日期加减天数（本地日历）。 */
+function shiftDate(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
+  const dt = new Date(y, m - 1, d + days);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
 function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
   const [dash, setDash] = useState<import("@/lib/ipc").DashboardView | null>(null);
   const [report, setReport] = useState<import("@/lib/ipc").ReportView | null>(null);
   const [showReport, setShowReport] = useState(false);
-  const date = todayStr();
+  // F8：可翻到历史日期（getDashboard 本来就支持任意日期）。
+  const [date, setDate] = useState(todayStr());
+  const isToday = date === todayStr();
+
+  const sheetRev = usePublishStore((s) => s.sheetRev);
 
   const load = useCallback(async () => {
     try {
@@ -95,16 +284,48 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
       setDash(null);
     }
   }, [date]);
+  // 任务单有任何变化（watcher 对账 / 导出 / 人工定态）→ 看板自动跟着走。
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, sheetRev]);
+
+  const dateNav = (
+    <div className="fx ac gap6" style={{ padding: "10px 18px 0" }}>
+      <button
+        type="button"
+        className="icb"
+        aria-label="前一天"
+        onClick={() => setDate((d) => shiftDate(d, -1))}
+      >
+        <ChevronLeft className="ic12" />
+      </button>
+      <span className="fw6 fs13 mono nowrap">{date}</span>
+      <button
+        type="button"
+        className="icb"
+        aria-label="后一天"
+        onClick={() => setDate((d) => shiftDate(d, 1))}
+      >
+        <ChevronRight className="ic12" />
+      </button>
+      {!isToday && (
+        <button type="button" className="btn sm gho" onClick={() => setDate(todayStr())}>
+          回到今天
+        </button>
+      )}
+      <div className="f1" />
+    </div>
+  );
 
   if (!dash) {
     return (
-      <div className="bigempty" style={{ padding: "72px 20px" }}>
-        <div className="fs13 fw5 t2">今日暂无任务单</div>
-        <div className="fs12 t3">配置根目录并生成任务单后，看板展示今日发布进度</div>
-      </div>
+      <>
+        {dateNav}
+        <div className="bigempty" style={{ padding: "72px 20px" }}>
+          <div className="fs13 fw5 t2">{isToday ? "今日" : date} 暂无任务单</div>
+          <div className="fs12 t3">配置根目录并生成任务单后，看板展示发布进度</div>
+        </div>
+      </>
     );
   }
 
@@ -118,10 +339,34 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
 
   return (
     <div className="pbody">
+      {dateNav}
+      {/* F9 同步链路：导出了但执行器一直没回写，先怀疑同步软件没把包送过去，
+          而不是急着重发（重发会触发平台查重，比失败更糟）。 */}
+      {dash.syncStalled && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            已导出 {tsLabel(dash.exportedAt)}，执行器至今没有任何回写 — 请检查同步软件是否把
+            任务包送到了执行机，以及执行器有没有在跑
+          </span>
+        </div>
+      )}
+      {dash.exportedAt != null && !dash.syncStalled && (
+        <div className="fs11 t3" style={{ padding: "8px 18px 0" }}>
+          已导出 {tsLabel(dash.exportedAt)}
+          {dash.firstReceiptAt != null && ` · 执行器 ${tsLabel(dash.firstReceiptAt)} 开始回写`}
+          {dash.lastReceiptAt != null && ` · 最后回写 ${tsLabel(dash.lastReceiptAt)}`}
+        </div>
+      )}
+
       <div className="statrow">
         <div className="statcard">
           <div className="stnum">{dash.plan}</div>
-          <div className="stlbl">今日计划任务</div>
+          <div className="stlbl">
+            {isToday ? "今日" : "当日"}计划任务
+            {dash.yesterdaySuccessRate != null && (
+              <span className="fs10 t3"> · 前一日成功率 {dash.yesterdaySuccessRate}%</span>
+            )}
+          </div>
         </div>
         <div className="statcard">
           <div className="stnum" style={{ color: "var(--ok)" }}>
@@ -313,6 +558,7 @@ function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
   const [sheets, setSheets] = useState<SheetSummary[]>([]);
   const [genTime, setGenTime] = useState("22:00");
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
+  const sheetRev = usePublishStore((s) => s.sheetRev);
 
   const load = useCallback(async () => {
     setSheets(await unwrap(commands.listSheets()));
@@ -325,7 +571,7 @@ function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
   }, []);
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, sheetRev]);
 
   const genTomorrow = async () => {
     const d = new Date();
@@ -402,7 +648,11 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   const [verify, setVerify] = useState<TaskRowView | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [confirmExport, setConfirmExport] = useState(false);
+  const [cancelRow, setCancelRow] = useState<TaskRowView | null>(null);
+  const [confirmRegen, setConfirmRegen] = useState(false);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
+
+  const lastSheetChanged = usePublishStore((s) => s.lastSheetChanged);
 
   const load = useCallback(async () => {
     setDetail(await unwrap(commands.getSheet(sheetId)));
@@ -411,11 +661,24 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
     void load();
   }, [load]);
 
+  // watcher 对账（回执落盘 → 2s 防抖 → SheetChangedEvent）时自动刷新，只认自己这一单。
+  useEffect(() => {
+    if (lastSheetChanged?.sheetId === sheetId) void load();
+  }, [lastSheetChanged, sheetId, load]);
+
   if (!detail) return <div className="col f1" />;
   const v = sheetVisual(detail.status);
   const isDraft = detail.status === "draft";
   const isConfirmed = detail.status === "confirmed";
   const isExported = detail.status === "exported" || detail.status === "reconciling";
+  // shortage_json 兼装了真·缺料与「补排」提示，分开渲染（含义完全不同）。
+  const shortages = detail.shortage.filter((s) => isShortage(s.reason));
+  const backfills = detail.shortage.filter((s) => !isShortage(s.reason));
+
+  const regenerate = async () => {
+    setConfirmRegen(false);
+    await act(() => unwrap(commands.generateSheet(detail.date)), "已按当前素材重新生成");
+  };
 
   const act = async (fn: () => Promise<unknown>, ok?: string) => {
     try {
@@ -452,6 +715,17 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         </span>
         <div className="f1" />
         {isDraft && (
+          <button
+            type="button"
+            className="btn sm gho"
+            title="按当前素材/频率/账号重算这一天（会清掉人工调整）"
+            onClick={() => (detail.edited ? setConfirmRegen(true) : void regenerate())}
+          >
+            <RefreshCw className="ic12" />
+            重新生成
+          </button>
+        )}
+        {isDraft && (
           <button type="button" className="btn sm gho" onClick={() => setAddOpen(true)}>
             <Plus className="ic12" />
             增补任务行
@@ -465,6 +739,10 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
               void act(async () => {
                 const r = await unwrap(commands.importReceipts(sheetId));
                 toast.success(`对账完成：已发布 ${r.published} · 失败 ${r.failed}`);
+                if (r.retiredPacks > 0)
+                  toast.warning(`${r.retiredPacks} 个素材包因「素材不合规」已退役`);
+                for (const name of r.loginFailAccounts)
+                  toast.error(`账号「${name}」登录失效，需人工处理（不会自动重发）`);
               })
             }
             title="从任务包 xlsx 手动导入回执对账"
@@ -484,11 +762,22 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         </div>
       )}
 
-      {detail.shortage.length > 0 && (
+      {shortages.length > 0 && (
         <div className="ban" style={{ margin: "10px 18px 0" }}>
           <span className="f1">
-            缺料清单：{detail.shortage.map((s) => `${s.code}（${s.reason}）`).join("、")} —
-            缺料不是报错，有料 SKU 已正常出草稿
+            缺料清单：
+            {shortages
+              .map((s) => `${s.code}（${shortageLabel(s.reason, s.platforms)}）`)
+              .join("、")}{" "}
+            — 缺料不是报错，有料 SKU 已正常出草稿
+          </span>
+        </div>
+      )}
+
+      {backfills.length > 0 && (
+        <div className="ban" style={{ margin: "10px 18px 0" }}>
+          <span className="f1">
+            补排：{backfills.map((s) => s.code).join("、")} — 昨日网络超时失败，今日已自动重排
           </span>
         </div>
       )}
@@ -571,6 +860,16 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
                           onClick={() => void act(() => unwrap(commands.deleteTaskRow(r.id)))}
                         >
                           删
+                        </button>
+                      )}
+                      {/* 已导出的单不能再删行（xlsx 已交给执行器），但可以人工取消 —— 需求 §4.5 的「已取消（人工）」态 */}
+                      {isExported && r.status === "pending" && (
+                        <button
+                          type="button"
+                          className="btn sm gho dng"
+                          onClick={() => setCancelRow(r)}
+                        >
+                          取消
                         </button>
                       )}
                     </span>
@@ -660,18 +959,36 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         />
       )}
       {confirmExport && (
+        <ExportModal
+          sheetId={sheetId}
+          onClose={() => setConfirmExport(false)}
+          onExported={() => {
+            setConfirmExport(false);
+            void act(async () => {});
+          }}
+        />
+      )}
+      {confirmRegen && (
         <ConfirmModal
-          title="导出任务包"
-          desc="确保执行器未在运行本包。重新导出=整包覆盖（先删 READY.txt 再写）。导出后 xlsx 写方移交执行器。"
-          confirmLabel="确认导出"
+          title="重新生成任务单"
+          desc="这张草稿有人工调整（改过时间 / 增补过行 / 换过套装）。重新生成会按当前素材、频率与账号重算整张单，那些调整会被清掉。"
+          confirmLabel="仍然重新生成"
+          onConfirm={() => void regenerate()}
+          onClose={() => setConfirmRegen(false)}
+        />
+      )}
+      {cancelRow && (
+        <ConfirmModal
+          title="取消这条任务"
+          desc={`${cancelRow.taskCode} · ${cancelRow.platformZh} · ${cancelRow.accountName}。执行器已拿到任务包，取消只改本地状态；若执行器已经发出去了，请改用「核对」。`}
+          confirmLabel="确认取消"
           onConfirm={() =>
             void act(async () => {
-              const r = await unwrap(commands.exportPackage(sheetId));
-              toast.success(`已导出 ${r.rowCount} 行 · ${r.skuCount} 个 SKU 素材`);
-              if (r.longPathWarn) toast.warning("存在超长路径，请检查执行机根路径设置");
+              await unwrap(commands.cancelTaskRow(cancelRow.id));
+              setCancelRow(null);
             })
           }
-          onClose={() => setConfirmExport(false)}
+          onClose={() => setCancelRow(null)}
         />
       )}
       {verify && (
@@ -685,6 +1002,116 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         />
       )}
     </>
+  );
+}
+
+/**
+ * 导出弹窗：打开即跑预检，逐条列出问题。有阻断项时「确认导出」不可点——
+ * 素材缺失、账号停用、执行器已回写回执，这些都必须在导出前解决，不能等到执行机上才炸。
+ */
+function ExportModal({
+  sheetId,
+  onClose,
+  onExported,
+}: {
+  sheetId: number;
+  onClose: () => void;
+  onExported: () => void;
+}) {
+  const [report, setReport] = useState<PreflightReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+
+  useEffect(() => {
+    void unwrap(commands.preflightExport(sheetId))
+      .then(setReport)
+      .catch((e) => {
+        toast.error(String(e));
+        onClose();
+      });
+  }, [sheetId, onClose]);
+
+  // 导出期间的进度（复制视频可达数百 MB，不能只显示一个转圈）。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void subscribeExportProgress((e) => {
+      if (e.sheetId === sheetId) setProgress({ done: e.done, total: e.total });
+    }).then((f) => {
+      un = f;
+    });
+    return () => un?.();
+  }, [sheetId]);
+
+  const blocked = report == null || report.errors.length > 0;
+  const doExport = async () => {
+    setBusy(true);
+    try {
+      const r = await unwrap(commands.exportPackage(sheetId));
+      toast.success(`已导出 ${r.rowCount} 行 · ${r.skuCount} 个 SKU 素材`);
+      if (r.missingFiles.length > 0)
+        toast.warning(`${r.missingFiles.length} 个素材文件在导出时已不存在`);
+      onExported();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="导出任务包"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">导出后 xlsx 的写方移交执行器</span>
+          <div className="f1" />
+          <button type="button" className="btn sm" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="btn sm pri"
+            disabled={blocked || busy}
+            onClick={() => void doExport()}
+          >
+            {busy
+              ? progress
+                ? `导出中 ${progress.done}/${progress.total}…`
+                : "导出中…"
+              : "确认导出"}
+          </button>
+        </>
+      }
+    >
+      {report == null ? (
+        <div className="fs12 t3" style={{ padding: 8 }}>
+          正在预检…
+        </div>
+      ) : (
+        <div className="col gap6" style={{ padding: 4 }}>
+          {report.errors.map((e) => (
+            <div key={e} className="fs12 terr" style={{ lineHeight: 1.7 }}>
+              ✗ {e}
+            </div>
+          ))}
+          {report.warnings.map((w) => (
+            <div key={w} className="fs12" style={{ color: "var(--wr)", lineHeight: 1.7 }}>
+              ⚠ {w}
+            </div>
+          ))}
+          {report.errors.length === 0 && (
+            <div className="fs12" style={{ color: "var(--ok)", lineHeight: 1.7 }}>
+              ✓ 预检通过：{report.rowCount} 行 · {report.skuCount} 个 SKU 素材齐备
+            </div>
+          )}
+          <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
+            重新导出 = 整包覆盖（先删 READY.txt 再写）。若执行器已回写过回执，
+            导出会被拒绝——请先「导入回执」对账。
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -743,7 +1170,41 @@ function VerifyModal({
         <span className="chip">{row.accountName}</span>
         <span className="chip">计划 {row.plannedTime ?? "立即发"}</span>
       </div>
+      <ReceiptShot row={row} />
     </Modal>
+  );
+}
+
+/**
+ * 回执截图（F2）：执行器回传的截图内嵌展示，核对时不用再去翻文件夹。
+ * 疑似已发的任务本来就没有回执，所以多半会看到占位文案——那本身就是信息。
+ */
+function ReceiptShot({ row }: { row: TaskRowView }) {
+  const src = assetSrc(row.screenshotPath);
+  return (
+    <div className="mt14">
+      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+        回执截图
+      </div>
+      {src ? (
+        <a href={src} target="_blank" rel="noreferrer">
+          <img
+            src={src}
+            alt="回执截图"
+            loading="lazy"
+            style={{
+              maxWidth: "100%",
+              maxHeight: 320,
+              marginTop: 6,
+              borderRadius: 8,
+              border: "1px solid var(--line)",
+            }}
+          />
+        </a>
+      ) : (
+        <div className="fs12 t3 mt6">执行器未回传截图</div>
+      )}
+    </div>
   );
 }
 
@@ -825,12 +1286,20 @@ function AddRowModal({
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [skuId, setSkuId] = useState<number | null>(null);
   const [accountId, setAccountId] = useState<number | null>(null);
+  const [q, setQ] = useState("");
   useEffect(() => {
     void unwrap(commands.listSchedulableSkus()).then((v) =>
       setSkus(v.map((s) => ({ id: s.id, code: s.code, styleName: s.styleName }))),
     );
     void unwrap(commands.listAccounts()).then(setAccounts);
   }, []);
+  // 100+ SKU 时长列表里靠肉眼找是不可能的（D6）。
+  const filtered = useMemo(() => {
+    const key = q.trim().toLowerCase();
+    return skus.filter(
+      (s) => !key || s.code.toLowerCase().includes(key) || s.styleName.toLowerCase().includes(key),
+    );
+  }, [skus, q]);
   const submit = async () => {
     if (skuId == null || accountId == null) return;
     try {
@@ -865,14 +1334,22 @@ function AddRowModal({
       <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
         选择 SKU
       </div>
-      <div className="mt4" style={{ maxHeight: 160, overflow: "auto" }}>
-        {skus.map((s) => (
+      <input
+        className="inp mt4"
+        style={{ width: "100%" }}
+        placeholder="搜索编码 / 款式名…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <div className="mt4" style={{ maxHeight: 260, overflow: "auto" }}>
+        {filtered.map((s) => (
           <div key={s.id} className="pickrow" onClick={() => setSkuId(s.id)}>
             <span className={cn("ckb", skuId === s.id && "on")}>✓</span>
             <span className="pid">{s.code}</span>
             <span className="fs12 f1 nowrap ohide">{s.styleName}</span>
           </div>
         ))}
+        {filtered.length === 0 && <div className="fs12 t3 pa8">没有匹配的 SKU</div>}
       </div>
       <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
         选择账号
@@ -898,6 +1375,7 @@ function StrategyTab() {
   const [s, setS] = useState<PublishSettings | null>(null);
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [addAcct, setAddAcct] = useState(false);
+  const [editAcct, setEditAcct] = useState<AccountView | null>(null);
 
   const load = useCallback(async () => {
     setS(await unwrap(commands.getPublishSettings()));
@@ -908,26 +1386,34 @@ function StrategyTab() {
   }, [load]);
 
   const patch = async (p: Partial<PublishSettingsPatch>) => {
-    const next = await unwrap(
-      commands.updatePublishSettings({
-        rootLocal: null,
-        rootExec: null,
-        pathStyle: null,
-        dedupDays: null,
-        receiptTimeoutHours: null,
-        autogenTime: null,
-        warnMaterial: null,
-        warnTitle: null,
-        warnBody: null,
-        accountDailyLimitDefault: null,
-        minGapMinutes: null,
-        platformMatrix: null,
-        tierRules: null,
-        timeSlots: null,
-        ...p,
-      }),
-    );
-    setS(next);
+    try {
+      const next = await unwrap(
+        commands.updatePublishSettings({
+          rootLocal: null,
+          rootExec: null,
+          pathStyle: null,
+          dedupDays: null,
+          receiptTimeoutHours: null,
+          autogenTime: null,
+          warnMaterial: null,
+          warnTitle: null,
+          warnBody: null,
+          accountDailyLimitDefault: null,
+          minGapMinutes: null,
+          platformMatrix: null,
+          tierRules: null,
+          timeSlots: null,
+          archiveRetentionDays: null,
+          schedulePaused: null,
+          ...p,
+        }),
+      );
+      setS(next);
+    } catch (e) {
+      // 后端拒绝（如非法时段）→ 提示并回读，避免界面停在没存进去的值上。
+      toast.error(String(e));
+      await load();
+    }
   };
 
   if (!s) return <div className="col f1" />;
@@ -956,15 +1442,17 @@ function StrategyTab() {
             分层频率
           </div>
           <div className="fx gap14 wrap">
+            {/* 引擎语义是「热款每天发一次 × 平台集」，>1 无效 —— 用开关而不是数字框，
+                免得调到 3 却什么也没发生。同 SKU 同日多套装留给 V2。 */}
             <div className="fx ac gap8">
-              <span className="fs12 t2 nowrap">热款每日</span>
-              <Stepper
-                value={tr.hotDaily}
-                min={0}
-                max={5}
-                onChange={(v) => void patch({ tierRules: { ...tr, hotDaily: v } })}
+              <span className="fs12 t2 nowrap">热款每日发布</span>
+              <Toggle
+                on={tr.hotDaily >= 1}
+                onClick={() =>
+                  void patch({ tierRules: { ...tr, hotDaily: tr.hotDaily >= 1 ? 0 : 1 } })
+                }
               />
-              <span className="fs11 t3">次 × 平台集</span>
+              <span className="fs11 t3">每天一次 × 平台集</span>
             </div>
             <div className="fx ac gap8">
               <span className="fs12 t2 nowrap">温款每周</span>
@@ -1021,10 +1509,18 @@ function StrategyTab() {
               <span className="bdg b-gray">{a.platformZh}</span>
               <span className="fw5 fs12 f1 nowrap ohide">{a.name}</span>
               <span className="fs11 t3 nowrap">日限 {a.dailyLimit}</span>
+              {a.slots && a.slots.length > 0 && (
+                <span className="chip" title="该账号的可用时段（覆盖全局模板）">
+                  {a.slots.join(" ")}
+                </span>
+              )}
               <span className={cn("bdg", a.status === "active" ? "b-green" : "b-gray")}>
                 {a.status === "active" ? "正常" : "停用"}
               </span>
               <span className="tract">
+                <button type="button" className="btn sm gho" onClick={() => setEditAcct(a)}>
+                  编辑
+                </button>
                 <button
                   type="button"
                   className="btn sm gho"
@@ -1047,21 +1543,13 @@ function StrategyTab() {
           )}
         </div>
 
-        <div className="card mt14" style={{ padding: "13px 16px" }}>
-          <div className="fw6 fs13" style={{ marginBottom: 8 }}>
-            时段模板
-          </div>
-          <div className="fx ac gap6 wrap">
-            {timeSlots.map((slot) => (
-              <span key={slot} className="fchip">
-                {slot}
-              </span>
-            ))}
-            <span className="fs11 t3">
-              分配时在时段内随机抖动 · 同平台多账号最小间隔 {s.minGapMinutes} 分钟
-            </span>
-          </div>
-        </div>
+        <SlotsCard
+          slots={timeSlots}
+          minGap={s.minGapMinutes ?? 60}
+          onSave={(next) => patch({ timeSlots: next })}
+        />
+
+        <PreviewCard settings={s} />
       </div>
 
       {addAcct && (
@@ -1073,7 +1561,293 @@ function StrategyTab() {
           }}
         />
       )}
+      {editAcct && (
+        <EditAccountModal
+          account={editAcct}
+          onClose={() => setEditAcct(null)}
+          onSaved={() => {
+            setEditAcct(null);
+            void load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * 排期预演（F4）：改了频率 / 平台矩阵 / 账号后，未来 7 天会排成什么样。
+ *
+ * 不选套装、不落库，所以**不反映缺料**——一个没素材的 SKU 照样出现在预演里。
+ * 它回答的是「频率设置合不合理」，不是「明天能不能发出去」。
+ */
+function PreviewCard({ settings }: { settings: PublishSettings }) {
+  const [days, setDays] = useState<import("@/lib/ipc").PreviewDay[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      setDays(await unwrap(commands.previewSchedule(7)));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 频率/矩阵改了 → 预演结果作废，收起来等重算（免得看着过期数据做决定）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只关心设置变化，不关心 days
+  useEffect(() => {
+    setDays(null);
+  }, [settings.tierRules, settings.platformMatrix]);
+
+  return (
+    <div className="card mt14" style={{ padding: "13px 16px" }}>
+      <div className="fx ac gap8" style={{ marginBottom: 8 }}>
+        <span className="fw6 fs13">未来 7 天预演</span>
+        <span className="fs11 t3 f1">按频率与账号推演 · 不含缺料过滤（没素材的 SKU 也会出现）</span>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => void run()}>
+          {busy ? "推演中…" : days ? "重新推演" : "预演"}
+        </button>
+      </div>
+      {days && (
+        <div className="col gap4">
+          {days.map((d) => (
+            <div key={d.date} className="fx ac gap8" style={{ padding: "4px 0" }}>
+              <span className="mono fs11 t3 nowrap" style={{ width: 88 }}>
+                {d.date}
+              </span>
+              <span className="fs12 fw6 nowrap" style={{ width: 44 }}>
+                {d.totalRows} 行
+              </span>
+              <span className="fs11 t3 f1 nowrap ohide">
+                {d.entries.length > 0
+                  ? d.entries.map((e) => `${e.skuCode}(${e.platforms.join("/")})`).join(" · ")
+                  : "无应发 SKU"}
+              </span>
+              {d.trimmed > 0 && (
+                <span className="bdg b-amber" title="超出账号日限，会被裁掉">
+                  裁 {d.trimmed}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** `HH:MM-HH:MM`，开始早于结束（与后端 `scheduler::parse_slot` 同一套规则）。 */
+function parseSlotErr(v: string): string | null {
+  const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(v.trim());
+  if (!m) return "格式应为 HH:MM-HH:MM";
+  const [h1, m1, h2, m2] = m.slice(1).map(Number) as [number, number, number, number];
+  const ok = (h: number, mi: number) => h >= 0 && h < 24 && mi >= 0 && mi < 60;
+  if (!ok(h1, m1) || !ok(h2, m2)) return "时间超出范围（00:00–23:59）";
+  const a = h1 * 60 + m1;
+  const b = h2 * 60 + m2;
+  if (a >= b) return "暂不支持跨午夜时段，请拆成 21:00-23:59";
+  return null;
+}
+
+/** 时段模板编辑：chips 可删，回车新增。空列表 = 全部立即发（保存时明确警告）。 */
+function SlotsCard({
+  slots,
+  minGap,
+  onSave,
+}: {
+  slots: string[];
+  minGap: number;
+  onSave: (next: string[]) => Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState("");
+  const err = draft.trim() ? parseSlotErr(draft) : null;
+
+  const add = async () => {
+    const v = draft.trim();
+    if (!v || parseSlotErr(v)) return;
+    if (slots.includes(v)) {
+      setDraft("");
+      return;
+    }
+    await onSave([...slots, v].sort());
+    setDraft("");
+  };
+  const remove = async (slot: string) => {
+    const next = slots.filter((s) => s !== slot);
+    if (next.length === 0) toast.warning("时段模板已清空：所有任务将变成「立即发」");
+    await onSave(next);
+  };
+
+  return (
+    <div className="card mt14" style={{ padding: "13px 16px" }}>
+      <div className="fw6 fs13" style={{ marginBottom: 8 }}>
+        时段模板
+      </div>
+      <div className="fx ac gap6 wrap">
+        {slots.map((slot) => (
+          <span key={slot} className="fchip">
+            {slot}
+            <button
+              type="button"
+              className="icb"
+              style={{ width: 16, height: 16, marginLeft: 4 }}
+              aria-label={`删除时段 ${slot}`}
+              onClick={() => void remove(slot)}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          className="inp mono"
+          style={{ width: 130, ...(err ? { borderColor: "var(--er)" } : {}) }}
+          placeholder="09:00-11:00"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void add()}
+        />
+        <button
+          type="button"
+          className="btn sm"
+          disabled={!draft.trim() || !!err}
+          onClick={() => void add()}
+        >
+          添加时段
+        </button>
+      </div>
+      <div className={cn("fs11 mt6", err ? "terr" : "t3")}>
+        {err ??
+          (slots.length === 0
+            ? "时段为空 → 所有任务立即发（不定时）"
+            : `分配时在时段内随机抖动 · 同平台多账号最小间隔 ${minGap} 分钟`)}
+      </div>
+    </div>
+  );
+}
+
+/** 账号编辑：改名 / 日限 / 可用时段（覆盖全局模板）/ 删除。 */
+function EditAccountModal({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: AccountView;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(account.name);
+  const [limit, setLimit] = useState(account.dailyLimit);
+  const [slots, setSlots] = useState<string[]>(account.slots ?? []);
+  const [draft, setDraft] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const err = draft.trim() ? parseSlotErr(draft) : null;
+
+  const addSlot = () => {
+    const v = draft.trim();
+    if (!v || parseSlotErr(v) || slots.includes(v)) return;
+    setSlots([...slots, v].sort());
+    setDraft("");
+  };
+  const save = async () => {
+    try {
+      await unwrap(
+        commands.updateAccount(account.id, {
+          name: name.trim() || null,
+          dailyLimit: limit,
+          // 空数组 = 清除覆盖，跟随全局时段模板。
+          slots: slots.length > 0 ? slots : null,
+        }),
+      );
+      onSaved();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+  const del = async () => {
+    try {
+      await unwrap(commands.deleteAccount(account.id));
+      toast.success("账号已删除");
+      onSaved();
+    } catch (e) {
+      toast.error(String(e));
+      setConfirmDel(false);
+    }
+  };
+
+  return (
+    <>
+      <Modal
+        title="编辑账号"
+        onClose={onClose}
+        headerExtra={<span className="bdg b-gray">{account.platformZh}</span>}
+        footer={
+          <>
+            <button type="button" className="btn sm gho dng" onClick={() => setConfirmDel(true)}>
+              删除
+            </button>
+            <div className="f1" />
+            <button type="button" className="btn sm" onClick={onClose}>
+              取消
+            </button>
+            <button type="button" className="btn sm pri" onClick={() => void save()}>
+              保存
+            </button>
+          </>
+        }
+      >
+        <div className="col gap10">
+          <div className="col gap4">
+            <span className="fs11 t3">账号名称（任务单「平台账号名称」列的值）</span>
+            <input className="inp" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="fx ac gap8">
+            <span className="fs12 t2 nowrap">日发布上限</span>
+            <Stepper value={limit} min={1} max={100} onChange={setLimit} />
+            <span className="fs11 t3">条</span>
+          </div>
+          <div className="col gap4">
+            <span className="fs11 t3">可用时段（留空 = 跟随全局时段模板）</span>
+            <div className="fx ac gap6 wrap">
+              {slots.map((slot) => (
+                <span key={slot} className="fchip">
+                  {slot}
+                  <button
+                    type="button"
+                    className="icb"
+                    style={{ width: 16, height: 16, marginLeft: 4 }}
+                    aria-label={`删除时段 ${slot}`}
+                    onClick={() => setSlots(slots.filter((s) => s !== slot))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <input
+                className="inp mono"
+                style={{ width: 130, ...(err ? { borderColor: "var(--er)" } : {}) }}
+                placeholder="09:00-11:00"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addSlot()}
+              />
+            </div>
+            {err && <span className="fs11 terr">{err}</span>}
+          </div>
+        </div>
+      </Modal>
+      {confirmDel && (
+        <ConfirmModal
+          title="删除账号"
+          desc={`删除「${account.name}」。有历史任务的账号删不掉（会让历史记录失去归属），请改用「停用」。`}
+          confirmLabel="确认删除"
+          onConfirm={() => void del()}
+          onClose={() => setConfirmDel(false)}
+        />
+      )}
+    </>
   );
 }
 

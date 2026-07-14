@@ -25,6 +25,15 @@ pub struct InboxIngestEvent {
     pub outcome: IngestOutcome,
 }
 
+/// `publish://export-progress`：任务包导出进度（复制视频可达数百 MB，UI 需要交代）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgressEvent {
+    pub sheet_id: i64,
+    pub done: i64,
+    pub total: i64,
+}
+
 /// `publish://sheet-changed`：任务单状态/行状态变化（P2/P3 工作台与看板刷新）。
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(rename_all = "camelCase")]

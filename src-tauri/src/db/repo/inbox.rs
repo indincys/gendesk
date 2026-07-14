@@ -1,5 +1,6 @@
 //! 收件箱收录记录数据仓（inbox_items）。
-//! state：ingested（成功归档）/ unclaimed（未知 SKU 待认领）/ failed（解析失败待人工确认）。
+//! state：ingested（成功归档）/ unclaimed（未知 SKU 待认领）/ failed（解析失败待人工确认）
+//! / discarded（人工丢弃，文件已移入 已丢弃/；保留行以供追溯，不在 UI 列出）。
 
 #![allow(dead_code)]
 
@@ -26,7 +27,7 @@ pub struct NewInboxItem {
     pub detail_json: Option<String>,
 }
 
-/// 按状态列出（state 为空则全部），新→旧。
+/// 按状态列出（state 为空则全部**未丢弃**条目），新→旧。
 pub async fn list(
     pool: &SqlitePool,
     state: Option<&str>,
@@ -42,12 +43,34 @@ pub async fn list(
         }
         None => {
             sqlx::query_as::<_, InboxItemRow>(
-                "SELECT * FROM inbox_items ORDER BY created_at DESC, id DESC",
+                "SELECT * FROM inbox_items WHERE state != 'discarded'
+                 ORDER BY created_at DESC, id DESC",
             )
             .fetch_all(pool)
             .await
         }
     }
+}
+
+/// 改状态（并更新 file_rel —— 丢弃/归档会把文件移走）。
+pub async fn set_state(
+    pool: &SqlitePool,
+    id: i64,
+    state: &str,
+    file_rel: &str,
+    detail_json: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE inbox_items SET state = ?2, file_rel = ?3,
+            detail_json = COALESCE(?4, detail_json) WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(file_rel)
+    .bind(detail_json)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<InboxItemRow>, sqlx::Error> {

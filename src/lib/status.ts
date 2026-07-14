@@ -78,6 +78,64 @@ export function pubTaskVisual(status: string): { label: string; badgeClass: stri
   }
 }
 
+/**
+ * 平台 code → 中文。后端 `publish/platform.rs` 是权威单点；这里只用于**纯展示**
+ * 且拿不到后端 zh 字段的场合（如 shortage_json 里的平台清单）。
+ */
+const PLATFORM_ZH: Record<string, string> = {
+  douyin: "抖音",
+  xhs: "小红书",
+  kuaishou: "快手",
+  shipinhao: "视频号",
+  bilibili: "B站",
+  general: "通用",
+};
+
+export function platformZh(code: string): string {
+  return PLATFORM_ZH[code] ?? code;
+}
+
+/**
+ * 发布模块：缺料/提示原因码 → 中文（后端 shortage_json 的 `reason` 单点映射）。
+ * `timeout_backfill` 不是缺料，是「这个 SKU 今天为什么出现」的说明。
+ */
+export function shortageLabel(reason: string, platforms?: string[]): string {
+  const plats = platforms?.length ? `（${platforms.map(platformZh).join("/")}）` : "";
+  switch (reason) {
+    case "no_pack":
+      return "无可用素材包";
+    case "no_title":
+      return "无可用标题";
+    case "no_body":
+      return "无可用正文（图集需正文）";
+    case "no_account":
+      return `无可用账号${plats}`;
+    case "dedup_partial":
+      return `查重窗口内已发过${plats}，本次跳过这些平台`;
+    case "timeout_backfill":
+      return `昨日超时失败，今日已补排${plats}`;
+    default:
+      return reason;
+  }
+}
+
+/**
+ * 资产跑道（F3）→ 文案 + 颜色。null = 60 天内不会断（或不排期）。
+ * ≤3 天红、≤7 天琥珀——静态阈值只说明「现在少」，倒计时才说明「什么时候断」。
+ */
+export function runwayVisual(days: number | null): { label: string; cls: string } {
+  if (days == null) return { label: "充足", cls: "t3" };
+  if (days <= 0) return { label: "已断料", cls: "terr" };
+  if (days <= 3) return { label: `${days} 天见底`, cls: "terr" };
+  if (days <= 7) return { label: `${days} 天见底`, cls: "twarn" };
+  return { label: `${days} 天`, cls: "t3" };
+}
+
+/** 缺料项是否为真·缺料（false = 只是提示，不该进「缺料清单」横幅）。 */
+export function isShortage(reason: string): boolean {
+  return reason !== "timeout_backfill";
+}
+
 /** 发布模块：任务单状态。草稿=灰 已确认/已导出/回收中=蓝 已关闭=绿。 */
 export function sheetVisual(status: string): { label: string; badgeClass: string } {
   switch (status) {

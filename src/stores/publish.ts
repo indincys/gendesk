@@ -1,20 +1,26 @@
-import { type PublishBadges, commands, subscribePublish, unwrap } from "@/lib/ipc";
+import {
+  type PublishBadges,
+  type SheetChangedEvent,
+  commands,
+  subscribePublish,
+  unwrap,
+} from "@/lib/ipc";
+import { toast } from "sonner";
 import { create } from "zustand";
-
-/** 单条收录 toast（收件箱事件镜像）。 */
-export interface IngestToast {
-  id: number;
-  fileName: string;
-  state: string;
-  text: string;
-}
 
 interface PublishState {
   badges: PublishBadges;
-  toasts: IngestToast[];
+  /**
+   * 事件驱动刷新的版本号（铁律：事件驱动不轮询）。后端每发一次对应事件就自增，
+   * 页面把它放进 `useEffect` 依赖里即可自动重载——比让每个页面各自订阅事件简单，
+   * 也不会漏掉某个页面。
+   */
+  sheetRev: number;
+  inboxRev: number;
+  /** 最近一次任务单变化事件（工作台据此判断变的是不是自己那一单）。 */
+  lastSheetChanged: SheetChangedEvent | null;
   init: () => Promise<() => void>;
   refreshBadges: () => Promise<void>;
-  dismissToast: (id: number) => void;
 }
 
 const EMPTY: PublishBadges = {
@@ -24,11 +30,11 @@ const EMPTY: PublishBadges = {
   pendingReconcile: 0,
 };
 
-let toastSeq = 1;
-
 export const usePublishStore = create<PublishState>((set, get) => ({
   badges: EMPTY,
-  toasts: [],
+  sheetRev: 0,
+  inboxRev: 0,
+  lastSheetChanged: null,
 
   init: async () => {
     await get().refreshBadges();
@@ -42,26 +48,28 @@ export const usePublishStore = create<PublishState>((set, get) => ({
             pendingReconcile: b.pendingReconcile,
           },
         }),
+
       onInboxIngest: (e) => {
         const o = e.outcome;
-        let text = "";
         if (o.state === "ingested") {
-          text = `${o.skuCode} 入库：标题 ×${o.titles} 正文 ×${o.bodies}`;
+          toast.success(`${o.skuCode} 入库：标题 ×${o.titles} 正文 ×${o.bodies}`, {
+            description: e.fileName,
+          });
+        } else if (o.state === "ingestedMedia") {
+          toast.success(`${o.skuCode} 入库：素材包 ×${o.packs}`, { description: e.fileName });
         } else if (o.state === "unclaimed") {
-          text = "待认领：未识别到已知 SKU";
+          toast.warning("待认领：未识别到已知 SKU", { description: e.fileName });
+        } else if (o.state === "unclaimedMedia") {
+          toast.warning(`待认领：${o.folder}（${o.files} 个媒体文件）`, {
+            description: "到资产库 › 收件箱指认 SKU",
+          });
         } else if (o.state === "failed") {
-          text = `解析失败：${o.reason}`;
+          toast.error(`解析失败：${o.reason}`, { description: e.fileName });
         }
-        const toast: IngestToast = {
-          id: toastSeq++,
-          fileName: e.fileName,
-          state: o.state,
-          text,
-        };
-        set((s) => ({ toasts: [...s.toasts, toast].slice(-4) }));
-        // 自动淡出
-        setTimeout(() => get().dismissToast(toast.id), 6000);
+        set((s) => ({ inboxRev: s.inboxRev + 1 }));
       },
+
+      onSheetChanged: (e) => set((s) => ({ sheetRev: s.sheetRev + 1, lastSheetChanged: e })),
     });
     return un;
   },
@@ -74,6 +82,4 @@ export const usePublishStore = create<PublishState>((set, get) => ({
       // 首次未配置根目录等：徽章保持为空即可。
     }
   },
-
-  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));

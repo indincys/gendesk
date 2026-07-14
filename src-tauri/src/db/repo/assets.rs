@@ -59,12 +59,16 @@ pub async fn insert(pool: &SqlitePool, input: &NewPack) -> Result<i64, sqlx::Err
     insert_conn(&mut *pool.acquire().await?, input).await
 }
 
-/// 事务/连接内插入（收录管线用）。lifecycle 初值 new（待完善，未参与排期）。
+/// 事务/连接内插入（收录管线用）。
+///
+/// lifecycle 初值 **active**：文件齐备即可发（封面本就可选），入库即参与排期。
+/// 存储态仍保留 `new`，留给未来需要人工过目的来源——写入方显式指定即可，
+/// UI 上 new 包有「标为可用」按钮转 active。
 pub async fn insert_conn(conn: &mut SqliteConnection, input: &NewPack) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO asset_packs (sku_id, kind, dir_rel, files_json, cover, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) RETURNING id",
+        "INSERT INTO asset_packs (sku_id, kind, dir_rel, files_json, cover, lifecycle, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) RETURNING id",
     )
     .bind(input.sku_id)
     .bind(&input.kind)
@@ -116,6 +120,28 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// **批量**取「被未关闭任务单引用」的包 id 集合（列表视图用，替代逐包查询）。
+pub async fn locked_ids(
+    pool: &SqlitePool,
+    pack_ids: &[i64],
+) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+    if pack_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let placeholders = vec!["?"; pack_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT ds.pack_id FROM publish_tasks pt
+         JOIN daily_sets ds ON ds.id = pt.set_id
+         JOIN task_sheets s ON s.id = pt.sheet_id
+         WHERE ds.pack_id IN ({placeholders}) AND s.status != 'closed'"
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for id in pack_ids {
+        q = q.bind(id);
+    }
+    Ok(q.fetch_all(pool).await?.into_iter().collect())
 }
 
 /// 是否被状态 ≠ closed 的任务单引用（锁定判定，前置事实 7）。P2 起 daily_sets/publish_tasks

@@ -11,6 +11,7 @@ pub mod prompts;
 pub mod publish_accounts;
 pub mod publish_assets;
 pub mod publish_inbox;
+pub mod publish_insights;
 pub mod publish_planning;
 pub mod publish_reconcile;
 pub mod publish_settings;

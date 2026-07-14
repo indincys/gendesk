@@ -13,21 +13,37 @@ use crate::error::{AppError, AppResult};
 use crate::publish::xlsx::reader::{parse_rpa, ReceiptRow};
 
 /// 失败六类分类（纯函数）：按执行器回写文案关键字归类。
+///
+/// **优先级有讲究**：timeout 排在 content/login 之前——「上传素材超时」既含「素材」
+/// 又含「超时」，它是网络问题（可自动补排），不是素材不合规（要退役素材包）。
+/// 归错类的代价是把好素材退役掉，且不补排。
 pub fn classify_fail(text: &str) -> &'static str {
     let t = text;
-    if t.contains("登录") {
-        "login"
+    if t.contains("超时") || t.contains("网络") || t.contains("连接") {
+        "timeout"
     } else if t.contains("风控") || t.contains("限流") || t.contains("频率") {
         "risk"
+    } else if t.contains("登录") || t.contains("未授权") || t.contains("cookie") {
+        "login"
     } else if t.contains("素材") || t.contains("不合规") || t.contains("违规") || t.contains("审核")
     {
         "content"
-    } else if t.contains("页面") || t.contains("变更") {
+    } else if t.contains("页面") || t.contains("变更") || t.contains("元素") {
         "page"
-    } else if t.contains("超时") || t.contains("网络") {
-        "timeout"
     } else {
         "other"
+    }
+}
+
+/// 任务状态中文名（错误文案/UI 共用单点）。
+pub fn task_status_zh(status: &str) -> &'static str {
+    match status {
+        "pending" => "待执行",
+        "published" => "已发布",
+        "failed" => "失败",
+        "suspect" => "疑似已发",
+        "canceled" => "已取消",
+        _ => "未知",
     }
 }
 
@@ -42,15 +58,33 @@ pub struct ReconcileResult {
     pub matched: i64,
     pub unmatched: i64,
     pub closed: bool,
+    /// 因「素材不合规」失败而退役的素材包数（需求 §6.3 content 处置）。
+    pub retired_packs: i64,
+    /// 登录失效的账号名（需求 §6.3 login 处置：转人工，不自动重试）。
+    pub login_fail_accounts: Vec<String>,
 }
 
-/// 解析回执时间为 Unix 秒；失败回退 now。
+/// 本地墙钟时间 → Unix 秒。回执时间与计划时间都由人/执行机按**本地时区**书写
+/// （「12:30 发」指本地 12:30），按 UTC 解析会整体偏移一个时区（东八区差 8 小时：
+/// 疑似已发晚 8 小时才标记、台账 published_at 记成未来）。
+///
+/// 夏令时歧义时刻取较早的一个；不存在的时刻（春季跳表缺口）返回 None，由调用方回退。
+fn local_naive_to_unix(dt: chrono::NaiveDateTime) -> Option<i64> {
+    use chrono::{Local, LocalResult, TimeZone};
+    match Local.from_local_datetime(&dt) {
+        LocalResult::Single(t) => Some(t.timestamp()),
+        LocalResult::Ambiguous(earliest, _) => Some(earliest.timestamp()),
+        LocalResult::None => None,
+    }
+}
+
+/// 解析回执时间为 Unix 秒（按本地时区）；失败回退 now。
 fn parse_time_or(now: i64, s: Option<&str>) -> i64 {
     use chrono::NaiveDateTime;
     let Some(s) = s else { return now };
     for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s.trim(), fmt) {
-            return dt.and_utc().timestamp();
+            return local_naive_to_unix(dt).unwrap_or(now);
         }
     }
     now
@@ -120,12 +154,42 @@ pub async fn apply_receipts(
                             .await?;
                     res.canceled_by_risk += n as i64;
                 }
+                // 素材不合规 → 该素材包退役并留痕，否则它明天还会被选中，再失败一次（§6.3）。
+                if kind == "content" {
+                    if let Some(set) = planning::get_daily_set(pool, task.set_id).await? {
+                        let note = format!("[素材不合规 {}]", task.task_code);
+                        sqlx::query(
+                            "UPDATE asset_packs
+                             SET lifecycle='retired', note = TRIM(note || ' ' || ?2), updated_at=?3
+                             WHERE id=?1",
+                        )
+                        .bind(set.pack_id)
+                        .bind(&note)
+                        .bind(now)
+                        .execute(&mut *conn)
+                        .await?;
+                        res.retired_packs += 1;
+                    }
+                }
                 conn.commit().await?;
+                // 登录失效 → 人工处理（绝不自动重试；只上报给前端 toast）。
+                if kind == "login" {
+                    let name = planning::account_name(pool, task.account_id)
+                        .await?
+                        .unwrap_or_else(|| format!("账号 #{}", task.account_id));
+                    if !res.login_fail_accounts.contains(&name) {
+                        res.login_fail_accounts.push(name);
+                    }
+                }
                 res.failed += 1;
             }
             // 空 / 待执行 → 尚未回写，留待超时扫描。
             _ => {}
         }
+    }
+    // 有任何一行被回执定态 → 执行器确实在回写（F9 同步链路健康的判据）。
+    if res.matched > 0 {
+        planning::touch_receipt(pool, sheet_id).await?;
     }
     Ok(res)
 }
@@ -260,11 +324,13 @@ pub async fn timeout_scan(pool: &SqlitePool, now: i64, timeout_hours: i64) -> Ap
             if task.status != "pending" {
                 continue;
             }
+            // 计划时刻是本地墙钟（任务单第 5 列「12:30」= 执行机本地 12:30）。
             let base = match &task.planned_time {
                 Some(hm) => {
                     let s = format!("{} {}", sheet.date, hm);
                     NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M")
-                        .map(|dt| dt.and_utc().timestamp())
+                        .ok()
+                        .and_then(local_naive_to_unix)
                         .unwrap_or(export_at)
                 }
                 None => export_at,
@@ -357,19 +423,43 @@ pub async fn maybe_close(pool: &SqlitePool, sheet_id: i64) -> AppResult<bool> {
             kind: r.fail_kind.clone().unwrap_or_else(|| "other".into()),
         })
         .collect();
+    // shortage_json 里也放了非缺料的提示项（如 timeout_backfill）；日报只列真正缺料的。
     let shortage: Vec<String> =
         serde_json::from_str::<Vec<serde_json::Value>>(&sheet.shortage_json)
             .unwrap_or_default()
             .into_iter()
+            .filter(|v| {
+                !matches!(
+                    v.get("reason").and_then(|r| r.as_str()),
+                    Some("timeout_backfill")
+                )
+            })
             .filter_map(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
             .collect();
-    let has_timeout = fails.iter().any(|f| f.kind == "timeout");
-    let tips = if has_timeout {
-        "存在网络超时失败，明日将自动补排相关 SKU×账号".to_string()
-    } else if !fails.is_empty() {
-        "失败任务需人工跟进（风控/素材/登录等）".to_string()
+    // tips 只陈述**实际会发生的事**：补排数由次日 generate_sheet 按 timeout 失败集补入
+    // （planner::timeout_backfill），故这里的数字与明日行为一致；没有 timeout 就不提补排。
+    let timeout_n = fails.iter().filter(|f| f.kind == "timeout").count();
+    let manual_n = fails
+        .iter()
+        .filter(|f| matches!(f.kind.as_str(), "risk" | "content" | "login" | "page"))
+        .count();
+    let mut parts: Vec<String> = Vec::new();
+    if timeout_n > 0 {
+        parts.push(format!("{timeout_n} 个网络超时失败，明日自动补排"));
+    }
+    if manual_n > 0 {
+        parts.push(format!(
+            "{manual_n} 个失败需人工跟进（风控/素材/登录/页面）"
+        ));
+    }
+    let tips = if parts.is_empty() {
+        if failed == 0 {
+            "全部成功，无需跟进".to_string()
+        } else {
+            "存在失败任务，请查看明细".to_string()
+        }
     } else {
-        "全部成功，无需跟进".to_string()
+        parts.join("；")
     };
     let report = ReportView {
         date: sheet.date.clone(),
@@ -513,7 +603,7 @@ mod e2e {
             .await
             .unwrap();
         drop(conn);
-        crate::publish::exporter::export_package(&pool, sheet_id, &s)
+        crate::publish::exporter::export_package(&pool, sheet_id, &s, None)
             .await
             .unwrap();
 
@@ -558,6 +648,203 @@ mod e2e {
         assert_eq!(report.published, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.fails[0].kind, "risk");
+    }
+
+    // B2 §6.4 负向断言：suspect 行不能被「取消」绕过 resolve_suspect 定态。
+    #[tokio::test]
+    async fn suspect_cannot_be_canceled() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed(&pool, root).await;
+        let s = settings(root);
+        let sheet_id = planner::generate_sheet(&pool, "2026-07-15", &s)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        prepo::set_sheet_status(&mut conn, sheet_id, "exported")
+            .await
+            .unwrap();
+        drop(conn);
+        let now = crate::db::now_unix() + 100 * 3600;
+        timeout_scan(&pool, now, 4).await.unwrap();
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_id).await.unwrap();
+        assert_eq!(rows[0].status, "suspect");
+
+        // 人工取消只对 pending 生效：对 suspect 行 UPDATE 影响 0 行。
+        let mut conn = pool.acquire().await.unwrap();
+        let n = prepo::cancel_task_manual(&mut conn, rows[0].id)
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(n, 0, "疑似已发不可被取消，只能由 resolve_suspect 定态");
+        let still = prepo::get_task(&pool, rows[0].id).await.unwrap().unwrap();
+        assert_eq!(still.status, "suspect");
+    }
+
+    // B2：人工取消最后一个待执行行 → 单自动关闭并出日报；取消原因是 manual（非风控熔断）。
+    #[tokio::test]
+    async fn manual_cancel_closes_sheet_and_is_not_a_circuit_break() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed(&pool, root).await;
+        let s = settings(root);
+        let sheet_id = planner::generate_sheet(&pool, "2026-07-15", &s)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        prepo::set_sheet_status(&mut conn, sheet_id, "exported")
+            .await
+            .unwrap();
+        drop(conn);
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_id).await.unwrap();
+        assert_eq!(rows.len(), 2);
+
+        let mut conn = pool.acquire().await.unwrap();
+        for r in &rows {
+            assert_eq!(prepo::cancel_task_manual(&mut conn, r.id).await.unwrap(), 1);
+        }
+        drop(conn);
+        assert!(maybe_close(&pool, sheet_id).await.unwrap(), "全终态应关单");
+
+        let joined = prepo::sheet_rows(&pool, sheet_id).await.unwrap();
+        assert!(
+            joined
+                .iter()
+                .all(|r| r.cancel_kind.as_deref() == Some("manual")),
+            "人工取消不得被记为风控熔断"
+        );
+    }
+
+    // B3：素材不合规（content）→ 素材包退役 + 留痕，明天不会被再选中。
+    #[tokio::test]
+    async fn content_fail_retires_the_pack() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed(&pool, root).await;
+        let s = settings(root);
+        let sheet_id = planner::generate_sheet(&pool, "2026-07-15", &s)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        prepo::set_sheet_status(&mut conn, sheet_id, "exported")
+            .await
+            .unwrap();
+        drop(conn);
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_id).await.unwrap();
+        write_receipts(
+            root,
+            "2026-07-15",
+            &[(
+                &rows[0].task_code,
+                "失败",
+                "素材不合规，审核未过｜2026-07-15 12:40",
+            )],
+        );
+        let xlsx = RelPath::from_parts(["任务包", "20260715", "任务单.xlsx"]).to_local(root);
+        let receipts = reader::read_receipts(&xlsx).unwrap();
+        let res = apply_receipts(&pool, sheet_id, &receipts).await.unwrap();
+        assert_eq!(res.failed, 1);
+        assert_eq!(res.retired_packs, 1);
+
+        let set = prepo::get_daily_set(&pool, rows[0].set_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let pack = assets::get(&pool, set.pack_id).await.unwrap().unwrap();
+        assert_eq!(pack.lifecycle, "retired");
+        assert!(pack.note.contains("素材不合规"), "note={}", pack.note);
+    }
+
+    // B3：登录失效 → 上报账号名给前端（转人工，绝不自动重试）。
+    #[tokio::test]
+    async fn login_fail_reports_account() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed(&pool, root).await;
+        let s = settings(root);
+        let sheet_id = planner::generate_sheet(&pool, "2026-07-15", &s)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        prepo::set_sheet_status(&mut conn, sheet_id, "exported")
+            .await
+            .unwrap();
+        drop(conn);
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_id).await.unwrap();
+        write_receipts(
+            root,
+            "2026-07-15",
+            &[(&rows[0].task_code, "失败", "登录失效｜2026-07-15 12:40")],
+        );
+        let xlsx = RelPath::from_parts(["任务包", "20260715", "任务单.xlsx"]).to_local(root);
+        let receipts = reader::read_receipts(&xlsx).unwrap();
+        let res = apply_receipts(&pool, sheet_id, &receipts).await.unwrap();
+        assert_eq!(res.login_fail_accounts.len(), 1);
+        assert!(["号A", "号B"].contains(&res.login_fail_accounts[0].as_str()));
+    }
+
+    // B3：昨日 timeout 失败的 SKU，今日即便按频率不该发也被补排（需求 §6.3）。
+    #[tokio::test]
+    async fn yesterday_timeout_is_backfilled_today() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed(&pool, root).await;
+        let s = settings(root);
+
+        // 昨日单：把 SKU 改成冷款并制造一条 timeout 失败。
+        let sheet_a = planner::generate_sheet(&pool, "2026-07-14", &s)
+            .await
+            .unwrap();
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_a).await.unwrap();
+        let mut conn = pool.begin().await.unwrap();
+        prepo::update_task_result(
+            &mut conn,
+            rows[0].id,
+            "failed",
+            Some("timeout"),
+            None,
+            Some("网络超时"),
+            Some(crate::db::now_unix()),
+            None,
+        )
+        .await
+        .unwrap();
+        conn.commit().await.unwrap();
+
+        // 该 SKU 转冷款 + 冷款轮播关掉 → 按频率今日绝不应发。
+        let sku = skus::find_by_code(&pool, "SF-1").await.unwrap().unwrap();
+        skus::update_fields(&pool, sku.id, None, None, Some("cold"), None, None, None)
+            .await
+            .unwrap();
+        let mut s2 = s.clone();
+        s2.tier_rules.cold_weekly_rotate = 0;
+
+        // 无补排时今日应为空。
+        let empty = planner::generate_sheet(&pool, "2026-07-16", &s2)
+            .await
+            .unwrap();
+        assert!(prepo::list_tasks_by_sheet(&pool, empty)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // 今日（= 失败次日）：补排把它拉回来。
+        let sheet_b = planner::generate_sheet(&pool, "2026-07-15", &s2)
+            .await
+            .unwrap();
+        let rows_b = prepo::list_tasks_by_sheet(&pool, sheet_b).await.unwrap();
+        assert!(!rows_b.is_empty(), "昨日超时失败的 SKU 今日应被补排");
+        let sheet = prepo::get_sheet(&pool, sheet_b).await.unwrap().unwrap();
+        assert!(
+            sheet.shortage_json.contains("timeout_backfill"),
+            "工作台需要「补排」标记：{}",
+            sheet.shortage_json
+        );
     }
 
     #[tokio::test]
@@ -642,6 +929,19 @@ mod tests {
         assert_eq!(classify_fail("莫名其妙"), "other");
     }
 
+    // E8：歧义文案的优先级。归错类的代价不对称——把网络超时判成「素材不合规」，
+    // 会白白退役一个好素材包，而且不会自动补排。
+    #[test]
+    fn ambiguous_text_prefers_timeout() {
+        assert_eq!(classify_fail("上传素材超时"), "timeout");
+        assert_eq!(classify_fail("网络异常导致审核未提交"), "timeout");
+        assert_eq!(classify_fail("登录时网络连接失败"), "timeout");
+        // 无超时线索时才落到各自的类。
+        assert_eq!(classify_fail("素材审核未通过"), "content");
+        assert_eq!(classify_fail("cookie 已失效"), "login");
+        assert_eq!(classify_fail("页面元素找不到"), "page");
+    }
+
     #[test]
     fn parse_time_formats() {
         let now = 999;
@@ -649,5 +949,27 @@ mod tests {
         assert_ne!(parse_time_or(now, Some("2026-07-15 12:30:45")), now);
         assert_eq!(parse_time_or(now, Some("乱码")), now);
         assert_eq!(parse_time_or(now, None), now);
+    }
+
+    // A2：回执/计划时间按**本地时区**解析。期望值由 chrono 现算（CI 可能跑在 UTC，
+    // 不能写死 +8）；断言的是「与按 UTC 解析不同（除非本机就是 UTC）」+ 等于真实本地 epoch。
+    #[test]
+    fn local_time_is_not_parsed_as_utc() {
+        use chrono::{Local, NaiveDateTime, TimeZone};
+        let dt = NaiveDateTime::parse_from_str("2026-07-15 12:30", "%Y-%m-%d %H:%M")
+            .expect("固定字面量可解析");
+        let expected = Local
+            .from_local_datetime(&dt)
+            .single()
+            .expect("2026-07-15 12:30 在任何时区都不是歧义时刻")
+            .timestamp();
+        assert_eq!(parse_time_or(0, Some("2026-07-15 12:30")), expected);
+
+        let offset = Local.offset_from_utc_datetime(&dt).local_minus_utc() as i64;
+        assert_eq!(
+            expected,
+            dt.and_utc().timestamp() - offset,
+            "本地 epoch = UTC 解析结果 - 时区偏移"
+        );
     }
 }

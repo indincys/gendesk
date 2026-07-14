@@ -50,6 +50,13 @@ jobs:
           # minisign 私钥与密码存于仓库 Secrets（私钥丢失 = 更新链断裂，另做离线备份）。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # T4：macOS 自签名代码签名证书（同一张证书 → 代码签名 leaf 指纹稳定 → DR 稳定
+          # → keychain「始终允许」一次永久生效，根治更新后反复弹窗）。不设 APPLE_ID/
+          # APPLE_PASSWORD/APPLE_TEAM_ID → tauri-action 只签名不公证；证书自动导入临时钥匙串。
+          # 未配置这些 Secret 时行为同现状（不签名），不阻塞构建。不动 tauri.conf.json。
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "GenDesk ${{ github.ref_name }}"

@@ -9,6 +9,7 @@ pub mod inbox;
 pub mod paths;
 pub mod planner;
 pub mod platform;
+pub mod reconcile;
 pub mod ticker;
 pub mod xlsx;
 
@@ -20,11 +21,11 @@ use tauri::AppHandle;
 
 use crate::error::AppResult;
 
-/// 发布模块运行时状态：持有收件箱 watcher 句柄，支持根目录变更时热重启。
+/// 发布模块运行时状态：持有收件箱 + 任务包 watcher 句柄，支持根目录变更时热重启。
 pub struct PublishState {
     pool: SqlitePool,
     app: AppHandle,
-    watcher: Mutex<Option<inbox::watcher::PublishWatcher>>,
+    watchers: Mutex<Vec<inbox::watcher::PublishWatcher>>,
 }
 
 impl PublishState {
@@ -32,23 +33,24 @@ impl PublishState {
         Self {
             pool,
             app,
-            watcher: Mutex::new(None),
+            watchers: Mutex::new(Vec::new()),
         }
     }
 
-    /// 在给定本机根目录上（重）启动收件箱监听；旧监听随替换而 drop 停止。
+    /// 在给定本机根目录上（重）启动收件箱 + 任务包监听；旧监听随替换而 drop 停止。
     pub fn restart(&self, root: PathBuf) -> AppResult<()> {
-        let w = inbox::watcher::start(self.pool.clone(), root, self.app.clone())?;
-        if let Ok(mut guard) = self.watcher.lock() {
-            *guard = Some(w);
+        let inbox_w = inbox::watcher::start(self.pool.clone(), root.clone(), self.app.clone())?;
+        let pkg_w = inbox::watcher::start_pkg(self.pool.clone(), root, self.app.clone())?;
+        if let Ok(mut guard) = self.watchers.lock() {
+            *guard = vec![inbox_w, pkg_w];
         }
         Ok(())
     }
 
     /// 停止监听（清空句柄）。
     pub fn stop(&self) {
-        if let Ok(mut guard) = self.watcher.lock() {
-            *guard = None;
+        if let Ok(mut guard) = self.watchers.lock() {
+            guard.clear();
         }
     }
 }

@@ -86,6 +86,22 @@ pub async fn run_catchup(pool: &SqlitePool, app: &AppHandle) -> Vec<String> {
             Err(e) => tracing::warn!(error = %e, date, "补跑生成任务单失败"),
         }
     }
+
+    // ③ 超时扫描 → 疑似已发（前置事实 17）。
+    match crate::publish::reconcile::timeout_scan(
+        pool,
+        now.timestamp(),
+        settings.receipt_timeout_hours,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => crate::publish::inbox::watcher::emit_badges(pool, app).await,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "超时扫描失败"),
+    }
+    // 顺带跑一轮对账（回执可能已回写但未触发 watcher）。
+    crate::commands::publish_reconcile::reconcile_run(pool, app).await;
+
     generated
 }
 

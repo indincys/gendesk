@@ -55,6 +55,38 @@ pub fn start(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<Publi
     })
 }
 
+/// 在任务包目录上启动监听：文件变更（回执回写）→ 防抖 → 全量对账。
+pub fn start_pkg(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<PublishWatcher> {
+    let pkg_dir = paths::RelPath::from_parts([paths::TASK_PACKAGES]).to_local(&root);
+    std::fs::create_dir_all(&pkg_dir)?;
+    let (tx, rx) = mpsc::channel::<()>(256);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.try_send(());
+        }
+    })
+    .map_err(|e| AppError::Io(format!("创建任务包监听失败：{e}")))?;
+    watcher
+        .watch(&pkg_dir, RecursiveMode::Recursive)
+        .map_err(|e| AppError::Io(format!("监听任务包目录失败：{e}")))?;
+    let worker = tokio::spawn(async move {
+        let mut rx = rx;
+        loop {
+            if rx.recv().await.is_none() {
+                break;
+            }
+            if !coalesce(&mut rx, QUIET).await {
+                break;
+            }
+            crate::commands::publish_reconcile::reconcile_run(&pool, &app).await;
+        }
+    });
+    Ok(PublishWatcher {
+        _watcher: watcher,
+        _worker: worker,
+    })
+}
+
 /// worker 主循环：等首个事件 → 防抖收敛 → rescan + 发事件。
 async fn run_worker(mut rx: mpsc::Receiver<()>, pool: SqlitePool, root: PathBuf, app: AppHandle) {
     loop {

@@ -1294,6 +1294,50 @@ async openPackageDir(sheetId: number) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * 手动导入回执（兜底，与 watcher 走同一对账管线）。
+ */
+async importReceipts(sheetId: number) : Promise<Result<ReconcileResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_receipts", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 人工定态疑似已发。
+ */
+async resolveSuspect(taskId: number, outcome: SuspectOutcome) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_suspect", { taskId, outcome }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 今日看板：计划/已发布/失败/待核对 + 平台完成率 + 账号健康。
+ */
+async getDashboard(date: string) : Promise<Result<DashboardView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_dashboard", { date }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 读日报（关单时写入 report_json）。
+ */
+async getReport(sheetId: number) : Promise<Result<ReportView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_report", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1341,6 +1385,11 @@ export type AccountPatch = { name: string | null; dailyLimit: number | null;
  * `Some(None)` = 清除（跟随全局时段模板）；`Some(Some)` = 设置。
  */
 slots: string[] | null }
+export type AccountStat = { id: number; platformZh: string; name: string; used: number; dailyLimit: number; 
+/**
+ * normal | disabled | circuit（当日熔断）
+ */
+health: string }
 export type AccountView = { id: number; platform: string; platformZh: string; name: string; dailyLimit: number; slots: string[] | null; status: string; createdAt: number }
 export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number; 
 /**
@@ -1452,6 +1501,7 @@ draws: number }
  * 新建 SKU 输入。
  */
 export type CreateSkuInput = { code: string; styleName: string; productName: string | null; tier: string | null; topics: string[] | null; platforms: string[] | null; note: string | null }
+export type DashboardView = { date: string; sheetId: number | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean }
 /**
  * 数据目录信息（E19：暴露落盘位置）。
  */
@@ -1623,6 +1673,7 @@ export type PlatformInfo = { code: string; zh: string }
  * 平台矩阵（全局启用开关）。字段即五平台 code。
  */
 export type PlatformMatrix = { douyin: boolean; xhs: boolean; kuaishou: boolean; shipinhao: boolean; bilibili: boolean }
+export type PlatformStat = { platform: string; platformZh: string; done: number; total: number; pct: number }
 /**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
@@ -1728,6 +1779,14 @@ timeSlots?: string[] }
  */
 export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null }
 /**
+ * 对账结果汇总。
+ */
+export type ReconcileResult = { published: number; failed: number; 
+/**
+ * 风控熔断连带取消的任务数。
+ */
+canceledByRisk: number; matched: number; unmatched: number; closed: boolean }
+/**
  * 参考图详情（含使用统计）。
  */
 export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
@@ -1749,6 +1808,15 @@ export type RefScanItem = { path: string; name: string; duplicate: boolean;
  * 与之重复的已有图名（库内）或本次靠前的文件名。
  */
 dupOf: string | null }
+export type ReportFail = { taskCode: string; skuCode: string; kind: string }
+/**
+ * 日报视图。
+ */
+export type ReportView = { date: string; plan: number; published: number; failed: number; canceled: number; 
+/**
+ * 成功率（0–100 整数）。
+ */
+successRate: number; fails: ReportFail[]; shortage: string[]; tips: string }
 /**
  * 手动全量扫描收件箱。返回本次收录/待认领/失败计数。
  */
@@ -1883,6 +1951,18 @@ passed: number;
  * 未通过 rej
  */
 rejected: number; total: number }
+/**
+ * 疑似已发人工定态结果。
+ */
+export type SuspectOutcome = 
+/**
+ * 已发布（补录链接）。
+ */
+{ kind: "published"; url: string | null } | 
+/**
+ * 未发出，定为失败。
+ */
+{ kind: "failed"; fail_kind: string }
 /**
  * `task://progress`（250ms 节流）
  */

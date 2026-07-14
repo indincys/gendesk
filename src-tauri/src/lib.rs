@@ -180,6 +180,11 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_planning::list_schedulable_skus,
             commands::publish_planning::export_package,
             commands::publish_planning::open_package_dir,
+            // reconcile 域（P3）
+            commands::publish_reconcile::import_receipts,
+            commands::publish_reconcile::resolve_suspect,
+            commands::publish_reconcile::get_dashboard,
+            commands::publish_reconcile::get_report,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,

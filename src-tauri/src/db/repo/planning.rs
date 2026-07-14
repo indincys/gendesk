@@ -306,6 +306,98 @@ pub async fn delete_task(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+pub async fn find_task_by_code(
+    pool: &SqlitePool,
+    code: &str,
+) -> Result<Option<PublishTaskRow>, sqlx::Error> {
+    sqlx::query_as::<_, PublishTaskRow>("SELECT * FROM publish_tasks WHERE task_code = ?1")
+        .bind(code)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 回写对账结果（已发布/失败/疑似定态）。
+#[allow(clippy::too_many_arguments)]
+pub async fn update_task_result(
+    conn: &mut SqliteConnection,
+    id: i64,
+    status: &str,
+    fail_kind: Option<&str>,
+    url: Option<&str>,
+    msg: Option<&str>,
+    time: Option<i64>,
+    screenshot: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE publish_tasks SET status=?2, fail_kind=?3, result_url=?4, result_msg=?5,
+            result_time=?6, screenshot=?7, updated_at=?8 WHERE id=?1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(fail_kind)
+    .bind(url)
+    .bind(msg)
+    .bind(time)
+    .bind(screenshot)
+    .bind(crate::db::now_unix())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// 风控熔断：把某账号在某单内剩余「待执行」任务置「已取消」。返回取消数。
+pub async fn cancel_pending_of_account(
+    conn: &mut SqliteConnection,
+    sheet_id: i64,
+    account_id: i64,
+) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE publish_tasks SET status='canceled', updated_at=?3
+         WHERE sheet_id=?1 AND account_id=?2 AND status='pending'",
+    )
+    .bind(sheet_id)
+    .bind(account_id)
+    .bind(crate::db::now_unix())
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// 任务单是否全部行到达终态（无 pending / suspect）。疑似不是终态。
+pub async fn all_terminal(pool: &SqlitePool, sheet_id: i64) -> Result<bool, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM publish_tasks WHERE sheet_id=?1 AND status IN ('pending','suspect')",
+    )
+    .bind(sheet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(n == 0)
+}
+
+pub async fn set_report(
+    conn: &mut SqliteConnection,
+    sheet_id: i64,
+    json: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE task_sheets SET report_json=?2, updated_at=?3 WHERE id=?1")
+        .bind(sheet_id)
+        .bind(json)
+        .bind(crate::db::now_unix())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// 已导出且有待执行任务的任务单（超时扫描输入）。
+pub async fn exported_with_pending(pool: &SqlitePool) -> Result<Vec<SheetRow>, sqlx::Error> {
+    sqlx::query_as::<_, SheetRow>(
+        "SELECT * FROM task_sheets WHERE status IN ('exported','reconciling')
+         AND EXISTS (SELECT 1 FROM publish_tasks pt WHERE pt.sheet_id = task_sheets.id AND pt.status='pending')",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// 任务单内已用的最大日序号（增补行时续号；删行不回收，前置事实 3）。
 pub async fn max_task_seq(
     pool: &SqlitePool,

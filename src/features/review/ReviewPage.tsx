@@ -138,7 +138,7 @@ export function ReviewPage() {
   const [onlyPending, setOnlyPending] = useState(false);
   // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
   // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
-  const [sortMode, setSortMode] = useState<"time" | "ref" | "group">("group");
+  const [sortMode, setSortMode] = useState<"time" | "ref" | "group" | "key">("group");
   // E38：shift 范围多选锚点（索引进 displayed）。
   const lastClicked = useRef<number | null>(null);
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
@@ -270,6 +270,9 @@ export function ReviewPage() {
       arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
     } else if (sortMode === "group") {
       arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
+    } else if (sortMode === "key") {
+      // "~" 使无 Key（keyAlias 为空）项排到末尾。
+      arr.sort((a, b) => (a.keyAlias ?? "~").localeCompare(b.keyAlias ?? "~") || a.id - b.id);
     } else if (!onlyPending) {
       // 时间序（后端已按 id 升序）：仅让待定项稳定沉底。
       arr.sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
@@ -280,7 +283,13 @@ export function ReviewPage() {
   // E24：聚类模式下某项所属的分段键（时间序无分段）。
   const clusterKey = useCallback(
     (it: ReviewItemView): string | null =>
-      sortMode === "ref" ? it.refName : sortMode === "group" ? it.groupName : null,
+      sortMode === "ref"
+        ? it.refName
+        : sortMode === "group"
+          ? it.groupName
+          : sortMode === "key"
+            ? (it.keyAlias ?? "未标注 Key")
+            : null,
     [sortMode],
   );
 
@@ -289,11 +298,11 @@ export function ReviewPage() {
     const m = new Map<string, number>();
     if (sortMode === "time") return m;
     for (const it of displayed) {
-      const k = sortMode === "ref" ? it.refName : it.groupName;
-      m.set(k, (m.get(k) ?? 0) + 1);
+      const k = clusterKey(it);
+      if (k !== null) m.set(k, (m.get(k) ?? 0) + 1);
     }
     return m;
-  }, [displayed, sortMode]);
+  }, [displayed, sortMode, clusterKey]);
 
   // T1：扁平行模型——遍历 displayed，聚类键变化（非 time）先 flush 不满行、再 push 分组头行；
   // 卡片按 cols 攒成等高网格行。cardRow：卡片全局 index → 所在行号，供焦点滚动。
@@ -489,6 +498,21 @@ export function ReviewPage() {
   const onZoom = useCallback((idx: number) => setZoom(idx), []);
   const onHover = useCallback((idx: number) => setFocus(idx), []);
 
+  // T3：分类验收——对某聚类键（ref/group/key）下全部 displayed 项批量通过 / 移废纸篓。
+  // 复用 accept/reject（含 inFlight 幂等守卫），触发既有自动转正/写回等副作用。
+  const clusterIds = useCallback(
+    (key: string) => displayed.filter((it) => clusterKey(it) === key).map((it) => it.id),
+    [displayed, clusterKey],
+  );
+  const acceptCluster = useCallback(
+    (key: string) => void accept(clusterIds(key)),
+    [accept, clusterIds],
+  );
+  const rejectCluster = useCallback(
+    (key: string) => void reject(clusterIds(key)),
+    [reject, clusterIds],
+  );
+
   const zoomItem = zoom !== null ? displayed[zoom] : undefined;
 
   return (
@@ -545,6 +569,12 @@ export function ReviewPage() {
           >
             按提示词组
           </span>
+          <span
+            className={cn("sgi", sortMode === "key" && "on")}
+            onClick={() => setSortMode("key")}
+          >
+            按 Key
+          </span>
         </div>
         <span className="fs11 t3 nowrap">每行</span>
         <input
@@ -581,11 +611,28 @@ export function ReviewPage() {
                 >
                   {row.kind === "header" ? (
                     <div className="rclhead">
-                      <span className="rcltag">{sortMode === "ref" ? "参考图" : "提示词组"}</span>
+                      <span className="rcltag">
+                        {sortMode === "ref" ? "参考图" : sortMode === "key" ? "Key" : "提示词组"}
+                      </span>
                       <span className="rclname" title={row.key}>
                         {row.key}
                       </span>
                       <span className="rclcnt">{row.count} 张</span>
+                      {/* T3：分类验收——对本聚类下全部项批量通过 / 移废纸篓（ref/group/key 三种都生效）。 */}
+                      <button
+                        type="button"
+                        className="btn xs"
+                        onClick={() => acceptCluster(row.key)}
+                      >
+                        通过本组
+                      </button>
+                      <button
+                        type="button"
+                        className="btn xs gho dng"
+                        onClick={() => rejectCluster(row.key)}
+                      >
+                        本组移废纸篓
+                      </button>
                     </div>
                   ) : (
                     <div className="rgrid2" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>

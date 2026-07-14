@@ -642,6 +642,13 @@ a:hover {
   font-size: 12px;
   border-radius: 7px;
 }
+/* T3：更紧凑的按钮尺寸（分组头「通过本组 / 本组移废纸篓」等行内小操作）。 */
+.btn.xs {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 6px;
+}
 .pri {
   background: linear-gradient(180deg, oklch(63% 0.17 256), oklch(56% 0.19 257));
   border-color: oklch(48% 0.18 257);

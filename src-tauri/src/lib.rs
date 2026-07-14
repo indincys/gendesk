@@ -142,6 +142,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_skus::get_sku_detail,
             commands::publish_skus::get_publish_badges,
             commands::publish_skus::import_sku_mappings,
+            commands::publish_skus::pick_mapping_file,
+            commands::publish_skus::save_sku_mapping_template,
             // texts 域
             commands::publish_texts::list_text_items,
             commands::publish_texts::add_text_item,

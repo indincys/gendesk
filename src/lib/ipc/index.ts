@@ -53,6 +53,7 @@ export type {
   SkuFilter,
   CreateSkuInput,
   SkuPatch,
+  MappingImportReport,
   HistoryItem,
   PublishBadges,
   TextItemView,

@@ -976,12 +976,36 @@ async getPublishBadges() : Promise<Result<PublishBadges, AppError>> {
 }
 },
 /**
- * 批量导入 SKU 映射：每行 `编码[<Tab/逗号>别名][<Tab/逗号>话题]`。
- * 别名一对一（唯一），话题为显式设置/替换（区别于收件箱的「绝不覆盖」）。SKU 需已存在。
+ * 批量导入 SKU 映射表：**编码不存在则新建，存在则就地更新，空单元格一律不动**。
+ * 
+ * 接受 `.xlsx/.csv/.tsv/.txt`（UTF-8/GBK 自动探测）；表头可选，见 [`sku_mapping`]。
+ * `dry_run=true` 只返回预检报告不落库——前端先预览、用户确认后再以 `false` 落库。
  */
-async importSkuMappings(path: string) : Promise<Result<MappingImportReport, AppError>> {
+async importSkuMappings(path: string, dryRun: boolean) : Promise<Result<MappingImportReport, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_sku_mappings", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("import_sku_mappings", { path, dryRun }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选择映射表文件（xlsx / csv / tsv / txt）。
+ */
+async pickMappingFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_mapping_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出映射表模板 CSV（UTF-8 BOM，Excel 双击即用）。返回落盘路径；用户取消则 `None`。
+ */
+async saveSkuMappingTemplate() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_sku_mapping_template") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1658,17 +1682,49 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 /**
- * 批量映射导入结果。
+ * 批量映射导入结果（`dryRun` 时为预检，不落库）。
  */
 export type MappingImportReport = { 
 /**
- * 至少设置了别名或话题的 SKU 行数。
+ * 本次是否只预检不落库。
  */
-updated: number; aliasSet: number; topicsSet: number; 
+dryRun: boolean; 
 /**
- * 跳过/出错行的说明（编码不存在、别名冲突等）。
+ * 探测到的文件编码（xlsx 为 `XLSX`）。
  */
-skipped: string[] }
+encoding: string; 
+/**
+ * 是否识别到表头行（否则按位置 `编码,别名,话题` 解析）。
+ */
+hadHeader: boolean; 
+/**
+ * 可导入的数据行数。
+ */
+rows: number; 
+/**
+ * 将新建 / 已新建的 SKU 数。
+ */
+created: number; 
+/**
+ * 有字段变更的既有 SKU 数。
+ */
+updated: number; 
+/**
+ * 与库内完全一致、无需改动的行。
+ */
+unchanged: number; aliasSet: number; topicsSet: number; 
+/**
+ * 新建 SKU 的编码（预览用，最多 200 个）。
+ */
+createdCodes: string[]; 
+/**
+ * 冲突：仅该格被跳过，行内其余字段照常导入。
+ */
+conflicts: string[]; 
+/**
+ * 无法导入的行，以及被忽略的单元格。
+ */
+errors: string[] }
 export type PackFileView = { name: string; origName: string; bytes: number }
 export type PackPatch = { note: string | null; 
 /**

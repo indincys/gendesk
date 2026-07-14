@@ -1,6 +1,7 @@
 import { Modal } from "@/components/ui/Modal";
 import {
   type InboxItemView,
+  type MappingImportReport,
   type PackView,
   type SkuDetail,
   type SkuView,
@@ -49,21 +50,47 @@ function AssetsList({
   const [editing, setEditing] = useState<SkuView | "new" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ path: string; report: MappingImportReport } | null>(
+    null,
+  );
 
-  const importMappings = async () => {
+  // 映射导入：先预检（不落库）弹窗给用户看清「将新建/更新/冲突」，确认后才写库。
+  const pickMappings = async () => {
     try {
-      const path = await unwrap(commands.pickTxtFile());
+      const path = await unwrap(commands.pickMappingFile());
       if (!path) return;
-      const r = await unwrap(commands.importSkuMappings(path));
-      const parts = [`更新 ${r.updated} 个 SKU`];
+      const report = await unwrap(commands.importSkuMappings(path, true));
+      setPreview({ path, report });
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const applyMappings = async (path: string) => {
+    try {
+      const r = await unwrap(commands.importSkuMappings(path, false));
+      setPreview(null);
+      const parts: string[] = [];
+      if (r.created > 0) parts.push(`新建 ${r.created} 个 SKU`);
+      if (r.updated > 0) parts.push(`更新 ${r.updated} 个`);
+      if (r.unchanged > 0) parts.push(`无变化 ${r.unchanged} 个`);
       if (r.aliasSet > 0) parts.push(`别名 ${r.aliasSet}`);
       if (r.topicsSet > 0) parts.push(`话题 ${r.topicsSet}`);
-      if (r.skipped.length > 0) parts.push(`跳过 ${r.skipped.length} 行`);
-      setMsg(
-        `映射导入完成：${parts.join(" · ")}${r.skipped.length ? `\n${r.skipped.join("\n")}` : ""}`,
-      );
+      setMsg(`映射导入完成：${parts.join(" · ") || "无可导入行"}`);
       setErr(null);
       await load();
+      await refreshBadges();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const saveTemplate = async () => {
+    try {
+      const p = await unwrap(commands.saveSkuMappingTemplate());
+      if (p) setMsg(`模板已保存：${p}`);
+      setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
@@ -181,7 +208,20 @@ function AssetsList({
                 卡片
               </span>
             </div>
-            <button type="button" className="btn sm gho" onClick={() => void importMappings()}>
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() => void saveTemplate()}
+              title="导出带表头的空白映射表（Excel 可直接打开）"
+            >
+              模板
+            </button>
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() => void pickMappings()}
+              title="批量建 SKU / 补别名话题（xlsx / csv / txt）"
+            >
               导入映射
             </button>
             <button type="button" className="btn sm" onClick={() => setEditing("new")}>
@@ -248,7 +288,124 @@ function AssetsList({
           }}
         />
       )}
+
+      {preview && (
+        <MappingPreviewModal
+          path={preview.path}
+          report={preview.report}
+          onClose={() => setPreview(null)}
+          onConfirm={() => void applyMappings(preview.path)}
+        />
+      )}
     </div>
+  );
+}
+
+/** 映射导入预检：确认前先把「将新建/更新/冲突」摊开给用户看。 */
+function MappingPreviewModal({
+  path,
+  report,
+  onClose,
+  onConfirm,
+}: {
+  path: string;
+  report: MappingImportReport;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { created, updated, unchanged, conflicts, errors } = report;
+  const nothing = created === 0 && updated === 0;
+  const file = path.split(/[/\\]/).pop() ?? path;
+
+  return (
+    <Modal
+      title="映射导入预检"
+      width="w640"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn sm gho" onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className="btn sm" disabled={nothing} onClick={onConfirm}>
+            {nothing ? "无可导入内容" : `确认导入（新建 ${created} · 更新 ${updated}）`}
+          </button>
+        </>
+      }
+    >
+      <div className="col gap10">
+        <div className="fs11 t3">
+          {file} · {report.encoding} ·{" "}
+          {report.hadHeader ? "已识别表头" : "无表头，按「编码, 别名, 话题」三列解析"}
+        </div>
+        <div className="statrow" style={{ padding: 0 }}>
+          <Stat label="新建 SKU" value={created} color="var(--ok)" />
+          <Stat label="更新" value={updated} color="var(--ok)" />
+          <Stat label="无变化" value={unchanged} />
+          <Stat
+            label="冲突"
+            value={conflicts.length}
+            color={conflicts.length ? "var(--wr)" : undefined}
+          />
+          <Stat
+            label="错误行"
+            value={errors.length}
+            color={errors.length ? "var(--er)" : undefined}
+          />
+        </div>
+        {created > 0 && (
+          <ReportList
+            title={`将新建的 SKU（${created}）`}
+            items={report.createdCodes}
+            more={created - report.createdCodes.length}
+          />
+        )}
+        {conflicts.length > 0 && (
+          <ReportList
+            title={`冲突：仅该格跳过，行内其余字段照常导入（${conflicts.length}）`}
+            items={conflicts}
+          />
+        )}
+        {errors.length > 0 && (
+          <ReportList title={`错误：该行或该格不导入（${errors.length}）`} items={errors} />
+        )}
+        <div className="fs11 t3">留空的单元格不会覆盖库里已有的值。</div>
+      </div>
+    </Modal>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  color,
+}: { label: string; value: number; color?: string | undefined }) {
+  return (
+    <div className="statcard">
+      <div className="stnum" style={color ? { color } : undefined}>
+        {value}
+      </div>
+      <div className="stlbl">{label}</div>
+    </div>
+  );
+}
+
+function ReportList({ title, items, more = 0 }: { title: string; items: string[]; more?: number }) {
+  return (
+    <details>
+      <summary className="fs12 fw6" style={{ cursor: "pointer" }}>
+        {title}
+      </summary>
+      <div
+        className="fs11 t3"
+        style={{ maxHeight: 180, overflow: "auto", paddingTop: 6, lineHeight: 1.7 }}
+      >
+        {items.map((t) => (
+          <div key={t}>{t}</div>
+        ))}
+        {more > 0 && <div>…另有 {more} 个</div>}
+      </div>
+    </details>
   );
 }
 

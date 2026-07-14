@@ -47,6 +47,15 @@ export function CommandPalette() {
           toast(paused ? "已继续队列" : "已暂停队列");
         },
       },
+      {
+        cat: "操作",
+        label: "重扫收件箱",
+        run: () => {
+          void unwrap(commands.rescanInbox())
+            .then((r) => toast(`收件箱扫描完成：入库 ${r.ingested} · 待认领 ${r.unclaimed}`))
+            .catch((e) => toast.error(String(e)));
+        },
+      },
       { cat: "操作", label: "检查更新", run: () => toast("应用内更新将在发布链接入（M4）") },
     ];
     const q = query.trim().toLowerCase();

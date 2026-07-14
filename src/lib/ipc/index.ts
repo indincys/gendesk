@@ -42,6 +42,34 @@ export type {
   TrashItemView,
   UpdateApiKeyPatch,
   WorkView,
+  // 发布与资产管理模块
+  PublishSettings,
+  PublishSettingsPatch,
+  PlatformInfo,
+  PlatformMatrix,
+  TierRules,
+  SkuView,
+  SkuDetail,
+  SkuFilter,
+  CreateSkuInput,
+  SkuPatch,
+  HistoryItem,
+  PublishBadges,
+  TextItemView,
+  AddTextItemInput,
+  TextItemPatch,
+  PackView,
+  PackFileView,
+  PackPatch,
+  InboxItemView,
+  IngestOutcome,
+  RescanResult,
+  AccountView,
+  CreateAccountInput,
+  AccountPatch,
+  PublishBadgesEvent,
+  InboxIngestEvent,
+  SheetChangedEvent,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -93,6 +121,26 @@ export async function subscribeBackupProgress(
   if (!isTauri()) return () => {};
   const un = await events.backupProgress.listen((e) => handler(e.payload));
   return () => un();
+}
+
+/**
+ * 订阅发布模块事件（徽章 / 收件箱收录 / 任务单变化）。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribePublish(handlers: {
+  onBadges?: (e: import("./bindings").PublishBadgesEvent) => void;
+  onInboxIngest?: (e: import("./bindings").InboxIngestEvent) => void;
+  onSheetChanged?: (e: import("./bindings").SheetChangedEvent) => void;
+}): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisteners = await Promise.all([
+    events.publishBadgesEvent.listen((e) => handlers.onBadges?.(e.payload)),
+    events.inboxIngestEvent.listen((e) => handlers.onInboxIngest?.(e.payload)),
+    events.sheetChangedEvent.listen((e) => handlers.onSheetChanged?.(e.payload)),
+  ]);
+  return () => {
+    for (const un of unlisteners) un();
+  };
 }
 
 /**

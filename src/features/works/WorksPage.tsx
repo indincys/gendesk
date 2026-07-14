@@ -2,7 +2,8 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
-import { type GroupView, type WorkView, commands, unwrap } from "@/lib/ipc";
+import { type GroupView, type SkuView, type WorkView, commands, unwrap } from "@/lib/ipc";
+import { tierVisual } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
@@ -12,6 +13,7 @@ import {
   Download,
   FolderOpen,
   ImageIcon,
+  Layers,
   RefreshCw,
   Star,
   Wand2,
@@ -33,6 +35,7 @@ export function WorksPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [confirmBatchDel, setConfirmBatchDel] = useState(false);
+  const [assetPick, setAssetPick] = useState(false);
   const lastClicked = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -209,6 +212,16 @@ export function WorksPage() {
             >
               <Star className="ic12" />
               收藏
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={() => setAssetPick(true)}
+              title="打包为图集素材包入资产库"
+            >
+              <Layers className="ic12" />
+              入资产库
             </button>
             <button
               type="button"
@@ -428,7 +441,75 @@ export function WorksPage() {
           onClose={() => setConfirmBatchDel(false)}
         />
       )}
+
+      {assetPick && (
+        <WorksToAssetModal
+          count={sel.size}
+          onClose={() => setAssetPick(false)}
+          onPick={async (skuId) => {
+            const pack = await unwrap(commands.packFromWorks(skuId, Array.from(sel)));
+            setAssetPick(false);
+            exitSelect();
+            if (pack) toast.success(`已打包 ${pack.fileCount} 张入资产库`);
+            else toast.error("未能入库（所选无有效图片）");
+          }}
+        />
+      )}
     </PageScaffold>
+  );
+}
+
+/** 「入资产库」SKU 选择弹窗（作品库联动 → 图集素材包）。 */
+function WorksToAssetModal({
+  count,
+  onClose,
+  onPick,
+}: {
+  count: number;
+  onClose: () => void;
+  onPick: (skuId: number) => void | Promise<void>;
+}) {
+  const [skus, setSkus] = useState<SkuView[]>([]);
+  useEffect(() => {
+    void unwrap(commands.listSkus({ tier: null, warnOnly: null, status: null, query: null })).then(
+      setSkus,
+    );
+  }, []);
+  return (
+    <Modal
+      title="入资产库 · 选择目标 SKU"
+      onClose={onClose}
+      headerExtra={<span className="chip">{count} 张</span>}
+      footer={
+        <>
+          <span className="fs11 t3">选中的输出图复制为一个图集素材包（原作品保留）</span>
+          <div className="f1" />
+          <button type="button" className="btn sm" onClick={onClose}>
+            取消
+          </button>
+        </>
+      }
+    >
+      <div style={{ padding: 8 }}>
+        {skus
+          .filter((s) => !s.isGeneral)
+          .map((s) => {
+            const t = tierVisual(s.tier);
+            return (
+              <div key={s.id} className="pickrow" onClick={() => void onPick(s.id)}>
+                <span className="pid">{s.code}</span>
+                <span className="fw5 fs12 f1 nowrap ohide">{s.styleName}</span>
+                <span className={cn("bdg", t.badgeClass)}>{t.label}</span>
+              </div>
+            );
+          })}
+        {skus.length === 0 && (
+          <div className="fs12 t3" style={{ padding: 12 }}>
+            尚无 SKU，请先在资产库创建
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

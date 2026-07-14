@@ -2,6 +2,7 @@ import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
 import { ROUTES, type RouteDef } from "@/routes";
 import { navBadges, useEngineStore } from "@/stores/engine";
+import { usePublishStore } from "@/stores/publish";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { Search } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
@@ -14,24 +15,32 @@ export function Sidebar() {
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
+  const pubBadges = usePublishStore((s) => s.badges);
   const version = useAppVersion();
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
 
   const make = ROUTES.filter((r) => r.group === "make");
   const asset = ROUTES.filter((r) => r.group === "asset");
+  const publish = ROUTES.filter((r) => r.group === "publish");
   const system = ROUTES.filter((r) => r.group === "system");
 
   const NavItem = ({ r }: { r: RouteDef }) => {
     const Icon = r.icon;
+    const assetsN = pubBadges.unclaimed + pubBadges.warn;
+    const planN = pubBadges.pendingSheets + pubBadges.pendingReconcile;
     const badge =
       r.key === "tasks" && badges.running > 0
         ? { cls: "nb-run", n: badges.running, spin: true }
         : r.key === "review" && badges.review > 0
           ? { cls: "nb-amb", n: badges.review, spin: false }
-          : r.key === "trash" && badges.trash > 0
-            ? { cls: "", n: badges.trash, spin: false }
-            : null;
+          : r.key === "assets" && assetsN > 0
+            ? { cls: "nb-amb", n: assetsN, spin: false }
+            : r.key === "plan" && planN > 0
+              ? { cls: "nb-amb", n: planN, spin: false }
+              : r.key === "trash" && badges.trash > 0
+                ? { cls: "", n: badges.trash, spin: false }
+                : null;
     return (
       <div
         className={cn("nv", route === r.key && "on")}
@@ -73,6 +82,11 @@ export function Sidebar() {
 
       <div className="nsec">资产</div>
       {asset.map((r) => (
+        <NavItem key={r.key} r={r} />
+      ))}
+
+      <div className="nsec">发布</div>
+      {publish.map((r) => (
         <NavItem key={r.key} r={r} />
       ))}
 

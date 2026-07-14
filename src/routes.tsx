@@ -1,4 +1,6 @@
+import { AssetsPage } from "@/features/assets/AssetsPage";
 import { GeneratePage } from "@/features/generate/GeneratePage";
+import { PlanPage } from "@/features/plan/PlanPage";
 import { PromptsPage } from "@/features/prompts/PromptsPage";
 import { RefsPage } from "@/features/refs/RefsPage";
 import { ReviewPage } from "@/features/review/ReviewPage";
@@ -11,14 +13,16 @@ import {
   CheckCircle2,
   Grid2x2,
   Image,
+  Layers,
   ListChecks,
+  Send,
   Settings2,
   Sparkles,
   Trash2,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
-/** 8 个页面路由键 —— 与 ⌘1–8 一一对应，顺序即快捷键序。 */
+/** 页面路由键 —— 顺序即快捷键序（⌘1–8 制作/资产，⌘9 资产库，⌘0 发布计划）。 */
 export type RouteKey =
   | "generate"
   | "tasks"
@@ -26,10 +30,12 @@ export type RouteKey =
   | "library"
   | "prompts"
   | "refs"
+  | "assets"
+  | "plan"
   | "trash"
   | "settings";
 
-export type NavGroup = "make" | "asset" | "system";
+export type NavGroup = "make" | "asset" | "publish" | "system";
 
 export interface RouteDef {
   key: RouteKey;
@@ -84,6 +90,22 @@ export const ROUTES: readonly RouteDef[] = [
     component: PromptsPage,
   },
   { key: "refs", label: "参考图库", shortcut: 6, group: "asset", icon: Image, component: RefsPage },
+  {
+    key: "assets",
+    label: "资产库",
+    shortcut: 9,
+    group: "asset",
+    icon: Layers,
+    component: AssetsPage,
+  },
+  {
+    key: "plan",
+    label: "发布计划",
+    shortcut: 0,
+    group: "publish",
+    icon: Send,
+    component: PlanPage,
+  },
   {
     key: "trash",
     label: "废纸篓",

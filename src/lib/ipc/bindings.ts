@@ -1427,17 +1427,17 @@ fileName: string; kind: string | null; skuCode: string | null; state: string;
  */
 detail: string | null; createdAt: number }
 /**
- * 单文件收录结果（供事件与报告使用）。
+ * 单文件收录结果（供事件与报告使用）。camelCase 字段名个别指定（specta 不识别 rename_all_fields）。
  */
 export type IngestOutcome = 
 /**
  * 成功入库并归档。
  */
-{ state: "ingested"; sku_code: string; kind: string; titles: number; bodies: number; topics_adopted: string[]; topic_diff: string | null } | 
+{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; topicsAdopted: string[]; topicDiff: string | null } | 
 /**
  * 识别不出已知 SKU，待认领。
  */
-{ state: "unclaimed"; sku_code: string | null } | 
+{ state: "unclaimed"; skuCode: string | null } | 
 /**
  * 解析失败，待人工确认。
  */

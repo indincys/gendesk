@@ -1166,6 +1166,112 @@ async setAccountStatus(id: number, status: string) : Promise<Result<null, AppErr
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * 生成/重生成某日任务单草稿。
+ */
+async generateSheet(date: string) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_sheet", { date }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listSheets() : Promise<Result<SheetSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_sheets") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 确认任务单（草稿 → 已确认，锁定）。
+ */
+async confirmSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("confirm_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 退回草稿（已确认 → 草稿；已导出不可退回）。
+ */
+async unlockSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unlock_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateTaskRow(id: number, patch: TaskRowPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_task_row", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelTaskRow(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_task_row", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteTaskRow(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_task_row", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 增补任务行：使用该 SKU 当日套装（无则即时选取一套）。
+ */
+async addTaskRow(input: AddTaskRowInput) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_task_row", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 整包换该 SKU 当日套装（重选素材/标题/正文）。所有引用该套装的行同步生效。
+ */
+async rerollSet(sheetId: number, skuId: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reroll_set", { sheetId, skuId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 内置「通用」以外的可排期 SKU（增补行选择器用）。
+ */
+async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_schedulable_skus") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1219,6 +1325,7 @@ export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; mode
  * 每分钟请求上限（E18）；None/<=0 = 不限速。
  */
 rpmLimit: number | null }
+export type AddTaskRowInput = { sheetId: number; skuId: number; accountId: number; plannedTime: string | null }
 export type AddTextItemInput = { skuId: number; kind: string; text: string; platform: string | null }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
@@ -1672,6 +1779,16 @@ export type SheetChangedEvent = { sheetId: number; date: string; status: string;
  * 汇总计数（待执行/已发布/失败/疑似/已取消）。
  */
 pending: number; published: number; failed: number; suspect: number; canceled: number }
+export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[] }
+export type SheetSummary = { id: number; date: string; status: string; taskCount: number; shortageCount: number; 
+/**
+ * 各状态计数（待执行/已发布/失败/疑似/已取消）。
+ */
+pending: number; published: number; failed: number; suspect: number; canceled: number }
+/**
+ * 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ */
+export type ShortageItem = { skuId: number; code: string; reason: string }
 /**
  * SKU 详情：档案视图 + 发布历史（池明细由 assets/texts 域命令单独取）。
  */
@@ -1736,6 +1853,16 @@ rejected: number; total: number }
  * `task://progress`（250ms 节流）
  */
 export type TaskProgress = { taskId: number; pct: number; phase: Phase }
+export type TaskRowPatch = { 
+/**
+ * `Some(None)` = 清空（立即发）；`Some(Some)` = 设为 HH:MM。
+ */
+plannedTime: string | null }
+export type TaskRowView = { id: number; taskCode: string; skuId: number; skuCode: string; styleName: string; productName: string; title: string; topics: string[]; 
+/**
+ * 封面绝对本地路径（前端 convertFileSrc）；无封面为 null。
+ */
+coverPath: string | null; platform: string; platformZh: string; accountName: string; contentKind: string; plannedTime: string | null; status: string; failKind: string | null; resultUrl: string | null; resultMsg: string | null }
 export type TaskStatus = 
 /**
  * 待生成

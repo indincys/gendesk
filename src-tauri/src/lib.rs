@@ -166,6 +166,18 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_accounts::create_account,
             commands::publish_accounts::update_account,
             commands::publish_accounts::set_account_status,
+            // planning 域（P2）
+            commands::publish_planning::generate_sheet,
+            commands::publish_planning::list_sheets,
+            commands::publish_planning::get_sheet,
+            commands::publish_planning::confirm_sheet,
+            commands::publish_planning::unlock_sheet,
+            commands::publish_planning::update_task_row,
+            commands::publish_planning::cancel_task_row,
+            commands::publish_planning::delete_task_row,
+            commands::publish_planning::add_task_row,
+            commands::publish_planning::reroll_set,
+            commands::publish_planning::list_schedulable_skus,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,

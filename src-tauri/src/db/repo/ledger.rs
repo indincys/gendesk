@@ -71,6 +71,20 @@ pub async fn history_by_sku(
     .await
 }
 
+/// 某素材包各平台最近发布时间（套装选取的查重/最少使用输入）。
+pub async fn pack_platform_last(
+    pool: &SqlitePool,
+    pack_id: i64,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT platform, MAX(published_at) FROM usage_ledger
+         WHERE pack_id = ?1 GROUP BY platform",
+    )
+    .bind(pack_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// 查重窗口占用：某素材包在某平台、`since`（Unix 秒）之后的最近一次发布时间。
 /// 用于「已用尽/回可用日期」派生（前置事实 5/6）。
 pub async fn last_publish_in_window(

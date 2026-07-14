@@ -123,16 +123,20 @@ pub async fn coalesce(rx: &mut mpsc::Receiver<()>, quiet: Duration) -> bool {
 /// 全量收录并推事件（错误落日志，不 panic）。
 async fn rescan_and_emit(pool: &SqlitePool, root: &Path, app: &AppHandle) {
     match ingest::rescan(pool, root).await {
-        Ok(outcomes) => {
-            for o in outcomes {
-                // 仅对有意义结果推 toast（成功/待认领/失败）。
-                let file_name = match &o {
-                    ingest::IngestOutcome::Ingested { sku_code, .. } => sku_code.clone(),
-                    _ => String::new(),
-                };
+        Ok(items) => {
+            // rescan 是全量的：滞留的待认领/失败条目每轮都会被重扫到。只对**本轮状态
+            // 发生变化**的条目推 toast，否则收件箱每有一点动静就重发一遍旧提示。
+            for item in items.into_iter().filter(|i| i.changed) {
+                let file_name = item
+                    .file_rel
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 let _ = InboxIngestEvent {
                     file_name,
-                    outcome: o,
+                    outcome: item.outcome,
                 }
                 .emit(app);
             }

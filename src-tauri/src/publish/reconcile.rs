@@ -44,13 +44,27 @@ pub struct ReconcileResult {
     pub closed: bool,
 }
 
-/// 解析回执时间为 Unix 秒；失败回退 now。
+/// 本地墙钟时间 → Unix 秒。回执时间与计划时间都由人/执行机按**本地时区**书写
+/// （「12:30 发」指本地 12:30），按 UTC 解析会整体偏移一个时区（东八区差 8 小时：
+/// 疑似已发晚 8 小时才标记、台账 published_at 记成未来）。
+///
+/// 夏令时歧义时刻取较早的一个；不存在的时刻（春季跳表缺口）返回 None，由调用方回退。
+fn local_naive_to_unix(dt: chrono::NaiveDateTime) -> Option<i64> {
+    use chrono::{Local, LocalResult, TimeZone};
+    match Local.from_local_datetime(&dt) {
+        LocalResult::Single(t) => Some(t.timestamp()),
+        LocalResult::Ambiguous(earliest, _) => Some(earliest.timestamp()),
+        LocalResult::None => None,
+    }
+}
+
+/// 解析回执时间为 Unix 秒（按本地时区）；失败回退 now。
 fn parse_time_or(now: i64, s: Option<&str>) -> i64 {
     use chrono::NaiveDateTime;
     let Some(s) = s else { return now };
     for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s.trim(), fmt) {
-            return dt.and_utc().timestamp();
+            return local_naive_to_unix(dt).unwrap_or(now);
         }
     }
     now
@@ -260,11 +274,13 @@ pub async fn timeout_scan(pool: &SqlitePool, now: i64, timeout_hours: i64) -> Ap
             if task.status != "pending" {
                 continue;
             }
+            // 计划时刻是本地墙钟（任务单第 5 列「12:30」= 执行机本地 12:30）。
             let base = match &task.planned_time {
                 Some(hm) => {
                     let s = format!("{} {}", sheet.date, hm);
                     NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M")
-                        .map(|dt| dt.and_utc().timestamp())
+                        .ok()
+                        .and_then(local_naive_to_unix)
                         .unwrap_or(export_at)
                 }
                 None => export_at,
@@ -649,5 +665,27 @@ mod tests {
         assert_ne!(parse_time_or(now, Some("2026-07-15 12:30:45")), now);
         assert_eq!(parse_time_or(now, Some("乱码")), now);
         assert_eq!(parse_time_or(now, None), now);
+    }
+
+    // A2：回执/计划时间按**本地时区**解析。期望值由 chrono 现算（CI 可能跑在 UTC，
+    // 不能写死 +8）；断言的是「与按 UTC 解析不同（除非本机就是 UTC）」+ 等于真实本地 epoch。
+    #[test]
+    fn local_time_is_not_parsed_as_utc() {
+        use chrono::{Local, NaiveDateTime, TimeZone};
+        let dt = NaiveDateTime::parse_from_str("2026-07-15 12:30", "%Y-%m-%d %H:%M")
+            .expect("固定字面量可解析");
+        let expected = Local
+            .from_local_datetime(&dt)
+            .single()
+            .expect("2026-07-15 12:30 在任何时区都不是歧义时刻")
+            .timestamp();
+        assert_eq!(parse_time_or(0, Some("2026-07-15 12:30")), expected);
+
+        let offset = Local.offset_from_utc_datetime(&dt).local_minus_utc() as i64;
+        assert_eq!(
+            expected,
+            dt.and_utc().timestamp() - offset,
+            "本地 epoch = UTC 解析结果 - 时区偏移"
+        );
     }
 }

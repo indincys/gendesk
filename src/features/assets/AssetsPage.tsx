@@ -511,6 +511,14 @@ function SkuCard({ s, onOpen }: { s: SkuView; onOpen: (id: number) => void }) {
 
 // ─────────────────────────────────────────────────────── 收件箱面板
 
+/** inbox_items.kind → 中文标签（媒体条目以文件夹为单位）。 */
+function inboxKindLabel(kind: string): string {
+  if (kind === "media") return "图片/视频";
+  if (kind === "title") return "标题";
+  if (kind === "body") return "正文";
+  return kind;
+}
+
 function InboxPanel({ onChanged }: { onChanged: () => void }) {
   const [claims, setClaims] = useState<InboxItemView[]>([]);
   const [fails, setFails] = useState<InboxItemView[]>([]);
@@ -553,7 +561,9 @@ function InboxPanel({ onChanged }: { onChanged: () => void }) {
           <div className="chead">
             <span className="fw6 fs13">待认领</span>
             <span className="cnt">{claims.length} 条</span>
-            <span className="pcap">无法关联到已知 SKU 的收件箱内容 · 不会被丢弃</span>
+            <span className="pcap">
+              无法关联到已知 SKU 的收件箱内容（TXT 按文件、图片/视频按文件夹）
+            </span>
           </div>
           {claims.map((c) => (
             <div
@@ -562,7 +572,7 @@ function InboxPanel({ onChanged }: { onChanged: () => void }) {
               style={{ borderTop: "1px solid var(--line)", borderBottom: "none" }}
             >
               <span className="chip">{c.fileName}</span>
-              {c.kind && <span className="bdg b-gray">{c.kind}</span>}
+              {c.kind && <span className="bdg b-gray">{inboxKindLabel(c.kind)}</span>}
               <span className="fs11 t3 f1 nowrap ohide">{c.detail ?? ""}</span>
               <button type="button" className="btn sm" onClick={() => setClaimTarget(c)}>
                 指认 SKU
@@ -617,7 +627,8 @@ function InboxPanel({ onChanged }: { onChanged: () => void }) {
         <div className="fs11 t3 mt14" style={{ lineHeight: 1.8 }}>
           收件箱监听根目录 <span className="chip">收件箱/</span> — Claude/Codex 生成的 TXT 与外部 AI
           图片落盘后自动收录：按 文件头【SKU】 › 文件名前缀 › 文件夹名 三处冗余识别归属；
-          成功收录的原文件移入 <span className="chip">收件箱/已收录/</span> 归档。
+          成功收录的原文件移入 <span className="chip">收件箱/已收录/</span> 归档， 丢弃的移入{" "}
+          <span className="chip">收件箱/已丢弃/</span>（文件仍在，只是不再收录）。
         </div>
       </div>
 
@@ -1004,6 +1015,10 @@ function PackModal({
   onChanged: () => void;
 }) {
   const life = packLifeVisual(pack.derived);
+  const [note, setNote] = useState(pack.note);
+  const [cover, setCover] = useState(pack.cover);
+  const [saving, setSaving] = useState(false);
+
   const retire = async () => {
     await unwrap(commands.retirePack(pack.id));
     onChanged();
@@ -1012,7 +1027,25 @@ function PackModal({
     await unwrap(commands.restorePack(pack.id));
     onChanged();
   };
+  const activate = async () => {
+    await unwrap(commands.activatePack(pack.id));
+    onChanged();
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      await unwrap(commands.updatePack(pack.id, { note, cover }));
+      onChanged();
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const canRetire = pack.derived !== "retired" && !pack.locked;
+  const dirty = note !== pack.note || cover !== pack.cover;
+  // 图片成员可当封面；视频文件不行。
+  const coverChoices = pack.files.filter((f) => /\.(jpe?g|png|webp)$/i.test(f.name));
+
   return (
     <Modal
       title={<span className="mono">{pack.dirRel.split("/").pop()}</span>}
@@ -1026,10 +1059,13 @@ function PackModal({
       }
       footer={
         <>
-          <span className="fs11 t3">
-            新入库 → 可用 → 已用尽（窗口期满自动回可用）· 退役为人工终态
-          </span>
+          <span className="fs11 t3">入库即可用 → 已用尽（窗口期满自动回可用）· 退役为人工终态</span>
           <div className="f1" />
+          {pack.derived === "new" && (
+            <button type="button" className="btn sm pri" onClick={() => void activate()}>
+              标为可用
+            </button>
+          )}
           {pack.derived === "retired" ? (
             <button type="button" className="btn sm" onClick={() => void restore()}>
               恢复可用
@@ -1041,6 +1077,14 @@ function PackModal({
               </button>
             )
           )}
+          <button
+            type="button"
+            className={cn("btn sm", dirty && "pri")}
+            disabled={!dirty || saving}
+            onClick={() => void save()}
+          >
+            保存
+          </button>
           <button type="button" className="btn sm" onClick={onClose}>
             关闭
           </button>
@@ -1055,9 +1099,46 @@ function PackModal({
           <span key={f.name} className="chip" style={{ alignSelf: "flex-start" }}>
             {f.name}
             {f.origName && f.origName !== f.name ? ` ← ${f.origName}` : ""}
+            {f.name === cover && " · 封面"}
           </span>
         ))}
       </div>
+
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        封面
+      </div>
+      <div className="fx ac gap6 mt6" style={{ flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className={cn("btn sm", cover == null ? "pri" : "gho")}
+          onClick={() => setCover(null)}
+        >
+          无封面
+        </button>
+        {coverChoices.map((f) => (
+          <button
+            key={f.name}
+            type="button"
+            className={cn("btn sm", cover === f.name ? "pri" : "gho")}
+            onClick={() => setCover(f.name)}
+          >
+            {f.name}
+          </button>
+        ))}
+        {coverChoices.length === 0 && <span className="fs11 t3">包内没有可作封面的图片</span>}
+      </div>
+
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        备注
+      </div>
+      <textarea
+        className="inp mt6"
+        rows={2}
+        value={note}
+        placeholder="给这个素材包留一句话（如「客户指定首图」「审核不过，勿再用」）"
+        onChange={(e) => setNote(e.target.value)}
+      />
+
       {pack.availableAt && (
         <div className="fs12 mt14" style={{ lineHeight: 1.8 }}>
           冷却中，预计 {lastPublishLabel(pack.availableAt)} 回可用。

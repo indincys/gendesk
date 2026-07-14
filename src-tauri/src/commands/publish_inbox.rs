@@ -40,7 +40,15 @@ fn detail_summary(detail_json: Option<&str>) -> Option<String> {
             }
             Some(s)
         }
+        Some("ingestedMedia") => {
+            let packs = v.get("packs").and_then(|x| x.as_i64()).unwrap_or(0);
+            Some(format!("入库 素材包×{packs}"))
+        }
         Some("unclaimed") => Some("未识别到已知 SKU".to_string()),
+        Some("unclaimedMedia") => {
+            let files = v.get("files").and_then(|x| x.as_i64()).unwrap_or(0);
+            Some(format!("未识别到已知 SKU（媒体文件×{files}）"))
+        }
         _ => None,
     }
 }
@@ -76,7 +84,7 @@ pub async fn list_inbox_items(
     Ok(rows.into_iter().map(to_view).collect())
 }
 
-/// 认领：人工指认 SKU 后走正常收录管线。
+/// 认领：人工指认 SKU 后走正常收录管线（TXT 走解析入库，媒体文件夹走归集建包）。
 #[tauri::command]
 #[specta::specta]
 pub async fn claim_inbox_item(
@@ -89,15 +97,61 @@ pub async fn claim_inbox_item(
         .await?
         .ok_or_else(|| AppError::InvalidInput("收件箱记录不存在".into()))?;
     let rel = RelPath::new(&item.file_rel);
+
+    if item.kind.as_deref() == Some(ingest::KIND_MEDIA) {
+        // 媒体条目的 file_rel 是 收件箱/{文件夹}；强制 SKU 后走同一条归集管线。
+        let folder = rel
+            .as_str()
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| AppError::InvalidInput("媒体条目路径异常".into()))?
+            .to_string();
+        let ids = ingest::collect_media(&state.db, &root, &folder, Some(&sku_code)).await?;
+        if ids.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "未在 收件箱/{folder}/ 找到可归集的媒体文件，或 SKU {sku_code} 不存在"
+            )));
+        }
+        let outcome = ingest::IngestOutcome::IngestedMedia {
+            sku_code,
+            packs: ids.len(),
+        };
+        repo::set_state(
+            &state.db,
+            id,
+            outcome.state_code(),
+            &item.file_rel,
+            serde_json::to_string(&outcome).ok().as_deref(),
+        )
+        .await?;
+        return Ok(outcome);
+    }
+
     let outcome = ingest::ingest_txt(&state.db, &root, &rel, Some(&sku_code)).await?;
     Ok(outcome)
 }
 
-/// 丢弃待认领/失败记录（删记录，文件留原位不动）。
+/// 丢弃待认领/失败条目：文件/文件夹**移入 `收件箱/已丢弃/{日期}/`**，记录转 discarded。
+///
+/// 不能只删 DB 行——文件留在原位，下一次收件箱事件触发 rescan 就会把它重新收录，
+/// 「丢弃」的东西复活。归档目录被 rescan 排除，故移档即真正丢弃（且可追溯）。
 #[tauri::command]
 #[specta::specta]
 pub async fn discard_inbox_item(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    repo::delete(&state.db, id).await?;
+    let item = repo::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("收件箱记录不存在".into()))?;
+    let root = publish_settings::root_local(&state.db).await?;
+    let rel = RelPath::new(&item.file_rel);
+    let archived = match ingest::archive_to(&root, &rel, crate::publish::paths::DISCARDED) {
+        Ok(r) => r.as_str().to_string(),
+        Err(e) => {
+            // 移档失败（文件被占用等）仍要标记丢弃，否则 UI 上这条永远处理不掉。
+            tracing::warn!(file = %item.file_rel, error = %e, "丢弃移档失败，仅标记状态");
+            item.file_rel.clone()
+        }
+    };
+    repo::set_state(&state.db, id, "discarded", &archived, None).await?;
     Ok(())
 }
 
@@ -127,13 +181,13 @@ pub struct RescanResult {
 #[specta::specta]
 pub async fn rescan_inbox(state: State<'_, AppState>) -> AppResult<RescanResult> {
     let root = publish_settings::root_local(&state.db).await?;
-    let outcomes = ingest::rescan(&state.db, &root).await?;
+    let items = ingest::rescan(&state.db, &root).await?;
     let mut r = RescanResult {
         ingested: 0,
         unclaimed: 0,
         failed: 0,
     };
-    for o in &outcomes {
+    for o in items.iter().map(|i| &i.outcome) {
         match o.state_code() {
             "ingested" => r.ingested += 1,
             "unclaimed" => r.unclaimed += 1,

@@ -1131,7 +1131,7 @@ async listInboxItems(filterState: string | null) : Promise<Result<InboxItemView[
 }
 },
 /**
- * 认领：人工指认 SKU 后走正常收录管线。
+ * 认领：人工指认 SKU 后走正常收录管线（TXT 走解析入库，媒体文件夹走归集建包）。
  */
 async claimInboxItem(id: number, skuCode: string) : Promise<Result<IngestOutcome, AppError>> {
     try {
@@ -1142,7 +1142,10 @@ async claimInboxItem(id: number, skuCode: string) : Promise<Result<IngestOutcome
 }
 },
 /**
- * 丢弃待认领/失败记录（删记录，文件留原位不动）。
+ * 丢弃待认领/失败条目：文件/文件夹**移入 `收件箱/已丢弃/{日期}/`**，记录转 discarded。
+ * 
+ * 不能只删 DB 行——文件留在原位，下一次收件箱事件触发 rescan 就会把它重新收录，
+ * 「丢弃」的东西复活。归档目录被 rescan 排除，故移档即真正丢弃（且可追溯）。
  */
 async discardInboxItem(id: number) : Promise<Result<null, AppError>> {
     try {
@@ -1662,13 +1665,21 @@ detail: string | null; createdAt: number }
  */
 export type IngestOutcome = 
 /**
- * 成功入库并归档。
+ * TXT 成功入库并归档。
  */
 { state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; topicsAdopted: string[]; topicDiff: string | null } | 
 /**
- * 识别不出已知 SKU，待认领。
+ * 媒体文件夹成包入库（自动归集或人工认领后）。
+ */
+{ state: "ingestedMedia"; skuCode: string; packs: number } | 
+/**
+ * TXT 识别不出已知 SKU，待认领。
  */
 { state: "unclaimed"; skuCode: string | null } | 
+/**
+ * 媒体文件夹识别不出已知 SKU，整个文件夹一条待认领（需求 §3.6：进队列由人工处理，不丢弃）。
+ */
+{ state: "unclaimedMedia"; folder: string; files: number } | 
 /**
  * 解析失败，待人工确认。
  */

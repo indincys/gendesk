@@ -19,7 +19,7 @@ use crate::publish::platform;
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum IngestOutcome {
-    /// 成功入库并归档。
+    /// TXT 成功入库并归档。
     Ingested {
         #[serde(rename = "skuCode")]
         sku_code: String,
@@ -33,23 +33,52 @@ pub enum IngestOutcome {
         #[serde(rename = "topicDiff")]
         topic_diff: Option<String>,
     },
-    /// 识别不出已知 SKU，待认领。
+    /// 媒体文件夹成包入库（自动归集或人工认领后）。
+    IngestedMedia {
+        #[serde(rename = "skuCode")]
+        sku_code: String,
+        /// 本次建包数。
+        packs: usize,
+    },
+    /// TXT 识别不出已知 SKU，待认领。
     Unclaimed {
         #[serde(rename = "skuCode")]
         sku_code: Option<String>,
+    },
+    /// 媒体文件夹识别不出已知 SKU，整个文件夹一条待认领（需求 §3.6：进队列由人工处理，不丢弃）。
+    UnclaimedMedia {
+        /// 收件箱内的文件夹名。
+        folder: String,
+        /// 文件夹内媒体文件数（含子文件夹）。
+        files: usize,
     },
     /// 解析失败，待人工确认。
     Failed { reason: String },
 }
 
 impl IngestOutcome {
+    /// inbox_items.state 存储值。
     pub fn state_code(&self) -> &'static str {
         match self {
-            IngestOutcome::Ingested { .. } => "ingested",
-            IngestOutcome::Unclaimed { .. } => "unclaimed",
+            IngestOutcome::Ingested { .. } | IngestOutcome::IngestedMedia { .. } => "ingested",
+            IngestOutcome::Unclaimed { .. } | IngestOutcome::UnclaimedMedia { .. } => "unclaimed",
             IngestOutcome::Failed { .. } => "failed",
         }
     }
+}
+
+/// inbox_items.kind 的媒体取值（TXT 的 kind 由解析结果给出：title/body）。
+pub const KIND_MEDIA: &str = "media";
+
+/// 一轮 rescan 中的一个条目。
+#[derive(Debug, Clone)]
+pub struct RescanItem {
+    /// 条目对应的收件箱内相对路径（TXT 为文件，媒体为文件夹）。
+    pub file_rel: RelPath,
+    pub outcome: IngestOutcome,
+    /// 本轮**新建或状态变化**——滞留的待认领/失败条目每轮都会被重扫到，
+    /// 只有 true 才该弹 toast，否则每次收件箱有任何风吹草动都重发一遍旧提示。
+    pub changed: bool,
 }
 
 /// 媒体扩展名分类。
@@ -76,6 +105,17 @@ pub async fn ingest_txt(
     file_rel: &RelPath,
     forced_sku: Option<&str>,
 ) -> AppResult<IngestOutcome> {
+    let (_, outcome, _) = ingest_txt_inner(pool, root, file_rel, forced_sku).await?;
+    Ok(outcome)
+}
+
+/// 同 [`ingest_txt`]，另返回（记录落到的 rel，是否新建/状态变化）供 rescan 组装 [`RescanItem`]。
+async fn ingest_txt_inner(
+    pool: &SqlitePool,
+    root: &Path,
+    file_rel: &RelPath,
+    forced_sku: Option<&str>,
+) -> AppResult<(RelPath, IngestOutcome, bool)> {
     let abs = file_rel.to_local(root);
     let content = std::fs::read(&abs)?;
     // 收件箱统一 UTF-8（规范 §2）；容错非 UTF-8 以 lossy 解析。
@@ -99,8 +139,8 @@ pub async fn ingest_txt(
             let outcome = IngestOutcome::Failed {
                 reason: e.to_string(),
             };
-            record_item(pool, file_rel, None, None, &outcome).await?;
-            return Ok(outcome);
+            let changed = record_item(pool, file_rel, None, None, &outcome).await?;
+            return Ok((file_rel.clone(), outcome, changed));
         }
     };
 
@@ -136,7 +176,7 @@ pub async fn ingest_txt(
         let outcome = IngestOutcome::Unclaimed {
             sku_code: sku_candidate.clone(),
         };
-        record_item(
+        let changed = record_item(
             pool,
             file_rel,
             Some(parsed.kind.code()),
@@ -144,7 +184,7 @@ pub async fn ingest_txt(
             &outcome,
         )
         .await?;
-        return Ok(outcome);
+        return Ok((file_rel.clone(), outcome, changed));
     };
 
     // 已知 SKU：单事务入库（标题/正文 + 话题采纳）。
@@ -206,7 +246,7 @@ pub async fn ingest_txt(
         topics_adopted,
         topic_diff,
     };
-    record_item(
+    let changed = record_item(
         pool,
         &archived_rel,
         Some(parsed.kind.code()),
@@ -214,7 +254,7 @@ pub async fn ingest_txt(
         &outcome,
     )
     .await?;
-    Ok(outcome)
+    Ok((archived_rel, outcome, changed))
 }
 
 /// 话题三选：SKU 无话题 → 采纳前 5；已有 → 忽略并给差异提示（绝不覆盖，前置事实 11）。
@@ -242,15 +282,18 @@ async fn resolve_topics(
 }
 
 /// 记录 inbox_items（已存在同 file_rel 则更新状态）。
+/// 返回**是否新建或状态/详情发生变化**——watcher 据此决定是否推 toast（见 [`RescanItem::changed`]）。
 async fn record_item(
     pool: &SqlitePool,
     file_rel: &RelPath,
     kind: Option<&str>,
     sku_code: Option<&str>,
     outcome: &IngestOutcome,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let detail = serde_json::to_string(outcome).ok();
     if let Some(existing) = inbox::find_by_rel(pool, file_rel.as_str()).await? {
+        let changed = existing.state != outcome.state_code()
+            || existing.detail_json.as_deref() != detail.as_deref();
         sqlx::query(
             "UPDATE inbox_items SET kind=?2, sku_code=?3, state=?4, detail_json=?5 WHERE id=?1",
         )
@@ -261,6 +304,7 @@ async fn record_item(
         .bind(&detail)
         .execute(pool)
         .await?;
+        Ok(changed)
     } else {
         inbox::insert(
             pool,
@@ -273,26 +317,36 @@ async fn record_item(
             },
         )
         .await?;
+        Ok(true)
     }
-    Ok(())
+}
+
+/// 移动收件箱内的文件/文件夹到 `收件箱/{subdir}/{YYYYMMDD}/`，返回归档后相对路径。
+/// `subdir` 取 [`paths::INGESTED`]（收录成功）或 [`paths::DISCARDED`]（人工丢弃）——
+/// 两者都被 rescan 排除在外，故归档过的东西不会被下一轮重新收录。
+/// 源不存在时视为已归档，原样返回（幂等）。
+pub fn archive_to(root: &Path, file_rel: &RelPath, subdir: &str) -> AppResult<RelPath> {
+    let src = file_rel.to_local(root);
+    if !src.exists() {
+        return Ok(file_rel.clone());
+    }
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::Io("归档目标无文件名".into()))?
+        .to_string();
+    let dir_rel = RelPath::from_parts([paths::INBOX, subdir, &today_yyyymmdd()]);
+    let dir_abs = dir_rel.to_local(root);
+    std::fs::create_dir_all(&dir_abs)?;
+    let final_name = paths::dedupe_name(&name, &|n| dir_abs.join(n).exists());
+    let dest_rel = dir_rel.join(&final_name);
+    std::fs::rename(&src, dest_rel.to_local(root))?;
+    Ok(dest_rel)
 }
 
 /// 移动原文件到 收件箱/已收录/{YYYYMMDD}/，返回归档后相对路径。
 fn archive_ingested(root: &Path, file_rel: &RelPath) -> AppResult<RelPath> {
-    let src = file_rel.to_local(root);
-    let filename = src
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| AppError::Io("收录文件无文件名".into()))?
-        .to_string();
-    let dir_rel = RelPath::from_parts([paths::INBOX, paths::INGESTED, &today_yyyymmdd()]);
-    let dir_abs = dir_rel.to_local(root);
-    std::fs::create_dir_all(&dir_abs)?;
-    // 去重命名。
-    let final_name = paths::dedupe_name(&filename, &|n| dir_abs.join(n).exists());
-    let dest_rel = dir_rel.join(&final_name);
-    std::fs::rename(&src, dest_rel.to_local(root))?;
-    Ok(dest_rel)
+    archive_to(root, file_rel, paths::INGESTED)
 }
 
 /// 收集一个收件箱 SKU 文件夹内的媒体为素材包（前置事实 10），移入资产库。
@@ -302,14 +356,20 @@ fn archive_ingested(root: &Path, file_rel: &RelPath) -> AppResult<RelPath> {
 /// - 每个**直接子文件夹** → 独立成包（子文件夹内图片 → 1 图集包；每个视频 → 1 视频包）。
 ///
 /// 图序按文件名排序；`cover.*`/`<video>_cover.*` 识别为封面。
+///
+/// `forced_sku`：人工认领时指认的 SKU 编码（跳过按文件夹名的三冗余识别）。
 pub async fn collect_media(
     pool: &SqlitePool,
     root: &Path,
     folder_name: &str,
+    forced_sku: Option<&str>,
 ) -> AppResult<Vec<i64>> {
-    let sku = match skus::find_by_code_or_alias(pool, folder_name).await? {
-        Some(s) => s,
-        None => return Ok(Vec::new()),
+    let found = match forced_sku {
+        Some(code) => skus::find_by_code(pool, code).await?,
+        None => skus::find_by_code_or_alias(pool, folder_name).await?,
+    };
+    let Some(sku) = found else {
+        return Ok(Vec::new());
     };
     let folder_abs = RelPath::from_parts([paths::INBOX, folder_name]).to_local(root);
     if !folder_abs.is_dir() {
@@ -326,12 +386,25 @@ pub async fn collect_media(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == paths::INGESTED || name.starts_with('.') {
+        if paths::INBOX_ARCHIVES.contains(&name.as_str()) || name.starts_with('.') {
             continue;
         }
         created.extend(collect_dir_media(pool, root, &sku, &entry.path(), &name).await?);
     }
     Ok(created)
+}
+
+/// 递归数一个收件箱文件夹内的媒体文件（待认领记录的 detail 计数）。
+fn count_media_files(dir: &Path) -> usize {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            !name.starts_with('.') && media_kind(&paths::ascii_ext(&name)).is_some()
+        })
+        .count()
 }
 
 /// 从单个目录（非递归）归集媒体为素材包。`gallery_dir_base` 决定图集在资产库的目录名基。
@@ -506,27 +579,93 @@ async fn build_pack(
     Ok(id)
 }
 
-/// 全量扫描收件箱：各 SKU 子目录归集媒体 + 收录全部 TXT（排除 已收录/）。
+/// 一个收件箱路径是否位于归档子目录（已收录/已丢弃）内 —— 归档过的东西不再重扫。
+fn in_archive(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| paths::INBOX_ARCHIVES.contains(&s))
+    })
+}
+
+/// 全量扫描收件箱：各 SKU 子目录归集媒体 + 收录全部 TXT（排除 已收录/、已丢弃/）。
 /// 启动补跑与手动「重扫收件箱」共用。
-pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<IngestOutcome>> {
+///
+/// **单文件失败不阻断全局**：坏文件记为 failed 条目后继续下一个（否则一份坏 TXT
+/// 能让整个收件箱停摆）。
+pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<RescanItem>> {
     let inbox_abs = RelPath::from_parts([paths::INBOX]).to_local(root);
     if !inbox_abs.is_dir() {
         return Ok(Vec::new());
     }
-    // 1) 各直接子目录（SKU 文件夹）归集媒体（已收录/ 跳过；未知 SKU 归集为 noop）。
+    let mut items: Vec<RescanItem> = Vec::new();
+
+    // 1) 各直接子目录（SKU 文件夹）归集媒体；未知 SKU 的文件夹进「待认领」（不静默滞留）。
     for entry in std::fs::read_dir(&inbox_abs)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == paths::INGESTED {
+        if paths::INBOX_ARCHIVES.contains(&name.as_str()) || name.starts_with('.') {
             continue;
         }
-        collect_media(pool, root, &name).await?;
+        let folder_rel = RelPath::from_parts([paths::INBOX, &name]);
+        match skus::find_by_code_or_alias(pool, &name).await? {
+            Some(sku) => match collect_media(pool, root, &name, None).await {
+                Ok(ids) if ids.is_empty() => {}
+                Ok(ids) => {
+                    let outcome = IngestOutcome::IngestedMedia {
+                        sku_code: sku.code.clone(),
+                        packs: ids.len(),
+                    };
+                    // 建包后源文件已移走，用「文件夹 + 时间戳」作 file_rel 保证每批一条新记录。
+                    let rel = folder_rel.join(format!("#{}", crate::db::now_unix()));
+                    let changed =
+                        record_item(pool, &rel, Some(KIND_MEDIA), Some(&sku.code), &outcome)
+                            .await?;
+                    items.push(RescanItem {
+                        file_rel: rel,
+                        outcome,
+                        changed,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(folder = %name, error = %e, "归集媒体失败，跳过该文件夹");
+                    let outcome = IngestOutcome::Failed {
+                        reason: e.to_string(),
+                    };
+                    let changed = record_item(pool, &folder_rel, Some(KIND_MEDIA), None, &outcome)
+                        .await
+                        .unwrap_or(false);
+                    items.push(RescanItem {
+                        file_rel: folder_rel,
+                        outcome,
+                        changed,
+                    });
+                }
+            },
+            None => {
+                let files = count_media_files(&entry.path());
+                if files == 0 {
+                    continue; // 只有 TXT 的文件夹交给下面的 TXT 分支处理。
+                }
+                let outcome = IngestOutcome::UnclaimedMedia {
+                    folder: name.clone(),
+                    files,
+                };
+                let changed =
+                    record_item(pool, &folder_rel, Some(KIND_MEDIA), None, &outcome).await?;
+                items.push(RescanItem {
+                    file_rel: folder_rel,
+                    outcome,
+                    changed,
+                });
+            }
+        }
     }
-    // 2) 收录全部 TXT（排除 已收录/ 与隐藏/锁文件）。
-    let mut outcomes = Vec::new();
+
+    // 2) 收录全部 TXT（排除归档目录与隐藏/锁文件）。
     for entry in walkdir::WalkDir::new(&inbox_abs)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -535,7 +674,7 @@ pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<IngestOutco
             continue;
         }
         let path = entry.path();
-        if path.components().any(|c| c.as_os_str() == paths::INGESTED) {
+        if in_archive(path) {
             continue;
         }
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -545,12 +684,44 @@ pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<IngestOutco
         if !name.to_ascii_lowercase().ends_with(".txt") {
             continue;
         }
-        if let Ok(sub) = path.strip_prefix(root) {
-            let rel = RelPath::new(sub.to_string_lossy());
-            outcomes.push(ingest_txt(pool, root, &rel, None).await?);
+        let Ok(sub) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = RelPath::new(sub.to_string_lossy());
+        match ingest_txt_recording(pool, root, &rel).await {
+            Ok(item) => items.push(item),
+            Err(e) => tracing::warn!(file = %rel.as_str(), error = %e, "记录收录结果失败，跳过"),
         }
     }
-    Ok(outcomes)
+    Ok(items)
+}
+
+/// 收录一个 TXT 并记录结果；收录本身失败（IO/DB）时记为 failed 条目而非向上传播——
+/// rescan 是全量扫描，一个坏文件不该中断其余文件的收录。
+async fn ingest_txt_recording(
+    pool: &SqlitePool,
+    root: &Path,
+    rel: &RelPath,
+) -> AppResult<RescanItem> {
+    match ingest_txt_inner(pool, root, rel, None).await {
+        Ok((file_rel, outcome, changed)) => Ok(RescanItem {
+            file_rel,
+            outcome,
+            changed,
+        }),
+        Err(e) => {
+            tracing::warn!(file = %rel.as_str(), error = %e, "收录 TXT 失败，记为待人工确认");
+            let outcome = IngestOutcome::Failed {
+                reason: e.to_string(),
+            };
+            let changed = record_item(pool, rel, None, None, &outcome).await?;
+            Ok(RescanItem {
+                file_rel: rel.clone(),
+                outcome,
+                changed,
+            })
+        }
+    }
 }
 
 /// 由任意绝对路径图片**复制**建一个图集包（作品库联动 / 手动导入用，保留原文件）。
@@ -754,7 +925,7 @@ mod tests {
         ] {
             write(root, &format!("收件箱/SF-9/{n}"), b"x");
         }
-        let ids = collect_media(&pool, root, "SF-9").await.unwrap();
+        let ids = collect_media(&pool, root, "SF-9", None).await.unwrap();
         assert_eq!(ids.len(), 2, "1 图集 + 1 视频");
         let packs = assets::list_by_sku(&pool, sid).await.unwrap();
         let gallery = packs.iter().find(|p| p.kind == "gallery").unwrap();
@@ -787,7 +958,9 @@ mod tests {
         write(root, "收件箱/A-敖瑞鹏-01/图集2/q2.jpg", b"x");
 
         // 以磁盘上的中文目录名调用（rescan 即如此），应经别名解析到 NFC-W-01。
-        let ids = collect_media(&pool, root, "A-敖瑞鹏-01").await.unwrap();
+        let ids = collect_media(&pool, root, "A-敖瑞鹏-01", None)
+            .await
+            .unwrap();
         assert_eq!(ids.len(), 3, "根目录默认图集 + 两个子文件夹图集");
         let packs = assets::list_by_sku(&pool, sid).await.unwrap();
         assert_eq!(packs.iter().filter(|p| p.kind == "gallery").count(), 3);
@@ -797,6 +970,202 @@ mod tests {
             .any(|p| p.cover.as_deref() == Some("cover.jpg")));
         // 全部落在 资产库/NFC-W-01（用真实编码而非别名）
         assert!(RelPath::new("资产库/NFC-W-01").to_local(root).is_dir());
+    }
+
+    // A1：收件箱放图 → 自动入库 → **不做任何人工操作** → 排期能选中该包。
+    // 旧行为 lifecycle=new 导致排期永远选不到，每个 SKU 恒报「无可用素材包」。
+    #[tokio::test]
+    async fn inbox_pack_is_schedulable_without_manual_activation() {
+        use crate::commands::publish_settings::PublishSettings;
+        use crate::db::repo::{accounts, planning};
+        use crate::publish::planner;
+
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        // 热款：每日应发，排期与日期无关，断言稳定。
+        let sid = skus::insert(
+            &pool,
+            &skus::NewSku {
+                code: "SF-A1".into(),
+                style_name: "款".into(),
+                product_name: String::new(),
+                tier: "hot".into(),
+                topics_json: "[]".into(),
+                platforms_json: Some("[\"xhs\"]".into()),
+                note: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        // 图集包需要标题 + 正文（内容类型由包类型决定）。
+        for (kind, text) in [("title", "标题"), ("body", "正文")] {
+            texts::insert(
+                &pool,
+                &texts::NewTextItem {
+                    sku_id: sid,
+                    kind: kind.into(),
+                    text: text.into(),
+                    platform: "general".into(),
+                    source: "manual".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        accounts::insert(
+            &pool,
+            &accounts::NewAccount {
+                platform: "xhs".into(),
+                name: "号A".into(),
+                daily_limit: 3,
+                slots_json: None,
+            },
+        )
+        .await
+        .unwrap();
+        write(root, "收件箱/SF-A1/a.jpg", b"x");
+
+        // 自动收录（watcher 走的就是 rescan），全程无人工干预。
+        let items = rescan(&pool, root).await.unwrap();
+        assert!(items.iter().any(|i| i.outcome.state_code() == "ingested"));
+        let packs = assets::list_by_sku(&pool, sid).await.unwrap();
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].lifecycle, "active", "入库即可用");
+
+        let s = PublishSettings {
+            root_local: root.to_string_lossy().to_string(),
+            time_slots: vec!["11:30-13:00".into()],
+            ..PublishSettings::default()
+        };
+        let sheet_id = planner::generate_sheet(&pool, "2026-07-16", &s)
+            .await
+            .unwrap();
+        let rows = planning::list_tasks_by_sheet(&pool, sheet_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "该 SKU 应被排入任务单");
+        let set = planning::get_daily_set(&pool, rows[0].set_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(set.pack_id, packs[0].id, "选中的正是收件箱入库的那个包");
+    }
+
+    // A4：未知 SKU 的媒体文件夹进「待认领」（一个文件夹一条），认领后成包入库。
+    #[tokio::test]
+    async fn unknown_media_folder_becomes_unclaimed_then_claimable() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        write(root, "收件箱/未知款/1.jpg", b"x");
+        write(root, "收件箱/未知款/2.jpg", b"x");
+
+        let items = rescan(&pool, root).await.unwrap();
+        let media: Vec<_> = items
+            .iter()
+            .filter(|i| matches!(i.outcome, IngestOutcome::UnclaimedMedia { .. }))
+            .collect();
+        assert_eq!(media.len(), 1, "50 张图也只出一条记录，按文件夹计");
+        if let IngestOutcome::UnclaimedMedia { folder, files } = &media[0].outcome {
+            assert_eq!(folder, "未知款");
+            assert_eq!(*files, 2);
+        }
+        let rec = inbox::find_by_rel(&pool, "收件箱/未知款")
+            .await
+            .unwrap()
+            .expect("待认领记录已落库");
+        assert_eq!(rec.state, "unclaimed");
+        assert_eq!(rec.kind.as_deref(), Some(KIND_MEDIA));
+
+        // 人工指认 SKU → 强制归集成包。
+        let sid = seed_sku(&pool, "SF-CLAIM").await;
+        let ids = collect_media(&pool, root, "未知款", Some("SF-CLAIM"))
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let packs = assets::list_by_sku(&pool, sid).await.unwrap();
+        assert_eq!(packs[0].dir_rel, "资产库/SF-CLAIM/gallery");
+    }
+
+    // A3：丢弃 = 移档。归档目录被 rescan 排除，故丢弃的东西不会被下一轮重新收录。
+    #[tokio::test]
+    async fn discarded_file_does_not_come_back_on_rescan() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        write(
+            root,
+            "收件箱/UNKNOWN/标题_通用.txt",
+            "【类型】标题\n\n标题一\n".as_bytes(),
+        );
+        let rel = RelPath::new("收件箱/UNKNOWN/标题_通用.txt");
+        let items = rescan(&pool, root).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].outcome.state_code(), "unclaimed");
+
+        // 丢弃（命令层同款动作：移档 + 记录转 discarded）。
+        let archived = archive_to(root, &rel, paths::DISCARDED).unwrap();
+        assert!(archived.as_str().starts_with("收件箱/已丢弃/"));
+        assert!(archived.to_local(root).exists());
+        assert!(!rel.to_local(root).exists());
+        let rec = inbox::find_by_rel(&pool, rel.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        inbox::set_state(&pool, rec.id, "discarded", archived.as_str(), None)
+            .await
+            .unwrap();
+
+        // 再扫一轮：不复活。
+        let again = rescan(&pool, root).await.unwrap();
+        assert!(again.is_empty(), "已丢弃目录不再被扫描：{again:?}");
+        assert!(
+            inbox::list(&pool, None).await.unwrap().is_empty(),
+            "丢弃条目不出现在列表"
+        );
+        assert_eq!(inbox::count_pending(&pool).await.unwrap(), 0);
+    }
+
+    // A3：一个坏文件不阻断其余收录；滞留条目连续两轮只在第一轮报变化（toast 只弹一次）。
+    #[tokio::test]
+    async fn bad_file_does_not_block_others_and_stale_items_do_not_re_toast() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        seed_sku(&pool, "SF-OK").await;
+        // 空内容 → 解析失败；另一份正常 TXT 必须照常入库。
+        write(root, "收件箱/SF-OK/坏文件.txt", b"");
+        write(
+            root,
+            "收件箱/SF-OK/标题_通用.txt",
+            "【类型】标题\n\n标题一\n".as_bytes(),
+        );
+
+        let items = rescan(&pool, root).await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| i.outcome.state_code() == "ingested")
+                .count(),
+            1,
+            "坏文件不阻断好文件"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| i.outcome.state_code() == "failed")
+                .count(),
+            1
+        );
+        assert!(items.iter().all(|i| i.changed), "首轮全是新条目");
+
+        // 第二轮：好文件已归档不再扫到；坏文件滞留但状态未变 → changed=false（不再弹 toast）。
+        let again = rescan(&pool, root).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].outcome.state_code(), "failed");
+        assert!(!again[0].changed, "滞留条目状态未变，不该重复推事件");
     }
 
     #[tokio::test]

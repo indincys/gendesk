@@ -380,17 +380,21 @@ fn parse_table(rows: Table) -> ParsedMapping {
         }
         if !paths::is_valid_sku_code(&code) {
             out.errors.push(format!(
-                "第 {line} 行：编码「{code}」非法（只能是字母、数字与 - _ .，且无空格）"
+                "第 {line} 行：编码「{code}」非法（只能是字母、数字与 - _ .，无空格，\
+                 不超过 {} 字符，且不能是 . / .. 或 Windows 保留名如 CON/COM1）",
+                paths::SKU_CODE_MAX
             ));
             continue;
         }
-        if seen_codes.iter().any(|c| c == &code) {
+        // 大小写不敏感查重：`sf-1` 与 `SF-1` 在 Windows 上争抢同一个资产库目录，库内亦唯一。
+        let key = code.to_ascii_lowercase();
+        if seen_codes.iter().any(|c| c == &key) {
             out.errors.push(format!(
                 "第 {line} 行：文件内编码重复「{code}」，已跳过本行"
             ));
             continue;
         }
-        seen_codes.push(code.clone());
+        seen_codes.push(key);
 
         let opt = |s: &str| {
             let t = s.trim();

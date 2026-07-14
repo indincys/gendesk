@@ -217,12 +217,18 @@ pub async fn list_skus(state: State<'_, AppState>, filter: SkuFilter) -> AppResu
 pub async fn create_sku(state: State<'_, AppState>, input: CreateSkuInput) -> AppResult<i64> {
     let code = input.code.trim().to_string();
     if !paths::is_valid_sku_code(&code) {
-        return Err(AppError::InvalidInput(
-            "SKU 编码只能包含字母、数字与 - _ .（无空格）".into(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "SKU 编码只能包含字母、数字与 - _ .（无空格，不超过 {} 字符），\
+             且不能是 . / .. 或 Windows 保留名（CON/PRN/AUX/NUL/COM1–9/LPT1–9）",
+            paths::SKU_CODE_MAX
+        )));
     }
-    if repo::find_by_code(&state.db, &code).await?.is_some() {
-        return Err(AppError::InvalidInput(format!("SKU 编码已存在：{code}")));
+    // NOCASE 查重：Windows 上 `sf-1` 与 `SF-1` 会争抢资产库同一个目录。
+    if let Some(existing) = repo::find_by_code(&state.db, &code).await? {
+        return Err(AppError::InvalidInput(format!(
+            "SKU 编码已存在：{}（编码不区分大小写）",
+            existing.code
+        )));
     }
     let tier = input
         .tier
@@ -449,6 +455,7 @@ async fn plan_mappings(
     };
     let existing = repo::list_agg(db).await?;
     // 别名归属与各 SKU 当前别名：随计划推进而更新，故「先改走 A 的别名、再把 A 给 B」不会误报冲突。
+    // 别名 → 持有者编码（原样，供报错文案）；编码键（小写）→ 当前别名。
     let mut alias_owner: HashMap<String, String> = existing
         .iter()
         .filter(|r| !r.folder_alias.is_empty())
@@ -456,15 +463,19 @@ async fn plan_mappings(
         .collect();
     let mut alias_of: HashMap<String, String> = existing
         .iter()
-        .map(|r| (r.code.clone(), r.folder_alias.clone()))
+        .map(|r| (r.code.to_ascii_lowercase(), r.folder_alias.clone()))
         .collect();
-    let by_code: HashMap<&str, &repo::SkuAggRow> =
-        existing.iter().map(|r| (r.code.as_str(), r)).collect();
+    // 编码键一律小写：库内编码大小写唯一（idx_skus_code_nocase），映射表里的
+    // `sf-1` 必须命中库里的 `SF-1` 走更新，而不是新建出一个撞索引的行。
+    let by_code: HashMap<String, &repo::SkuAggRow> = existing
+        .iter()
+        .map(|r| (r.code.to_ascii_lowercase(), r))
+        .collect();
 
     let mut plans: Vec<RowPlan> = Vec::new();
     for row in &parsed.rows {
         let line = row.line;
-        let cur = by_code.get(row.code.as_str()).copied();
+        let cur = by_code.get(&row.code.to_ascii_lowercase()).copied();
         if cur.map(|c| c.is_general != 0) == Some(true) {
             report
                 .errors
@@ -474,20 +485,23 @@ async fn plan_mappings(
         report.rows += 1;
 
         // 别名：占用冲突则只跳过这一格；与现值相同则不算变更。
+        let code_key = row.code.to_ascii_lowercase();
         let mut alias_to_set: Option<String> = None;
         if let Some(a) = &row.alias {
             match alias_owner.get(a) {
-                Some(owner) if owner != &row.code => report.conflicts.push(format!(
-                    "第 {line} 行：别名「{a}」已被 SKU {owner} 占用，本行别名未写入"
-                )),
+                Some(owner) if !owner.eq_ignore_ascii_case(&row.code) => {
+                    report.conflicts.push(format!(
+                        "第 {line} 行：别名「{a}」已被 SKU {owner} 占用，本行别名未写入"
+                    ));
+                }
                 _ => {
-                    let same = alias_of.get(&row.code).map(String::as_str) == Some(a.as_str());
+                    let same = alias_of.get(&code_key).map(String::as_str) == Some(a.as_str());
                     if !same {
-                        if let Some(old) = alias_of.get(&row.code) {
+                        if let Some(old) = alias_of.get(&code_key) {
                             alias_owner.remove(old);
                         }
                         alias_owner.insert(a.clone(), row.code.clone());
-                        alias_of.insert(row.code.clone(), a.clone());
+                        alias_of.insert(code_key.clone(), a.clone());
                         alias_to_set = Some(a.clone());
                         report.alias_set += 1;
                     }
@@ -832,6 +846,24 @@ mod tests {
                 .is_none(),
             "预检不得落库"
         );
+    }
+
+    // A5：编码大小写唯一 —— 映射表里的 `sf-1` 必须命中库里的 `SF-1` 走更新，
+    // 而不是新建出一个撞 idx_skus_code_nocase 唯一索引的行。
+    #[tokio::test]
+    async fn code_lookup_is_case_insensitive() {
+        let (pool, dir) = test_pool().await;
+        import(&pool, "SKU编码,款式名\nSF-1,原名\n", dir.path()).await;
+        let r = import(&pool, "SKU编码,款式名\nsf-1,新名\n", dir.path()).await;
+        assert_eq!((r.created, r.updated), (0, 1), "大小写不同视为同一个 SKU");
+        let all = repo::list_agg(&pool).await.unwrap();
+        assert_eq!(
+            all.iter().filter(|s| s.is_general == 0).count(),
+            1,
+            "不得建出第二个 SKU"
+        );
+        let s = repo::find_by_code(&pool, "SF-1").await.unwrap().unwrap();
+        assert_eq!(s.style_name, "新名");
     }
 
     #[tokio::test]

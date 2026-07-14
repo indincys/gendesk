@@ -195,7 +195,7 @@ pub async fn import_media_files(
             std::fs::copy(src, inbox_abs.join(name))?;
         }
     }
-    let ids = ingest::collect_media(&state.db, &root, &sku.code).await?;
+    let ids = ingest::collect_media(&state.db, &root, &sku.code, Some(&sku.code)).await?;
     let s = publish_settings::load(&state.db).await?;
     let mut out = Vec::new();
     for id in ids {
@@ -294,12 +294,8 @@ pub struct PackPatch {
 pub async fn update_pack(state: State<'_, AppState>, id: i64, patch: PackPatch) -> AppResult<()> {
     let cover_arg: Option<Option<&str>> = patch.cover.as_ref().map(|o| o.as_deref());
     repo::update_fields(&state.db, id, patch.note.as_deref(), cover_arg).await?;
-    // 素材包 new → active：首次维护封面/备注视为完善，可参与排期。
-    if let Some(p) = repo::get(&state.db, id).await? {
-        if p.lifecycle == "new" {
-            repo::set_lifecycle(&state.db, id, "active").await?;
-        }
-    }
+    // 生命周期只由显式路径改（activate_pack / retire_pack / restore_pack）：
+    // 改个备注就顺带让包参与排期是意料之外的副作用。
     Ok(())
 }
 

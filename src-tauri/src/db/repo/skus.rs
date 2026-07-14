@@ -101,20 +101,23 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<SkuRow>, sqlx::Err
         .await
 }
 
+/// 按编码查库（大小写不敏感）。Windows 文件系统大小写不敏感，`sf-1` 与 `SF-1` 在
+/// 资产库里是同一个目录，故编码唯一性与查找一律 NOCASE（唯一索引 idx_skus_code_nocase）。
 pub async fn find_by_code(pool: &SqlitePool, code: &str) -> Result<Option<SkuRow>, sqlx::Error> {
-    sqlx::query_as::<_, SkuRow>("SELECT * FROM skus WHERE code = ?1")
+    sqlx::query_as::<_, SkuRow>("SELECT * FROM skus WHERE code = ?1 COLLATE NOCASE")
         .bind(code)
         .fetch_optional(pool)
         .await
 }
 
 /// 按收件箱文件夹别名精确查库（空 token 返回 None，避免匹配到空别名行）。
+/// NOCASE：别名多为中文（SQLite NOCASE 只折叠 ASCII），ASCII 别名同样大小写不敏感。
 pub async fn find_by_alias(pool: &SqlitePool, alias: &str) -> Result<Option<SkuRow>, sqlx::Error> {
     let alias = alias.trim();
     if alias.is_empty() {
         return Ok(None);
     }
-    sqlx::query_as::<_, SkuRow>("SELECT * FROM skus WHERE folder_alias = ?1")
+    sqlx::query_as::<_, SkuRow>("SELECT * FROM skus WHERE folder_alias = ?1 COLLATE NOCASE")
         .bind(alias)
         .fetch_optional(pool)
         .await

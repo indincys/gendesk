@@ -59,12 +59,16 @@ pub async fn insert(pool: &SqlitePool, input: &NewPack) -> Result<i64, sqlx::Err
     insert_conn(&mut *pool.acquire().await?, input).await
 }
 
-/// 事务/连接内插入（收录管线用）。lifecycle 初值 new（待完善，未参与排期）。
+/// 事务/连接内插入（收录管线用）。
+///
+/// lifecycle 初值 **active**：文件齐备即可发（封面本就可选），入库即参与排期。
+/// 存储态仍保留 `new`，留给未来需要人工过目的来源——写入方显式指定即可，
+/// UI 上 new 包有「标为可用」按钮转 active。
 pub async fn insert_conn(conn: &mut SqliteConnection, input: &NewPack) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO asset_packs (sku_id, kind, dir_rel, files_json, cover, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) RETURNING id",
+        "INSERT INTO asset_packs (sku_id, kind, dir_rel, files_json, cover, lifecycle, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7) RETURNING id",
     )
     .bind(input.sku_id)
     .bind(&input.kind)

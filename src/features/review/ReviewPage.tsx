@@ -28,6 +28,7 @@ type ReviewCardProps = {
   onRetry: (item: ReviewItemView) => void;
   onTogglePending: (id: number) => void;
   onZoom: (idx: number) => void;
+  onHover: (idx: number) => void;
 };
 
 const ReviewCard = memo(function ReviewCard({
@@ -42,12 +43,15 @@ const ReviewCard = memo(function ReviewCard({
   onRetry,
   onTogglePending,
   onZoom,
+  onHover,
 }: ReviewCardProps) {
   return (
     <div
       className={cn("rcard", selected && "sel", focused && "focus", pending && "pend")}
       onClick={(e) => onCardClick(idx, e.shiftKey)}
       onDoubleClick={() => onZoom(idx)}
+      // T2：指针跟随焦点——悬停即设焦点，令空格/回车作用于鼠标所指卡片而非默认第 0 张。
+      onMouseEnter={() => onHover(idx)}
     >
       <NatThumb path={item.resultThumbPath} className="rcimg rcsq" />
       <span className={cn("rck", selected && "on")}>
@@ -83,6 +87,7 @@ const ReviewCard = memo(function ReviewCard({
           title="重试（可微调提示词）"
           onClick={(e) => {
             e.stopPropagation();
+            (e.currentTarget as HTMLElement).blur();
             onRetry(item);
           }}
         >
@@ -94,6 +99,8 @@ const ReviewCard = memo(function ReviewCard({
           title="标记待定（稍后再定）"
           onClick={(e) => {
             e.stopPropagation();
+            // T2：点击后失焦，键盘焦点回网格，消除「再按空格/回车双触发」。
+            (e.currentTarget as HTMLElement).blur();
             onTogglePending(item.id);
           }}
         >
@@ -105,6 +112,7 @@ const ReviewCard = memo(function ReviewCard({
           title="大图逐张"
           onClick={(e) => {
             e.stopPropagation();
+            (e.currentTarget as HTMLElement).blur();
             onZoom(idx);
           }}
         >
@@ -381,12 +389,14 @@ export function ReviewPage() {
     };
   }, [zoom, retryTarget]);
 
-  // E09：网格模式键盘流（大图/重试框打开时让位）。
+  // E09：网格模式键盘流（大图/重试框/批次弹层打开时让位）。
   useEffect(() => {
-    if (zoom !== null || retryTarget) return;
+    if (zoom !== null || retryTarget || showBatchPicker) return;
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // T2：焦点落在任何交互控件（悬浮按钮 / 每行滑块 / 输入）上时让位给原生行为，
+      // 避免 window 处理器与控件双触发、或方向键被滑块吞掉导致网格导航失灵。
+      const el = e.target as HTMLElement | null;
+      if (el?.closest("button, input, textarea, select, [contenteditable=true]")) return;
       const n = displayed.length;
       if (n === 0) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) {
@@ -425,7 +435,19 @@ export function ReviewPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, retryTarget, displayed, focus, cols, sel, accept, reject, toggleSel, togglePending]);
+  }, [
+    zoom,
+    retryTarget,
+    showBatchPicker,
+    displayed,
+    focus,
+    cols,
+    sel,
+    accept,
+    reject,
+    toggleSel,
+    togglePending,
+  ]);
 
   // E09：焦点越界修正 + 滚动进视野（T1：虚拟化 scrollToIndex 定位所在行）。
   useEffect(() => {
@@ -465,6 +487,7 @@ export function ReviewPage() {
   const onAccept = useCallback((id: number) => void accept([id]), [accept]);
   const onReject = useCallback((id: number) => void reject([id]), [reject]);
   const onZoom = useCallback((idx: number) => setZoom(idx), []);
+  const onHover = useCallback((idx: number) => setFocus(idx), []);
 
   const zoomItem = zoom !== null ? displayed[zoom] : undefined;
 
@@ -530,6 +553,9 @@ export function ReviewPage() {
           max={8}
           value={cols}
           onChange={(e) => setCols(Number(e.target.value))}
+          // T2：拖动/调整后失焦，方向键网格导航恢复（否则方向键继续改滑块值）。
+          onMouseUp={(e) => e.currentTarget.blur()}
+          onKeyUp={(e) => e.currentTarget.blur()}
           className="rng"
         />
       </div>
@@ -577,6 +603,7 @@ export function ReviewPage() {
                           onRetry={openRetry}
                           onTogglePending={togglePending}
                           onZoom={onZoom}
+                          onHover={onHover}
                         />
                       ))}
                     </div>
@@ -718,48 +745,43 @@ export function ReviewPage() {
           );
         })()}
 
+      {/* T2：批次筛选迁到共享 Modal（自带 Esc + 捕获阶段拦截），配合网格 keydown 让位守卫杜绝穿透。 */}
       {showBatchPicker && (
-        <div className="ovl" onClick={() => setShowBatchPicker(false)}>
-          <div className="mdl w420" onClick={(e) => e.stopPropagation()}>
-            <div className="mhead">
-              <span className="fw6 fs13">按批次筛选</span>
-              <div className="f1" />
+        <Modal title="按批次筛选" width="w420" onClose={() => setShowBatchPicker(false)}>
+          <div className="mlist">
+            <div
+              className="pickrow"
+              onClick={() => {
+                setBatchFilter(null);
+                setShowBatchPicker(false);
+              }}
+            >
+              <span className={cn("ckb", batchFilter == null && "on")} />
+              <span className="fs12 f1">全部批次</span>
             </div>
-            <div className="mlist">
+            {batches.map((b) => (
               <div
+                key={b.id}
                 className="pickrow"
                 onClick={() => {
-                  setBatchFilter(null);
+                  setBatchFilter(b.id);
                   setShowBatchPicker(false);
                 }}
               >
-                <span className={cn("ckb", batchFilter == null && "on")} />
-                <span className="fs12 f1">全部批次</span>
+                <span className={cn("ckb", b.id === batchFilter && "on")} />
+                <span className="fs12 f1">
+                  批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
+                  任务
+                </span>
               </div>
-              {batches.map((b) => (
-                <div
-                  key={b.id}
-                  className="pickrow"
-                  onClick={() => {
-                    setBatchFilter(b.id);
-                    setShowBatchPicker(false);
-                  }}
-                >
-                  <span className={cn("ckb", b.id === batchFilter && "on")} />
-                  <span className="fs12 f1">
-                    批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
-                    任务
-                  </span>
-                </div>
-              ))}
-              {batches.length === 0 && (
-                <div className="fs12 t3" style={{ padding: 12 }}>
-                  暂无批次
-                </div>
-              )}
-            </div>
+            ))}
+            {batches.length === 0 && (
+              <div className="fs12 t3" style={{ padding: 12 }}>
+                暂无批次
+              </div>
+            )}
           </div>
-        </div>
+        </Modal>
       )}
 
       {retryTarget && (

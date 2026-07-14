@@ -20,6 +20,17 @@
 3. **RPA 发布任务单导出**：查库 → 导出 xlsx/csv（影刀类 RPA 对 Excel 支持最好）+ JSON；
    素材列写绝对路径；预留回执导入闭环。
 
+## 密钥存储后续（v0.10.0 迁到本地加密文件后）
+
+1. **取得 Apple 开发者证书后回迁 Data Protection Keychain**：可信签名身份下
+   `keychain-access-groups` 使授权跨版本存活，不再有反复弹窗；`SecretStore` trait 使回迁
+   仅为换一个实现（`secrets.rs`），调用方零改动。届时可把安全水位从「防误不防恶」
+   提到系统级密钥保护。
+2. **迁移期结束后移除 `keyring` 依赖与 `KeyringStore`**：预计 1–2 个发版周期、确认团队
+   全员已升级过一次（钥匙串条目均已清空）后执行，减 cargo audit 面。移除点：
+   `secrets.rs` 的 `KeyringStore` / `migrate_from_keyring`、`lib.rs` 启动迁移调用、
+   `error.rs` 的 `From<keyring::Error>`、`Cargo.toml` 的 keyring 依赖。
+
 ## M5 人工收尾清单（AI 不可替代，交付前由用户执行）
 
 - [ ] 双端真机 UI 冒烟：macOS(WKWebView) + Windows(WebView2) 渲染差异排查，重点

@@ -1598,7 +1598,7 @@ export type AppError =
  */
 { type: "InvalidInput"; message: string } | 
 /**
- * 系统钥匙串（Keychain / 凭据管理器）访问失败。
+ * 密钥存储访问失败（本地加密文件 / 迁移期的系统钥匙串）。
  */
 { type: "Keyring"; message: string } | 
 /**

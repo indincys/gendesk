@@ -160,4 +160,11 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
     classify_fail 把 timeout 提到 content 之前（「上传素材超时」归成 content 会白白退役好素材）。
   - **F 新功能**：补料提示词（模板由反向 parser 测试守住）· 回执截图 · 资产跑道 · 排期预演 ·
     发布月历 · 开屏晨报 · 拖放直投 · 看板日期切换 · 同步链路健康 · 素材包使用统计。
+- [x] **密钥存储迁移（v0.10.0）** — API Key 由系统钥匙串迁到本地加密文件，根治自签名下
+  每次更新/重编译反复弹 Keychain 授权（无可信签名身份 → 按应用 ACL 的「始终允许」无法跨版本
+  存活，系统固有限制）。`secrets::FileStore`：`secrets.key`(32B 主密钥) + `secrets.enc`
+  (XChaCha20-Poly1305，24B 随机 nonce 前置)，原子写 + 0600 + 损坏自愈留证；启动时
+  `migrate_from_keyring` 幂等搬运（先写目的地再删源，单条失败不删源、不中断启动）。
+  **安全水位如实记录**：防误不防恶（防备份/截图/grep 出明文），主密钥与密文同目录，
+  不构成独立安全边界；爆炸半径 = 可轮换的第三方 API Key。无 migration / 无新 IPC / 无前端改动。
 

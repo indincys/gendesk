@@ -40,8 +40,19 @@ const KEY_LEN: usize = 32;
 /// nonce 字节数（XChaCha20 扩展 nonce），密文文件前置存放。
 const NONCE_LEN: usize = 24;
 
-const KEY_FILE: &str = "secrets.key";
-const ENC_FILE: &str = "secrets.enc";
+/// 明文结构版本。读到未知版本按损坏处理（见 [`FileStore::load`]）。
+const VAULT_VERSION: u32 = 1;
+
+pub const KEY_FILE: &str = "secrets.key";
+pub const ENC_FILE: &str = "secrets.enc";
+
+/// 该文件名是否属于密钥存储（含 `.bak-*` / `.tmp-*` 派生物）。
+///
+/// 备份导出（`commands::backup`）据此排除密钥文件：主密钥与密文同目录，
+/// 一起打进 zip 等于把 API Key 明文交出去（见 secrets.rs 模块头安全水位）。
+pub fn is_secret_file(name: &str) -> bool {
+    name.starts_with(KEY_FILE) || name.starts_with(ENC_FILE)
+}
 
 pub trait SecretStore: Send + Sync {
     fn set(&self, account: &str, secret: &str) -> AppResult<()>;
@@ -104,15 +115,18 @@ impl FileStore {
         Ok(key)
     }
 
-    /// 把损坏 / 失效的文件改名留证（`<name>.bak-<秒级时间戳>`），失败只记 warn。
+    /// 把损坏 / 失效的文件改名留证（`<name>.bak-<纳秒级时间戳>`），失败只记 warn。
     /// 绝不写入任何密钥内容到日志。
+    ///
+    /// 时间戳取到纳秒：损坏后同一秒内可能连续多次 load（启动迁移 + 引擎首读），
+    /// 秒级命名会让后一次留证覆盖前一次，抹掉唯一的人工抢救线索。
     fn quarantine(&self, path: &Path) {
         if !path.exists() {
             return;
         }
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let mut backup = path.as_os_str().to_os_string();
         backup.push(format!(".bak-{ts}"));
@@ -144,7 +158,17 @@ impl FileStore {
             }
         };
         match serde_json::from_slice::<Vault>(&plain) {
-            Ok(v) => Ok(v.keys),
+            // 版本必须认识：未知版本（未来格式）下 serde 会忽略新字段、把 keys 解成
+            // 空表或半张表 —— 那会走「解析成功」分支静默丢密钥且不留证。宁可按损坏处理。
+            Ok(v) if v.version == VAULT_VERSION => Ok(v.keys),
+            Ok(v) => {
+                tracing::warn!(
+                    version = v.version,
+                    "密钥文件版本未知（疑似降级运行），已留证并重建（需在设置页重填 API Key）"
+                );
+                self.quarantine(&self.enc_path);
+                Ok(HashMap::new())
+            }
             Err(_) => {
                 tracing::warn!("密钥明文结构非法，已留证并重建（需在设置页重填 API Key）");
                 self.quarantine(&self.enc_path);
@@ -156,7 +180,7 @@ impl FileStore {
     /// 加密写回全量密钥表（每次写入重新随机 nonce；原子替换）。
     fn store(&self, key: &Key, keys: &HashMap<String, String>) -> AppResult<()> {
         let vault = Vault {
-            version: 1,
+            version: VAULT_VERSION,
             keys: keys.clone(),
         };
         let plain = serde_json::to_vec(&vault)?;
@@ -171,9 +195,17 @@ impl FileStore {
     }
 }
 
+impl FileStore {
+    /// 取锁。锁只串行化「读—改—写」，不持有任何跨调用状态，故中毒后直接取回内部值
+    /// 继续用 —— 否则一次 panic 会让此后所有密钥读写永久失败到重启。
+    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl SecretStore for FileStore {
     fn set(&self, account: &str, secret: &str) -> AppResult<()> {
-        let _g = self.lock.lock().map_err(|_| poisoned())?;
+        let _g = self.guard();
         let key = self.master_key()?;
         let mut keys = self.load(&key)?;
         keys.insert(account.to_string(), secret.to_string());
@@ -181,13 +213,13 @@ impl SecretStore for FileStore {
     }
 
     fn get(&self, account: &str) -> AppResult<Option<String>> {
-        let _g = self.lock.lock().map_err(|_| poisoned())?;
+        let _g = self.guard();
         let key = self.master_key()?;
         Ok(self.load(&key)?.get(account).cloned())
     }
 
     fn delete(&self, account: &str) -> AppResult<()> {
-        let _g = self.lock.lock().map_err(|_| poisoned())?;
+        let _g = self.guard();
         let key = self.master_key()?;
         let mut keys = self.load(&key)?;
         if keys.remove(account).is_none() {
@@ -195,10 +227,6 @@ impl SecretStore for FileStore {
         }
         self.store(&key, &keys)
     }
-}
-
-fn poisoned() -> AppError {
-    AppError::Keyring("密钥存储锁已中毒".into())
 }
 
 /// 原子写：同目录临时文件 → fsync → rename 覆盖。

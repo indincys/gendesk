@@ -195,7 +195,16 @@ export function SettingsPage() {
                     {k.sampleCount > 0 ? `${Math.round(k.successRate * 100)}%` : "—"}
                   </span>
                   <span className="fx ac gap6 ohide">
-                    {k.circuitBroken ? (
+                    {k.secretMissing ? (
+                      // 密钥本体丢失（迁移被拒 / 密钥文件损坏重建）：引擎会静默跳过这个
+                      // Key，不显式标出来的话用户只会看到任务永远排不到它。
+                      <span
+                        className="bdg b-red"
+                        title="密钥本体已丢失，引擎不会使用这个 Key —— 请点「编辑」重新填入 Key"
+                      >
+                        密钥缺失
+                      </span>
+                    ) : k.circuitBroken ? (
                       <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
                         已熔断
                       </span>

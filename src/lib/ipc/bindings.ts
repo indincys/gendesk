@@ -1580,7 +1580,13 @@ sampleCount: number;
 /**
  * 当前占用并发（运行时；M2 引擎接入后填充，M1 恒为 0）
  */
-usedConcurrency: number }
+usedConcurrency: number; 
+/**
+ * 密钥本体在密钥存储中找不到（迁移被拒绝 / 密钥文件损坏自愈后重建）。
+ * 此时引擎会静默跳过这个 Key（任务永远排不到它），UI 必须显式提示重填 —— 否则
+ * `masked_key` 只是普通的 `****`，用户看不出这个 Key 已经是空壳。
+ */
+secretMissing: boolean }
 /**
  * 应用级错误。`type` 字段作为前端可判别的分类标签。
  */

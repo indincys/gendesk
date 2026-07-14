@@ -24,8 +24,11 @@ pub enum IngestOutcome {
         #[serde(rename = "skuCode")]
         sku_code: String,
         kind: String,
+        /// 新增条数（不含重复）。
         titles: usize,
         bodies: usize,
+        /// 与池内已有条目完全相同、被跳过的条数。
+        duplicates: usize,
         /// 采纳的话题（SKU 原先无话题时）。
         #[serde(rename = "topicsAdopted")]
         topics_adopted: Vec<String>,
@@ -88,6 +91,50 @@ fn media_kind(ext: &str) -> Option<&'static str> {
         "mp4" | "mov" => Some("video"),
         _ => None,
     }
+}
+
+/// 同步软件/浏览器的半成品文件：还在写，收录进来就是半截内容。
+fn is_temp_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    name.starts_with('.')
+        || name.starts_with("~$")
+        || lower.starts_with(".syncthing.")
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".part")
+        || lower.ends_with(".crdownload")
+        || lower.ends_with(".download")
+}
+
+/// 大小采样间隔。
+const SIZE_PROBE: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn size_of(p: &Path) -> Option<u64> {
+    std::fs::metadata(p).map(|m| m.len()).ok()
+}
+
+/// 从候选里筛出**大小已稳定**的文件：一次性采样全部 → 等 500ms → 再采样一次，
+/// 两次一致的才算写完。仍在变的本轮跳过（下一次文件系统事件自然会再来一轮）。
+///
+/// watcher 的 2 秒事件防抖只保证「没有新的文件系统事件」；写入方停顿超过 2 秒
+/// （人工分批拷贝、同步软件限速）照样会让我们收录到半截文件。这是第二道闸。
+/// 整批只睡一次——按文件逐个睡的话，50 张图要等 25 秒。
+async fn filter_size_stable(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    if paths.is_empty() {
+        return paths;
+    }
+    let first: Vec<Option<u64>> = paths.iter().map(|p| size_of(p)).collect();
+    tokio::time::sleep(SIZE_PROBE).await;
+    paths
+        .into_iter()
+        .zip(first)
+        .filter_map(|(p, before)| {
+            let stable = before.is_some() && size_of(&p) == before;
+            if !stable {
+                tracing::debug!(file = %p.display(), "文件大小仍在变化，本轮跳过");
+            }
+            stable.then_some(p)
+        })
+        .collect()
 }
 
 /// `YYYYMMDD`（本地日期，归档子目录用）。
@@ -197,32 +244,34 @@ async fn ingest_txt_inner(
     let (topics_adopted, topic_diff) =
         resolve_topics(pool, sku.id, &sku.topics_json, &parsed.topics).await?;
 
+    // 入库查重：AI 反复生成同一句话是常态，同 SKU 同类型同文本只留一条
+    // （否则文本池被同一句刷屏，「最少使用优先」也就失效了）。
     let mut tx = pool.begin().await?;
-    for t in &parsed.titles {
-        texts::insert_tx(
-            &mut tx,
-            &texts::NewTextItem {
-                sku_id: sku.id,
-                kind: "title".into(),
-                text: t.clone(),
-                platform: platform_tag.clone(),
-                source: "inbox".into(),
-            },
-        )
-        .await?;
-    }
-    for b in &parsed.bodies {
-        texts::insert_tx(
-            &mut tx,
-            &texts::NewTextItem {
-                sku_id: sku.id,
-                kind: "body".into(),
-                text: b.clone(),
-                platform: platform_tag.clone(),
-                source: "inbox".into(),
-            },
-        )
-        .await?;
+    let mut titles_new = 0usize;
+    let mut bodies_new = 0usize;
+    let mut duplicates = 0usize;
+    for (kind, list, counter) in [
+        ("title", &parsed.titles, &mut titles_new),
+        ("body", &parsed.bodies, &mut bodies_new),
+    ] {
+        for t in list.iter() {
+            if texts::exists_same(&mut tx, sku.id, kind, t).await? {
+                duplicates += 1;
+                continue;
+            }
+            texts::insert_tx(
+                &mut tx,
+                &texts::NewTextItem {
+                    sku_id: sku.id,
+                    kind: kind.into(),
+                    text: t.clone(),
+                    platform: platform_tag.clone(),
+                    source: "inbox".into(),
+                },
+            )
+            .await?;
+            *counter += 1;
+        }
     }
     if !topics_adopted.is_empty() {
         let json = serde_json::to_string(&topics_adopted)?;
@@ -241,8 +290,9 @@ async fn ingest_txt_inner(
     let outcome = IngestOutcome::Ingested {
         sku_code: sku.code.clone(),
         kind: parsed.kind.code().to_string(),
-        titles: parsed.titles.len(),
-        bodies: parsed.bodies.len(),
+        titles: titles_new,
+        bodies: bodies_new,
+        duplicates,
         topics_adopted,
         topic_diff,
     };
@@ -415,19 +465,30 @@ async fn collect_dir_media(
     src_dir: &Path,
     gallery_dir_base: &str,
 ) -> AppResult<Vec<i64>> {
-    // 枚举媒体文件（忽略隐藏/锁文件与子目录）。
-    let mut galleries: Vec<(String, String)> = Vec::new(); // (filename, ext)
-    let mut videos: Vec<(String, String)> = Vec::new();
-    let mut covers: Vec<String> = Vec::new(); // 潜在封面文件名
+    // 枚举媒体文件（忽略隐藏/锁文件/同步软件半成品与子目录），并等大小稳定。
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for entry in std::fs::read_dir(src_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.starts_with("~$") {
+        if is_temp_file(&name) {
             continue;
         }
+        candidates.push(entry.path());
+    }
+    let stable = filter_size_stable(candidates).await;
+
+    let mut galleries: Vec<(String, String)> = Vec::new(); // (filename, ext)
+    let mut videos: Vec<(String, String)> = Vec::new();
+    let mut covers: Vec<String> = Vec::new(); // 潜在封面文件名
+    for path in stable {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
         let ext = paths::ascii_ext(&name);
         let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name);
         if stem.eq_ignore_ascii_case("cover") || stem.to_ascii_lowercase().ends_with("_cover") {
@@ -527,6 +588,9 @@ async fn build_pack(
     std::fs::create_dir_all(&pack_abs)?;
 
     let mut files: Vec<PackFile> = Vec::new();
+    // 已搬走的 (dest, 原位置)：落库失败时按此原路搬回，不让文件消失在一个没有记录的目录里。
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+
     // 成员文件重命名：图集 img_NN.ext，视频 video.ext。
     for (i, (orig, ext)) in members.iter().enumerate() {
         let new_name = if kind == "gallery" {
@@ -536,8 +600,12 @@ async fn build_pack(
         };
         let src = src_folder.join(orig);
         let dest = pack_abs.join(&new_name);
-        let bytes = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
-        std::fs::rename(&src, &dest)?;
+        let bytes = size_of(&src).unwrap_or(0);
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            rollback_moves(&moved);
+            return Err(e.into());
+        }
+        moved.push((dest, src));
         files.push(PackFile {
             name: new_name,
             orig_name: orig.clone(),
@@ -552,8 +620,12 @@ async fn build_pack(
         let src = src_folder.join(orig);
         if src.exists() {
             let dest = pack_abs.join(&new_name);
-            let bytes = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
-            std::fs::rename(&src, &dest)?;
+            let bytes = size_of(&src).unwrap_or(0);
+            if let Err(e) = std::fs::rename(&src, &dest) {
+                rollback_moves(&moved);
+                return Err(e.into());
+            }
+            moved.push((dest, src));
             files.push(PackFile {
                 name: new_name.clone(),
                 orig_name: orig.to_string(),
@@ -564,7 +636,7 @@ async fn build_pack(
     }
 
     let files_json = serde_json::to_string(&files)?;
-    let id = assets::insert(
+    let inserted = assets::insert(
         pool,
         &assets::NewPack {
             sku_id,
@@ -575,8 +647,31 @@ async fn build_pack(
             source: "inbox".into(),
         },
     )
-    .await?;
-    Ok(id)
+    .await;
+    match inserted {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            // 落库失败 → 文件搬回原位，目录删掉。否则素材就成了「磁盘上有、库里没有」的孤儿。
+            rollback_moves(&moved);
+            let _ = std::fs::remove_dir(&pack_abs);
+            Err(e.into())
+        }
+    }
+}
+
+/// 把已搬走的文件搬回原位（建包落库失败时的回滚）。
+/// 回滚本身失败只能 warn——此时文件在包目录里，落一个 `.orphan` 标记便于人工找回。
+fn rollback_moves(moved: &[(std::path::PathBuf, std::path::PathBuf)]) {
+    for (dest, src) in moved {
+        if let Err(e) = std::fs::rename(dest, src) {
+            tracing::warn!(
+                file = %dest.display(),
+                error = %e,
+                "建包回滚失败，文件仍在资产库目录内（无对应记录）"
+            );
+            let _ = std::fs::write(dest.with_extension("orphan"), b"pack insert failed\n");
+        }
+    }
 }
 
 /// 一个收件箱路径是否位于归档子目录（已收录/已丢弃）内 —— 归档过的东西不再重扫。
@@ -665,7 +760,8 @@ pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<RescanItem>
         }
     }
 
-    // 2) 收录全部 TXT（排除归档目录与隐藏/锁文件）。
+    // 2) 收录全部 TXT（排除归档目录、隐藏/锁文件、同步软件半成品；等大小稳定）。
+    let mut txts: Vec<std::path::PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(&inbox_abs)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -678,12 +774,12 @@ pub async fn rescan(pool: &SqlitePool, root: &Path) -> AppResult<Vec<RescanItem>
             continue;
         }
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with('.') || name.starts_with("~$") {
+        if is_temp_file(name) || !name.to_ascii_lowercase().ends_with(".txt") {
             continue;
         }
-        if !name.to_ascii_lowercase().ends_with(".txt") {
-            continue;
-        }
+        txts.push(path.to_path_buf());
+    }
+    for path in filter_size_stable(txts).await {
         let Ok(sub) = path.strip_prefix(root) else {
             continue;
         };

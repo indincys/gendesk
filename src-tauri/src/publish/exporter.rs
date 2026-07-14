@@ -221,11 +221,18 @@ fn pack_file_names(files_json: &str) -> Vec<String> {
         .collect()
 }
 
+/// 导出进度回调（每复制完一个文件调一次）。
+pub type ProgressFn = std::sync::Arc<dyn Fn(i64, i64) + Send + Sync>;
+
 /// 导出某任务单为任务包。sheet 必须为 confirmed 或 exported（重导出=整包覆盖）。
+///
+/// 文件搬运（复制视频可达数百 MB × 多 SKU）走 `spawn_blocking`：留在 async 线程上
+/// 同步复制会把整个 Tauri 运行时堵死，导出期间 UI 与其它 IPC 全部卡住。
 pub async fn export_package(
     pool: &SqlitePool,
     sheet_id: i64,
     s: &PublishSettings,
+    progress: Option<ProgressFn>,
 ) -> AppResult<ExportResult> {
     // 预检是导出的唯一入口条件：素材缺失/回执已回写等问题在这里拦下，
     // 而不是等到执行机上才发现（或把回执覆盖掉）。
@@ -252,46 +259,34 @@ pub async fn export_package(
     let pkg_rel = RelPath::from_parts([paths::TASK_PACKAGES, &yyyymmdd]);
     let pkg_abs = pkg_rel.to_local(local_root);
 
-    // 重导出：先删 READY.txt（其他文件整包覆盖）。
-    let ready_path = pkg_rel.join(paths::READY).to_local(local_root);
-    let _ = std::fs::remove_file(&ready_path);
-    std::fs::create_dir_all(&pkg_abs)?;
-    std::fs::create_dir_all(pkg_rel.join(paths::RECEIPTS_DIR).to_local(local_root))?;
-
     let rows = planning::sheet_rows(pool, sheet_id).await?;
 
-    // 复制素材（每 distinct SKU 一份）。
+    // ── 计划阶段（纯数据，无 IO）：算出要复制哪些文件、写哪些 body.txt ──
     let mut copied_skus = std::collections::HashSet::new();
-    let mut file_count = 0i64;
     let mut long_path_warn = false;
-    let mut missing_files: Vec<String> = Vec::new();
+    let mut copy_jobs: Vec<(std::path::PathBuf, std::path::PathBuf, String)> = Vec::new(); // (src, dest, 展示名)
+    let mut body_jobs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut sku_dirs: Vec<std::path::PathBuf> = Vec::new();
     for r in &rows {
         if !copied_skus.insert(r.sku_id) {
             continue;
         }
         let dest_rel = pkg_rel.join(paths::MATERIALS_DIR).join(&r.sku_code);
         let dest_abs = dest_rel.to_local(local_root);
-        std::fs::create_dir_all(&dest_abs)?;
-        // 复制包内文件（img_NN / video / cover）。预检已保证齐备，缺失只可能是
-        // 预检之后被删——记下来上报，不静默跳过。
+        sku_dirs.push(dest_abs.clone());
         let src_dir = RelPath::new(&r.dir_rel).to_local(local_root);
         for name in pack_file_names(&r.files_json) {
-            let src = src_dir.join(&name);
-            if src.exists() {
-                std::fs::copy(&src, dest_abs.join(&name))?;
-                file_count += 1;
-            } else {
-                missing_files.push(format!("{}/{}", r.sku_code, name));
-            }
+            copy_jobs.push((
+                src_dir.join(&name),
+                dest_abs.join(&name),
+                format!("{}/{}", r.sku_code, name),
+            ));
         }
-        // 图文正文物化 body.txt。
         if r.pack_kind == "gallery" {
             if let Some(body) = &r.body_text {
-                std::fs::write(dest_abs.join(paths::BODY_TXT), body)?;
-                file_count += 1;
+                body_jobs.push((dest_abs.join(paths::BODY_TXT), body.clone()));
             }
         }
-        // 长度告警。
         let exec_path = paths::exec_join(exec_root, &dest_rel, style);
         if paths::exceeds_path_limit(&exec_path) {
             long_path_warn = true;
@@ -357,20 +352,68 @@ pub async fn export_package(
         });
     }
 
-    // 写 xlsx + 执行说明.md。
-    write_sheet(&pkg_rel.join(paths::TASK_XLSX).to_local(local_root), &xrows)?;
-    file_count += 1;
-    std::fs::write(
-        pkg_rel.join(paths::EXEC_GUIDE).to_local(local_root),
-        EXEC_GUIDE_TEMPLATE,
-    )?;
-    file_count += 1;
+    // ── 落盘阶段：全部文件 IO 挪到阻塞线程池，async 运行时不被数百 MB 的复制堵死 ──
+    let ready_path = pkg_rel.join(paths::READY).to_local(local_root);
+    let receipts_dir = pkg_rel.join(paths::RECEIPTS_DIR).to_local(local_root);
+    let xlsx_path = pkg_rel.join(paths::TASK_XLSX).to_local(local_root);
+    let guide_path = pkg_rel.join(paths::EXEC_GUIDE).to_local(local_root);
+    let ready_body = format!("READY {}\n{} 行任务\n", sheet.date, rows.len());
+    let total = (copy_jobs.len() + body_jobs.len() + 2) as i64;
 
-    // 最后写 READY.txt（就绪标志，mtime 最新）。
-    std::fs::write(
-        &ready_path,
-        format!("READY {}\n{} 行任务\n", sheet.date, rows.len()),
-    )?;
+    let written = tauri::async_runtime::spawn_blocking(move || -> AppResult<(i64, Vec<String>)> {
+        // 重导出：先删 READY.txt——执行器以它为「包已就绪」的信号，
+        // 必须在其余文件全部落盘后才重新出现。
+        let _ = std::fs::remove_file(&ready_path);
+        std::fs::create_dir_all(&pkg_abs)?;
+        std::fs::create_dir_all(&receipts_dir)?;
+        for d in &sku_dirs {
+            std::fs::create_dir_all(d)?;
+        }
+
+        let mut file_count = 0i64;
+        let mut done = 0i64;
+        let mut missing: Vec<String> = Vec::new();
+        let tick = |done: i64| {
+            if let Some(p) = &progress {
+                p(done, total);
+            }
+        };
+
+        for (src, dest, label) in copy_jobs {
+            // 预检已保证素材齐备；到这一步还缺，只可能是预检之后被删——记下来上报，不静默跳过。
+            if src.exists() {
+                std::fs::copy(&src, &dest)?;
+                file_count += 1;
+            } else {
+                missing.push(label);
+            }
+            done += 1;
+            tick(done);
+        }
+        for (path, body) in body_jobs {
+            std::fs::write(&path, body)?;
+            file_count += 1;
+            done += 1;
+            tick(done);
+        }
+
+        write_sheet(&xlsx_path, &xrows)?;
+        file_count += 1;
+        done += 1;
+        tick(done);
+
+        std::fs::write(&guide_path, EXEC_GUIDE_TEMPLATE)?;
+        file_count += 1;
+        done += 1;
+        tick(done);
+
+        // READY.txt 最后写（就绪标志，mtime 最新）。
+        std::fs::write(&ready_path, ready_body)?;
+        Ok((file_count, missing))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("导出任务异常终止：{e}")))?;
+    let (file_count, missing_files) = written?;
 
     // 置任务单为已导出。
     let mut conn = pool.acquire().await?;
@@ -481,7 +524,7 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        let res = export_package(&pool, sheet_id, &s).await.unwrap();
+        let res = export_package(&pool, sheet_id, &s, None).await.unwrap();
         assert_eq!(res.row_count, 1);
         assert_eq!(res.sku_count, 1);
 
@@ -537,7 +580,7 @@ mod tests {
         let rep = preflight(&pool, sheet_id, &s).await.unwrap();
         assert!(!rep.ok(), "已有回执必须拒绝重导出");
         assert!(rep.errors[0].contains("回执"), "{:?}", rep.errors);
-        assert!(export_package(&pool, sheet_id, &s).await.is_err());
+        assert!(export_package(&pool, sheet_id, &s, None).await.is_err());
 
         // 素材文件缺失 → 预检报 error，导出被拒（问题不再推迟到执行机才暴露）。
         std::fs::remove_file(pack_dir.join("img_01.jpg")).unwrap();
@@ -548,7 +591,7 @@ mod tests {
             "{:?}",
             rep.errors
         );
-        assert!(export_package(&pool, sheet_id, &s).await.is_err());
+        assert!(export_package(&pool, sheet_id, &s, None).await.is_err());
     }
 
     // B1：关单后不可再导出（状态机保证；补断言防回归）。
@@ -569,6 +612,6 @@ mod tests {
         drop(conn);
         let rep = preflight(&pool, sheet_id, &s).await.unwrap();
         assert!(!rep.ok());
-        assert!(export_package(&pool, sheet_id, &s).await.is_err());
+        assert!(export_package(&pool, sheet_id, &s, None).await.is_err());
     }
 }

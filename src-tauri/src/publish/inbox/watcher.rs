@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::publish_skus::badge_counts;
 use crate::error::{AppError, AppResult};
-use crate::publish::events::{InboxIngestEvent, PublishBadgesEvent};
+use crate::publish::events::{InboxIngestEvent, PublishBadgesEvent, SheetChangedEvent};
 use crate::publish::inbox::ingest;
 use crate::publish::paths;
 
@@ -126,7 +126,17 @@ async fn rescan_and_emit(pool: &SqlitePool, root: &Path, app: &AppHandle) {
         Ok(items) => {
             // rescan 是全量的：滞留的待认领/失败条目每轮都会被重扫到。只对**本轮状态
             // 发生变化**的条目推 toast，否则收件箱每有一点动静就重发一遍旧提示。
+            let mut ingested_skus: Vec<String> = Vec::new();
             for item in items.into_iter().filter(|i| i.changed) {
+                match &item.outcome {
+                    ingest::IngestOutcome::Ingested { sku_code, .. }
+                    | ingest::IngestOutcome::IngestedMedia { sku_code, .. }
+                        if !ingested_skus.contains(sku_code) =>
+                    {
+                        ingested_skus.push(sku_code.clone());
+                    }
+                    _ => {}
+                }
                 let file_name = item
                     .file_rel
                     .as_str()
@@ -140,12 +150,57 @@ async fn rescan_and_emit(pool: &SqlitePool, root: &Path, app: &AppHandle) {
                 }
                 .emit(app);
             }
+            if !ingested_skus.is_empty() {
+                notify_restocked_drafts(pool, app, &ingested_skus).await;
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "收件箱 rescan 失败");
         }
     }
     emit_badges(pool, app).await;
+}
+
+/// 到料提示（E6）：新入库的 SKU 若正躺在某张**草稿**的缺料清单里，发一条 SheetChanged
+/// 让工作台刷新——人可以据此决定要不要重新生成。
+///
+/// **不自动重算**：草稿里可能已有人工调整（改时间/增补行），自动重生成会把它们清掉。
+async fn notify_restocked_drafts(pool: &SqlitePool, app: &AppHandle, sku_codes: &[String]) {
+    let drafts = match crate::db::repo::planning::list_sheets(pool).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "读任务单失败");
+            return;
+        }
+    };
+    for sheet in drafts.into_iter().filter(|s| s.status == "draft") {
+        let hit = serde_json::from_str::<Vec<serde_json::Value>>(&sheet.shortage_json)
+            .unwrap_or_default()
+            .iter()
+            .any(|v| {
+                v.get("code")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| sku_codes.iter().any(|s| s == c))
+            });
+        if !hit {
+            continue;
+        }
+        tracing::info!(date = %sheet.date, "缺料 SKU 已到料，草稿可重新生成");
+        if let Ok(rows) = crate::db::repo::planning::list_tasks_by_sheet(pool, sheet.id).await {
+            let c = |st: &str| rows.iter().filter(|r| r.status == st).count() as i64;
+            let _ = SheetChangedEvent {
+                sheet_id: sheet.id,
+                date: sheet.date,
+                status: sheet.status,
+                pending: c("pending"),
+                published: c("published"),
+                failed: c("failed"),
+                suspect: c("suspect"),
+                canceled: c("canceled"),
+            }
+            .emit(app);
+        }
+    }
 }
 
 /// 计算并推送发布徽章。

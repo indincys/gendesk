@@ -203,6 +203,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             publish::events::PublishBadgesEvent,
             publish::events::InboxIngestEvent,
             publish::events::SheetChangedEvent,
+            publish::events::ExportProgressEvent,
         ])
 }
 

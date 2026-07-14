@@ -92,6 +92,14 @@ pub async fn add_text_item(state: State<'_, AppState>, input: AddTextItemInput) 
         .platform
         .map(|p| platform::text_platform_tag(&p))
         .unwrap_or_else(|| platform::GENERAL_TAG.to_string());
+    // 与收录管线同一套查重：同 SKU 同类型同文本不重复入池。
+    let mut conn = state.db.acquire().await?;
+    if repo::exists_same(&mut conn, input.sku_id, &input.kind, &text).await? {
+        return Err(AppError::InvalidInput(
+            "该文本已在池中（同 SKU 同类型完全相同）".into(),
+        ));
+    }
+    drop(conn);
     let id = repo::insert(
         &state.db,
         &repo::NewTextItem {

@@ -184,16 +184,21 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             continue;
         }
         let packs = assets::list_by_sku(pool, r.id).await?;
-        let mut pack_cands = Vec::with_capacity(packs.len());
-        for p in &packs {
-            let last = ledger::pack_platform_last(pool, p.id).await?;
-            pack_cands.push(PackCand {
+        // 台账一次批量取（原来是每个包一次查询，300 SKU × 若干包时非常伤）。
+        let pack_ids: Vec<i64> = packs.iter().map(|p| p.id).collect();
+        let usage = ledger::pack_usage_batch(pool, &pack_ids).await?;
+        let pack_cands: Vec<PackCand> = packs
+            .iter()
+            .map(|p| PackCand {
                 id: p.id,
                 kind: p.kind.clone(),
                 lifecycle: p.lifecycle.clone(),
-                last_pub: last,
-            });
-        }
+                last_pub: usage
+                    .get(&p.id)
+                    .map(|u| u.last_by_platform.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
         let mut conn = pool.acquire().await?;
         let titles = texts::list_enabled(&mut conn, r.id, "title").await?;
         let bodies = texts::list_enabled(&mut conn, r.id, "body").await?;
@@ -350,6 +355,8 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
 
     let shortage_json = serde_json::to_string(&shortage)?;
     planning::set_shortage(&mut tx, sheet_id, &shortage_json).await?;
+    // 记下生成时刻：此后任务行的改动才算「人工调整」（重生成前要确认，见 E6）。
+    planning::mark_generated(&mut tx, sheet_id).await?;
     tx.commit().await?;
 
     let _ = rows; // 行数已由 sheet_rows 复算，无需回传

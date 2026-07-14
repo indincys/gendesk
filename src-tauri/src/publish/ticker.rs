@@ -59,31 +59,35 @@ pub async fn run_catchup(pool: &SqlitePool, app: &AppHandle) -> Vec<String> {
     let today = now.date_naive();
     let autogen = parse_hm(&settings.autogen_time);
 
-    // 预取存在性（同步闭包不能 await，故先查两日）。
-    let today_s = today.format("%Y-%m-%d").to_string();
-    let tomorrow_s = (today + Duration::days(1)).format("%Y-%m-%d").to_string();
-    let today_exists = planning::get_sheet_by_date(pool, &today_s)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    let tomorrow_exists = planning::get_sheet_by_date(pool, &tomorrow_s)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    let exists = |d: &str| (d == today_s && today_exists) || (d == tomorrow_s && tomorrow_exists);
-    let dates = catchup_dates(today, now.time(), autogen, &exists);
-
     let mut generated = Vec::new();
-    for date in dates {
-        match planner::generate_sheet(pool, &date, &settings).await {
-            Ok(sheet_id) => {
-                crate::publish::inbox::watcher::emit_badges(pool, app).await;
-                let _ = sheet_id;
-                generated.push(date);
+    // 暂停排期（节假日）：只跳过①②生成，超时扫描与对账照常——回收闭环停了的话，
+    // 暂停期间已导出的单永远收不回来。手动 generate_sheet 也不受影响。
+    if settings.schedule_paused {
+        tracing::info!("排期已暂停，跳过自动生成（对账与超时扫描照常）");
+    } else {
+        // 预取存在性（同步闭包不能 await，故先查两日）。
+        let today_s = today.format("%Y-%m-%d").to_string();
+        let tomorrow_s = (today + Duration::days(1)).format("%Y-%m-%d").to_string();
+        let today_exists = planning::get_sheet_by_date(pool, &today_s)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let tomorrow_exists = planning::get_sheet_by_date(pool, &tomorrow_s)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let exists =
+            |d: &str| (d == today_s && today_exists) || (d == tomorrow_s && tomorrow_exists);
+        for date in catchup_dates(today, now.time(), autogen, &exists) {
+            match planner::generate_sheet(pool, &date, &settings).await {
+                Ok(_) => {
+                    crate::publish::inbox::watcher::emit_badges(pool, app).await;
+                    generated.push(date);
+                }
+                Err(e) => tracing::warn!(error = %e, date, "补跑生成任务单失败"),
             }
-            Err(e) => tracing::warn!(error = %e, date, "补跑生成任务单失败"),
         }
     }
 
@@ -102,7 +106,80 @@ pub async fn run_catchup(pool: &SqlitePool, app: &AppHandle) -> Vec<String> {
     // 顺带跑一轮对账（回执可能已回写但未触发 watcher）。
     crate::commands::publish_reconcile::reconcile_run(pool, app).await;
 
+    // 归档清理：每天只跑一次（日期变了才跑），避免每 5 分钟扫一遍磁盘。
+    if settings.archive_retention_days > 0 {
+        let today_s = today.format("%Y-%m-%d").to_string();
+        let last = LAST_SWEEP_DAY.lock().ok().map(|g| g.clone());
+        if last.as_deref() != Some(today_s.as_str()) {
+            if let Ok(mut g) = LAST_SWEEP_DAY.lock() {
+                *g = today_s;
+            }
+            sweep_archives(pool, &settings, today).await;
+        }
+    }
+
     generated
+}
+
+/// 上次跑归档清理的日期（进程内，重启后当天会再跑一次——清理是幂等的）。
+static LAST_SWEEP_DAY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 目录名（`YYYYMMDD`）是否已超出保留期。
+fn dir_expired(name: &str, today: NaiveDate, retention_days: i64) -> bool {
+    let Ok(d) = NaiveDate::parse_from_str(name, "%Y%m%d") else {
+        return false; // 名字不是日期的目录一律不动
+    };
+    (today - d).num_days() > retention_days
+}
+
+/// 删除超期归档：收件箱 已收录/ 与 已丢弃/ 下的过期日期目录 +
+/// **已关闭**任务单的过期任务包目录（未关闭的绝不删——回执还没收完）。
+/// inbox_items / task_sheets 的 DB 记录保留，历史仍可查。
+async fn sweep_archives(pool: &SqlitePool, settings: &PublishSettings, today: NaiveDate) {
+    use crate::publish::paths::{self, RelPath};
+    let root = std::path::PathBuf::from(&settings.root_local);
+    let keep = settings.archive_retention_days;
+
+    let mut removed = 0usize;
+    for sub in paths::INBOX_ARCHIVES {
+        let dir = RelPath::from_parts([paths::INBOX, sub]).to_local(&root);
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_dir() && dir_expired(&name, today, keep) {
+                match std::fs::remove_dir_all(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(e) => tracing::warn!(dir = %name, error = %e, "清理归档目录失败"),
+                }
+            }
+        }
+    }
+
+    // 任务包：只删已关闭的单（未关闭 = 回执还没收完，删了就永远收不回来）。
+    let closed: Vec<String> =
+        sqlx::query_scalar("SELECT date FROM task_sheets WHERE status='closed'")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    let pkg_root = RelPath::from_parts([paths::TASK_PACKAGES]).to_local(&root);
+    for date in closed {
+        let yyyymmdd: String = date.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !dir_expired(&yyyymmdd, today, keep) {
+            continue;
+        }
+        let dir = pkg_root.join(&yyyymmdd);
+        if dir.is_dir() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::warn!(dir = %yyyymmdd, error = %e, "清理任务包目录失败"),
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, retention_days = keep, "归档清理完成");
+    }
 }
 
 /// 启动定时循环：立即补跑一次，此后每 5 分钟一轮（P3 会在此加超时扫描）。
@@ -164,5 +241,74 @@ mod tests {
         assert_eq!(parse_hm("07:30"), (7, 30));
         assert_eq!(parse_hm("bad"), (22, 0));
         assert_eq!(parse_hm("99:99"), (22, 0));
+    }
+
+    // E5：只删超期的日期目录；未到期的、名字不是日期的一概不动。
+    #[test]
+    fn only_expired_date_dirs_are_swept() {
+        let today = d(2026, 7, 15);
+        assert!(dir_expired("20260101", today, 90), "195 天前 > 90 天保留期");
+        assert!(!dir_expired("20260701", today, 90), "14 天前，未到期");
+        assert!(!dir_expired("任务单备份", today, 90), "非日期目录不动");
+        assert!(
+            !dir_expired("20260715", today, 0),
+            "0 = 永久保留（调用方已跳过）"
+        );
+    }
+
+    // E5/E7 端到端：过期的已关闭任务包被删，未关闭的留下；暂停时不生成草稿。
+    #[tokio::test]
+    async fn sweep_keeps_unclosed_packages() {
+        use crate::commands::publish_settings::ensure_partitions;
+        use crate::db::repo::planning as prepo;
+        use crate::db::test_support::test_pool;
+        use crate::publish::paths::RelPath;
+
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        let today = d(2026, 7, 15);
+
+        // 两个 100 天前的任务包：一个已关闭、一个仍在回收中。
+        let mut conn = pool.acquire().await.unwrap();
+        let closed = prepo::create_sheet(&mut conn, "2026-04-06").await.unwrap();
+        prepo::set_sheet_status(&mut conn, closed, "closed")
+            .await
+            .unwrap();
+        let open = prepo::create_sheet(&mut conn, "2026-04-07").await.unwrap();
+        prepo::set_sheet_status(&mut conn, open, "reconciling")
+            .await
+            .unwrap();
+        drop(conn);
+
+        for day in ["20260406", "20260407"] {
+            let p = RelPath::from_parts(["任务包", day]).to_local(root);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("任务单.xlsx"), b"x").unwrap();
+        }
+        // 过期的收件箱归档。
+        let old_inbox = RelPath::from_parts(["收件箱", "已收录", "20260101"]).to_local(root);
+        std::fs::create_dir_all(&old_inbox).unwrap();
+
+        let settings = PublishSettings {
+            root_local: root.to_string_lossy().to_string(),
+            archive_retention_days: 90,
+            ..PublishSettings::default()
+        };
+        sweep_archives(&pool, &settings, today).await;
+
+        assert!(
+            !RelPath::from_parts(["任务包", "20260406"])
+                .to_local(root)
+                .exists(),
+            "已关闭且超期 → 删"
+        );
+        assert!(
+            RelPath::from_parts(["任务包", "20260407"])
+                .to_local(root)
+                .exists(),
+            "未关闭 → 绝不删（回执还没收完）"
+        );
+        assert!(!old_inbox.exists(), "超期的收件箱归档 → 删");
     }
 }

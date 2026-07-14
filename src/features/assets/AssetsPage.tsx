@@ -447,10 +447,17 @@ function PoolCounts({ s }: { s: SkuView }) {
   );
 }
 
+/**
+ * 日期标签。跨年时补上年份——「12月3日」在 7 月看到，到底是去年的还是今年的，
+ * 光看月日说不清（冷却中的包尤其要紧，那关系到它什么时候回可用）。
+ */
 function lastPublishLabel(ts: number | null): string {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
-  return `${d.getMonth() + 1}月${d.getDate()}日`;
+  const now = new Date();
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  return sameYear ? md : `${d.getFullYear()}年${md}`;
 }
 
 function SkuRow({ s, onOpen }: { s: SkuView; onOpen: (id: number) => void }) {

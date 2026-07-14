@@ -1091,7 +1091,10 @@ async restorePack(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 删除素材包：校验锁定 → 物理删目录 + 删记录。
+ * 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
+ * 
+ * **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
+ * 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
  */
 async deletePack(id: number) : Promise<Result<null, AppError>> {
     try {
@@ -1430,6 +1433,7 @@ async getReport(sheetId: number) : Promise<Result<ReportView | null, AppError>> 
 export const events = __makeEvents__<{
 backupProgress: BackupProgress,
 batchSummary: BatchSummary,
+exportProgressEvent: ExportProgressEvent,
 inboxIngestEvent: InboxIngestEvent,
 keyHealth: KeyHealth,
 publishBadgesEvent: PublishBadgesEvent,
@@ -1440,6 +1444,7 @@ updateStateChanged: UpdateStateChanged
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
+exportProgressEvent: "export-progress-event",
 inboxIngestEvent: "inbox-ingest-event",
 keyHealth: "key-health",
 publishBadgesEvent: "publish-badges-event",
@@ -1598,6 +1603,10 @@ export type DataDirInfo = { root: string; dbPath: string }
  */
 export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
 /**
+ * `publish://export-progress`：任务包导出进度（复制视频可达数百 MB，UI 需要交代）。
+ */
+export type ExportProgressEvent = { sheetId: number; done: number; total: number }
+/**
  * 导出结果。
  */
 export type ExportResult = { 
@@ -1715,7 +1724,7 @@ export type IngestOutcome =
 /**
  * TXT 成功入库并归档。
  */
-{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; topicsAdopted: string[]; topicDiff: string | null } | 
+{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; duplicates: number; topicsAdopted: string[]; topicDiff: string | null } | 
 /**
  * 媒体文件夹成包入库（自动归集或人工认领后）。
  */
@@ -1811,7 +1820,15 @@ availableAt: number | null;
 /**
  * 被未关闭任务单引用（锁定）。
  */
-locked: boolean; source: string; note: string; fileCount: number; createdAt: number; updatedAt: number }
+locked: boolean; 
+/**
+ * 累计发布次数（台账）。
+ */
+publishCount: number; 
+/**
+ * 最近一次发布（Unix 秒；从未发布为 null）。
+ */
+lastPublished: number | null; source: string; note: string; fileCount: number; createdAt: number; updatedAt: number }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 /**
  * 平台标签信息（暴露给前端做矩阵/选择器渲染，避免前端重复中文映射）。
@@ -1933,11 +1950,20 @@ minGapMinutes?: number; platformMatrix?: PlatformMatrix; tierRules?: TierRules;
 /**
  * 时段模板（`HH:MM-HH:MM`）。
  */
-timeSlots?: string[] }
+timeSlots?: string[]; 
+/**
+ * 归档保留天数（收件箱已收录/已丢弃、已关闭的任务包）；0 = 永久保留。
+ */
+archiveRetentionDays?: number; 
+/**
+ * 暂停排期（节假日）：ticker 不再自动生成草稿，但**超时扫描与对账照常**
+ * ——回收闭环不能停，否则暂停期间已导出的单永远收不回来。
+ */
+schedulePaused?: boolean }
 /**
  * 设置补丁（部分更新）。
  */
-export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null }
+export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
 /**
  * 对账结果汇总。
  */
@@ -2049,7 +2075,12 @@ export type SheetChangedEvent = { sheetId: number; date: string; status: string;
  * 汇总计数（待执行/已发布/失败/疑似/已取消）。
  */
 pending: number; published: number; failed: number; suspect: number; canceled: number }
-export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[] }
+export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[]; 
+/**
+ * 生成之后有过人工调整（改时间/增补行/换套装）。重生成会清掉这些改动，
+ * 前端据此在「重新生成」前弹确认。
+ */
+edited: boolean }
 export type SheetSummary = { id: number; date: string; status: string; taskCount: number; shortageCount: number; 
 /**
  * 各状态计数（待执行/已发布/失败/疑似/已取消）。

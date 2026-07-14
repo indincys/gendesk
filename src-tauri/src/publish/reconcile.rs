@@ -13,19 +13,23 @@ use crate::error::{AppError, AppResult};
 use crate::publish::xlsx::reader::{parse_rpa, ReceiptRow};
 
 /// 失败六类分类（纯函数）：按执行器回写文案关键字归类。
+///
+/// **优先级有讲究**：timeout 排在 content/login 之前——「上传素材超时」既含「素材」
+/// 又含「超时」，它是网络问题（可自动补排），不是素材不合规（要退役素材包）。
+/// 归错类的代价是把好素材退役掉，且不补排。
 pub fn classify_fail(text: &str) -> &'static str {
     let t = text;
-    if t.contains("登录") {
-        "login"
+    if t.contains("超时") || t.contains("网络") || t.contains("连接") {
+        "timeout"
     } else if t.contains("风控") || t.contains("限流") || t.contains("频率") {
         "risk"
+    } else if t.contains("登录") || t.contains("未授权") || t.contains("cookie") {
+        "login"
     } else if t.contains("素材") || t.contains("不合规") || t.contains("违规") || t.contains("审核")
     {
         "content"
-    } else if t.contains("页面") || t.contains("变更") {
+    } else if t.contains("页面") || t.contains("变更") || t.contains("元素") {
         "page"
-    } else if t.contains("超时") || t.contains("网络") {
-        "timeout"
     } else {
         "other"
     }
@@ -595,7 +599,7 @@ mod e2e {
             .await
             .unwrap();
         drop(conn);
-        crate::publish::exporter::export_package(&pool, sheet_id, &s)
+        crate::publish::exporter::export_package(&pool, sheet_id, &s, None)
             .await
             .unwrap();
 
@@ -919,6 +923,19 @@ mod tests {
         assert_eq!(classify_fail("页面变更"), "page");
         assert_eq!(classify_fail("网络超时"), "timeout");
         assert_eq!(classify_fail("莫名其妙"), "other");
+    }
+
+    // E8：歧义文案的优先级。归错类的代价不对称——把网络超时判成「素材不合规」，
+    // 会白白退役一个好素材包，而且不会自动补排。
+    #[test]
+    fn ambiguous_text_prefers_timeout() {
+        assert_eq!(classify_fail("上传素材超时"), "timeout");
+        assert_eq!(classify_fail("网络异常导致审核未提交"), "timeout");
+        assert_eq!(classify_fail("登录时网络连接失败"), "timeout");
+        // 无超时线索时才落到各自的类。
+        assert_eq!(classify_fail("素材审核未通过"), "content");
+        assert_eq!(classify_fail("cookie 已失效"), "login");
+        assert_eq!(classify_fail("页面元素找不到"), "page");
     }
 
     #[test]

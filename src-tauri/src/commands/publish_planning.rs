@@ -8,7 +8,7 @@ use tauri_specta::Event;
 use crate::commands::publish_settings;
 use crate::db::repo::{accounts, assets, ledger, planning, texts};
 use crate::error::{AppError, AppResult};
-use crate::publish::events::SheetChangedEvent;
+use crate::publish::events::{ExportProgressEvent, SheetChangedEvent};
 use crate::publish::planner::{self, set_picker, ShortageItem};
 use crate::publish::platform::Platform;
 use crate::state::AppState;
@@ -63,6 +63,9 @@ pub struct SheetDetail {
     pub status: String,
     pub shortage: Vec<ShortageItem>,
     pub rows: Vec<TaskRowView>,
+    /// 生成之后有过人工调整（改时间/增补行/换套装）。重生成会清掉这些改动，
+    /// 前端据此在「重新生成」前弹确认。
+    pub edited: bool,
 }
 
 // ─────────────────────────────────────────────── 辅助
@@ -132,12 +135,14 @@ async fn build_detail(state: &AppState, sheet_id: i64) -> AppResult<SheetDetail>
         .collect();
     let shortage: Vec<ShortageItem> =
         serde_json::from_str(&sheet.shortage_json).unwrap_or_default();
+    let edited = planning::is_edited(&state.db, sheet_id).await?;
     Ok(SheetDetail {
         id: sheet.id,
         date: sheet.date,
         status: sheet.status,
         shortage,
         rows,
+        edited,
     })
 }
 
@@ -180,11 +185,37 @@ pub async fn generate_sheet(
 #[tauri::command]
 #[specta::specta]
 pub async fn list_sheets(state: State<'_, AppState>) -> AppResult<Vec<SheetSummary>> {
-    let mut out = Vec::new();
-    for s in planning::list_sheets(&state.db).await? {
-        out.push(build_summary(&state.db, s).await?);
-    }
-    Ok(out)
+    // 两条查询搞定：单据表 + 一条 GROUP BY 的状态计数。
+    // 原来是每张单拉全部任务行再在内存里数，单据攒到几十张就明显卡。
+    let counts = planning::sheet_status_counts(&state.db).await?;
+    Ok(planning::list_sheets(&state.db)
+        .await?
+        .into_iter()
+        .map(|s| {
+            let shortage: Vec<ShortageItem> =
+                serde_json::from_str(&s.shortage_json).unwrap_or_default();
+            let n = |st: &str| counts.get(&(s.id, st.to_string())).copied().unwrap_or(0);
+            SheetSummary {
+                task_count: n("pending")
+                    + n("published")
+                    + n("failed")
+                    + n("suspect")
+                    + n("canceled"),
+                shortage_count: shortage
+                    .iter()
+                    .filter(|i| i.reason != "timeout_backfill")
+                    .count() as i64,
+                pending: n("pending"),
+                published: n("published"),
+                failed: n("failed"),
+                suspect: n("suspect"),
+                canceled: n("canceled"),
+                id: s.id,
+                date: s.date,
+                status: s.status,
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -559,7 +590,19 @@ pub async fn export_package(
     sheet_id: i64,
 ) -> AppResult<crate::publish::exporter::ExportResult> {
     let settings = publish_settings::load(&state.db).await?;
-    let res = crate::publish::exporter::export_package(&state.db, sheet_id, &settings).await?;
+    // 每复制完一个文件推一次进度（文件数至多数百，无需节流）。
+    let handle = app.clone();
+    let progress: crate::publish::exporter::ProgressFn = std::sync::Arc::new(move |done, total| {
+        let _ = ExportProgressEvent {
+            sheet_id,
+            done,
+            total,
+        }
+        .emit(&handle);
+    });
+    let res =
+        crate::publish::exporter::export_package(&state.db, sheet_id, &settings, Some(progress))
+            .await?;
     emit_changed(&app, &state.db, sheet_id).await;
     Ok(res)
 }

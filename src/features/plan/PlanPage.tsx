@@ -10,6 +10,7 @@ import {
   type SheetSummary,
   type TaskRowView,
   commands,
+  subscribeExportProgress,
   unwrap,
 } from "@/lib/ipc";
 import { failKindLabel, isShortage, pubTaskVisual, sheetVisual, shortageLabel } from "@/lib/status";
@@ -26,6 +27,40 @@ export function PlanPage() {
   const [tab, setTab] = useState<Tab>("sheets");
   const [openSheet, setOpenSheet] = useState<number | null>(null);
   const badges = usePublishStore((s) => s.badges);
+  const [paused, setPaused] = useState(false);
+
+  useEffect(() => {
+    void unwrap(commands.getPublishSettings()).then((s) => setPaused(s.schedulePaused ?? false));
+  }, []);
+  const togglePause = async () => {
+    const next = !paused;
+    try {
+      await unwrap(
+        commands.updatePublishSettings({
+          rootLocal: null,
+          rootExec: null,
+          pathStyle: null,
+          dedupDays: null,
+          receiptTimeoutHours: null,
+          autogenTime: null,
+          warnMaterial: null,
+          warnTitle: null,
+          warnBody: null,
+          accountDailyLimitDefault: null,
+          minGapMinutes: null,
+          platformMatrix: null,
+          tierRules: null,
+          timeSlots: null,
+          archiveRetentionDays: null,
+          schedulePaused: next,
+        }),
+      );
+      setPaused(next);
+      toast.success(next ? "排期已暂停（对账与超时扫描照常）" : "排期已恢复");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
 
   return (
     <div className="col f1 ohide">
@@ -57,7 +92,22 @@ export function PlanPage() {
           </span>
         </div>
         <div className="f1" />
+        {/* 节假日暂停：只停自动生成草稿，超时扫描与对账照常——
+            回收闭环停了的话，暂停期间已导出的单永远收不回来。 */}
+        <span className="fs11 t3">排期</span>
+        <Toggle on={!paused} onClick={() => void togglePause()} />
+        <span className={cn("fs11", paused ? "b-amber" : "t3")}>
+          {paused ? "已暂停" : "运行中"}
+        </span>
       </div>
+
+      {paused && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            排期已暂停 — 不再自动生成明日草稿；回执对账与超时扫描照常，手动生成也仍可用
+          </span>
+        </div>
+      )}
 
       {tab === "board" && (
         <Board
@@ -408,6 +458,7 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   const [addOpen, setAddOpen] = useState(false);
   const [confirmExport, setConfirmExport] = useState(false);
   const [cancelRow, setCancelRow] = useState<TaskRowView | null>(null);
+  const [confirmRegen, setConfirmRegen] = useState(false);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
 
   const lastSheetChanged = usePublishStore((s) => s.lastSheetChanged);
@@ -432,6 +483,11 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   // shortage_json 兼装了真·缺料与「补排」提示，分开渲染（含义完全不同）。
   const shortages = detail.shortage.filter((s) => isShortage(s.reason));
   const backfills = detail.shortage.filter((s) => !isShortage(s.reason));
+
+  const regenerate = async () => {
+    setConfirmRegen(false);
+    await act(() => unwrap(commands.generateSheet(detail.date)), "已按当前素材重新生成");
+  };
 
   const act = async (fn: () => Promise<unknown>, ok?: string) => {
     try {
@@ -467,6 +523,17 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
           {v.label}
         </span>
         <div className="f1" />
+        {isDraft && (
+          <button
+            type="button"
+            className="btn sm gho"
+            title="按当前素材/频率/账号重算这一天（会清掉人工调整）"
+            onClick={() => (detail.edited ? setConfirmRegen(true) : void regenerate())}
+          >
+            <RefreshCw className="ic12" />
+            重新生成
+          </button>
+        )}
         {isDraft && (
           <button type="button" className="btn sm gho" onClick={() => setAddOpen(true)}>
             <Plus className="ic12" />
@@ -710,6 +777,15 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
           }}
         />
       )}
+      {confirmRegen && (
+        <ConfirmModal
+          title="重新生成任务单"
+          desc="这张草稿有人工调整（改过时间 / 增补过行 / 换过套装）。重新生成会按当前素材、频率与账号重算整张单，那些调整会被清掉。"
+          confirmLabel="仍然重新生成"
+          onConfirm={() => void regenerate()}
+          onClose={() => setConfirmRegen(false)}
+        />
+      )}
       {cancelRow && (
         <ConfirmModal
           title="取消这条任务"
@@ -753,6 +829,7 @@ function ExportModal({
 }) {
   const [report, setReport] = useState<PreflightReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
     void unwrap(commands.preflightExport(sheetId))
@@ -762,6 +839,17 @@ function ExportModal({
         onClose();
       });
   }, [sheetId, onClose]);
+
+  // 导出期间的进度（复制视频可达数百 MB，不能只显示一个转圈）。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void subscribeExportProgress((e) => {
+      if (e.sheetId === sheetId) setProgress({ done: e.done, total: e.total });
+    }).then((f) => {
+      un = f;
+    });
+    return () => un?.();
+  }, [sheetId]);
 
   const blocked = report == null || report.errors.length > 0;
   const doExport = async () => {
@@ -796,7 +884,11 @@ function ExportModal({
             disabled={blocked || busy}
             onClick={() => void doExport()}
           >
-            {busy ? "导出中…" : "确认导出"}
+            {busy
+              ? progress
+                ? `导出中 ${progress.done}/${progress.total}…`
+                : "导出中…"
+              : "确认导出"}
           </button>
         </>
       }
@@ -1086,6 +1178,8 @@ function StrategyTab() {
           platformMatrix: null,
           tierRules: null,
           timeSlots: null,
+          archiveRetentionDays: null,
+          schedulePaused: null,
           ...p,
         }),
       );

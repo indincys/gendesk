@@ -122,6 +122,28 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// **批量**取「被未关闭任务单引用」的包 id 集合（列表视图用，替代逐包查询）。
+pub async fn locked_ids(
+    pool: &SqlitePool,
+    pack_ids: &[i64],
+) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+    if pack_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let placeholders = vec!["?"; pack_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT ds.pack_id FROM publish_tasks pt
+         JOIN daily_sets ds ON ds.id = pt.set_id
+         JOIN task_sheets s ON s.id = pt.sheet_id
+         WHERE ds.pack_id IN ({placeholders}) AND s.status != 'closed'"
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for id in pack_ids {
+        q = q.bind(id);
+    }
+    Ok(q.fetch_all(pool).await?.into_iter().collect())
+}
+
 /// 是否被状态 ≠ closed 的任务单引用（锁定判定，前置事实 7）。P2 起 daily_sets/publish_tasks
 /// 填充后生效；P1 无引用恒返回 false。
 pub async fn is_locked(pool: &SqlitePool, pack_id: i64) -> Result<bool, sqlx::Error> {

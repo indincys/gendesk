@@ -43,6 +43,8 @@ export function PublishSyncSection() {
           platformMatrix: null,
           tierRules: null,
           timeSlots: null,
+          archiveRetentionDays: null,
+          schedulePaused: null,
           ...p,
         }),
       );
@@ -158,6 +160,16 @@ export function PublishSyncSection() {
           <span className={cn("fs11", isHhmm(s.autogenTime) ? "t3" : "terr")}>
             {isHhmm(s.autogenTime) ? "HH:MM · 自动生成明日草稿" : "格式应为 HH:MM（00:00–23:59）"}
           </span>
+        </div>
+        <div className="fx ac gap8">
+          <span className="fs12 t2 nowrap">归档保留</span>
+          <Stepper
+            value={s.archiveRetentionDays ?? 90}
+            min={0}
+            max={365}
+            onChange={(v) => void patch({ archiveRetentionDays: v })}
+          />
+          <span className="fs11 t3">天 · 清理收件箱归档与已关闭的任务包（0 = 永久保留）</span>
         </div>
       </div>
 

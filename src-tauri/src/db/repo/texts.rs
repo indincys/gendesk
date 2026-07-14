@@ -138,3 +138,21 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .await?;
     Ok(())
 }
+
+/// 同 SKU、同类型、同文本是否已存在（入库查重：AI 反复生成同一句是常态）。
+pub async fn exists_same(
+    conn: &mut SqliteConnection,
+    sku_id: i64,
+    kind: &str,
+    text: &str,
+) -> Result<bool, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM text_items WHERE sku_id = ?1 AND kind = ?2 AND text = ?3",
+    )
+    .bind(sku_id)
+    .bind(kind)
+    .bind(text)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(n > 0)
+}

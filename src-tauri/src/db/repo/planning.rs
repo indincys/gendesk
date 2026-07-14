@@ -14,6 +14,8 @@ pub struct SheetRow {
     pub report_json: Option<String>,
     pub exported_at: Option<i64>,
     pub closed_at: Option<i64>,
+    /// 最近一次「生成/重生成」的时刻（此后的行改动即人工调整，见 `is_edited`）。
+    pub generated_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -73,6 +75,21 @@ pub async fn get_sheet(pool: &SqlitePool, id: i64) -> Result<Option<SheetRow>, s
         .await
 }
 
+/// 全部任务单的 (sheet_id, status) → 计数：**一条** GROUP BY，替代「每张单拉全部行再数」。
+pub async fn sheet_status_counts(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashMap<(i64, String), i64>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT sheet_id, status, COUNT(*) FROM publish_tasks GROUP BY sheet_id, status",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(sid, st, n)| ((sid, st), n))
+        .collect())
+}
+
 use sqlx::SqliteConnection;
 
 /// 创建任务单（草稿），返回 id。
@@ -102,6 +119,29 @@ pub async fn clear_sheet_children(
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+/// 标记「本单刚刚（重）生成」——此后任务行的 updated_at 变化即人工调整。
+pub async fn mark_generated(conn: &mut SqliteConnection, sheet_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE task_sheets SET generated_at = ?2 WHERE id = ?1")
+        .bind(sheet_id)
+        .bind(crate::db::now_unix())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// 生成之后是否有人工调整（改时间 / 增补行 / 换套装）。
+/// 重生成会 `clear_sheet_children` 清掉这些改动，所以要先问一句。
+pub async fn is_edited(pool: &SqlitePool, sheet_id: i64) -> Result<bool, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM publish_tasks pt JOIN task_sheets s ON s.id = pt.sheet_id
+         WHERE pt.sheet_id = ?1 AND pt.updated_at > COALESCE(s.generated_at, s.created_at) + 1",
+    )
+    .bind(sheet_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(n > 0)
 }
 
 /// 写入缺料清单 JSON。

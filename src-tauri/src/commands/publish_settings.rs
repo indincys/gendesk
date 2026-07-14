@@ -110,6 +110,13 @@ pub struct PublishSettings {
     /// 时段模板（`HH:MM-HH:MM`）。
     #[serde(default = "d_time_slots")]
     pub time_slots: Vec<String>,
+    /// 归档保留天数（收件箱已收录/已丢弃、已关闭的任务包）；0 = 永久保留。
+    #[serde(default = "d_retention")]
+    pub archive_retention_days: i64,
+    /// 暂停排期（节假日）：ticker 不再自动生成草稿，但**超时扫描与对账照常**
+    /// ——回收闭环不能停，否则暂停期间已导出的单永远收不回来。
+    #[serde(default)]
+    pub schedule_paused: bool,
 }
 
 fn default_path_style() -> String {
@@ -146,6 +153,9 @@ fn d_time_slots() -> Vec<String> {
         "21:00-22:30".into(),
     ]
 }
+fn d_retention() -> i64 {
+    90
+}
 
 impl Default for PublishSettings {
     fn default() -> Self {
@@ -164,6 +174,8 @@ impl Default for PublishSettings {
             platform_matrix: PlatformMatrix::default(),
             tier_rules: TierRules::default(),
             time_slots: d_time_slots(),
+            archive_retention_days: d_retention(),
+            schedule_paused: false,
         }
     }
 }
@@ -186,6 +198,7 @@ impl PublishSettings {
         self.tier_rules.hot_daily = self.tier_rules.hot_daily.clamp(0, 1);
         self.tier_rules.warm_weekly = self.tier_rules.warm_weekly.clamp(0, 7);
         self.tier_rules.cold_weekly_rotate = self.tier_rules.cold_weekly_rotate.clamp(0, 100);
+        self.archive_retention_days = self.archive_retention_days.clamp(0, 3650);
 
         if scheduler::parse_hhmm(&self.autogen_time).is_none() {
             tracing::warn!(value = %self.autogen_time, "每日生成时间非法，回退默认");
@@ -238,6 +251,8 @@ pub struct PublishSettingsPatch {
     pub platform_matrix: Option<PlatformMatrix>,
     pub tier_rules: Option<TierRules>,
     pub time_slots: Option<Vec<String>>,
+    pub archive_retention_days: Option<i64>,
+    pub schedule_paused: Option<bool>,
 }
 
 /// 从连接池加载发布设置（供 watcher/ticker 读取）。
@@ -335,6 +350,12 @@ pub async fn update_publish_settings(
     }
     if let Some(v) = patch.time_slots {
         s.time_slots = v;
+    }
+    if let Some(v) = patch.archive_retention_days {
+        s.archive_retention_days = v;
+    }
+    if let Some(v) = patch.schedule_paused {
+        s.schedule_paused = v;
     }
     // 时间字段先拒后清：非法输入报错回前端，不静默改成别的值。
     validate_times(&s)?;

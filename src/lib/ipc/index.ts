@@ -86,6 +86,7 @@ export type {
   PublishBadgesEvent,
   InboxIngestEvent,
   SheetChangedEvent,
+  ExportProgressEvent,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -157,6 +158,18 @@ export async function subscribePublish(handlers: {
   return () => {
     for (const un of unlisteners) un();
   };
+}
+
+/**
+ * 订阅任务包导出进度（复制视频可达数百 MB，导出期间需要交代进度）。
+ * 仅导出弹窗打开期间临时挂载。
+ */
+export async function subscribeExportProgress(
+  handler: (e: import("./bindings").ExportProgressEvent) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.exportProgressEvent.listen((e) => handler(e.payload));
+  return () => un();
 }
 
 /**

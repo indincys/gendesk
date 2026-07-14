@@ -490,6 +490,45 @@ async fn pick_set_for(
         .map_err(|e| AppError::InvalidInput(format!("换套装失败：{}", e.label())))
 }
 
+/// 导出任务包（confirmed → exported；重导出=整包覆盖）。
+#[tauri::command]
+#[specta::specta]
+pub async fn export_package(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    sheet_id: i64,
+) -> AppResult<crate::publish::exporter::ExportResult> {
+    let settings = publish_settings::load(&state.db).await?;
+    let res = crate::publish::exporter::export_package(&state.db, sheet_id, &settings).await?;
+    emit_changed(&app, &state.db, sheet_id).await;
+    Ok(res)
+}
+
+/// 在文件管理器中打开任务包目录。
+#[tauri::command]
+#[specta::specta]
+pub async fn open_package_dir(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    sheet_id: i64,
+) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let sheet = planning::get_sheet(&state.db, sheet_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
+    let root = publish_settings::root_local(&state.db).await?;
+    let yyyymmdd: String = sheet.date.chars().filter(|c| c.is_ascii_digit()).collect();
+    let dir = crate::publish::paths::RelPath::from_parts([
+        crate::publish::paths::TASK_PACKAGES,
+        &yyyymmdd,
+    ])
+    .to_local(&root);
+    std::fs::create_dir_all(&dir)?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+
 /// 内置「通用」以外的可排期 SKU（增补行选择器用）。
 #[tauri::command]
 #[specta::specta]

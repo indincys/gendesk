@@ -4,10 +4,13 @@
 //! 与现有引擎调度器互不干扰——各异步链路汇入各自的串行工作者（单写者纪律的发布版）。
 
 pub mod events;
+pub mod exporter;
 pub mod inbox;
 pub mod paths;
 pub mod planner;
 pub mod platform;
+pub mod ticker;
+pub mod xlsx;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

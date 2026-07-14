@@ -178,6 +178,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_planning::add_task_row,
             commands::publish_planning::reroll_set,
             commands::publish_planning::list_schedulable_skus,
+            commands::publish_planning::export_package,
+            commands::publish_planning::open_package_dir,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,
@@ -322,6 +324,8 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 publish::inbox::watcher::emit_badges(&pool_bg, &app_bg).await;
             });
+            // 应用内定时：启动补跑生成今日/明日草稿 + 每 5 分钟一轮。
+            publish::ticker::spawn(pool.clone(), app.handle().clone());
         }
     }
     app.manage(publish_state);

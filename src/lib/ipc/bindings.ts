@@ -1272,6 +1272,28 @@ async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * 导出任务包（confirmed → exported；重导出=整包覆盖）。
+ */
+async exportPackage(sheetId: number) : Promise<Result<ExportResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_package", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在文件管理器中打开任务包目录。
+ */
+async openPackageDir(sheetId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_package_dir", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1438,6 +1460,18 @@ export type DataDirInfo = { root: string; dbPath: string }
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */
 export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
+/**
+ * 导出结果。
+ */
+export type ExportResult = { 
+/**
+ * 包目录相对路径（任务包/YYYYMMDD）。
+ */
+pkgDirRel: string; rowCount: number; skuCount: number; fileCount: number; 
+/**
+ * 是否有超 Windows 长度上限的拼接路径（告警）。
+ */
+longPathWarn: boolean }
 /**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */

@@ -224,9 +224,12 @@ pub struct TaskRowJoin {
     pub style_name: String,
     pub product_name: String,
     pub title_text: String,
+    pub body_text: Option<String>,
     pub topics_json: String,
     pub cover: Option<String>,
     pub dir_rel: String,
+    pub pack_kind: String,
+    pub files_json: String,
     pub account_id: i64,
     pub account_name: String,
     pub platform: String,
@@ -244,7 +247,8 @@ pub async fn sheet_rows(pool: &SqlitePool, sheet_id: i64) -> Result<Vec<TaskRowJ
     sqlx::query_as::<_, TaskRowJoin>(
         "SELECT pt.id, pt.task_code, pt.set_id, ds.sku_id,
                 sk.code AS sku_code, sk.style_name, sk.product_name, sk.topics_json,
-                ti.text AS title_text, ap.cover, ap.dir_rel,
+                ti.text AS title_text, bt.text AS body_text,
+                ap.cover, ap.dir_rel, ap.kind AS pack_kind, ap.files_json,
                 pt.account_id, ac.name AS account_name,
                 pt.platform, pt.content_kind, pt.planned_time, pt.status,
                 pt.fail_kind, pt.result_url, pt.result_msg, pt.result_time, pt.screenshot
@@ -252,6 +256,7 @@ pub async fn sheet_rows(pool: &SqlitePool, sheet_id: i64) -> Result<Vec<TaskRowJ
          JOIN daily_sets ds ON ds.id = pt.set_id
          JOIN skus sk ON sk.id = ds.sku_id
          JOIN text_items ti ON ti.id = ds.title_id
+         LEFT JOIN text_items bt ON bt.id = ds.body_id
          JOIN asset_packs ap ON ap.id = ds.pack_id
          JOIN accounts ac ON ac.id = pt.account_id
          WHERE pt.sheet_id = ?1

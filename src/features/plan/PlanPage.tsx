@@ -1,0 +1,1137 @@
+import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { Stepper, Toggle } from "@/components/ui/Stepper";
+import { assetSrc } from "@/lib/img";
+import {
+  type AccountView,
+  type PublishSettings,
+  type PublishSettingsPatch,
+  type SheetDetail,
+  type SheetSummary,
+  type TaskRowView,
+  commands,
+  unwrap,
+} from "@/lib/ipc";
+import { failKindLabel, pubTaskVisual, sheetVisual } from "@/lib/status";
+import { cn } from "@/lib/utils";
+import { usePublishStore } from "@/stores/publish";
+import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
+
+type Tab = "board" | "sheets" | "strategy";
+
+/** 发布计划页（原型 publish.dc.html 发布计划三页签）。看板于 P3 充实。 */
+export function PlanPage() {
+  const [tab, setTab] = useState<Tab>("sheets");
+  const [openSheet, setOpenSheet] = useState<number | null>(null);
+  const badges = usePublishStore((s) => s.badges);
+
+  return (
+    <div className="col f1 ohide">
+      <div className="phd">
+        <span className="ptt">发布计划</span>
+        <div className="seg" style={{ marginLeft: 6 }}>
+          <span className={cn("sgi", tab === "board" && "on")} onClick={() => setTab("board")}>
+            看板
+          </span>
+          <span
+            className={cn("sgi", tab === "sheets" && "on")}
+            onClick={() => {
+              setTab("sheets");
+              setOpenSheet(null);
+            }}
+          >
+            任务单
+            {badges.pendingSheets > 0 && (
+              <span className="bdg b-amber" style={{ height: 16, padding: "0 5px" }}>
+                {badges.pendingSheets}
+              </span>
+            )}
+          </span>
+          <span
+            className={cn("sgi", tab === "strategy" && "on")}
+            onClick={() => setTab("strategy")}
+          >
+            策略与账号
+          </span>
+        </div>
+        <div className="f1" />
+      </div>
+
+      {tab === "board" && (
+        <Board
+          onOpenSheet={(id) => {
+            setTab("sheets");
+            setOpenSheet(id);
+          }}
+        />
+      )}
+      {tab === "sheets" &&
+        (openSheet == null ? (
+          <SheetList onOpen={setOpenSheet} />
+        ) : (
+          <Workbench sheetId={openSheet} onBack={() => setOpenSheet(null)} />
+        ))}
+      {tab === "strategy" && <StrategyTab />}
+    </div>
+  );
+}
+
+function todayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
+  const [dash, setDash] = useState<import("@/lib/ipc").DashboardView | null>(null);
+  const [report, setReport] = useState<import("@/lib/ipc").ReportView | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  const date = todayStr();
+
+  const load = useCallback(async () => {
+    try {
+      setDash(await unwrap(commands.getDashboard(date)));
+    } catch {
+      setDash(null);
+    }
+  }, [date]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!dash) {
+    return (
+      <div className="bigempty" style={{ padding: "72px 20px" }}>
+        <div className="fs13 fw5 t2">今日暂无任务单</div>
+        <div className="fs12 t3">配置根目录并生成任务单后，看板展示今日发布进度</div>
+      </div>
+    );
+  }
+
+  const sid = dash.sheetId;
+  const openReport = async () => {
+    if (sid == null) return;
+    const r = await unwrap(commands.getReport(sid));
+    setReport(r);
+    setShowReport(true);
+  };
+
+  return (
+    <div className="pbody">
+      <div className="statrow">
+        <div className="statcard">
+          <div className="stnum">{dash.plan}</div>
+          <div className="stlbl">今日计划任务</div>
+        </div>
+        <div className="statcard">
+          <div className="stnum" style={{ color: "var(--ok)" }}>
+            {dash.published}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--ok)" }} />
+            已发布
+          </div>
+        </div>
+        <div className="statcard">
+          <div className="stnum" style={{ color: "var(--er)" }}>
+            {dash.failed}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--er)" }} />
+            失败
+          </div>
+        </div>
+        <div
+          className={cn("statcard", dash.suspect > 0 && "hl")}
+          onClick={() => dash.sheetId != null && dash.suspect > 0 && onOpenSheet(dash.sheetId)}
+        >
+          <div className="stnum" style={{ color: "var(--wr)" }}>
+            {dash.suspect}
+          </div>
+          <div className="stlbl">
+            <span className="dt" style={{ background: "var(--wr)" }} />
+            待核对 · 疑似已发
+          </div>
+        </div>
+      </div>
+
+      {dash.suspect > 0 && (
+        <div className="ban" style={{ margin: "10px 18px 0" }}>
+          <span className="f1">
+            {dash.suspect} 个任务疑似已发 — 疑似已发绝不自动重发，需人工到平台后台核实后定态
+          </span>
+          {sid != null && (
+            <button type="button" className="btn sm" onClick={() => onOpenSheet(sid)}>
+              去核对
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="fx gap12" style={{ padding: "14px 18px 0", alignItems: "flex-start" }}>
+        <div className="card f1" style={{ minWidth: 0 }}>
+          <div className="chead">
+            <span className="fw6 fs13">按平台完成率</span>
+          </div>
+          {dash.platforms.map((p) => (
+            <div
+              key={p.platform}
+              className="fx ac gap10"
+              style={{ padding: "7px 14px", borderTop: "1px solid var(--line)" }}
+            >
+              <span className="fs12 fw5 nowrap" style={{ width: 52 }}>
+                {p.platformZh}
+              </span>
+              <div className="pbarw">
+                <i style={{ width: `${p.pct}%` }} />
+              </div>
+              <span className="mono fs11 t2 nowrap" style={{ width: 64, textAlign: "right" }}>
+                {p.done}/{p.total}
+              </span>
+            </div>
+          ))}
+          {dash.platforms.length === 0 && <div className="txrow t3 fs12">今日无任务</div>}
+        </div>
+        <div className="card f1" style={{ minWidth: 0 }}>
+          <div className="chead">
+            <span className="fw6 fs13">账号健康</span>
+            <span className="cnt">{dash.accounts.length}</span>
+          </div>
+          {dash.accounts.map((a) => (
+            <div
+              key={a.id}
+              className="fx ac gap8"
+              style={{ padding: "6px 14px", borderTop: "1px solid var(--line)", minHeight: 34 }}
+            >
+              <span className="bdg b-gray">{a.platformZh}</span>
+              <span className="fs12 fw5 f1 nowrap ohide">{a.name}</span>
+              <span className="mono fs11 t3 nowrap">
+                {a.used}/{a.dailyLimit}
+              </span>
+              <span
+                className={cn(
+                  "bdg",
+                  a.health === "normal" ? "b-green" : a.health === "circuit" ? "b-red" : "b-gray",
+                )}
+              >
+                {a.health === "normal" ? "正常" : a.health === "circuit" ? "当日熔断" : "停用"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {dash.hasReport && (
+        <div className="card" style={{ margin: "12px 18px 24px" }}>
+          <div className="chead">
+            <span className="fw6 fs13">日报</span>
+            <span className="pcap">任务单全部终态后自动关闭并生成</span>
+            <div className="f1" />
+            <button type="button" className="btn sm" onClick={() => void openReport()}>
+              查看日报
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showReport && report && <ReportModal report={report} onClose={() => setShowReport(false)} />}
+    </div>
+  );
+}
+
+function ReportModal({
+  report,
+  onClose,
+}: {
+  report: import("@/lib/ipc").ReportView;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      title={`日报 · ${report.date}`}
+      width="w640"
+      onClose={onClose}
+      headerExtra={
+        <span className="bdg b-green">
+          <span className="dt" />
+          已关闭
+        </span>
+      }
+    >
+      <div className="fx gap10">
+        {[
+          ["计划", report.plan, undefined],
+          ["成功", report.published, "var(--ok)"],
+          ["失败", report.failed, "var(--er)"],
+          ["成功率", `${report.successRate}%`, undefined],
+        ].map(([label, val, color]) => (
+          <div key={String(label)} className="rc">
+            <div className="stnum" style={{ fontSize: 20, color: color as string }}>
+              {val}
+            </div>
+            <div className="stlbl">{label}</div>
+          </div>
+        ))}
+      </div>
+      {report.fails.length > 0 && (
+        <>
+          <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+            失败清单
+          </div>
+          <div className="mt6 col gap6">
+            {report.fails.map((f) => (
+              <div key={f.taskCode} className="fx ac gap8">
+                <span className="pid">{f.taskCode}</span>
+                <span className="bdg b-red">{failKindLabel(f.kind)}</span>
+                <span className="fs12 f1 nowrap ohide">{f.skuCode}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {report.shortage.length > 0 && (
+        <>
+          <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+            缺料清单
+          </div>
+          <div className="fs12 mt6">{report.shortage.join("、")}</div>
+        </>
+      )}
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        明日建议
+      </div>
+      <div className="fs12 mt6" style={{ lineHeight: 1.8 }}>
+        {report.tips}
+      </div>
+    </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────── 任务单列表
+
+function SheetList({ onOpen }: { onOpen: (id: number) => void }) {
+  const [sheets, setSheets] = useState<SheetSummary[]>([]);
+  const [genTime, setGenTime] = useState("22:00");
+  const refreshBadges = usePublishStore((s) => s.refreshBadges);
+
+  const load = useCallback(async () => {
+    setSheets(await unwrap(commands.listSheets()));
+    try {
+      const s = await unwrap(commands.getPublishSettings());
+      setGenTime(s.autogenTime ?? "22:00");
+    } catch {
+      // ignore
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const genTomorrow = async () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate(),
+    ).padStart(2, "0")}`;
+    try {
+      await unwrap(commands.generateSheet(date));
+      toast.success(`已生成 ${date} 任务单草稿`);
+      await load();
+      void refreshBadges();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <>
+      <div className="fx ac gap8" style={{ padding: "10px 18px 8px" }}>
+        <span className="fs11 t3">每晚 {genTime} 自动生成明日任务单草稿 · 也可手动触发</span>
+        <div className="f1" />
+        <button type="button" className="btn sm" onClick={() => void genTomorrow()}>
+          <Plus className="ic12" />
+          生成明日任务单
+        </button>
+      </div>
+      <div className="f1" style={{ overflow: "auto", minHeight: 0 }}>
+        {sheets.map((s) => {
+          const v = sheetVisual(s.status);
+          const chips: { cls: string; t: string }[] = [];
+          if (s.published > 0) chips.push({ cls: "b-green", t: `已发 ${s.published}` });
+          if (s.failed > 0) chips.push({ cls: "b-red", t: `失败 ${s.failed}` });
+          if (s.suspect > 0) chips.push({ cls: "b-amber", t: `待核对 ${s.suspect}` });
+          if (s.shortageCount > 0) chips.push({ cls: "b-gray", t: `缺料 ${s.shortageCount}` });
+          return (
+            <div key={s.id} className="shrow" onClick={() => onOpen(s.id)}>
+              <span className="fw6 fs13 nowrap" style={{ width: 92 }}>
+                {s.date}
+              </span>
+              <span className="fs11 t3 nowrap" style={{ width: 44 }}>
+                {s.taskCount} 行
+              </span>
+              <span className={cn("bdg", v.badgeClass)}>
+                <span className="dt" />
+                {v.label}
+              </span>
+              <span className="f1" />
+              {chips.map((c) => (
+                <span key={c.t} className={cn("bdg", c.cls)}>
+                  {c.t}
+                </span>
+              ))}
+              <ChevronRight className="ic12 t3" />
+            </div>
+          );
+        })}
+        {sheets.length === 0 && (
+          <div className="bigempty" style={{ padding: "56px 20px" }}>
+            <div className="fs13 fw5 t2">暂无任务单</div>
+            <div className="fs12 t3">点「生成明日任务单」创建草稿；或等每晚定时生成</div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────── 工作台
+
+function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void }) {
+  const [detail, setDetail] = useState<SheetDetail | null>(null);
+  const [timeEdit, setTimeEdit] = useState<TaskRowView | null>(null);
+  const [verify, setVerify] = useState<TaskRowView | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [confirmExport, setConfirmExport] = useState(false);
+  const refreshBadges = usePublishStore((s) => s.refreshBadges);
+
+  const load = useCallback(async () => {
+    setDetail(await unwrap(commands.getSheet(sheetId)));
+  }, [sheetId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!detail) return <div className="col f1" />;
+  const v = sheetVisual(detail.status);
+  const isDraft = detail.status === "draft";
+  const isConfirmed = detail.status === "confirmed";
+  const isExported = detail.status === "exported" || detail.status === "reconciling";
+
+  const act = async (fn: () => Promise<unknown>, ok?: string) => {
+    try {
+      await fn();
+      if (ok) toast.success(ok);
+      await load();
+      void refreshBadges();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // 按 SKU 分组。
+  const groups = new Map<number, TaskRowView[]>();
+  for (const r of detail.rows) {
+    const arr = groups.get(r.skuId) ?? [];
+    arr.push(r);
+    groups.set(r.skuId, arr);
+  }
+
+  return (
+    <>
+      <div className="fx ac gap8" style={{ padding: "10px 18px 0" }}>
+        <button type="button" className="icb" onClick={onBack} aria-label="返回">
+          <ChevronLeft className="ic12" />
+        </button>
+        <span className="fw6 fs13 nowrap">任务单 · {detail.date}</span>
+        <span className="fs11 t3">
+          {detail.rows.length} 行 · {groups.size} 个 SKU
+        </span>
+        <span className={cn("bdg", v.badgeClass)}>
+          <span className="dt" />
+          {v.label}
+        </span>
+        <div className="f1" />
+        {isDraft && (
+          <button type="button" className="btn sm gho" onClick={() => setAddOpen(true)}>
+            <Plus className="ic12" />
+            增补任务行
+          </button>
+        )}
+        {isExported && (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() =>
+              void act(async () => {
+                const r = await unwrap(commands.importReceipts(sheetId));
+                toast.success(`对账完成：已发布 ${r.published} · 失败 ${r.failed}`);
+              })
+            }
+            title="从任务包 xlsx 手动导入回执对账"
+          >
+            <RefreshCw className="ic12" />
+            导入回执
+          </button>
+        )}
+      </div>
+
+      {detail.rows.some((r) => r.status === "suspect") && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            {detail.rows.filter((r) => r.status === "suspect").length} 个任务疑似已发 —
+            超时无回写。绝不自动重发；请人工到平台后台核实后定态
+          </span>
+        </div>
+      )}
+
+      {detail.shortage.length > 0 && (
+        <div className="ban" style={{ margin: "10px 18px 0" }}>
+          <span className="f1">
+            缺料清单：{detail.shortage.map((s) => `${s.code}（${s.reason}）`).join("、")} —
+            缺料不是报错，有料 SKU 已正常出草稿
+          </span>
+        </div>
+      )}
+
+      <div className="f1 mt10" style={{ overflow: "auto", minHeight: 0, paddingBottom: 8 }}>
+        {[...groups.entries()].map(([skuId, rows]) => {
+          const head = rows[0];
+          if (!head) return null;
+          return (
+            <div key={skuId} className="wgrp">
+              <div className="wgh">
+                <div
+                  className="ph"
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 7,
+                    flex: "none",
+                    ...bgCover(head.coverPath),
+                  }}
+                />
+                <span className="pid">{head.skuCode}</span>
+                <span className="fw5 fs12 nowrap ohide" style={{ maxWidth: 160 }}>
+                  {head.styleName}
+                </span>
+                <span className="fs11 t3 nowrap ohide f1" style={{ minWidth: 0 }}>
+                  {head.title}
+                </span>
+                {head.topics.slice(0, 3).map((t) => (
+                  <span key={t} className="tagchip">
+                    #{t}
+                  </span>
+                ))}
+                {isDraft && (
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    onClick={() => void act(() => unwrap(commands.rerollSet(sheetId, skuId)))}
+                    title="整包换该 SKU 当日套装"
+                  >
+                    <RefreshCw className="ic12" />
+                    换套装
+                  </button>
+                )}
+              </div>
+              {rows.map((r) => {
+                const st = pubTaskVisual(r.status);
+                return (
+                  <div key={r.id} className="wrow">
+                    <span className="mono fs10 t3 nowrap">{r.taskCode.split("-")[1]}</span>
+                    <span className="bdg b-gray">{r.platformZh}</span>
+                    <span className="fs12 nowrap ohide">{r.accountName}</span>
+                    <span className="fs11 t3 nowrap">
+                      {r.contentKind === "gallery" ? "图文" : "视频"}
+                    </span>
+                    <span
+                      className={cn("mono fs11 nowrap", isDraft && "clickable")}
+                      style={isDraft ? { cursor: "pointer" } : undefined}
+                      onClick={() => isDraft && setTimeEdit(r)}
+                    >
+                      {r.plannedTime ?? "立即发"}
+                    </span>
+                    <span className={cn("bdg", st.badgeClass)}>
+                      {st.label}
+                      {r.status === "failed" && r.failKind ? ` · ${failKindLabel(r.failKind)}` : ""}
+                    </span>
+                    <span
+                      className="tract"
+                      style={r.status === "suspect" ? { opacity: 1 } : undefined}
+                    >
+                      {r.status === "suspect" && (
+                        <button type="button" className="btn sm" onClick={() => setVerify(r)}>
+                          核对
+                        </button>
+                      )}
+                      {isDraft && r.status === "pending" && (
+                        <button
+                          type="button"
+                          className="btn sm gho dng"
+                          onClick={() => void act(() => unwrap(commands.deleteTaskRow(r.id)))}
+                        >
+                          删
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+        {detail.rows.length === 0 && (
+          <div className="bigempty" style={{ padding: "44px 20px" }}>
+            <div className="fs13 fw5 t2">本单无任务行</div>
+            <div className="fs12 t3">
+              全部应发 SKU 缺料，或今日无应发 SKU；可「增补任务行」手动补
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 底部操作条 */}
+      <div className="genbar">
+        <span className="fs11 t3">
+          {isDraft
+            ? "确认后锁定进入待导出 · 导出的任务包可被影刀直接消费"
+            : isConfirmed
+              ? "已确认 · 可导出任务包，或退回草稿再编辑"
+              : "已导出 · xlsx 写方已移交执行器"}
+        </span>
+        <div className="f1" />
+        {isConfirmed && (
+          <button
+            type="button"
+            className="btn sm gho"
+            onClick={() => void act(() => unwrap(commands.unlockSheet(sheetId)), "已退回草稿")}
+          >
+            退回草稿
+          </button>
+        )}
+        {isDraft && (
+          <button
+            type="button"
+            className="btn pri"
+            disabled={detail.rows.length === 0}
+            onClick={() => void act(() => unwrap(commands.confirmSheet(sheetId)), "已确认")}
+          >
+            确认
+          </button>
+        )}
+        {isConfirmed && (
+          <button type="button" className="btn pri" onClick={() => setConfirmExport(true)}>
+            导出任务包
+          </button>
+        )}
+        {isExported && (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() =>
+              void unwrap(commands.openPackageDir(sheetId)).catch((e) => toast.error(String(e)))
+            }
+          >
+            <FolderOpen className="ic12" />
+            打开任务包
+          </button>
+        )}
+      </div>
+
+      {timeEdit && (
+        <TimeEditModal
+          row={timeEdit}
+          onClose={() => setTimeEdit(null)}
+          onPick={async (time) => {
+            await unwrap(commands.updateTaskRow(timeEdit.id, { plannedTime: time }));
+            setTimeEdit(null);
+            await load();
+          }}
+        />
+      )}
+      {addOpen && (
+        <AddRowModal
+          sheetId={sheetId}
+          onClose={() => setAddOpen(false)}
+          onAdded={() => {
+            setAddOpen(false);
+            void act(async () => {});
+          }}
+        />
+      )}
+      {confirmExport && (
+        <ConfirmModal
+          title="导出任务包"
+          desc="确保执行器未在运行本包。重新导出=整包覆盖（先删 READY.txt 再写）。导出后 xlsx 写方移交执行器。"
+          confirmLabel="确认导出"
+          onConfirm={() =>
+            void act(async () => {
+              const r = await unwrap(commands.exportPackage(sheetId));
+              toast.success(`已导出 ${r.rowCount} 行 · ${r.skuCount} 个 SKU 素材`);
+              if (r.longPathWarn) toast.warning("存在超长路径，请检查执行机根路径设置");
+            })
+          }
+          onClose={() => setConfirmExport(false)}
+        />
+      )}
+      {verify && (
+        <VerifyModal
+          row={verify}
+          onClose={() => setVerify(null)}
+          onResolved={() => {
+            setVerify(null);
+            void act(async () => {});
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function VerifyModal({
+  row,
+  onClose,
+  onResolved,
+}: {
+  row: TaskRowView;
+  onClose: () => void;
+  onResolved: () => void;
+}) {
+  const resolve = async (outcome: import("@/lib/ipc").SuspectOutcome) => {
+    try {
+      await unwrap(commands.resolveSuspect(row.id, outcome));
+      onResolved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Modal
+      title="核对疑似已发"
+      onClose={onClose}
+      headerExtra={<span className="pid">{row.taskCode}</span>}
+      footer={
+        <>
+          <span className="fs11 t3">定态后写入使用台账</span>
+          <div className="f1" />
+          <button
+            type="button"
+            className="btn sm dng"
+            onClick={() => void resolve({ kind: "failed", failKind: "other" })}
+          >
+            未发出 · 定为失败
+          </button>
+          <button
+            type="button"
+            className="btn pri sm"
+            onClick={() => void resolve({ kind: "published", url: null })}
+          >
+            已发布 · 补录
+          </button>
+        </>
+      }
+    >
+      <div className="susban">
+        <b className="fw6">超时无回执，内容可能已实际发出。</b>
+        <br />
+        系统绝不自动重发 — 重发会触发平台查重，比失败更糟。请到平台后台人工核实后定态。
+      </div>
+      <div className="fx ac gap6 mt10 wrap">
+        <span className="pid">{row.skuCode}</span>
+        <span className="fs12">{row.styleName}</span>
+        <span className="bdg b-gray">{row.platformZh}</span>
+        <span className="chip">{row.accountName}</span>
+        <span className="chip">计划 {row.plannedTime ?? "立即发"}</span>
+      </div>
+    </Modal>
+  );
+}
+
+function bgCover(path?: string | null): React.CSSProperties {
+  const src = assetSrc(path);
+  return src
+    ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
+    : { background: "var(--inset)" };
+}
+
+function TimeEditModal({
+  row,
+  onClose,
+  onPick,
+}: {
+  row: TaskRowView;
+  onClose: () => void;
+  onPick: (time: string | null) => void | Promise<void>;
+}) {
+  const [slots, setSlots] = useState<string[]>([]);
+  useEffect(() => {
+    void unwrap(commands.getPublishSettings()).then((s) => setSlots(s.timeSlots ?? []));
+  }, []);
+  // 由时段模板生成候选整点/半点。
+  const opts: string[] = [];
+  for (const sl of slots) {
+    const [a, b] = sl.split("-");
+    if (!a || !b) continue;
+    const [ah = 0, am = 0] = a.split(":").map(Number);
+    const [bh = 0, bm = 0] = b.split(":").map(Number);
+    let t = ah * 60 + am;
+    const end = bh * 60 + bm;
+    while (t <= end) {
+      opts.push(
+        `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`,
+      );
+      t += 30;
+    }
+  }
+  return (
+    <Modal
+      title="调整发布时间"
+      width="w360"
+      onClose={onClose}
+      headerExtra={<span className="pid">{row.taskCode}</span>}
+    >
+      <div className="fs11 t3" style={{ marginBottom: 8 }}>
+        在时段模板内选择 · 留空 = 立即发布（人工改出）
+      </div>
+      <div className="fx ac gap6 wrap">
+        <button type="button" className="btn sm gho" onClick={() => void onPick(null)}>
+          立即发
+        </button>
+        {opts.map((o) => (
+          <button
+            type="button"
+            key={o}
+            className={cn("btn sm", row.plannedTime === o && "pri")}
+            onClick={() => void onPick(o)}
+          >
+            {o}
+          </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+function AddRowModal({
+  sheetId,
+  onClose,
+  onAdded,
+}: {
+  sheetId: number;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const [skus, setSkus] = useState<{ id: number; code: string; styleName: string }[]>([]);
+  const [accounts, setAccounts] = useState<AccountView[]>([]);
+  const [skuId, setSkuId] = useState<number | null>(null);
+  const [accountId, setAccountId] = useState<number | null>(null);
+  useEffect(() => {
+    void unwrap(commands.listSchedulableSkus()).then((v) =>
+      setSkus(v.map((s) => ({ id: s.id, code: s.code, styleName: s.styleName }))),
+    );
+    void unwrap(commands.listAccounts()).then(setAccounts);
+  }, []);
+  const submit = async () => {
+    if (skuId == null || accountId == null) return;
+    try {
+      await unwrap(commands.addTaskRow({ sheetId, skuId, accountId, plannedTime: null }));
+      onAdded();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Modal
+      title="增补任务行"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">使用该 SKU 当日套装 · 时间自动分配</span>
+          <div className="f1" />
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="btn pri"
+            disabled={skuId == null || accountId == null}
+            onClick={() => void submit()}
+          >
+            增补
+          </button>
+        </>
+      }
+    >
+      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+        选择 SKU
+      </div>
+      <div className="mt4" style={{ maxHeight: 160, overflow: "auto" }}>
+        {skus.map((s) => (
+          <div key={s.id} className="pickrow" onClick={() => setSkuId(s.id)}>
+            <span className={cn("ckb", skuId === s.id && "on")}>✓</span>
+            <span className="pid">{s.code}</span>
+            <span className="fs12 f1 nowrap ohide">{s.styleName}</span>
+          </div>
+        ))}
+      </div>
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        选择账号
+      </div>
+      <div className="mt4" style={{ maxHeight: 140, overflow: "auto" }}>
+        {accounts
+          .filter((a) => a.status === "active")
+          .map((a) => (
+            <div key={a.id} className="pickrow" onClick={() => setAccountId(a.id)}>
+              <span className={cn("ckb", accountId === a.id && "on")}>✓</span>
+              <span className="bdg b-gray">{a.platformZh}</span>
+              <span className="fs12 f1 nowrap ohide">{a.name}</span>
+            </div>
+          ))}
+      </div>
+    </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────── 策略与账号
+
+function StrategyTab() {
+  const [s, setS] = useState<PublishSettings | null>(null);
+  const [accounts, setAccounts] = useState<AccountView[]>([]);
+  const [addAcct, setAddAcct] = useState(false);
+
+  const load = useCallback(async () => {
+    setS(await unwrap(commands.getPublishSettings()));
+    setAccounts(await unwrap(commands.listAccounts()));
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const patch = async (p: Partial<PublishSettingsPatch>) => {
+    const next = await unwrap(
+      commands.updatePublishSettings({
+        rootLocal: null,
+        rootExec: null,
+        pathStyle: null,
+        dedupDays: null,
+        receiptTimeoutHours: null,
+        autogenTime: null,
+        warnMaterial: null,
+        warnTitle: null,
+        warnBody: null,
+        accountDailyLimitDefault: null,
+        minGapMinutes: null,
+        platformMatrix: null,
+        tierRules: null,
+        timeSlots: null,
+        ...p,
+      }),
+    );
+    setS(next);
+  };
+
+  if (!s) return <div className="col f1" />;
+  const tr = s.tierRules ?? { hotDaily: 1, warmWeekly: 3, coldWeeklyRotate: 5 };
+  const m = s.platformMatrix ?? {
+    douyin: true,
+    xhs: true,
+    kuaishou: true,
+    shipinhao: true,
+    bilibili: true,
+  };
+  const timeSlots = s.timeSlots ?? [];
+  const plats: [keyof typeof m, string][] = [
+    ["douyin", "抖音"],
+    ["xhs", "小红书"],
+    ["kuaishou", "快手"],
+    ["shipinhao", "视频号"],
+    ["bilibili", "B站"],
+  ];
+
+  return (
+    <div className="pbody">
+      <div className="cwrap">
+        <div className="card" style={{ padding: "13px 16px" }}>
+          <div className="fw6 fs13" style={{ marginBottom: 10 }}>
+            分层频率
+          </div>
+          <div className="fx gap14 wrap">
+            <div className="fx ac gap8">
+              <span className="fs12 t2 nowrap">热款每日</span>
+              <Stepper
+                value={tr.hotDaily}
+                min={0}
+                max={5}
+                onChange={(v) => void patch({ tierRules: { ...tr, hotDaily: v } })}
+              />
+              <span className="fs11 t3">次 × 平台集</span>
+            </div>
+            <div className="fx ac gap8">
+              <span className="fs12 t2 nowrap">温款每周</span>
+              <Stepper
+                value={tr.warmWeekly}
+                min={0}
+                max={7}
+                onChange={(v) => void patch({ tierRules: { ...tr, warmWeekly: v } })}
+              />
+              <span className="fs11 t3">次</span>
+            </div>
+            <div className="fx ac gap8">
+              <span className="fs12 t2 nowrap">冷款每周轮出</span>
+              <Stepper
+                value={tr.coldWeeklyRotate}
+                min={0}
+                max={20}
+                onChange={(v) => void patch({ tierRules: { ...tr, coldWeeklyRotate: v } })}
+              />
+              <span className="fs11 t3">个</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="card mt14" style={{ padding: "13px 16px" }}>
+          <div className="fw6 fs13" style={{ marginBottom: 10 }}>
+            平台矩阵（全局启用）
+          </div>
+          <div className="fx gap14 wrap">
+            {plats.map(([k, label]) => (
+              <div key={k} className="fx ac gap6">
+                <Toggle
+                  on={m[k]}
+                  onClick={() => void patch({ platformMatrix: { ...m, [k]: !m[k] } })}
+                />
+                <span className="fs12">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="card mt14">
+          <div className="chead">
+            <span className="fw6 fs13">账号档案</span>
+            <span className="cnt">{accounts.length}</span>
+            <div className="f1" />
+            <button type="button" className="btn sm" onClick={() => setAddAcct(true)}>
+              <Plus className="ic12" />
+              添加账号
+            </button>
+          </div>
+          {accounts.map((a) => (
+            <div key={a.id} className="txrow">
+              <span className="bdg b-gray">{a.platformZh}</span>
+              <span className="fw5 fs12 f1 nowrap ohide">{a.name}</span>
+              <span className="fs11 t3 nowrap">日限 {a.dailyLimit}</span>
+              <span className={cn("bdg", a.status === "active" ? "b-green" : "b-gray")}>
+                {a.status === "active" ? "正常" : "停用"}
+              </span>
+              <span className="tract">
+                <button
+                  type="button"
+                  className="btn sm gho"
+                  onClick={() =>
+                    void unwrap(
+                      commands.setAccountStatus(
+                        a.id,
+                        a.status === "active" ? "disabled" : "active",
+                      ),
+                    ).then(load)
+                  }
+                >
+                  {a.status === "active" ? "停用" : "启用"}
+                </button>
+              </span>
+            </div>
+          ))}
+          {accounts.length === 0 && (
+            <div className="txrow t3 fs12">尚无账号 · 添加后才能生成任务行</div>
+          )}
+        </div>
+
+        <div className="card mt14" style={{ padding: "13px 16px" }}>
+          <div className="fw6 fs13" style={{ marginBottom: 8 }}>
+            时段模板
+          </div>
+          <div className="fx ac gap6 wrap">
+            {timeSlots.map((slot) => (
+              <span key={slot} className="fchip">
+                {slot}
+              </span>
+            ))}
+            <span className="fs11 t3">
+              分配时在时段内随机抖动 · 同平台多账号最小间隔 {s.minGapMinutes} 分钟
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {addAcct && (
+        <AddAccountModal
+          onClose={() => setAddAcct(false)}
+          onAdded={() => {
+            setAddAcct(false);
+            void load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [platforms, setPlatforms] = useState<{ code: string; zh: string }[]>([]);
+  const [platform, setPlatform] = useState("");
+  const [name, setName] = useState("");
+  useEffect(() => {
+    void commands.publishPlatforms().then((r) => {
+      if (r.status === "ok") {
+        setPlatforms(r.data);
+        setPlatform(r.data[0]?.code ?? "");
+      }
+    });
+  }, []);
+  const submit = async () => {
+    if (!platform || !name.trim()) return;
+    try {
+      await unwrap(
+        commands.createAccount({ platform, name: name.trim(), dailyLimit: null, slots: null }),
+      );
+      onAdded();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Modal
+      title="添加账号"
+      onClose={onClose}
+      footer={
+        <>
+          <div className="f1" />
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className="btn pri" onClick={() => void submit()}>
+            添加
+          </button>
+        </>
+      }
+    >
+      <div className="col gap10">
+        <div className="col gap4">
+          <span className="fs11 t3">平台</span>
+          <select className="inp" value={platform} onChange={(e) => setPlatform(e.target.value)}>
+            {platforms.map((p) => (
+              <option key={p.code} value={p.code}>
+                {p.zh}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="col gap4">
+          <span className="fs11 t3">账号名称（任务单「平台账号名称」列的值）</span>
+          <input className="inp" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+      </div>
+    </Modal>
+  );
+}

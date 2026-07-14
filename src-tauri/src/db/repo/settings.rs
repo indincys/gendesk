@@ -15,11 +15,25 @@ pub async fn get_raw(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
 
 /// 写入设置 JSON 原文（upsert）。
 pub async fn set_raw(pool: &SqlitePool, json: &str) -> Result<(), sqlx::Error> {
+    set_by_key(pool, KEY, json).await
+}
+
+/// 读取任意 key 的设置 JSON（发布模块用 key='publish'）。
+pub async fn get_by_key(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value_json FROM settings WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|(v,)| v))
+}
+
+/// 写入任意 key 的设置 JSON（upsert）。
+pub async fn set_by_key(pool: &SqlitePool, key: &str, json: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
     )
-    .bind(KEY)
+    .bind(key)
     .bind(json)
     .execute(pool)
     .await?;

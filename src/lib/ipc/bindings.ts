@@ -877,6 +877,467 @@ async exportBackup() : Promise<Result<string | null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getPublishSettings() : Promise<Result<PublishSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_publish_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updatePublishSettings(patch: PublishSettingsPatch) : Promise<Result<PublishSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_publish_settings", { patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选择本机根目录（dialog）；返回所选路径，取消返回 None。
+ */
+async pickPublishRoot() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_publish_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 拓扑 B「同本机」一键：把执行机根路径设为本机根路径。
+ */
+async useLocalAsExecRoot() : Promise<Result<PublishSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("use_local_as_exec_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 五平台 `{code, zh}`（前端矩阵/选择器单点数据源）。
+ */
+async publishPlatforms() : Promise<Result<PlatformInfo[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("publish_platforms") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listSkus(filter: SkuFilter) : Promise<Result<SkuView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_skus", { filter }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async createSku(input: CreateSkuInput) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_sku", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateSku(id: number, patch: SkuPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_sku", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setSkuStatus(id: number, status: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_sku_status", { id, status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getSkuDetail(id: number) : Promise<Result<SkuDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sku_detail", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getPublishBadges() : Promise<Result<PublishBadges, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_publish_badges") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listTextItems(skuId: number, kind: string) : Promise<Result<TextItemView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_text_items", { skuId, kind }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async addTextItem(input: AddTextItemInput) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_text_item", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateTextItem(id: number, patch: TextItemPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_text_item", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setTextItemEnabled(id: number, enabled: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_text_item_enabled", { id, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listAssetPacks(skuId: number) : Promise<Result<PackView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_asset_packs", { skuId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动导入素材文件（走与收件箱相同的归集/命名管线）。
+ */
+async importMediaFiles(skuId: number, paths: string[]) : Promise<Result<PackView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_media_files", { skuId, paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 作品库联动：把选中的输出图复制为一个图集包。
+ */
+async packFromWorks(skuId: number, workIds: number[]) : Promise<Result<PackView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pack_from_works", { skuId, workIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retirePack(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retire_pack", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async restorePack(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_pack", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除素材包：校验锁定 → 物理删目录 + 删记录。
+ */
+async deletePack(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_pack", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updatePack(id: number, patch: PackPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_pack", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动把 new 包标记为 active（可用）。
+ */
+async activatePack(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("activate_pack", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出收件箱记录；state 为空则全部。
+ */
+async listInboxItems(filterState: string | null) : Promise<Result<InboxItemView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_inbox_items", { filterState }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 认领：人工指认 SKU 后走正常收录管线。
+ */
+async claimInboxItem(id: number, skuCode: string) : Promise<Result<IngestOutcome, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claim_inbox_item", { id, skuCode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 丢弃待认领/失败记录（删记录，文件留原位不动）。
+ */
+async discardInboxItem(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discard_inbox_item", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 解析失败重试：对原文件重跑收录管线。
+ */
+async retryInboxItem(id: number) : Promise<Result<IngestOutcome, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_inbox_item", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async rescanInbox() : Promise<Result<RescanResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rescan_inbox") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listAccounts() : Promise<Result<AccountView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_accounts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async createAccount(input: CreateAccountInput) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_account", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateAccount(id: number, patch: AccountPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_account", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setAccountStatus(id: number, status: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_account_status", { id, status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 生成/重生成某日任务单草稿。
+ */
+async generateSheet(date: string) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_sheet", { date }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listSheets() : Promise<Result<SheetSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_sheets") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 确认任务单（草稿 → 已确认，锁定）。
+ */
+async confirmSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("confirm_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 退回草稿（已确认 → 草稿；已导出不可退回）。
+ */
+async unlockSheet(id: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unlock_sheet", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateTaskRow(id: number, patch: TaskRowPatch) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_task_row", { id, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelTaskRow(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_task_row", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteTaskRow(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_task_row", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 增补任务行：使用该 SKU 当日套装（无则即时选取一套）。
+ */
+async addTaskRow(input: AddTaskRowInput) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_task_row", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 整包换该 SKU 当日套装（重选素材/标题/正文）。所有引用该套装的行同步生效。
+ */
+async rerollSet(sheetId: number, skuId: number) : Promise<Result<SheetDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reroll_set", { sheetId, skuId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 内置「通用」以外的可排期 SKU（增补行选择器用）。
+ */
+async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_schedulable_skus") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出任务包（confirmed → exported；重导出=整包覆盖）。
+ */
+async exportPackage(sheetId: number) : Promise<Result<ExportResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_package", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在文件管理器中打开任务包目录。
+ */
+async openPackageDir(sheetId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_package_dir", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动导入回执（兜底，与 watcher 走同一对账管线）。
+ */
+async importReceipts(sheetId: number) : Promise<Result<ReconcileResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_receipts", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 人工定态疑似已发。
+ */
+async resolveSuspect(taskId: number, outcome: SuspectOutcome) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_suspect", { taskId, outcome }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 今日看板：计划/已发布/失败/待核对 + 平台完成率 + 账号健康。
+ */
+async getDashboard(date: string) : Promise<Result<DashboardView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_dashboard", { date }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 读日报（关单时写入 report_json）。
+ */
+async getReport(sheetId: number) : Promise<Result<ReportView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_report", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -886,14 +1347,20 @@ async exportBackup() : Promise<Result<string | null, AppError>> {
 export const events = __makeEvents__<{
 backupProgress: BackupProgress,
 batchSummary: BatchSummary,
+inboxIngestEvent: InboxIngestEvent,
 keyHealth: KeyHealth,
+publishBadgesEvent: PublishBadgesEvent,
+sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
+inboxIngestEvent: "inbox-ingest-event",
 keyHealth: "key-health",
+publishBadgesEvent: "publish-badges-event",
+sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
 updateStateChanged: "update-state-changed"
@@ -913,11 +1380,24 @@ export type AcceptResult = { accepted: number;
  * 本次因验收通过而转正的临时分组名（前端 toast）
  */
 promotedGroups: string[] }
+export type AccountPatch = { name: string | null; dailyLimit: number | null; 
+/**
+ * `Some(None)` = 清除（跟随全局时段模板）；`Some(Some)` = 设置。
+ */
+slots: string[] | null }
+export type AccountStat = { id: number; platformZh: string; name: string; used: number; dailyLimit: number; 
+/**
+ * normal | disabled | circuit（当日熔断）
+ */
+health: string }
+export type AccountView = { id: number; platform: string; platformZh: string; name: string; dailyLimit: number; slots: string[] | null; status: string; createdAt: number }
 export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number; 
 /**
  * 每分钟请求上限（E18）；None/<=0 = 不限速。
  */
 rpmLimit: number | null }
+export type AddTaskRowInput = { sheetId: number; skuId: number; accountId: number; plannedTime: string | null }
+export type AddTextItemInput = { skuId: number; kind: string; text: string; platform: string | null }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
  */
@@ -1011,11 +1491,17 @@ firstThumbPath: string | null;
  * 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
  */
 requestCount: number }
+export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
  * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
  */
 draws: number }
+/**
+ * 新建 SKU 输入。
+ */
+export type CreateSkuInput = { code: string; styleName: string; productName: string | null; tier: string | null; topics: string[] | null; platforms: string[] | null; note: string | null }
+export type DashboardView = { date: string; sheetId: number | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean }
 /**
  * 数据目录信息（E19：暴露落盘位置）。
  */
@@ -1024,6 +1510,18 @@ export type DataDirInfo = { root: string; dbPath: string }
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */
 export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
+/**
+ * 导出结果。
+ */
+export type ExportResult = { 
+/**
+ * 包目录相对路径（任务包/YYYYMMDD）。
+ */
+pkgDirRel: string; rowCount: number; skuCount: number; fileCount: number; 
+/**
+ * 是否有超 Windows 长度上限的拼接路径（告警）。
+ */
+longPathWarn: boolean }
 /**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */
@@ -1069,6 +1567,10 @@ export type GroupView = { id: number; name: string; prefix: string; scene: strin
  */
 tags: string[] }
 /**
+ * 一条发布历史（读台账）。
+ */
+export type HistoryItem = { date: string; platform: string; taskCode: string; url: string | null; publishedAt: number }
+/**
  * 导入预览（parse 阶段产物，不落库）。
  */
 export type ImportPreview = { encoding: string; groups: ImportPreviewGroup[]; total: number; 
@@ -1099,6 +1601,39 @@ temp: boolean }
  */
 export type ImportWarning = { line: number; message: string }
 /**
+ * `publish://inbox-ingest`：单文件收录结果（前端 toast + 列表刷新）。
+ */
+export type InboxIngestEvent = { 
+/**
+ * 收录文件名（末段）。
+ */
+fileName: string; outcome: IngestOutcome }
+export type InboxItemView = { id: number; fileRel: string; 
+/**
+ * 文件名（末段，UI 展示）。
+ */
+fileName: string; kind: string | null; skuCode: string | null; state: string; 
+/**
+ * 收录报告 / 失败原因摘要。
+ */
+detail: string | null; createdAt: number }
+/**
+ * 单文件收录结果（供事件与报告使用）。camelCase 字段名个别指定（specta 不识别 rename_all_fields）。
+ */
+export type IngestOutcome = 
+/**
+ * 成功入库并归档。
+ */
+{ state: "ingested"; skuCode: string; kind: string; titles: number; bodies: number; topicsAdopted: string[]; topicDiff: string | null } | 
+/**
+ * 识别不出已知 SKU，待认领。
+ */
+{ state: "unclaimed"; skuCode: string | null } | 
+/**
+ * 解析失败，待人工确认。
+ */
+{ state: "failed"; reason: string }
+/**
  * `keys://health`
  */
 export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: number; successRate: number }
@@ -1106,7 +1641,39 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  * Key 健康状态。
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
+export type PackFileView = { name: string; origName: string; bytes: number }
+export type PackPatch = { note: string | null; 
+/**
+ * `Some(None)` = 清除封面；`Some(Some)` = 设为该包内文件名。
+ */
+cover: string | null }
+export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
+/**
+ * 存储态：new|active|retired。
+ */
+lifecycle: string; 
+/**
+ * 派生态：new|active|exhausted|retired。
+ */
+derived: string; 
+/**
+ * 回可用日期（exhausted 时的最早解冻 Unix 秒）。
+ */
+availableAt: number | null; 
+/**
+ * 被未关闭任务单引用（锁定）。
+ */
+locked: boolean; source: string; note: string; fileCount: number; createdAt: number; updatedAt: number }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
+/**
+ * 平台标签信息（暴露给前端做矩阵/选择器渲染，避免前端重复中文映射）。
+ */
+export type PlatformInfo = { code: string; zh: string }
+/**
+ * 平台矩阵（全局启用开关）。字段即五平台 code。
+ */
+export type PlatformMatrix = { douyin: boolean; xhs: boolean; kuaishou: boolean; shipinhao: boolean; bilibili: boolean }
+export type PlatformStat = { platform: string; platformZh: string; done: number; total: number; pct: number }
 /**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
@@ -1132,6 +1699,94 @@ export type PromptStat = { works: number; combos: number; passed: number }
  */
 export type PromptView = { id: number; groupId: number; code: string; title: string | null; text: string; favorite: boolean; edited: boolean }
 /**
+ * 发布模块导航徽章计数（资产库 = 待认领 + 预警；发布计划 = 待确认任务单 + 待核对）。
+ */
+export type PublishBadges = { 
+/**
+ * 待认领 + 解析失败。
+ */
+unclaimed: number; 
+/**
+ * 余量预警 SKU 数。
+ */
+warn: number; 
+/**
+ * 待确认任务单数（P2 起）。
+ */
+pendingSheets: number; 
+/**
+ * 待核对数（P3 起）。
+ */
+pendingReconcile: number }
+/**
+ * `publish://badges`：资产库徽章（待认领 + 预警）、发布计划徽章（待确认 + 待核对）。
+ */
+export type PublishBadgesEvent = { unclaimed: number; warn: number; pendingSheets: number; pendingReconcile: number }
+/**
+ * 发布与同步设置。
+ */
+export type PublishSettings = { 
+/**
+ * 本机根目录（空 = 未配置）。
+ */
+rootLocal?: string; 
+/**
+ * 执行机根目录（空 = 未配置；同机模式一键同本机）。
+ */
+rootExec?: string; 
+/**
+ * 执行机路径风格（windows|unix）。
+ */
+pathStyle?: string; 
+/**
+ * 查重窗口天数。
+ */
+dedupDays?: number; 
+/**
+ * 回执超时小时数。
+ */
+receiptTimeoutHours?: number; 
+/**
+ * 每日生成时间（HH:MM）。
+ */
+autogenTime?: string; 
+/**
+ * 素材余量预警阈值。
+ */
+warnMaterial?: number; 
+/**
+ * 标题余量预警阈值。
+ */
+warnTitle?: number; 
+/**
+ * 正文余量预警阈值（仅对有图集包的 SKU 生效）。
+ */
+warnBody?: number; 
+/**
+ * 账号默认日上限。
+ */
+accountDailyLimitDefault?: number; 
+/**
+ * 同平台多账号最小间隔（分钟）。
+ */
+minGapMinutes?: number; platformMatrix?: PlatformMatrix; tierRules?: TierRules; 
+/**
+ * 时段模板（`HH:MM-HH:MM`）。
+ */
+timeSlots?: string[] }
+/**
+ * 设置补丁（部分更新）。
+ */
+export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null }
+/**
+ * 对账结果汇总。
+ */
+export type ReconcileResult = { published: number; failed: number; 
+/**
+ * 风控熔断连带取消的任务数。
+ */
+canceledByRisk: number; matched: number; unmatched: number; closed: boolean }
+/**
  * 参考图详情（含使用统计）。
  */
 export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
@@ -1153,6 +1808,19 @@ export type RefScanItem = { path: string; name: string; duplicate: boolean;
  * 与之重复的已有图名（库内）或本次靠前的文件名。
  */
 dupOf: string | null }
+export type ReportFail = { taskCode: string; skuCode: string; kind: string }
+/**
+ * 日报视图。
+ */
+export type ReportView = { date: string; plan: number; published: number; failed: number; canceled: number; 
+/**
+ * 成功率（0–100 整数）。
+ */
+successRate: number; fails: ReportFail[]; shortage: string[]; tips: string }
+/**
+ * 手动全量扫描收件箱。返回本次收录/待认领/失败计数。
+ */
+export type RescanResult = { ingested: number; unclaimed: number; failed: number }
 /**
  * 待验收项视图。
  */
@@ -1206,6 +1874,56 @@ onboarded?: boolean }
  */
 export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
 /**
+ * `publish://sheet-changed`：任务单状态/行状态变化（P2/P3 工作台与看板刷新）。
+ */
+export type SheetChangedEvent = { sheetId: number; date: string; status: string; 
+/**
+ * 汇总计数（待执行/已发布/失败/疑似/已取消）。
+ */
+pending: number; published: number; failed: number; suspect: number; canceled: number }
+export type SheetDetail = { id: number; date: string; status: string; shortage: ShortageItem[]; rows: TaskRowView[] }
+export type SheetSummary = { id: number; date: string; status: string; taskCount: number; shortageCount: number; 
+/**
+ * 各状态计数（待执行/已发布/失败/疑似/已取消）。
+ */
+pending: number; published: number; failed: number; suspect: number; canceled: number }
+/**
+ * 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ */
+export type ShortageItem = { skuId: number; code: string; reason: string }
+/**
+ * SKU 详情：档案视图 + 发布历史（池明细由 assets/texts 域命令单独取）。
+ */
+export type SkuDetail = { sku: SkuView; history: HistoryItem[] }
+/**
+ * 列表过滤条件。
+ */
+export type SkuFilter = { tier: string | null; warnOnly: boolean | null; status: string | null; query: string | null }
+/**
+ * 编辑补丁。
+ */
+export type SkuPatch = { styleName: string | null; productName: string | null; tier: string | null; topics: string[] | null; 
+/**
+ * `Some(None)` = 清除覆盖（跟随全局矩阵）；`Some(Some(..))` = 设置覆盖。
+ */
+platforms: string[] | null; note: string | null }
+/**
+ * SKU 列表/详情视图。
+ */
+export type SkuView = { id: number; code: string; styleName: string; productName: string; tier: string; topics: string[]; 
+/**
+ * 平台覆盖（NULL=跟随全局矩阵）。
+ */
+platforms: string[] | null; status: string; isGeneral: boolean; note: string; materialCount: number; titleCount: number; bodyCount: number; hasGallery: boolean; lastPublished: number | null; 
+/**
+ * 各池预警（低于阈值）。
+ */
+warnMaterial: boolean; warnTitle: boolean; warnBody: boolean; 
+/**
+ * 任一池预警。
+ */
+warn: boolean }
+/**
  * 5 视觉组计数。
  */
 export type SummaryCounts = { 
@@ -1234,9 +1952,31 @@ passed: number;
  */
 rejected: number; total: number }
 /**
+ * 疑似已发人工定态结果。
+ */
+export type SuspectOutcome = 
+/**
+ * 已发布（补录链接）。
+ */
+{ kind: "published"; url: string | null } | 
+/**
+ * 未发出，定为失败。
+ */
+{ kind: "failed"; failKind: string }
+/**
  * `task://progress`（250ms 节流）
  */
 export type TaskProgress = { taskId: number; pct: number; phase: Phase }
+export type TaskRowPatch = { 
+/**
+ * `Some(None)` = 清空（立即发）；`Some(Some)` = 设为 HH:MM。
+ */
+plannedTime: string | null }
+export type TaskRowView = { id: number; taskCode: string; skuId: number; skuCode: string; styleName: string; productName: string; title: string; topics: string[]; 
+/**
+ * 封面绝对本地路径（前端 convertFileSrc）；无封面为 null。
+ */
+coverPath: string | null; platform: string; platformZh: string; accountName: string; contentKind: string; plannedTime: string | null; status: string; failKind: string | null; resultUrl: string | null; resultMsg: string | null }
 export type TaskStatus = 
 /**
  * 待生成
@@ -1274,6 +2014,32 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
+export type TextItemPatch = { text: string | null; platform: string | null }
+export type TextItemView = { id: number; skuId: number; kind: string; text: string; 
+/**
+ * 平台标签 code（douyin…|general）。
+ */
+platform: string; 
+/**
+ * 平台中文名（UI 展示）。
+ */
+platformZh: string; source: string; enabled: boolean; useCount: number; createdAt: number }
+/**
+ * 分层频率规则（扁平化 §3 的 `{hot:{daily},warm:{weekly},cold:{weeklyRotate}}`）。
+ */
+export type TierRules = { 
+/**
+ * 热款：每天次数（× 平台集）。
+ */
+hotDaily: number; 
+/**
+ * 温款：每周次数。
+ */
+warmWeekly: number; 
+/**
+ * 冷款：轮播池每周轮出个数。
+ */
+coldWeeklyRotate: number }
 export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
 /**
  * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。

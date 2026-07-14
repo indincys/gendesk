@@ -47,6 +47,30 @@ export function CommandPalette() {
           toast(paused ? "已继续队列" : "已暂停队列");
         },
       },
+      {
+        cat: "操作",
+        label: "重扫收件箱",
+        run: () => {
+          void unwrap(commands.rescanInbox())
+            .then((r) => toast(`收件箱扫描完成：入库 ${r.ingested} · 待认领 ${r.unclaimed}`))
+            .catch((e) => toast.error(String(e)));
+        },
+      },
+      {
+        cat: "操作",
+        label: "生成明日任务单",
+        run: () => {
+          const d = new Date();
+          d.setDate(d.getDate() + 1);
+          const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          void unwrap(commands.generateSheet(date))
+            .then(() => {
+              toast.success(`已生成 ${date} 任务单草稿`);
+              go("plan");
+            })
+            .catch((e) => toast.error(String(e)));
+        },
+      },
       { cat: "操作", label: "检查更新", run: () => toast("应用内更新将在发布链接入（M4）") },
     ];
     const q = query.trim().toLowerCase();

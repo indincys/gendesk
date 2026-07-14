@@ -7,6 +7,7 @@ import { commands, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
+import { usePublishStore } from "@/stores/publish";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { useEffect } from "react";
@@ -17,7 +18,9 @@ export function AppShell() {
   const route = useUiStore((s) => s.route);
   const platform = useUiStore((s) => s.platform);
   const initEngine = useEngineStore((s) => s.init);
+  const initPublish = usePublishStore((s) => s.init);
   const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
+  const refreshPubBadges = usePublishStore((s) => s.refreshBadges);
   const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
 
@@ -36,10 +39,20 @@ export function AppShell() {
     return () => cleanup?.();
   }, [initEngine]);
 
-  // 切页刷新废纸篓徽章（清理/删除后即时反映，非定时轮询）。
+  // 订阅发布模块事件（徽章 / 收件箱收录）。
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void initPublish().then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, [initPublish]);
+
+  // 切页刷新废纸篓 + 发布徽章（增删后即时反映，非定时轮询）。
   useEffect(() => {
     void refreshBadges();
-  }, [route, refreshBadges]);
+    void refreshPubBadges();
+  }, [route, refreshBadges, refreshPubBadges]);
 
   return (
     <div className={`app ${platform === "win" ? "win" : "mac"}`}>

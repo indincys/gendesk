@@ -1,6 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
 import {
   type ApiKeyView,
   type DataDirInfo,
@@ -441,6 +442,9 @@ export function SettingsPage() {
             </span>
           </div>
         </section>
+
+        {/* ---------------- 发布与同步（发布模块 P1） ---------------- */}
+        <PublishSyncSection />
 
         {/* ---------------- 通用 ---------------- */}
         <section className="sec">

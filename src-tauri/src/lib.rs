@@ -12,6 +12,7 @@ mod ids;
 mod importer;
 mod logging;
 mod provider;
+mod publish;
 mod secrets;
 mod state;
 
@@ -126,6 +127,64 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::backup::data_dir_info,
             commands::backup::open_data_dir,
             commands::backup::export_backup,
+            // ── 发布与资产管理模块（P1 起）──────────────────────────
+            // publish_settings 域
+            commands::publish_settings::get_publish_settings,
+            commands::publish_settings::update_publish_settings,
+            commands::publish_settings::pick_publish_root,
+            commands::publish_settings::use_local_as_exec_root,
+            commands::publish_settings::publish_platforms,
+            // skus 域
+            commands::publish_skus::list_skus,
+            commands::publish_skus::create_sku,
+            commands::publish_skus::update_sku,
+            commands::publish_skus::set_sku_status,
+            commands::publish_skus::get_sku_detail,
+            commands::publish_skus::get_publish_badges,
+            // texts 域
+            commands::publish_texts::list_text_items,
+            commands::publish_texts::add_text_item,
+            commands::publish_texts::update_text_item,
+            commands::publish_texts::set_text_item_enabled,
+            // assets 域
+            commands::publish_assets::list_asset_packs,
+            commands::publish_assets::import_media_files,
+            commands::publish_assets::pack_from_works,
+            commands::publish_assets::retire_pack,
+            commands::publish_assets::restore_pack,
+            commands::publish_assets::delete_pack,
+            commands::publish_assets::update_pack,
+            commands::publish_assets::activate_pack,
+            // inbox 域
+            commands::publish_inbox::list_inbox_items,
+            commands::publish_inbox::claim_inbox_item,
+            commands::publish_inbox::discard_inbox_item,
+            commands::publish_inbox::retry_inbox_item,
+            commands::publish_inbox::rescan_inbox,
+            // accounts 域
+            commands::publish_accounts::list_accounts,
+            commands::publish_accounts::create_account,
+            commands::publish_accounts::update_account,
+            commands::publish_accounts::set_account_status,
+            // planning 域（P2）
+            commands::publish_planning::generate_sheet,
+            commands::publish_planning::list_sheets,
+            commands::publish_planning::get_sheet,
+            commands::publish_planning::confirm_sheet,
+            commands::publish_planning::unlock_sheet,
+            commands::publish_planning::update_task_row,
+            commands::publish_planning::cancel_task_row,
+            commands::publish_planning::delete_task_row,
+            commands::publish_planning::add_task_row,
+            commands::publish_planning::reroll_set,
+            commands::publish_planning::list_schedulable_skus,
+            commands::publish_planning::export_package,
+            commands::publish_planning::open_package_dir,
+            // reconcile 域（P3）
+            commands::publish_reconcile::import_receipts,
+            commands::publish_reconcile::resolve_suspect,
+            commands::publish_reconcile::get_dashboard,
+            commands::publish_reconcile::get_report,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,
@@ -134,6 +193,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             engine::events::KeyHealth,
             commands::updater::UpdateStateChanged,
             commands::backup::BackupProgress,
+            // 发布模块事件（P1 起）
+            publish::events::PublishBadgesEvent,
+            publish::events::InboxIngestEvent,
+            publish::events::SheetChangedEvent,
         ])
 }
 
@@ -242,7 +305,35 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings.trash_retention_days,
     ));
 
-    app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
+    app.manage(state::AppState::new(
+        pool.clone(),
+        secrets,
+        dirs,
+        Arc::new(engine),
+    ));
+
+    // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
+    let publish_state = publish::PublishState::new(pool.clone(), app.handle().clone());
+    if let Ok(pset) = tauri::async_runtime::block_on(commands::publish_settings::load(&pool)) {
+        if !pset.root_local.is_empty() {
+            let root = std::path::PathBuf::from(&pset.root_local);
+            if let Err(err) = publish_state.restart(root.clone()) {
+                tracing::warn!(error = %err, "启动收件箱监听失败");
+            }
+            // 启动补跑：全量扫描收件箱（异步，不阻塞启动）。
+            let pool_bg = pool.clone();
+            let app_bg = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = publish::inbox::ingest::rescan(&pool_bg, &root).await {
+                    tracing::warn!(error = %err, "启动补跑收录失败");
+                }
+                publish::inbox::watcher::emit_badges(&pool_bg, &app_bg).await;
+            });
+            // 应用内定时：启动补跑生成今日/明日草稿 + 每 5 分钟一轮。
+            publish::ticker::spawn(pool.clone(), app.handle().clone());
+        }
+    }
+    app.manage(publish_state);
 
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
     if let Some(window) = app.get_webview_window("main") {

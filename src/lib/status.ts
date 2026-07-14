@@ -29,6 +29,91 @@ export function statusVisual(status: string): StatusVisual {
   }
 }
 
+/** 发布模块：冷热分层 → 徽章。hot=琥珀 warm=蓝 cold=灰 gen=灰。 */
+export function tierVisual(tier: string, isGeneral = false): { label: string; badgeClass: string } {
+  if (isGeneral) return { label: "通用", badgeClass: "b-gray" };
+  switch (tier) {
+    case "hot":
+      return { label: "热款", badgeClass: "b-amber" };
+    case "warm":
+      return { label: "温款", badgeClass: "b-blue" };
+    case "cold":
+      return { label: "冷款", badgeClass: "b-gray" };
+    default:
+      return { label: tier, badgeClass: "b-gray" };
+  }
+}
+
+/** 发布模块：素材包派生生命周期 → 徽章。new=灰 active=绿 exhausted=琥珀 retired=灰。 */
+export function packLifeVisual(derived: string): { label: string; badgeClass: string } {
+  switch (derived) {
+    case "new":
+      return { label: "新入库", badgeClass: "b-gray" };
+    case "active":
+      return { label: "可用", badgeClass: "b-green" };
+    case "exhausted":
+      return { label: "冷却中", badgeClass: "b-amber" };
+    case "retired":
+      return { label: "退役", badgeClass: "b-gray" };
+    default:
+      return { label: derived, badgeClass: "b-gray" };
+  }
+}
+
+/** 发布模块：单任务 5 视觉组。待执行=灰 已发布=绿 失败=红 疑似已发=琥珀 已取消=灰。 */
+export function pubTaskVisual(status: string): { label: string; badgeClass: string } {
+  switch (status) {
+    case "pending":
+      return { label: "待执行", badgeClass: "b-gray" };
+    case "published":
+      return { label: "已发布", badgeClass: "b-green" };
+    case "failed":
+      return { label: "失败", badgeClass: "b-red" };
+    case "suspect":
+      return { label: "疑似已发", badgeClass: "b-amber" };
+    case "canceled":
+      return { label: "已取消", badgeClass: "b-gray" };
+    default:
+      return { label: status, badgeClass: "b-gray" };
+  }
+}
+
+/** 发布模块：任务单状态。草稿=灰 已确认/已导出/回收中=蓝 已关闭=绿。 */
+export function sheetVisual(status: string): { label: string; badgeClass: string } {
+  switch (status) {
+    case "draft":
+      return { label: "草稿", badgeClass: "b-gray" };
+    case "confirmed":
+      return { label: "已确认", badgeClass: "b-blue" };
+    case "exported":
+      return { label: "已导出", badgeClass: "b-blue" };
+    case "reconciling":
+      return { label: "回收中", badgeClass: "b-blue" };
+    case "closed":
+      return { label: "已关闭", badgeClass: "b-green" };
+    default:
+      return { label: status, badgeClass: "b-gray" };
+  }
+}
+
+/** 发布模块：失败六类 → 中文标签。 */
+export function failKindLabel(kind?: string | null): string {
+  switch (kind) {
+    case "login":
+      return "登录失效";
+    case "risk":
+      return "风控拦截";
+    case "content":
+      return "素材不合规";
+    case "page":
+      return "页面变更";
+    case "timeout":
+      return "网络超时";
+    default:
+      return "其他";
+  }
+}
+
 /** 错误类型 → 中文标签。 */
 export function errorLabel(errorType?: string | null): string {
   switch (errorType) {

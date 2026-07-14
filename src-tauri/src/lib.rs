@@ -12,6 +12,7 @@ mod ids;
 mod importer;
 mod logging;
 mod provider;
+mod publish;
 mod secrets;
 mod state;
 
@@ -126,6 +127,45 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::backup::data_dir_info,
             commands::backup::open_data_dir,
             commands::backup::export_backup,
+            // ── 发布与资产管理模块（P1 起）──────────────────────────
+            // publish_settings 域
+            commands::publish_settings::get_publish_settings,
+            commands::publish_settings::update_publish_settings,
+            commands::publish_settings::pick_publish_root,
+            commands::publish_settings::use_local_as_exec_root,
+            commands::publish_settings::publish_platforms,
+            // skus 域
+            commands::publish_skus::list_skus,
+            commands::publish_skus::create_sku,
+            commands::publish_skus::update_sku,
+            commands::publish_skus::set_sku_status,
+            commands::publish_skus::get_sku_detail,
+            commands::publish_skus::get_publish_badges,
+            // texts 域
+            commands::publish_texts::list_text_items,
+            commands::publish_texts::add_text_item,
+            commands::publish_texts::update_text_item,
+            commands::publish_texts::set_text_item_enabled,
+            // assets 域
+            commands::publish_assets::list_asset_packs,
+            commands::publish_assets::import_media_files,
+            commands::publish_assets::pack_from_works,
+            commands::publish_assets::retire_pack,
+            commands::publish_assets::restore_pack,
+            commands::publish_assets::delete_pack,
+            commands::publish_assets::update_pack,
+            commands::publish_assets::activate_pack,
+            // inbox 域
+            commands::publish_inbox::list_inbox_items,
+            commands::publish_inbox::claim_inbox_item,
+            commands::publish_inbox::discard_inbox_item,
+            commands::publish_inbox::retry_inbox_item,
+            commands::publish_inbox::rescan_inbox,
+            // accounts 域
+            commands::publish_accounts::list_accounts,
+            commands::publish_accounts::create_account,
+            commands::publish_accounts::update_account,
+            commands::publish_accounts::set_account_status,
         ])
         .events(collect_events![
             engine::events::TaskStatusChanged,

@@ -47,6 +47,8 @@ pub struct SchedAccount {
     pub id: i64,
     pub platform: String,
     pub daily_limit: i64,
+    /// 账号可用时段（空 = 跟随全局时段）。需求 §4.1「账号档案：可用时段」。
+    pub slots: Vec<Slot>,
 }
 
 /// 一个当日应发套装（已选定素材，含内容类型）。
@@ -88,6 +90,13 @@ pub struct ScheduleResult {
     pub trimmed: usize,
 }
 
+/// 分钟所属的时段（不在任何时段内为 None）。
+fn slot_of(slots: &[Slot], minute: i64) -> Option<&Slot> {
+    slots
+        .iter()
+        .find(|s| minute >= s.start_min && minute <= s.end_min)
+}
+
 /// 简单字符串 hash（平台 → seed 扰动），避免不同平台共用同一抖动。
 fn str_hash(s: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -98,25 +107,32 @@ fn str_hash(s: &str) -> u64 {
     h
 }
 
-/// 生成平台时间线上的可用时刻点：时段内、全局两两间隔 ≥ gap、起点带 seed 抖动。
+/// 生成时间线上的可用时刻点：时段内、两两间隔 ≥ gap、**每步独立抖动**。
+///
+/// 旧实现是「起点小抖动 + 严格等距网格」，产出 12:03/13:03/14:03 这种完美等差序列
+/// ——对平台风控是可识别模式。改为每步 `gap + rand(0, jitter_max)`，间隔仍恒 ≥ gap
+/// （不变量 2 不破），但不再等差。
 fn available_points(slots: &[Slot], gap: i64, rng: &mut Rng) -> Vec<i64> {
     let gap = gap.max(1);
+    // 抖动幅度：gap 的一半，夹在 5–30 分钟（gap 很小时不至于把点挤没，很大时不至于失控）。
+    let jitter_max = (gap / 2).clamp(5, 30);
     let mut points = Vec::new();
     let mut next_allowed = i64::MIN;
     let mut ordered: Vec<Slot> = slots.to_vec();
     ordered.sort_by_key(|s| s.start_min);
     for slot in ordered {
         let span = (slot.end_min - slot.start_min).max(0);
-        let jitter = if span > 0 {
+        let start_jitter = if span > 0 {
             rng.below(gap.min(span + 1) as usize) as i64
         } else {
             0
         };
-        let mut t = (slot.start_min + jitter).max(next_allowed);
+        let mut t = (slot.start_min + start_jitter).max(next_allowed);
         while t <= slot.end_min {
             points.push(t);
+            let step = gap + rng.below((jitter_max + 1) as usize) as i64;
             next_allowed = t + gap;
-            t += gap;
+            t += step;
         }
     }
     points
@@ -141,7 +157,8 @@ pub fn schedule(input: &ScheduleInput) -> ScheduleResult {
     }
     let expanded = expanded_rows.len();
 
-    // 2) 账号日限裁剪（每账号保留至多 daily_limit 行，按 sku_id 稳定序）。
+    // 2) 账号日限裁剪。**按日轮转**：先稳定排序保证可复现，再用 seed（含日期派生）洗牌
+    // 后截断。固定按 sku_id 截断会让 id 大的那批 SKU 天天被裁，永远发不出去。
     let mut kept: Vec<PlannedRow> = Vec::new();
     let mut trimmed = 0usize;
     let mut acct_ids: Vec<i64> = input.accounts.iter().map(|a| a.id).collect();
@@ -161,20 +178,48 @@ pub fn schedule(input: &ScheduleInput) -> ScheduleResult {
             .collect();
         rows.sort_by_key(|r| r.sku_id);
         if rows.len() > limit {
+            let mut rng = Rng::new(input.seed ^ (aid as u64));
+            rng.shuffle(&mut rows);
             trimmed += rows.len() - limit;
             rows.truncate(limit);
         }
         kept.extend(rows);
     }
 
-    // 3) 时段分配：按平台聚合，同平台时间线上两两间隔 ≥ min_gap；超容量的行留空（立即发）。
+    // 3) 时段分配。每个平台一条时间线（点两两 ≥ min_gap，这是「同平台多账号最小间隔」
+    // 的来源），账号只能取落在自己可用时段内的点（需求 §4.1；账号无时段则跟随全局）。
+    // 容量不够的行留空 = 立即发。
+    let gap = input.min_gap_minutes.max(1);
+    let mut used_minutes: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut platforms: Vec<String> = kept.iter().map(|r| r.platform.clone()).collect();
     platforms.sort();
     platforms.dedup();
+
     for plat in platforms {
         let mut rng = Rng::new(input.seed ^ str_hash(&plat));
-        let points = available_points(&input.global_slots, input.min_gap_minutes, &mut rng);
-        // 该平台的行索引（稳定序后洗牌，实现抖动分配）。
+        // 该平台涉及的账号及其生效时段。
+        let acct_slots = |aid: i64| -> Vec<Slot> {
+            input
+                .accounts
+                .iter()
+                .find(|a| a.id == aid)
+                .map(|a| a.slots.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| input.global_slots.clone())
+        };
+        // 时间线覆盖该平台所有账号的时段并集（账号时段可能超出全局时段）。
+        let mut union_slots: Vec<Slot> = Vec::new();
+        for r in kept.iter().filter(|r| r.platform == plat) {
+            for s in acct_slots(r.account_id) {
+                if !union_slots.contains(&s) {
+                    union_slots.push(s);
+                }
+            }
+        }
+        let mut grid = available_points(&union_slots, gap, &mut rng);
+        grid.sort_unstable();
+
+        // 行的分配顺序：稳定序后洗牌（同一天可复现，但不按 id 顺序占点）。
         let mut idxs: Vec<usize> = kept
             .iter()
             .enumerate()
@@ -183,8 +228,42 @@ pub fn schedule(input: &ScheduleInput) -> ScheduleResult {
             .collect();
         idxs.sort_by_key(|&i| (kept[i].account_id, kept[i].sku_id));
         rng.shuffle(&mut idxs);
-        for (k, &i) in idxs.iter().enumerate() {
-            kept[i].planned_minute = points.get(k).copied();
+
+        // 逐行取「该账号时段内、尚未被占用」的最早点。
+        let mut taken = vec![false; grid.len()];
+        let mut assigned: Vec<(i64, usize)> = Vec::new(); // (分钟, 行索引)
+        for &i in &idxs {
+            let slots = acct_slots(kept[i].account_id);
+            let found = grid
+                .iter()
+                .enumerate()
+                .find(|(k, m)| !taken[*k] && slot_of(&slots, **m).is_some());
+            if let Some((k, m)) = found {
+                let m = *m;
+                taken[k] = true;
+                assigned.push((m, i));
+            }
+        }
+
+        // 跨平台错峰：同一分钟被别的平台占了就顺延，但**不得**越出所属时段，
+        // 也**不得**逼近本平台的下一个点（否则 min_gap 不变量就破了）。宁可撞点，不破约束。
+        assigned.sort_unstable();
+        for k in 0..assigned.len() {
+            let (orig, row) = assigned[k];
+            let next = assigned.get(k + 1).map(|(m, _)| *m);
+            let slot_end = slot_of(&acct_slots(kept[row].account_id), orig).map(|s| s.end_min);
+            let limit = match (slot_end, next) {
+                (Some(e), Some(n)) => e.min(n - gap),
+                (Some(e), None) => e,
+                (None, Some(n)) => n - gap,
+                (None, None) => orig,
+            };
+            let mut m = orig;
+            while used_minutes.contains(&m) && m < limit {
+                m += 1;
+            }
+            used_minutes.insert(m);
+            kept[row].planned_minute = Some(m);
         }
     }
 
@@ -264,6 +343,7 @@ mod tests {
                 id: 10,
                 platform: "xhs".into(),
                 daily_limit: 3,
+                slots: vec![],
             }],
             global_slots: vec![parse_slot("08:00-22:00").unwrap()], // 14h 宽裕
             min_gap_minutes: 60,
@@ -304,6 +384,7 @@ mod tests {
                 id: 10,
                 platform: "xhs".into(),
                 daily_limit: 3,
+                slots: vec![],
             }],
             global_slots: vec![parse_slot("12:00-12:30").unwrap()], // 30min，gap 60 → 至多 1 点
             min_gap_minutes: 60,
@@ -334,16 +415,19 @@ mod tests {
                     id: 10,
                     platform: "xhs".into(),
                     daily_limit: 3,
+                    slots: vec![],
                 },
                 SchedAccount {
                     id: 11,
                     platform: "douyin".into(),
                     daily_limit: 3,
+                    slots: vec![],
                 },
                 SchedAccount {
                     id: 12,
                     platform: "douyin".into(),
                     daily_limit: 3,
+                    slots: vec![],
                 },
             ],
             global_slots: slots(),
@@ -373,6 +457,7 @@ mod tests {
                 id: 10,
                 platform: "xhs".into(),
                 daily_limit: 2,
+                slots: vec![],
             }],
             global_slots: slots(),
             min_gap_minutes: 60,
@@ -384,7 +469,92 @@ mod tests {
         assert_eq!(r.rows.len(), 2);
     }
 
-    // proptest：排期不变量全套（§6.2）。
+    // C2：日限裁剪按日轮转 —— 固定按 sku_id 截断会让 id 大的那批 SKU 天天被裁、
+    // 永远发不出去。遍历 14 个 seed（模拟 14 天），每个 SKU 至少被保留过一次。
+    #[test]
+    fn daily_limit_trim_rotates_across_days_no_permanent_starvation() {
+        let due: Vec<DueSet> = (1..=4)
+            .map(|i| DueSet {
+                sku_id: i,
+                platforms: vec!["xhs".into()],
+                content_kind: "video".into(),
+            })
+            .collect();
+        let mut kept_ever: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for day in 0..14u64 {
+            let inp = ScheduleInput {
+                due: due.clone(),
+                accounts: vec![SchedAccount {
+                    id: 10,
+                    platform: "xhs".into(),
+                    daily_limit: 2,
+                    slots: vec![],
+                }],
+                global_slots: slots(),
+                min_gap_minutes: 60,
+                seed: 0x9E37_79B9 ^ day, // 日期派生 seed
+            };
+            for row in schedule(&inp).rows {
+                kept_ever.insert(row.sku_id);
+            }
+        }
+        assert_eq!(kept_ever.len(), 4, "14 天内每个 SKU 都该被排上过至少一次");
+    }
+
+    // C5：账号有自己的可用时段时，它的行只能落在该时段内（需求 §4.1）。
+    #[test]
+    fn account_slots_are_respected() {
+        let due: Vec<DueSet> = (1..=2)
+            .map(|i| DueSet {
+                sku_id: i,
+                platforms: vec!["xhs".into()],
+                content_kind: "video".into(),
+            })
+            .collect();
+        let night = parse_slot("21:00-22:30").unwrap();
+        let inp = ScheduleInput {
+            due,
+            accounts: vec![SchedAccount {
+                id: 10,
+                platform: "xhs".into(),
+                daily_limit: 2,
+                slots: vec![night],
+            }],
+            // 全局时段是中午，账号时段是晚上：以账号为准。
+            global_slots: vec![parse_slot("11:30-13:00").unwrap()],
+            min_gap_minutes: 30,
+            seed: 7,
+        };
+        let r = schedule(&inp);
+        let times: Vec<i64> = r.rows.iter().filter_map(|row| row.planned_minute).collect();
+        assert!(!times.is_empty(), "账号时段内应排得下");
+        for t in times {
+            assert!(
+                t >= night.start_min && t <= night.end_min,
+                "{t} 不在账号可用时段内"
+            );
+        }
+    }
+
+    // C4：时间不再是完美等差（等距网格是平台风控可识别的模式）。
+    #[test]
+    fn point_intervals_are_not_a_perfect_grid() {
+        let mut rng = Rng::new(42);
+        let pts = available_points(&[parse_slot("08:00-22:00").unwrap()], 60, &mut rng);
+        assert!(pts.len() >= 5);
+        let deltas: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(deltas.iter().all(|d| *d >= 60), "间隔仍恒 ≥ gap");
+        assert!(
+            deltas
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
+            "步长应有抖动，而非恒等于 gap：{deltas:?}"
+        );
+    }
+
+    // proptest：排期不变量全套（§6.2）+ C4/C5 新增。
     proptest::proptest! {
         #[test]
         fn schedule_invariants(
@@ -403,6 +573,7 @@ mod tests {
                 id: 100 + i as i64,
                 platform: plats[i % 3].into(),
                 daily_limit: (1 + (i % 3)) as i64,
+                slots: vec![],
             }).collect();
             let inp = ScheduleInput { due, accounts: accounts.clone(), global_slots: slots(), min_gap_minutes: gap, seed };
             let r = schedule(&inp);
@@ -438,6 +609,16 @@ mod tests {
                     proptest::prop_assert!(w[1] - w[0] >= gap, "同平台 {} 间隔 {} < {}", p, w[1]-w[0], gap);
                 }
             }
+
+            // C4 新增（弱断言）：跨平台错峰后，全局重复的分钟数 ≤ 平台数 − 1。
+            // 单执行机串行发布，同一分钟撞多个任务会挤压；顺延不越界时应基本消除撞点。
+            let mut all: Vec<i64> = r.rows.iter().filter_map(|row| row.planned_minute).collect();
+            all.sort_unstable();
+            let dupes = all.windows(2).filter(|w| w[0] == w[1]).count();
+            proptest::prop_assert!(
+                dupes <= plats.len().saturating_sub(1),
+                "全局撞点 {} 个，超过平台数-1", dupes
+            );
         }
     }
 }

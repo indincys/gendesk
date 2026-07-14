@@ -1089,15 +1089,17 @@ function StrategyTab() {
             分层频率
           </div>
           <div className="fx gap14 wrap">
+            {/* 引擎语义是「热款每天发一次 × 平台集」，>1 无效 —— 用开关而不是数字框，
+                免得调到 3 却什么也没发生。同 SKU 同日多套装留给 V2。 */}
             <div className="fx ac gap8">
-              <span className="fs12 t2 nowrap">热款每日</span>
-              <Stepper
-                value={tr.hotDaily}
-                min={0}
-                max={5}
-                onChange={(v) => void patch({ tierRules: { ...tr, hotDaily: v } })}
+              <span className="fs12 t2 nowrap">热款每日发布</span>
+              <Toggle
+                on={tr.hotDaily >= 1}
+                onClick={() =>
+                  void patch({ tierRules: { ...tr, hotDaily: tr.hotDaily >= 1 ? 0 : 1 } })
+                }
               />
-              <span className="fs11 t3">次 × 平台集</span>
+              <span className="fs11 t3">每天一次 × 平台集</span>
             </div>
             <div className="fx ac gap8">
               <span className="fs12 t2 nowrap">温款每周</span>

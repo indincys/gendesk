@@ -44,7 +44,11 @@ impl Default for PlatformMatrix {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TierRules {
-    /// 热款：每天次数（× 平台集）。
+    /// 热款：**每日发布开关**（1=每日发，0=不发）。
+    ///
+    /// 引擎语义是「热款每天发一次（× 平台集）」——同 SKU 同日多套装是 V2 的事。
+    /// 故这里只有 0/1 两态（sanitize 夹紧），UI 是开关而不是 0–5 的 Stepper：
+    /// 一个调到 3 却毫无作用的数字框比没有更糟。
     pub hot_daily: i64,
     /// 温款：每周次数。
     pub warm_weekly: i64,
@@ -178,6 +182,10 @@ impl PublishSettings {
         self.warn_body = self.warn_body.clamp(0, 100);
         self.account_daily_limit_default = self.account_daily_limit_default.clamp(1, 100);
         self.min_gap_minutes = self.min_gap_minutes.clamp(0, 1440);
+        // 热款只有「每日发 / 不发」两态（>1 引擎不认，存着只会误导）。
+        self.tier_rules.hot_daily = self.tier_rules.hot_daily.clamp(0, 1);
+        self.tier_rules.warm_weekly = self.tier_rules.warm_weekly.clamp(0, 7);
+        self.tier_rules.cold_weekly_rotate = self.tier_rules.cold_weekly_rotate.clamp(0, 100);
 
         if scheduler::parse_hhmm(&self.autogen_time).is_none() {
             tracing::warn!(value = %self.autogen_time, "每日生成时间非法，回退默认");

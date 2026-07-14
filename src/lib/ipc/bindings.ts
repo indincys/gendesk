@@ -2184,7 +2184,11 @@ platformZh: string; source: string; enabled: boolean; useCount: number; createdA
  */
 export type TierRules = { 
 /**
- * 热款：每天次数（× 平台集）。
+ * 热款：**每日发布开关**（1=每日发，0=不发）。
+ * 
+ * 引擎语义是「热款每天发一次（× 平台集）」——同 SKU 同日多套装是 V2 的事。
+ * 故这里只有 0/1 两态（sanitize 夹紧），UI 是开关而不是 0–5 的 Stepper：
+ * 一个调到 3 却毫无作用的数字框比没有更糟。
  */
 hotDaily: number; 
 /**

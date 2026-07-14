@@ -1,9 +1,20 @@
 import { Stepper } from "@/components/ui/Stepper";
 import { type PublishSettings, commands, unwrap } from "@/lib/ipc";
+import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+/** `HH:MM`（00:00–23:59）；与后端 `scheduler::parse_hhmm` 同一套规则。 */
+function isHhmm(v: string | null | undefined): boolean {
+  if (!v) return false;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim());
+  if (!m) return false;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  return h >= 0 && h < 24 && min >= 0 && min < 60;
+}
 
 /** 设置页「发布与同步」区块（原型 publish.dc.html 设置 · 发布与同步）。 */
 export function PublishSyncSection() {
@@ -15,27 +26,33 @@ export function PublishSyncSection() {
   }, []);
 
   const patch = async (p: Partial<Record<string, unknown>>) => {
-    const next = await unwrap(
-      commands.updatePublishSettings({
-        rootLocal: null,
-        rootExec: null,
-        pathStyle: null,
-        dedupDays: null,
-        receiptTimeoutHours: null,
-        autogenTime: null,
-        warnMaterial: null,
-        warnTitle: null,
-        warnBody: null,
-        accountDailyLimitDefault: null,
-        minGapMinutes: null,
-        platformMatrix: null,
-        tierRules: null,
-        timeSlots: null,
-        ...p,
-      }),
-    );
-    setS(next);
-    void refreshBadges();
+    try {
+      const next = await unwrap(
+        commands.updatePublishSettings({
+          rootLocal: null,
+          rootExec: null,
+          pathStyle: null,
+          dedupDays: null,
+          receiptTimeoutHours: null,
+          autogenTime: null,
+          warnMaterial: null,
+          warnTitle: null,
+          warnBody: null,
+          accountDailyLimitDefault: null,
+          minGapMinutes: null,
+          platformMatrix: null,
+          tierRules: null,
+          timeSlots: null,
+          ...p,
+        }),
+      );
+      setS(next);
+      void refreshBadges();
+    } catch (e) {
+      // 后端拒绝（如非法时间格式）→ 提示并回读，避免界面停在一个没存进去的值上。
+      toast.error(String(e));
+      setS(await unwrap(commands.getPublishSettings()));
+    }
   };
 
   if (!s) return null;
@@ -127,12 +144,20 @@ export function PublishSyncSection() {
           <span className="fs12 t2 nowrap">每日生成时间</span>
           <input
             className="inp mono"
-            style={{ width: 84 }}
+            style={{
+              width: 84,
+              ...(isHhmm(s.autogenTime) ? {} : { borderColor: "var(--er)" }),
+            }}
             value={s.autogenTime ?? ""}
             onChange={(e) => setS({ ...s, autogenTime: e.target.value })}
-            onBlur={(e) => void patch({ autogenTime: e.target.value })}
+            // 非法值不提交：后端会拒绝，先在本地拦下，省一次往返 + 一个红 toast。
+            onBlur={(e) => {
+              if (isHhmm(e.target.value)) void patch({ autogenTime: e.target.value });
+            }}
           />
-          <span className="fs11 t3">HH:MM · 自动生成明日草稿</span>
+          <span className={cn("fs11", isHhmm(s.autogenTime) ? "t3" : "terr")}>
+            {isHhmm(s.autogenTime) ? "HH:MM · 自动生成明日草稿" : "格式应为 HH:MM（00:00–23:59）"}
+          </span>
         </div>
       </div>
 

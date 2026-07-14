@@ -36,7 +36,64 @@ async fn emit_sheet(app: &AppHandle, pool: &sqlx::SqlitePool, sheet_id: i64) {
     crate::publish::inbox::watcher::emit_badges(pool, app).await;
 }
 
-/// 读取某任务单对应任务包内的 `任务单.xlsx` 回执。
+/// 快照目录名（点前缀：收件箱/任务包 watcher 与收录一律跳过点开头的名字）。
+const SNAPSHOT_DIR: &str = ".snapshots";
+/// 保留的快照份数（超出删最旧）。
+const SNAPSHOT_KEEP: usize = 20;
+
+/// 内容哈希（FNV-1a 64）：只用来判「这份 xlsx 和上次快照是不是同一份」，不做安全用途。
+fn content_hash(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
+/// 回执 xlsx 留底：内容与最新快照不同才存一份。
+///
+/// xlsx 是双侧唯一契约，会被执行器重写、被同步软件搬运、被 Excel 存坏——一旦覆盖就无据可查。
+/// 快照失败只 warn，绝不阻断对账。
+fn snapshot_receipts(xlsx: &std::path::Path, pkg_dir: &std::path::Path) {
+    let Ok(bytes) = std::fs::read(xlsx) else {
+        return;
+    };
+    let dir = pkg_dir.join(SNAPSHOT_DIR);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "创建回执快照目录失败");
+        return;
+    }
+    // 已有快照按文件名（含 unix 秒）排序。
+    let mut snaps: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("xlsx"))
+                .collect()
+        })
+        .unwrap_or_default();
+    snaps.sort();
+
+    let hash = content_hash(&bytes);
+    if let Some(latest) = snaps.last() {
+        if std::fs::read(latest).ok().map(|b| content_hash(&b)) == Some(hash) {
+            return; // 内容没变，不重复留底
+        }
+    }
+    let name = format!("任务单.{}.xlsx", crate::db::now_unix());
+    if let Err(e) = std::fs::write(dir.join(&name), &bytes) {
+        tracing::warn!(error = %e, "写回执快照失败");
+        return;
+    }
+    // 裁剪到上限（+1 是刚写的这份）。
+    while snaps.len() + 1 > SNAPSHOT_KEEP {
+        let oldest = snaps.remove(0);
+        let _ = std::fs::remove_file(oldest);
+    }
+}
+
+/// 读取某任务单对应任务包内的 `任务单.xlsx` 回执（读到非空回执时顺带留底快照）。
 async fn read_sheet_receipts(
     pool: &sqlx::SqlitePool,
     root: &std::path::Path,
@@ -46,12 +103,19 @@ async fn read_sheet_receipts(
         .await?
         .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
     let yyyymmdd: String = sheet.date.chars().filter(|c| c.is_ascii_digit()).collect();
-    let xlsx =
-        RelPath::from_parts([paths::TASK_PACKAGES, &yyyymmdd, paths::TASK_XLSX]).to_local(root);
+    let pkg_dir = RelPath::from_parts([paths::TASK_PACKAGES, &yyyymmdd]).to_local(root);
+    let xlsx = pkg_dir.join(paths::TASK_XLSX);
     if !xlsx.exists() {
         return Ok(Vec::new());
     }
-    reader::read_receipts(&xlsx)
+    let receipts = reader::read_receipts(&xlsx)?;
+    let has_written = receipts
+        .iter()
+        .any(|r| !r.status_zh.trim().is_empty() && r.status_zh != "待执行");
+    if has_written {
+        snapshot_receipts(&xlsx, &pkg_dir);
+    }
+    Ok(receipts)
 }
 
 /// 手动导入回执（兜底，与 watcher 走同一对账管线）。
@@ -196,9 +260,12 @@ pub async fn get_dashboard(state: State<'_, AppState>, date: String) -> AppResul
                 .iter()
                 .filter(|r| r.account_id == a.id && r.status == "published")
                 .count() as i64;
-            let has_risk_cancel = rows
-                .iter()
-                .any(|r| r.account_id == a.id && r.status == "canceled");
+            // 熔断 = 风控导致的取消。人工取消一行不该让整个账号显示「当日熔断」。
+            let has_risk_cancel = rows.iter().any(|r| {
+                r.account_id == a.id
+                    && r.status == "canceled"
+                    && r.cancel_kind.as_deref() == Some("risk")
+            });
             let health = if a.status == "disabled" {
                 "disabled"
             } else if has_risk_cancel {
@@ -246,4 +313,62 @@ pub async fn get_report(
     Ok(sheet
         .report_json
         .and_then(|j| serde_json::from_str::<ReportView>(&j).ok()))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即测试失败，是期望行为
+mod tests {
+    use super::*;
+
+    fn snaps_in(pkg: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = pkg.join(SNAPSHOT_DIR);
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_else(|_| Vec::new());
+        v.sort();
+        v
+    }
+
+    // B5：内容不同的两次回写各留一份底；相同内容不重复存；超上限裁剪最旧。
+    #[test]
+    fn snapshots_dedupe_by_content_and_cap_at_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        let xlsx = pkg.join("任务单.xlsx");
+
+        std::fs::write(&xlsx, b"v1").unwrap();
+        snapshot_receipts(&xlsx, pkg);
+        assert_eq!(snaps_in(pkg).len(), 1);
+
+        // 同内容再来一次 → 不重复留底。
+        snapshot_receipts(&xlsx, pkg);
+        assert_eq!(snaps_in(pkg).len(), 1, "内容未变不重复存");
+
+        // 内容变了 → 新增一份。文件名含 unix 秒，同秒内会去重命名冲突，故直接造历史份数。
+        std::fs::write(&xlsx, b"v2").unwrap();
+        snapshot_receipts(&xlsx, pkg);
+        assert!(!snaps_in(pkg).is_empty());
+
+        // 造满上限的历史快照，再写一份新内容 → 总数不超过上限。
+        for i in 0..SNAPSHOT_KEEP as i64 + 5 {
+            std::fs::write(
+                pkg.join(SNAPSHOT_DIR).join(format!("任务单.{i:04}.xlsx")),
+                b"old",
+            )
+            .unwrap();
+        }
+        std::fs::write(&xlsx, b"v3").unwrap();
+        snapshot_receipts(&xlsx, pkg);
+        assert!(
+            snaps_in(pkg).len() <= SNAPSHOT_KEEP,
+            "超出上限应删最旧：{}",
+            snaps_in(pkg).len()
+        );
+    }
+
+    #[test]
+    fn content_hash_differs_on_change() {
+        assert_eq!(content_hash(b"abc"), content_hash(b"abc"));
+        assert_ne!(content_hash(b"abc"), content_hash(b"abd"));
+    }
 }

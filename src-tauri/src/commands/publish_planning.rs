@@ -257,6 +257,19 @@ pub struct TaskRowPatch {
     pub planned_time: Option<Option<String>>,
 }
 
+/// 校验计划时间：`None` = 清空（立即发）；`Some` 必须是 `HH:MM`。
+/// 不校验的话任意字符串会进 xlsx 第 5 列，执行器读不懂；超时扫描也只能静默回退到导出时刻。
+fn validate_planned_time(pt: &Option<String>) -> AppResult<()> {
+    if let Some(t) = pt {
+        if crate::publish::planner::scheduler::parse_hhmm(t).is_none() {
+            return Err(AppError::InvalidInput(format!(
+                "定时发布时间格式应为 HH:MM（00:00–23:59），收到「{t}」"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn update_task_row(
@@ -269,18 +282,43 @@ pub async fn update_task_row(
         .ok_or_else(|| AppError::InvalidInput("任务行不存在".into()))?;
     ensure_draft(&state.db, task.sheet_id).await?;
     if let Some(pt) = patch.planned_time {
+        validate_planned_time(&pt)?;
         planning::update_task_time(&state.db, id, pt.as_deref()).await?;
     }
     Ok(())
 }
 
+/// 人工取消一行（只允许待执行）。
+///
+/// 硬性红线（需求 §6.4）：published/failed/**suspect** 都是已定态的，取消它们等于
+/// 绕过 `resolve_suspect` 这条唯一定态路径。取消后立即尝试关单——否则取消掉最后一个
+/// 待执行行的单会永远停在「回收中」，不出日报。
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_task_row(state: State<'_, AppState>, app: AppHandle, id: i64) -> AppResult<()> {
     let task = planning::get_task(&state.db, id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("任务行不存在".into()))?;
-    planning::set_task_status(&state.db, id, "canceled").await?;
+    if task.status != "pending" {
+        return Err(AppError::InvalidInput(format!(
+            "只有待执行的任务可以取消；该任务当前为「{}」{}",
+            crate::publish::reconcile::task_status_zh(&task.status),
+            if task.status == "suspect" {
+                "，请到核对台人工定态"
+            } else {
+                ""
+            }
+        )));
+    }
+    let mut conn = state.db.acquire().await?;
+    let n = planning::cancel_task_manual(&mut conn, id).await?;
+    drop(conn);
+    if n == 0 {
+        return Err(AppError::InvalidInput(
+            "任务状态已变化，请刷新后重试".into(),
+        ));
+    }
+    crate::publish::reconcile::maybe_close(&state.db, task.sheet_id).await?;
     emit_changed(&app, &state.db, task.sheet_id).await;
     Ok(())
 }
@@ -315,6 +353,7 @@ pub async fn add_task_row(
     input: AddTaskRowInput,
 ) -> AppResult<()> {
     ensure_draft(&state.db, input.sheet_id).await?;
+    validate_planned_time(&input.planned_time)?;
     let sheet = planning::get_sheet(&state.db, input.sheet_id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
@@ -324,16 +363,31 @@ pub async fn add_task_row(
         .find(|a| a.id == input.account_id)
         .ok_or_else(|| AppError::InvalidInput("账号不存在".into()))?;
 
-    // 找该 SKU 当日套装；无则即时选取并落套装。
+    // 找该 SKU 当日套装；无则即时选取（选取是纯读，放事务外）。
     let existing_set =
         sqlx::query_scalar::<_, i64>("SELECT id FROM daily_sets WHERE date = ?1 AND sku_id = ?2")
             .bind(&sheet.date)
             .bind(input.sku_id)
             .fetch_optional(&state.db)
             .await?;
+    let picked = match existing_set {
+        Some(_) => None,
+        None => Some(pick_set_for(&state, input.sku_id, &account.platform).await?),
+    };
 
-    let (set_id, content_kind) = match existing_set {
-        Some(sid) => {
+    let yy: String = sheet
+        .date
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .skip(2)
+        .collect();
+    let next = planning::max_task_seq(&state.db, input.sheet_id, &yy).await? + 1;
+    let task_code = format!("T{yy}-{next:03}");
+
+    // 建套装 + 插任务在同一事务：中途失败不会留下一个没有任务行的孤儿套装。
+    let mut tx = state.db.begin().await?;
+    let (set_id, content_kind) = match (existing_set, picked) {
+        (Some(sid), _) => {
             let ds = planning::get_daily_set(&state.db, sid)
                 .await?
                 .ok_or_else(|| AppError::Internal("套装读取失败".into()))?;
@@ -341,11 +395,9 @@ pub async fn add_task_row(
             let kind = pack.map(|p| p.kind).unwrap_or_else(|| "video".into());
             (sid, kind)
         }
-        None => {
-            let pick = pick_set_for(&state, input.sku_id, &account.platform).await?;
-            let mut conn = state.db.acquire().await?;
+        (None, Some(pick)) => {
             let sid = planning::insert_daily_set(
-                &mut conn,
+                &mut tx,
                 &planning::NewDailySet {
                     date: sheet.date.clone(),
                     sku_id: input.sku_id,
@@ -357,19 +409,10 @@ pub async fn add_task_row(
             .await?;
             (sid, pick.content_kind)
         }
+        (None, None) => return Err(AppError::Internal("套装选取缺失".into())),
     };
-
-    let yy: String = sheet
-        .date
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .skip(2)
-        .collect();
-    let next = planning::max_task_seq(&state.db, input.sheet_id, &yy).await? + 1;
-    let task_code = format!("T{yy}-{next:03}");
-    let mut conn = state.db.acquire().await?;
     planning::insert_publish_task(
-        &mut conn,
+        &mut tx,
         &planning::NewPublishTask {
             sheet_id: input.sheet_id,
             task_code,
@@ -381,7 +424,8 @@ pub async fn add_task_row(
         },
     )
     .await?;
-    drop(conn);
+    tx.commit().await?;
+
     emit_changed(&app, &state.db, input.sheet_id).await;
     Ok(())
 }
@@ -416,20 +460,24 @@ pub async fn reroll_set(
     .await?
     .unwrap_or_else(|| "general".into());
     let pick = pick_set_for(&state, sku_id, &platform).await?;
+    // 两条 UPDATE 收进一个事务：中断在两者之间会留下 content_kind 与套装包类型不一致的行
+    // （套装换成了图集包，任务行还写着「视频」）。
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE daily_sets SET pack_id = ?2, title_id = ?3, body_id = ?4 WHERE id = ?1")
         .bind(set_id)
         .bind(pick.pack_id)
         .bind(pick.title_id)
         .bind(pick.body_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     // content_kind 可能随包类型变（video↔gallery）→ 同步任务行。
     sqlx::query("UPDATE publish_tasks SET content_kind = ?2, updated_at = ?3 WHERE set_id = ?1")
         .bind(set_id)
         .bind(&pick.content_kind)
         .bind(crate::db::now_unix())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     emit_changed(&app, &state.db, sheet_id).await;
     build_detail(&state, sheet_id).await
 }
@@ -490,7 +538,19 @@ async fn pick_set_for(
         .map_err(|e| AppError::InvalidInput(format!("换套装失败：{}", e.label())))
 }
 
-/// 导出任务包（confirmed → exported；重导出=整包覆盖）。
+/// 导出预检（纯读）：素材齐备 / 路径长度 / 账号在用 / 重导出回执保护。
+/// 前端在导出确认弹窗打开时调用，逐条渲染；有 error 时禁用「确认导出」。
+#[tauri::command]
+#[specta::specta]
+pub async fn preflight_export(
+    state: State<'_, AppState>,
+    sheet_id: i64,
+) -> AppResult<crate::publish::exporter::PreflightReport> {
+    let settings = publish_settings::load(&state.db).await?;
+    crate::publish::exporter::preflight(&state.db, sheet_id, &settings).await
+}
+
+/// 导出任务包（confirmed → exported；重导出=整包覆盖，但已有回执时被预检拒绝）。
 #[tauri::command]
 #[specta::specta]
 pub async fn export_package(

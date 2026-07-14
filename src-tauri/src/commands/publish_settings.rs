@@ -11,6 +11,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::db::repo::settings as repo;
 use crate::error::{AppError, AppResult};
 use crate::publish::paths;
+use crate::publish::planner::scheduler;
 use crate::publish::platform::{platform_infos, PlatformInfo};
 use crate::state::AppState;
 
@@ -164,6 +165,8 @@ impl Default for PublishSettings {
 }
 
 impl PublishSettings {
+    /// 读路径的兜底：数值夹到合法区间；非法时间字符串（历史库/手改 JSON）落日志后回退默认，
+    /// **不静默留着**——写路径由 [`validate_times`] 直接拒绝，故正常不会走到这里。
     fn sanitize(&mut self) {
         if self.path_style != "windows" && self.path_style != "unix" {
             self.path_style = default_path_style();
@@ -175,7 +178,38 @@ impl PublishSettings {
         self.warn_body = self.warn_body.clamp(0, 100);
         self.account_daily_limit_default = self.account_daily_limit_default.clamp(1, 100);
         self.min_gap_minutes = self.min_gap_minutes.clamp(0, 1440);
+
+        if scheduler::parse_hhmm(&self.autogen_time).is_none() {
+            tracing::warn!(value = %self.autogen_time, "每日生成时间非法，回退默认");
+            self.autogen_time = d_autogen();
+        }
+        let before = self.time_slots.len();
+        self.time_slots
+            .retain(|t| scheduler::parse_slot(t).is_some());
+        if self.time_slots.len() != before {
+            tracing::warn!("时段模板含非法段，已剔除");
+        }
     }
+}
+
+/// 写路径校验：非法时间直接报错（而非静默回退成另一个值——用户以为存进去了，
+/// 引擎却按 22:00 跑，是最难查的那类不一致）。
+fn validate_times(s: &PublishSettings) -> AppResult<()> {
+    if scheduler::parse_hhmm(&s.autogen_time).is_none() {
+        return Err(AppError::InvalidInput(format!(
+            "每日生成时间格式应为 HH:MM（00:00–23:59），收到「{}」",
+            s.autogen_time
+        )));
+    }
+    for t in &s.time_slots {
+        if scheduler::parse_slot(t).is_none() {
+            return Err(AppError::InvalidInput(format!(
+                "时段格式应为 HH:MM-HH:MM 且开始早于结束（暂不支持跨午夜，\
+                 请拆成 21:00-23:59），收到「{t}」"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 设置补丁（部分更新）。
@@ -294,6 +328,8 @@ pub async fn update_publish_settings(
     if let Some(v) = patch.time_slots {
         s.time_slots = v;
     }
+    // 时间字段先拒后清：非法输入报错回前端，不静默改成别的值。
+    validate_times(&s)?;
     s.sanitize();
 
     // 配置了本机根目录 → 校验/创建四分区（缺失即重建，残余风险默认处置）。
@@ -325,11 +361,13 @@ pub async fn pick_publish_root(app: AppHandle) -> AppResult<Option<String>> {
 }
 
 /// 拓扑 B「同本机」一键：把执行机根路径设为本机根路径。
+/// 路径风格同步跟随本机——执行机就是本机，还留着 `windows` 会拼出 `\` 分隔的假路径。
 #[tauri::command]
 #[specta::specta]
 pub async fn use_local_as_exec_root(state: State<'_, AppState>) -> AppResult<PublishSettings> {
     let mut s = load(&state.db).await?;
     s.root_exec = s.root_local.clone();
+    s.path_style = if cfg!(windows) { "windows" } else { "unix" }.into();
     save(&state.db, &s).await?;
     Ok(s)
 }
@@ -339,4 +377,45 @@ pub async fn use_local_as_exec_root(state: State<'_, AppState>) -> AppResult<Pub
 #[specta::specta]
 pub async fn publish_platforms() -> AppResult<Vec<PlatformInfo>> {
     Ok(platform_infos())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即测试失败，是期望行为
+mod tests {
+    use super::*;
+
+    // B4：非法时间在写路径被**拒绝**，而不是静默回退（回退会让存储值与用户所见不一致）。
+    #[test]
+    fn invalid_times_are_rejected_not_silently_defaulted() {
+        let mut s = PublishSettings::default();
+        assert!(validate_times(&s).is_ok());
+
+        s.autogen_time = "25:00".into();
+        let err = validate_times(&s).unwrap_err().to_string();
+        assert!(err.contains("每日生成时间"), "{err}");
+
+        s.autogen_time = "22:00".into();
+        s.time_slots = vec!["21:00-01:00".into()]; // 跨午夜
+        let err = validate_times(&s).unwrap_err().to_string();
+        assert!(err.contains("跨午夜"), "{err}");
+
+        s.time_slots = vec!["随便".into()];
+        assert!(validate_times(&s).is_err());
+
+        s.time_slots = vec!["09:00-11:00".into()];
+        assert!(validate_times(&s).is_ok());
+    }
+
+    // 读路径兜底：历史库里已存的非法值回退默认并剔除，不把坏数据带进引擎。
+    #[test]
+    fn sanitize_repairs_legacy_bad_values() {
+        let mut s = PublishSettings {
+            autogen_time: "bad".into(),
+            time_slots: vec!["11:30-13:00".into(), "坏段".into()],
+            ..PublishSettings::default()
+        };
+        s.sanitize();
+        assert_eq!(s.autogen_time, "22:00");
+        assert_eq!(s.time_slots, vec!["11:30-13:00".to_string()]);
+    }
 }

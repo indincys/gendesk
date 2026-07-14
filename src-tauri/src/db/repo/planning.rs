@@ -45,6 +45,8 @@ pub struct PublishTaskRow {
     pub result_msg: Option<String>,
     pub result_time: Option<i64>,
     pub screenshot: Option<String>,
+    /// 取消原因：`manual`（人工）| `risk`（风控熔断）；非 canceled 行为 NULL。
+    pub cancel_kind: Option<String>,
     pub updated_at: i64,
 }
 
@@ -241,17 +243,20 @@ pub struct TaskRowJoin {
     pub result_msg: Option<String>,
     pub result_time: Option<i64>,
     pub screenshot: Option<String>,
+    pub cancel_kind: Option<String>,
+    pub pack_id: i64,
 }
 
 pub async fn sheet_rows(pool: &SqlitePool, sheet_id: i64) -> Result<Vec<TaskRowJoin>, sqlx::Error> {
     sqlx::query_as::<_, TaskRowJoin>(
-        "SELECT pt.id, pt.task_code, pt.set_id, ds.sku_id,
+        "SELECT pt.id, pt.task_code, pt.set_id, ds.sku_id, ds.pack_id,
                 sk.code AS sku_code, sk.style_name, sk.product_name, sk.topics_json,
                 ti.text AS title_text, bt.text AS body_text,
                 ap.cover, ap.dir_rel, ap.kind AS pack_kind, ap.files_json,
                 pt.account_id, ac.name AS account_name,
                 pt.platform, pt.content_kind, pt.planned_time, pt.status,
-                pt.fail_kind, pt.result_url, pt.result_msg, pt.result_time, pt.screenshot
+                pt.fail_kind, pt.result_url, pt.result_msg, pt.result_time, pt.screenshot,
+                pt.cancel_kind
          FROM publish_tasks pt
          JOIN daily_sets ds ON ds.id = pt.set_id
          JOIN skus sk ON sk.id = ds.sku_id
@@ -296,6 +301,45 @@ pub async fn set_task_status(pool: &SqlitePool, id: i64, status: &str) -> Result
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// 人工取消一行（只作用于待执行行；`cancel_kind='manual'` 使看板不把它当风控熔断）。
+/// 返回受影响行数——0 表示该行已不是 pending（调用方据此报错）。
+pub async fn cancel_task_manual(conn: &mut SqliteConnection, id: i64) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE publish_tasks SET status='canceled', cancel_kind='manual', updated_at=?2
+         WHERE id=?1 AND status='pending'",
+    )
+    .bind(id)
+    .bind(crate::db::now_unix())
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// 账号名（失败上报文案用）。
+pub async fn account_name(pool: &SqlitePool, id: i64) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>("SELECT name FROM accounts WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 某日「网络超时」失败的 (sku_id, platform, account_id)（次日补排输入，需求 §6.3）。
+pub async fn timeout_fails_of_date(
+    pool: &SqlitePool,
+    date: &str,
+) -> Result<Vec<(i64, String, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT DISTINCT ds.sku_id, pt.platform, pt.account_id
+         FROM publish_tasks pt
+         JOIN daily_sets ds ON ds.id = pt.set_id
+         JOIN task_sheets s ON s.id = pt.sheet_id
+         WHERE s.date = ?1 AND pt.status = 'failed' AND pt.fail_kind = 'timeout'",
+    )
+    .bind(date)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn delete_task(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
@@ -345,14 +389,14 @@ pub async fn update_task_result(
     Ok(())
 }
 
-/// 风控熔断：把某账号在某单内剩余「待执行」任务置「已取消」。返回取消数。
+/// 风控熔断：把某账号在某单内剩余「待执行」任务置「已取消」（cancel_kind=risk）。返回取消数。
 pub async fn cancel_pending_of_account(
     conn: &mut SqliteConnection,
     sheet_id: i64,
     account_id: i64,
 ) -> Result<u64, sqlx::Error> {
     let r = sqlx::query(
-        "UPDATE publish_tasks SET status='canceled', updated_at=?3
+        "UPDATE publish_tasks SET status='canceled', cancel_kind='risk', updated_at=?3
          WHERE sheet_id=?1 AND account_id=?2 AND status='pending'",
     )
     .bind(sheet_id)

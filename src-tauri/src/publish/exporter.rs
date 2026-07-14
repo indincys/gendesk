@@ -10,7 +10,7 @@ use specta::Type;
 use sqlx::SqlitePool;
 
 use crate::commands::publish_settings::PublishSettings;
-use crate::db::repo::planning;
+use crate::db::repo::{accounts, planning};
 use crate::error::{AppError, AppResult};
 use crate::publish::paths::{self, PathStyle, RelPath};
 use crate::publish::platform::Platform;
@@ -29,6 +29,180 @@ pub struct ExportResult {
     pub file_count: i64,
     /// 是否有超 Windows 长度上限的拼接路径（告警）。
     pub long_path_warn: bool,
+    /// 源文件缺失清单（预检通过后正常应为空；冗余上报便于排查）。
+    pub missing_files: Vec<String>,
+}
+
+/// 导出预检报告：errors 非空即阻断导出。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightReport {
+    /// 阻断级问题（导出会被拒绝）。
+    pub errors: Vec<String>,
+    /// 提醒级问题（导出照常，但值得看一眼）。
+    pub warnings: Vec<String>,
+    pub row_count: i64,
+    pub sku_count: i64,
+}
+
+impl PreflightReport {
+    pub fn ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// 导出预检（纯读）：素材齐备 · 路径长度 · 账号在用 · 执行机根路径 · **重导出回执保护**。
+///
+/// 最后一项是关键：xlsx 是双侧唯一契约，执行器只写 20–22 列。一旦它开始回写，
+/// 整包覆盖会把回执抹掉，且无从恢复——所以只要包内 xlsx 有任何一行不是「待执行」，
+/// 就拒绝重导出，先走对账。
+pub async fn preflight(
+    pool: &SqlitePool,
+    sheet_id: i64,
+    s: &PublishSettings,
+) -> AppResult<PreflightReport> {
+    let mut rep = PreflightReport::default();
+    let sheet = planning::get_sheet(pool, sheet_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
+    if sheet.status != "confirmed" && sheet.status != "exported" {
+        rep.errors.push(format!(
+            "任务单当前为「{}」，只有已确认 / 已导出的可以导出",
+            sheet.status
+        ));
+        return Ok(rep);
+    }
+    if s.root_local.is_empty() {
+        rep.errors
+            .push("尚未配置本机根目录（设置 › 发布与同步）".into());
+        return Ok(rep);
+    }
+    let local_root = Path::new(&s.root_local);
+    let style = PathStyle::from_str_or_default(&s.path_style);
+
+    // 执行机根路径：未配置则回退本机根（同机模式），风格与根路径首字符不一致时提醒。
+    if s.root_exec.is_empty() {
+        rep.warnings
+            .push("未配置执行机根目录，将按本机根目录拼接路径（同机模式）".into());
+    } else {
+        let looks_windows = s.root_exec.chars().nth(1) == Some(':');
+        let looks_unix = s.root_exec.starts_with('/');
+        let mismatch = (looks_windows && style == PathStyle::Unix)
+            || (looks_unix && style == PathStyle::Windows);
+        if mismatch {
+            rep.warnings.push(format!(
+                "执行机根目录「{}」与路径风格「{}」看起来不匹配，导出的路径可能在执行机上打不开",
+                s.root_exec, s.path_style
+            ));
+        }
+    }
+
+    let exec_root = if s.root_exec.is_empty() {
+        &s.root_local
+    } else {
+        &s.root_exec
+    };
+    let yyyymmdd: String = sheet.date.chars().filter(|c| c.is_ascii_digit()).collect();
+    let pkg_rel = RelPath::from_parts([paths::TASK_PACKAGES, &yyyymmdd]);
+
+    // 重导出：执行器已回写 → 禁止覆盖。
+    if sheet.status == "exported" {
+        let xlsx = pkg_rel.join(paths::TASK_XLSX).to_local(local_root);
+        if xlsx.exists() {
+            // 读不动（被 Excel 占用/写坏）时不阻断——真有回执的话对账那边也读不到，
+            // 这里报 warning 让人先去看一眼。
+            match crate::publish::xlsx::reader::read_receipts(&xlsx) {
+                Ok(receipts) => {
+                    let written = receipts
+                        .iter()
+                        .filter(|r| !r.status_zh.trim().is_empty() && r.status_zh != "待执行")
+                        .count();
+                    if written > 0 {
+                        rep.errors.push(format!(
+                            "检测到执行器已回写 {written} 行回执，禁止覆盖任务包；\
+                             请先「导入回执」对账，再决定是否重导出"
+                        ));
+                    }
+                }
+                Err(e) => rep.warnings.push(format!(
+                    "包内任务单.xlsx 读取失败（{e}），无法确认是否已有回执"
+                )),
+            }
+        }
+    }
+
+    let rows = planning::sheet_rows(pool, sheet_id).await?;
+    rep.row_count = rows.len() as i64;
+    if rows.is_empty() {
+        rep.errors.push("任务单没有任何任务行".into());
+    }
+
+    // 账号在用。
+    let accts = accounts::list(pool).await?;
+    let mut seen_skus = std::collections::HashSet::new();
+    let mut bad_accounts: Vec<String> = Vec::new();
+    for r in &rows {
+        if let Some(a) = accts.iter().find(|a| a.id == r.account_id) {
+            if a.status != "active" && !bad_accounts.contains(&a.name) {
+                bad_accounts.push(a.name.clone());
+            }
+        } else {
+            rep.errors
+                .push(format!("任务 {} 引用的账号已不存在", r.task_code));
+        }
+
+        if !seen_skus.insert(r.sku_id) {
+            continue;
+        }
+        // 素材文件齐备（存在且非空）。
+        let src_dir = RelPath::new(&r.dir_rel).to_local(local_root);
+        let names = pack_file_names(&r.files_json);
+        if names.is_empty() {
+            rep.errors
+                .push(format!("{} 的素材包没有任何文件", r.sku_code));
+        }
+        for name in &names {
+            let src = src_dir.join(name);
+            match std::fs::metadata(&src) {
+                Ok(m) if m.len() > 0 => {}
+                Ok(_) => rep
+                    .errors
+                    .push(format!("{}/{} 是空文件（0 字节）", r.sku_code, name)),
+                Err(_) => rep.errors.push(format!(
+                    "{}/{} 不存在（{}）",
+                    r.sku_code,
+                    name,
+                    src.display()
+                )),
+            }
+        }
+        if r.pack_kind == "gallery" && r.body_text.is_none() {
+            rep.errors
+                .push(format!("{} 是图集任务但没有正文", r.sku_code));
+        }
+        // 执行机路径长度（含最长文件名，不能只算到 SKU 目录层）。
+        let mat_rel = pkg_rel.join(paths::MATERIALS_DIR).join(&r.sku_code);
+        let longest = names.iter().map(String::as_str).max_by_key(|n| n.len());
+        let probe = match longest {
+            Some(n) => mat_rel.join(n),
+            None => mat_rel.clone(),
+        };
+        let exec_path = paths::exec_join(exec_root, &probe, style);
+        if paths::exceeds_path_limit(&exec_path) {
+            rep.warnings.push(format!(
+                "{} 的执行机路径长 {} 字符，超过 Windows {} 上限，可能被截断",
+                r.sku_code,
+                exec_path.chars().count(),
+                paths::PATH_LIMIT
+            ));
+        }
+    }
+    for name in bad_accounts {
+        rep.errors
+            .push(format!("账号「{name}」已停用，但任务单里仍有它的任务行"));
+    }
+    rep.sku_count = seen_skus.len() as i64;
+    Ok(rep)
 }
 
 fn content_kind_zh(kind: &str) -> &'static str {
@@ -53,17 +227,19 @@ pub async fn export_package(
     sheet_id: i64,
     s: &PublishSettings,
 ) -> AppResult<ExportResult> {
+    // 预检是导出的唯一入口条件：素材缺失/回执已回写等问题在这里拦下，
+    // 而不是等到执行机上才发现（或把回执覆盖掉）。
+    let pre = preflight(pool, sheet_id, s).await?;
+    if !pre.ok() {
+        return Err(AppError::InvalidInput(format!(
+            "导出预检未通过：\n{}",
+            pre.errors.join("\n")
+        )));
+    }
+
     let sheet = planning::get_sheet(pool, sheet_id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
-    if sheet.status != "confirmed" && sheet.status != "exported" {
-        return Err(AppError::InvalidInput(
-            "只有已确认 / 已导出的任务单可导出".into(),
-        ));
-    }
-    if s.root_local.is_empty() {
-        return Err(AppError::InvalidInput("尚未配置本机根目录".into()));
-    }
     let local_root = Path::new(&s.root_local);
     let exec_root = if s.root_exec.is_empty() {
         &s.root_local
@@ -88,6 +264,7 @@ pub async fn export_package(
     let mut copied_skus = std::collections::HashSet::new();
     let mut file_count = 0i64;
     let mut long_path_warn = false;
+    let mut missing_files: Vec<String> = Vec::new();
     for r in &rows {
         if !copied_skus.insert(r.sku_id) {
             continue;
@@ -95,13 +272,16 @@ pub async fn export_package(
         let dest_rel = pkg_rel.join(paths::MATERIALS_DIR).join(&r.sku_code);
         let dest_abs = dest_rel.to_local(local_root);
         std::fs::create_dir_all(&dest_abs)?;
-        // 复制包内文件（img_NN / video / cover）。
+        // 复制包内文件（img_NN / video / cover）。预检已保证齐备，缺失只可能是
+        // 预检之后被删——记下来上报，不静默跳过。
         let src_dir = RelPath::new(&r.dir_rel).to_local(local_root);
         for name in pack_file_names(&r.files_json) {
             let src = src_dir.join(&name);
             if src.exists() {
                 std::fs::copy(&src, dest_abs.join(&name))?;
                 file_count += 1;
+            } else {
+                missing_files.push(format!("{}/{}", r.sku_code, name));
             }
         }
         // 图文正文物化 body.txt。
@@ -202,6 +382,7 @@ pub async fn export_package(
         sku_count: copied_skus.len() as i64,
         file_count,
         long_path_warn,
+        missing_files,
     })
 }
 
@@ -331,5 +512,63 @@ mod tests {
         // 任务单状态置 exported。
         let sheet = prepo::get_sheet(&pool, sheet_id).await.unwrap().unwrap();
         assert_eq!(sheet.status, "exported");
+        assert!(res.missing_files.is_empty());
+
+        // ── B1 预检 ──────────────────────────────────────────────────
+        // 已导出但执行器尚未回写 → 允许重导出。
+        assert!(
+            preflight(&pool, sheet_id, &s).await.unwrap().ok(),
+            "无回执时重导出是允许的"
+        );
+
+        // 执行器回写一行「已发布」→ 重导出被拒（整包覆盖会抹掉回执，§6.1 单写方约定）。
+        let xlsx = pkg.join("任务单.xlsx");
+        let rows = prepo::list_tasks_by_sheet(&pool, sheet_id).await.unwrap();
+        crate::publish::xlsx::writer::write_sheet(
+            &xlsx,
+            &[crate::publish::xlsx::writer::XlsxRow {
+                task_id: rows[0].task_code.clone(),
+                status_zh: "已发布".into(),
+                rpa_info: "https://x｜｜2026-07-15 12:30".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let rep = preflight(&pool, sheet_id, &s).await.unwrap();
+        assert!(!rep.ok(), "已有回执必须拒绝重导出");
+        assert!(rep.errors[0].contains("回执"), "{:?}", rep.errors);
+        assert!(export_package(&pool, sheet_id, &s).await.is_err());
+
+        // 素材文件缺失 → 预检报 error，导出被拒（问题不再推迟到执行机才暴露）。
+        std::fs::remove_file(pack_dir.join("img_01.jpg")).unwrap();
+        std::fs::remove_file(&xlsx).unwrap(); // 排除上面的回执因素
+        let rep = preflight(&pool, sheet_id, &s).await.unwrap();
+        assert!(
+            rep.errors.iter().any(|e| e.contains("img_01.jpg")),
+            "{:?}",
+            rep.errors
+        );
+        assert!(export_package(&pool, sheet_id, &s).await.is_err());
+    }
+
+    // B1：关单后不可再导出（状态机保证；补断言防回归）。
+    #[tokio::test]
+    async fn closed_sheet_cannot_be_exported() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        let s = PublishSettings {
+            root_local: root.to_string_lossy().to_string(),
+            ..PublishSettings::default()
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        let sheet_id = prepo::create_sheet(&mut conn, "2026-07-15").await.unwrap();
+        prepo::set_sheet_status(&mut conn, sheet_id, "closed")
+            .await
+            .unwrap();
+        drop(conn);
+        let rep = preflight(&pool, sheet_id, &s).await.unwrap();
+        assert!(!rep.ok());
+        assert!(export_package(&pool, sheet_id, &s).await.is_err());
     }
 }

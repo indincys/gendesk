@@ -68,6 +68,15 @@ impl PickError {
             PickError::NoBody => "无可用正文（图集需正文）",
         }
     }
+
+    /// 机器可读原因码（存 shortage_json；中文由前端 `shortageLabel()` 单点映射）。
+    pub fn code(&self) -> &'static str {
+        match self {
+            PickError::NoPack => "no_pack",
+            PickError::NoTitle => "no_title",
+            PickError::NoBody => "no_body",
+        }
+    }
 }
 
 /// 素材包是否在查重窗口内「已用尽」：全部目标平台都有近发布。

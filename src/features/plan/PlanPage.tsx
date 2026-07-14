@@ -3,6 +3,7 @@ import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { assetSrc } from "@/lib/img";
 import {
   type AccountView,
+  type PreflightReport,
   type PublishSettings,
   type PublishSettingsPatch,
   type SheetDetail,
@@ -11,7 +12,7 @@ import {
   commands,
   unwrap,
 } from "@/lib/ipc";
-import { failKindLabel, pubTaskVisual, sheetVisual } from "@/lib/status";
+import { failKindLabel, isShortage, pubTaskVisual, sheetVisual, shortageLabel } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-react";
@@ -402,6 +403,7 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   const [verify, setVerify] = useState<TaskRowView | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [confirmExport, setConfirmExport] = useState(false);
+  const [cancelRow, setCancelRow] = useState<TaskRowView | null>(null);
   const refreshBadges = usePublishStore((s) => s.refreshBadges);
 
   const load = useCallback(async () => {
@@ -416,6 +418,9 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
   const isDraft = detail.status === "draft";
   const isConfirmed = detail.status === "confirmed";
   const isExported = detail.status === "exported" || detail.status === "reconciling";
+  // shortage_json 兼装了真·缺料与「补排」提示，分开渲染（含义完全不同）。
+  const shortages = detail.shortage.filter((s) => isShortage(s.reason));
+  const backfills = detail.shortage.filter((s) => !isShortage(s.reason));
 
   const act = async (fn: () => Promise<unknown>, ok?: string) => {
     try {
@@ -465,6 +470,10 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
               void act(async () => {
                 const r = await unwrap(commands.importReceipts(sheetId));
                 toast.success(`对账完成：已发布 ${r.published} · 失败 ${r.failed}`);
+                if (r.retiredPacks > 0)
+                  toast.warning(`${r.retiredPacks} 个素材包因「素材不合规」已退役`);
+                for (const name of r.loginFailAccounts)
+                  toast.error(`账号「${name}」登录失效，需人工处理（不会自动重发）`);
               })
             }
             title="从任务包 xlsx 手动导入回执对账"
@@ -484,11 +493,22 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         </div>
       )}
 
-      {detail.shortage.length > 0 && (
+      {shortages.length > 0 && (
         <div className="ban" style={{ margin: "10px 18px 0" }}>
           <span className="f1">
-            缺料清单：{detail.shortage.map((s) => `${s.code}（${s.reason}）`).join("、")} —
-            缺料不是报错，有料 SKU 已正常出草稿
+            缺料清单：
+            {shortages
+              .map((s) => `${s.code}（${shortageLabel(s.reason, s.platforms)}）`)
+              .join("、")}{" "}
+            — 缺料不是报错，有料 SKU 已正常出草稿
+          </span>
+        </div>
+      )}
+
+      {backfills.length > 0 && (
+        <div className="ban" style={{ margin: "10px 18px 0" }}>
+          <span className="f1">
+            补排：{backfills.map((s) => s.code).join("、")} — 昨日网络超时失败，今日已自动重排
           </span>
         </div>
       )}
@@ -571,6 +591,16 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
                           onClick={() => void act(() => unwrap(commands.deleteTaskRow(r.id)))}
                         >
                           删
+                        </button>
+                      )}
+                      {/* 已导出的单不能再删行（xlsx 已交给执行器），但可以人工取消 —— 需求 §4.5 的「已取消（人工）」态 */}
+                      {isExported && r.status === "pending" && (
+                        <button
+                          type="button"
+                          className="btn sm gho dng"
+                          onClick={() => setCancelRow(r)}
+                        >
+                          取消
                         </button>
                       )}
                     </span>
@@ -660,18 +690,27 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         />
       )}
       {confirmExport && (
+        <ExportModal
+          sheetId={sheetId}
+          onClose={() => setConfirmExport(false)}
+          onExported={() => {
+            setConfirmExport(false);
+            void act(async () => {});
+          }}
+        />
+      )}
+      {cancelRow && (
         <ConfirmModal
-          title="导出任务包"
-          desc="确保执行器未在运行本包。重新导出=整包覆盖（先删 READY.txt 再写）。导出后 xlsx 写方移交执行器。"
-          confirmLabel="确认导出"
+          title="取消这条任务"
+          desc={`${cancelRow.taskCode} · ${cancelRow.platformZh} · ${cancelRow.accountName}。执行器已拿到任务包，取消只改本地状态；若执行器已经发出去了，请改用「核对」。`}
+          confirmLabel="确认取消"
           onConfirm={() =>
             void act(async () => {
-              const r = await unwrap(commands.exportPackage(sheetId));
-              toast.success(`已导出 ${r.rowCount} 行 · ${r.skuCount} 个 SKU 素材`);
-              if (r.longPathWarn) toast.warning("存在超长路径，请检查执行机根路径设置");
+              await unwrap(commands.cancelTaskRow(cancelRow.id));
+              setCancelRow(null);
             })
           }
-          onClose={() => setConfirmExport(false)}
+          onClose={() => setCancelRow(null)}
         />
       )}
       {verify && (
@@ -685,6 +724,100 @@ function Workbench({ sheetId, onBack }: { sheetId: number; onBack: () => void })
         />
       )}
     </>
+  );
+}
+
+/**
+ * 导出弹窗：打开即跑预检，逐条列出问题。有阻断项时「确认导出」不可点——
+ * 素材缺失、账号停用、执行器已回写回执，这些都必须在导出前解决，不能等到执行机上才炸。
+ */
+function ExportModal({
+  sheetId,
+  onClose,
+  onExported,
+}: {
+  sheetId: number;
+  onClose: () => void;
+  onExported: () => void;
+}) {
+  const [report, setReport] = useState<PreflightReport | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void unwrap(commands.preflightExport(sheetId))
+      .then(setReport)
+      .catch((e) => {
+        toast.error(String(e));
+        onClose();
+      });
+  }, [sheetId, onClose]);
+
+  const blocked = report == null || report.errors.length > 0;
+  const doExport = async () => {
+    setBusy(true);
+    try {
+      const r = await unwrap(commands.exportPackage(sheetId));
+      toast.success(`已导出 ${r.rowCount} 行 · ${r.skuCount} 个 SKU 素材`);
+      if (r.missingFiles.length > 0)
+        toast.warning(`${r.missingFiles.length} 个素材文件在导出时已不存在`);
+      onExported();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="导出任务包"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">导出后 xlsx 的写方移交执行器</span>
+          <div className="f1" />
+          <button type="button" className="btn sm" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="btn sm pri"
+            disabled={blocked || busy}
+            onClick={() => void doExport()}
+          >
+            {busy ? "导出中…" : "确认导出"}
+          </button>
+        </>
+      }
+    >
+      {report == null ? (
+        <div className="fs12 t3" style={{ padding: 8 }}>
+          正在预检…
+        </div>
+      ) : (
+        <div className="col gap6" style={{ padding: 4 }}>
+          {report.errors.map((e) => (
+            <div key={e} className="fs12 terr" style={{ lineHeight: 1.7 }}>
+              ✗ {e}
+            </div>
+          ))}
+          {report.warnings.map((w) => (
+            <div key={w} className="fs12" style={{ color: "var(--wr)", lineHeight: 1.7 }}>
+              ⚠ {w}
+            </div>
+          ))}
+          {report.errors.length === 0 && (
+            <div className="fs12" style={{ color: "var(--ok)", lineHeight: 1.7 }}>
+              ✓ 预检通过：{report.rowCount} 行 · {report.skuCount} 个 SKU 素材齐备
+            </div>
+          )}
+          <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
+            重新导出 = 整包覆盖（先删 READY.txt 再写）。若执行器已回写过回执，
+            导出会被拒绝——请先「导入回执」对账。
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 

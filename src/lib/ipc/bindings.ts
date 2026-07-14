@@ -907,6 +907,7 @@ async pickPublishRoot() : Promise<Result<string | null, AppError>> {
 },
 /**
  * 拓扑 B「同本机」一键：把执行机根路径设为本机根路径。
+ * 路径风格同步跟随本机——执行机就是本机，还留着 `windows` 会拼出 `\` 分隔的假路径。
  */
 async useLocalAsExecRoot() : Promise<Result<PublishSettings, AppError>> {
     try {
@@ -1263,6 +1264,13 @@ async updateTaskRow(id: number, patch: TaskRowPatch) : Promise<Result<null, AppE
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 人工取消一行（只允许待执行）。
+ * 
+ * 硬性红线（需求 §6.4）：published/failed/**suspect** 都是已定态的，取消它们等于
+ * 绕过 `resolve_suspect` 这条唯一定态路径。取消后立即尝试关单——否则取消掉最后一个
+ * 待执行行的单会永远停在「回收中」，不出日报。
+ */
 async cancelTaskRow(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_task_row", { id }) };
@@ -1313,7 +1321,19 @@ async listSchedulableSkus() : Promise<Result<SkuView[], AppError>> {
 }
 },
 /**
- * 导出任务包（confirmed → exported；重导出=整包覆盖）。
+ * 导出预检（纯读）：素材齐备 / 路径长度 / 账号在用 / 重导出回执保护。
+ * 前端在导出确认弹窗打开时调用，逐条渲染；有 error 时禁用「确认导出」。
+ */
+async preflightExport(sheetId: number) : Promise<Result<PreflightReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preflight_export", { sheetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出任务包（confirmed → exported；重导出=整包覆盖，但已有回执时被预检拒绝）。
  */
 async exportPackage(sheetId: number) : Promise<Result<ExportResult, AppError>> {
     try {
@@ -1564,7 +1584,11 @@ pkgDirRel: string; rowCount: number; skuCount: number; fileCount: number;
 /**
  * 是否有超 Windows 长度上限的拼接路径（告警）。
  */
-longPathWarn: boolean }
+longPathWarn: boolean; 
+/**
+ * 源文件缺失清单（预检通过后正常应为空；冗余上报便于排查）。
+ */
+missingFiles: string[] }
 /**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */
@@ -1770,6 +1794,18 @@ export type PlatformInfo = { code: string; zh: string }
 export type PlatformMatrix = { douyin: boolean; xhs: boolean; kuaishou: boolean; shipinhao: boolean; bilibili: boolean }
 export type PlatformStat = { platform: string; platformZh: string; done: number; total: number; pct: number }
 /**
+ * 导出预检报告：errors 非空即阻断导出。
+ */
+export type PreflightReport = { 
+/**
+ * 阻断级问题（导出会被拒绝）。
+ */
+errors: string[]; 
+/**
+ * 提醒级问题（导出照常，但值得看一眼）。
+ */
+warnings: string[]; rowCount: number; skuCount: number }
+/**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
 export type ProductionOverview = { 
@@ -1880,7 +1916,15 @@ export type ReconcileResult = { published: number; failed: number;
 /**
  * 风控熔断连带取消的任务数。
  */
-canceledByRisk: number; matched: number; unmatched: number; closed: boolean }
+canceledByRisk: number; matched: number; unmatched: number; closed: boolean; 
+/**
+ * 因「素材不合规」失败而退役的素材包数（需求 §6.3 content 处置）。
+ */
+retiredPacks: number; 
+/**
+ * 登录失效的账号名（需求 §6.3 login 处置：转人工，不自动重试）。
+ */
+loginFailAccounts: string[] }
 /**
  * 参考图详情（含使用统计）。
  */
@@ -1983,9 +2027,17 @@ export type SheetSummary = { id: number; date: string; status: string; taskCount
  */
 pending: number; published: number; failed: number; suspect: number; canceled: number }
 /**
- * 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ * 缺料/提示清单一项（生成副产物，存入 task_sheets.shortage_json）。
+ * 
+ * `reason` 为机器码，中文由前端 `shortageLabel()` 单点映射：
+ * `no_pack` 无可用素材包 · `no_title` 无可用标题 · `no_body` 无可用正文 ·
+ * `timeout_backfill` 昨日超时失败，今日已补排（**不是缺料，是提示**）。
  */
-export type ShortageItem = { skuId: number; code: string; reason: string }
+export type ShortageItem = { skuId: number; code: string; reason: string; 
+/**
+ * 相关平台（部分原因有意义，如无账号/查重冲突）；无则空。
+ */
+platforms?: string[] }
 /**
  * SKU 详情：档案视图 + 发布历史（池明细由 assets/texts 域命令单独取）。
  */

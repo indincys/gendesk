@@ -17,20 +17,23 @@ pub struct Slot {
     pub end_min: i64,
 }
 
+/// 解析 `HH:MM` → 分钟自午夜（非法返回 None）。任务行计划时间、时段端点、
+/// 每日生成时刻三处共用同一份校验，避免各写各的、松紧不一。
+pub fn parse_hhmm(s: &str) -> Option<i64> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: i64 = h.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    if (0..24).contains(&h) && (0..60).contains(&m) {
+        Some(h * 60 + m)
+    } else {
+        None
+    }
+}
+
 /// 解析 `HH:MM-HH:MM`（非法返回 None）。
 pub fn parse_slot(s: &str) -> Option<Slot> {
     let (a, b) = s.split_once('-')?;
-    let hm = |t: &str| -> Option<i64> {
-        let (h, m) = t.trim().split_once(':')?;
-        let h: i64 = h.trim().parse().ok()?;
-        let m: i64 = m.trim().parse().ok()?;
-        if (0..24).contains(&h) && (0..60).contains(&m) {
-            Some(h * 60 + m)
-        } else {
-            None
-        }
-    };
-    let (start_min, end_min) = (hm(a)?, hm(b)?);
+    let (start_min, end_min) = (parse_hhmm(a)?, parse_hhmm(b)?);
     if start_min < end_min {
         Some(Slot { start_min, end_min })
     } else {
@@ -216,6 +219,18 @@ mod tests {
             parse_slot("18:00-20:00").unwrap(),
             parse_slot("21:00-22:30").unwrap(),
         ]
+    }
+
+    #[test]
+    fn parse_hhmm_valid_and_invalid() {
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("22:30"), Some(22 * 60 + 30));
+        assert_eq!(parse_hhmm(" 7:05 "), Some(7 * 60 + 5));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("12:60"), None);
+        assert_eq!(parse_hhmm("12"), None);
+        assert_eq!(parse_hhmm("随便"), None);
+        assert_eq!(parse_hhmm(""), None);
     }
 
     #[test]

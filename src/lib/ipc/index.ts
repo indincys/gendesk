@@ -75,6 +75,7 @@ export type {
   AddTaskRowInput,
   ShortageItem,
   ExportResult,
+  PreflightReport,
   DashboardView,
   PlatformStat,
   AccountStat,

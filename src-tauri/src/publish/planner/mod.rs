@@ -22,13 +22,39 @@ use crate::publish::planner::scheduler::{DueSet, SchedAccount, ScheduleInput};
 use crate::publish::planner::set_picker::{PackCand, PickInput, TextCand};
 use crate::publish::platform::Platform;
 
-/// 缺料清单一项（生成副产物，存入 task_sheets.shortage_json）。
+/// 缺料/提示清单一项（生成副产物，存入 task_sheets.shortage_json）。
+///
+/// `reason` 为机器码，中文由前端 `shortageLabel()` 单点映射：
+/// `no_pack` 无可用素材包 · `no_title` 无可用标题 · `no_body` 无可用正文 ·
+/// `timeout_backfill` 昨日超时失败，今日已补排（**不是缺料，是提示**）。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortageItem {
     pub sku_id: i64,
     pub code: String,
     pub reason: String,
+    /// 相关平台（部分原因有意义，如无账号/查重冲突）；无则空。
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+/// 前一日「网络超时」失败的 SKU → 今日无条件纳入应发（需求 §6.3 timeout 处置：
+/// 自动重排次日）。返回 (sku_id 集合, 用于提示的 (sku_id, platforms) 明细)。
+async fn timeout_backfill(pool: &SqlitePool, date: &str) -> AppResult<HashMap<i64, Vec<String>>> {
+    let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return Ok(HashMap::new());
+    };
+    let prev = (d - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    for (sku_id, platform, _account_id) in planning::timeout_fails_of_date(pool, &prev).await? {
+        let entry = out.entry(sku_id).or_default();
+        if !entry.contains(&platform) {
+            entry.push(platform);
+        }
+    }
+    Ok(out)
 }
 
 /// `YYYY-MM-DD` → `YYMMDD`（任务 ID 用）。
@@ -113,7 +139,16 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             tier: r.tier.clone(),
         })
         .collect();
-    let due_ids = frequency::due_skus(date, &freq_in, &rules);
+    let mut due_ids = frequency::due_skus(date, &freq_in, &rules);
+
+    // 昨日网络超时失败的 SKU：即便按频率今日不该发，也补进应发集（需求 §6.3）。
+    // 展开仍走正常约束（日限/间隔），补排不是插队。
+    let backfill = timeout_backfill(pool, date).await?;
+    for id in backfill.keys() {
+        if sched_skus.iter().any(|r| r.id == *id) && !due_ids.contains(id) {
+            due_ids.push(*id);
+        }
+    }
 
     let all_accts = accounts::list(pool).await?;
     let slots: Vec<scheduler::Slot> = s
@@ -167,15 +202,27 @@ pub async fn generate_sheet(pool: &SqlitePool, date: &str, s: &PublishSettings) 
             seed: seed ^ (r.id as u64),
         };
         match set_picker::pick(&input) {
-            Ok(pick) => chosen.push(Chosen {
-                sku_id: r.id,
-                pick,
-                platforms: target_platforms,
-            }),
+            Ok(pick) => {
+                if let Some(platforms) = backfill.get(&r.id) {
+                    // 工作台据此显示「补排」徽标，说明这个 SKU 今天为什么出现。
+                    shortage.push(ShortageItem {
+                        sku_id: r.id,
+                        code: r.code.clone(),
+                        reason: "timeout_backfill".into(),
+                        platforms: platforms.clone(),
+                    });
+                }
+                chosen.push(Chosen {
+                    sku_id: r.id,
+                    pick,
+                    platforms: target_platforms,
+                });
+            }
             Err(e) => shortage.push(ShortageItem {
                 sku_id: r.id,
                 code: r.code.clone(),
-                reason: e.label().to_string(),
+                reason: e.code().to_string(),
+                platforms: Vec::new(),
             }),
         }
     }

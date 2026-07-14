@@ -1,6 +1,6 @@
 {
   "name": "gendesk",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "GenDesk — 内部图片生产工具（本地批量图生图流水线）",
   "type": "module",
   "private": true,

@@ -66,6 +66,24 @@
 - **废纸篓**：未通过/删除内容暂存（留缩略图+提示词记录，删原图）；清理=物理删+级联删+编号回收，不可恢复。
 - **伪进度**：生图 API 无真实进度；排队 0→请求 10%→elapsed/expected 线性至 90%→下载 90-98%→落盘 100%。
 
+### 发布模块词汇（v0.7.0）
+
+- **SKU**：款式一级分类，下挂素材/标题/正文三池；内置「通用」分组收纳无 SKU 文本。
+- **素材包(asset_pack)**：一次可发布素材单元；视频型=1 视频(+封面)，图集型=N 图(+封面)。
+  存储态 new|active|retired；「已用尽/冷却中/回可用」为台账 + 查重窗口派生态（不落库）。
+- **日内容套装(daily_set)**：某天某 SKU 选定的（素材包+标题[+正文]）；当天全平台全账号统一。
+- **任务单(task_sheet)**：某天全部发布任务集合，一天一张；草稿→已确认→已导出→回收中→已关闭。
+- **任务包**：任务单.xlsx(22 列) + 素材(按 SKU 一份) + 执行说明.md + 回执截图/ + READY.txt(最后写)。
+- **回执**：执行器回写的任务状态 + RPA 信息(链接｜原因｜时间) + 截图；只写 xlsx 第 20–22 列。
+- **使用台账(usage_ledger)**：套装粒度发布记录，驱动查重窗口 + 素材生命周期 + 发布历史。
+- **查重窗口**：同素材包同平台最短复用间隔（默认 30 天）；窗口内全部目标平台有发布 → 用尽。
+- **收件箱**：根目录 `收件箱/`，Claude/Codex TXT 与外部 AI 图片落盘后自动收录（notify + 2s 防抖）。
+- **待认领**：收件箱无法关联已知 SKU 的内容，进队列由人工指认，不丢弃。
+- **疑似已发**：超时无回执标记（琥珀）；**绝不自动重发**，只能人工核实后定态（硬性 §6.4）。
+- **相对路径是真相**：库内/包内只存根目录内相对路径（RelPath）；导出是唯一绝对路径转换点。
+- **五平台**：`douyin/xhs/kuaishou/shipinhao/bilibili`（抖音/小红书/快手/视频号/B站），
+  中文名↔枚举映射单点在 `publish/platform.rs`；文本平台标签另有 `general`（通用）。
+
 ## 审查协议（§1.4）
 
 - **实现与审查分离**：任务实现完成后，由**全新上下文**会话执行 `/code-review`
@@ -110,4 +128,15 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
   左栏彩色可展开词组卡（配色 gc0–gc4，可拖拽 + 悬停交叉高亮），右栏参考图就地弹层/拖放挂靠，
   生成参数移入底栏「参数 ▾」弹层；提示词原文改上一条/下一条弹窗。纯前端（GeneratePage + globals.css），
   无 migration/无新 IPC，删除旧生成页样式。
+- [x] **发布与资产管理模块（v0.7.0）** — 三阶段（P1 资产管理 / P2 编排导出 / P3 回执闭环）。
+  migration 0010（skus/asset_packs/text_items/accounts/daily_sets/task_sheets/publish_tasks/
+  usage_ledger/inbox_items + 内置通用分组）。新顶层模块 `publish/`：paths(RelPath/四分区/ASCII/
+  win-mac 拼接)、platform(五平台单点)、inbox(parser 三类 TXT+话题+SKU 三冗余、notify watcher+2s 防抖、
+  ingest 收录事务+媒体归集)、planner(set_picker/scheduler[proptest 五不变量]/frequency/generate_sheet)、
+  xlsx(writer 22 列+reader 表头定位)、exporter(任务包+READY 最后写)、reconcile(三分支+六类处置+疑似已发+
+  关单日报)、ticker(应用内定时+补跑)、events(3 事件)。~40 IPC 命令（publish_settings/skus/texts/assets/
+  inbox/accounts/planning/reconcile 域）。前端两新页（资产库/发布计划三页签）+ 设置「发布与同步」区块 +
+  导航两项(⌘9/⌘0)+徽章 + publish store + 作品库「入资产库」。覆盖率闸门扩展至 publish 纯逻辑目录。
+  67 publish 测试（含 proptest + 端到端 + 疑似负向断言）。发版节奏三阶段三 PR 一次发版，全程不打 tag，
+  P3 收尾后一次性 bump 0.7.0 + tag v0.7.0。
 

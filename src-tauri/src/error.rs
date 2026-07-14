@@ -24,7 +24,9 @@ pub enum AppError {
     #[error("参数错误：{0}")]
     InvalidInput(String),
 
-    /// 系统钥匙串（Keychain / 凭据管理器）访问失败。
+    // 变体名保留 `Keyring`（非 doc 注释：doc 会被 specta 带进 bindings.ts）——
+    // 生产路径已是 `secrets::FileStore` 本地加密文件，系统钥匙串仅剩迁移读取。
+    /// 密钥存储访问失败（本地加密文件 / 迁移期的系统钥匙串）。
     #[error("凭据存储错误：{0}")]
     Keyring(String),
 

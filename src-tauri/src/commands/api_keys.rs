@@ -7,7 +7,7 @@ use tauri::State;
 use crate::db::now_unix;
 use crate::db::repo::api_keys as repo;
 use crate::error::{AppError, AppResult};
-use crate::secrets::mask;
+use crate::secrets::{mask, SecretStore};
 use crate::state::AppState;
 
 /// 成功率统计窗口（近 50 次尝试）。
@@ -35,6 +35,10 @@ pub struct ApiKeyView {
     pub sample_count: i64,
     /// 当前占用并发（运行时；M2 引擎接入后填充，M1 恒为 0）
     pub used_concurrency: i64,
+    /// 密钥本体在密钥存储中找不到（迁移被拒绝 / 密钥文件损坏自愈后重建）。
+    /// 此时引擎会静默跳过这个 Key（任务永远排不到它），UI 必须显式提示重填 —— 否则
+    /// `masked_key` 只是普通的 `****`，用户看不出这个 Key 已经是空壳。
+    pub secret_missing: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -69,16 +73,17 @@ fn normalize_base_url(url: &str) -> String {
 }
 
 async fn to_view(state: &AppState, row: repo::ApiKeyRow) -> AppResult<ApiKeyView> {
-    let masked = state
-        .secrets
-        .get(&row.keyring_account)?
-        .map(|k| mask(&k))
+    let secret = state.secrets.get(&row.keyring_account)?;
+    let masked = secret
+        .as_deref()
+        .map(mask)
         .unwrap_or_else(|| "****".to_string());
     let (rate, count) = repo::success_rate(&state.db, row.id, RATE_WINDOW).await?;
     Ok(ApiKeyView {
         id: row.id,
         name: row.name,
         masked_key: masked,
+        secret_missing: secret.is_none(),
         base_url: row.base_url,
         model: row.model,
         concurrency_limit: row.concurrency_limit,
@@ -218,6 +223,10 @@ pub async fn set_api_key_enabled(
 pub async fn delete_api_key(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     if let Some(account) = repo::delete(&state.db, id).await? {
         let _ = state.secrets.delete(&account);
+        // 迁移被用户拒绝过的 Key，密钥还留在系统钥匙串里。DB 行一删，启动迁移的名单里
+        // 就再也不会有它 —— 不在这里顺手清掉，那条明文密钥会永久孤儿化在钥匙串中。
+        // best-effort：钥匙串里没有该条目属正常（已迁移过），失败也不影响删除本身。
+        let _ = crate::secrets::KeyringStore.delete(&account);
     }
     let _ = state
         .engine

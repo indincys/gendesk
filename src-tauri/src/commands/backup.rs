@@ -2,6 +2,10 @@
 //!
 //! 让用户看到数据落盘位置 + 一键导出「DB + 资产目录」为 zip：磁盘故障前有备份手段。
 //! 导出前 WAL 检查点保证一致；队列运行中拒绝（避免边写边打包出半成品）。
+//!
+//! **密钥文件绝不入包**（`secrets.key` / `secrets.enc` 及其 .bak/.tmp 派生物）：
+//! 主密钥与密文同目录，一起打进 zip 就等于把 API Key 明文交出去（备份常被外发 /
+//! 上网盘）。备份的定位是数据抢救，Key 可在设置页重填，不是抢救对象。
 
 use std::io::Write;
 use std::path::Path;
@@ -128,6 +132,12 @@ fn zip_dir(
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| !e.path().starts_with(skip_dir))
+        // 密钥文件排除（见模块头）：主密钥 + 密文同在一个 zip = 明文 API Key。
+        .filter(|e| {
+            !e.file_name()
+                .to_str()
+                .is_some_and(crate::secrets::is_secret_file)
+        })
         .collect();
     let total = files.len() as u64;
     emit(0, total, "running");
@@ -193,5 +203,37 @@ mod tests {
             !names.iter().any(|n| n.starts_with("logs/")),
             "日志目录应被排除，names={names:?}"
         );
+    }
+
+    /// 密钥文件（含 .bak/.tmp 派生物）绝不入备份包：主密钥与密文同在一个 zip
+    /// 就等于把 API Key 明文交给任何拿到备份的人。
+    #[test]
+    fn zip_dir_never_includes_secret_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("gendesk.db"), b"DBDATA").unwrap();
+        std::fs::write(root.join(crate::secrets::KEY_FILE), b"MASTERKEY").unwrap();
+        std::fs::write(root.join(crate::secrets::ENC_FILE), b"CIPHERTEXT").unwrap();
+        std::fs::write(root.join("secrets.enc.bak-123"), b"OLDCIPHER").unwrap();
+        std::fs::write(root.join("secrets.key.tmp-77"), b"HALFWRITTEN").unwrap();
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+
+        let dest = root.join("backup.zip");
+        let last = Cell::new((0u64, 0u64));
+        zip_dir(root, &logs, &dest, &|done, total, _| {
+            last.set((done, total))
+        })
+        .unwrap();
+
+        // 只有 gendesk.db 入包；四个密钥相关文件全被排除（也不进进度分母）。
+        assert_eq!(last.get(), (1, 1));
+
+        let f = std::fs::File::open(&dest).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert_eq!(names, vec!["gendesk.db".to_string()], "names={names:?}");
     }
 }

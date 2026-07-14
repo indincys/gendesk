@@ -286,7 +286,17 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(guard);
 
     let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
-    let secrets: Arc<dyn secrets::SecretStore> = Arc::new(secrets::KeyringStore);
+
+    // 密钥存本地加密文件（见 secrets.rs 模块头安全水位）。旧版把 Key 放系统钥匙串，
+    // 自签名下每次更新都弹授权 → 启动时做一次性迁移（幂等，失败只 warn 不阻断启动，
+    // 下次启动重试）。必须发生在 Engine::start 之前，保证引擎首读即走文件、零弹窗。
+    let store = Arc::new(secrets::FileStore::new(&data_dir)?);
+    if let Err(err) =
+        tauri::async_runtime::block_on(secrets::migrate_from_keyring(&pool, store.as_ref()))
+    {
+        tracing::warn!(error = %err, "钥匙串密钥迁移未完成，下次启动重试");
+    }
+    let secrets: Arc<dyn secrets::SecretStore> = store;
 
     // 读设置 → 启动引擎（中断恢复 + 调度循环）。
     let default_out = dirs.outputs().to_string_lossy().to_string();

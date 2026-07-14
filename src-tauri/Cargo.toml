@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.9.0"
+version = "0.10.0"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -46,7 +46,11 @@ reqwest = { version = "0.13", default-features = false, features = [
 # 数据层
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
-# API Key 存系统钥匙串
+# API Key 密钥文件加密（XChaCha20-Poly1305；默认特性含 getrandom → OsRng 出主密钥/nonce）
+chacha20poly1305 = "0.10"
+
+# 旧版密钥来源：系统钥匙串。仅供 secrets::migrate_from_keyring 一次性迁移读取，
+# 迁移期结束后随 KeyringStore 一并移除（见 docs/V2-backlog.md）。
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # 缩略图生成 / 格式转换（输出统一 JPG）

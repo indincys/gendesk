@@ -20,7 +20,7 @@ import { ChevronLeft, ChevronRight, FolderOpen, Plus, RefreshCw } from "lucide-r
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-type Tab = "board" | "sheets" | "strategy";
+type Tab = "board" | "sheets" | "calendar" | "strategy";
 
 /** 发布计划页（原型 publish.dc.html 发布计划三页签）。看板于 P3 充实。 */
 export function PlanPage() {
@@ -85,6 +85,12 @@ export function PlanPage() {
             )}
           </span>
           <span
+            className={cn("sgi", tab === "calendar" && "on")}
+            onClick={() => setTab("calendar")}
+          >
+            月历
+          </span>
+          <span
             className={cn("sgi", tab === "strategy" && "on")}
             onClick={() => setTab("strategy")}
           >
@@ -123,6 +129,14 @@ export function PlanPage() {
         ) : (
           <Workbench sheetId={openSheet} onBack={() => setOpenSheet(null)} />
         ))}
+      {tab === "calendar" && (
+        <CalendarTab
+          onOpenSheet={(id) => {
+            setTab("sheets");
+            setOpenSheet(id);
+          }}
+        />
+      )}
       {tab === "strategy" && <StrategyTab />}
     </div>
   );
@@ -133,11 +147,133 @@ function todayStr(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// ─────────────────────────────────────────────── 月历（F5）
+
+/** 发布月历：一眼看清「哪天发了多少、哪天空着」。格子点进去就是那天的任务单。 */
+function CalendarTab({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
+  const now = new Date();
+  const [ym, setYm] = useState(
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
+  );
+  const [days, setDays] = useState<import("@/lib/ipc").CalendarDay[]>([]);
+  const sheetRev = usePublishStore((s) => s.sheetRev);
+
+  useEffect(() => {
+    void unwrap(commands.calendarMonth(ym))
+      .then(setDays)
+      .catch(() => setDays([]));
+  }, [ym, sheetRev]);
+
+  const shiftMonth = (delta: number) => {
+    const [y, m] = ym.split("-").map(Number) as [number, number];
+    const d = new Date(y, m - 1 + delta, 1);
+    setYm(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+
+  const [y, m] = ym.split("-").map(Number) as [number, number];
+  const first = new Date(y, m - 1, 1);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  // 周一为一周之首（与频率规则的周内日一致）。
+  const lead = (first.getDay() + 6) % 7;
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const max = Math.max(1, ...days.map((d) => d.published));
+
+  // 月初前的空格只是把 1 号推到正确的星期列上，不是数据。
+  const pads = Array.from({ length: lead }, (_, i) => `pad-${i}`);
+  const cells = Array.from({ length: daysInMonth }, (_, i) => {
+    const date = `${y}-${String(m).padStart(2, "0")}-${String(i + 1).padStart(2, "0")}`;
+    return (
+      byDate.get(date) ?? { date, published: 0, planned: 0, failed: 0, sheetId: null, skus: [] }
+    );
+  });
+
+  return (
+    <div className="pbody">
+      <div className="cwrap" style={{ maxWidth: 860 }}>
+        <div className="fx ac gap6" style={{ marginBottom: 12 }}>
+          <button type="button" className="icb" aria-label="上个月" onClick={() => shiftMonth(-1)}>
+            <ChevronLeft className="ic12" />
+          </button>
+          <span className="fw6 fs13 mono">{ym}</span>
+          <button type="button" className="icb" aria-label="下个月" onClick={() => shiftMonth(1)}>
+            <ChevronRight className="ic12" />
+          </button>
+          <div className="f1" />
+          <span className="fs11 t3">色块深浅 = 当日实发条数 · 点格子进当日任务单</span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+          {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
+            <div key={w} className="fs11 t3" style={{ textAlign: "center", paddingBottom: 4 }}>
+              {w}
+            </div>
+          ))}
+          {pads.map((k) => (
+            <div key={k} />
+          ))}
+          {cells.map((c) => {
+            const day = Number(c.date.slice(-2));
+            const density = c.published / max;
+            return (
+              <div
+                key={c.date}
+                className="card"
+                onClick={() => c.sheetId != null && onOpenSheet(c.sheetId)}
+                title={c.skus.length > 0 ? c.skus.join(" · ") : undefined}
+                style={{
+                  padding: "6px 8px",
+                  minHeight: 62,
+                  cursor: c.sheetId != null ? "pointer" : "default",
+                  background:
+                    c.published > 0
+                      ? `color-mix(in oklch, var(--ok) ${Math.round(12 + density * 30)}%, var(--card))`
+                      : undefined,
+                }}
+              >
+                <div className="fs11 t3">{day}</div>
+                {c.published > 0 && (
+                  <div className="fs12 fw6" style={{ color: "var(--ok)" }}>
+                    {c.published}
+                  </div>
+                )}
+                {c.failed > 0 && (
+                  <div className="fs10" style={{ color: "var(--er)" }}>
+                    失败 {c.failed}
+                  </div>
+                )}
+                {c.published === 0 && c.planned > 0 && (
+                  <div className="fs10 t3">计划 {c.planned}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Unix 秒 → `HH:MM`（同一天内的时刻，看板只关心几点）。 */
+function tsLabel(ts: number | null): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 日期加减天数（本地日历）。 */
+function shiftDate(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
+  const dt = new Date(y, m - 1, d + days);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
 function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
   const [dash, setDash] = useState<import("@/lib/ipc").DashboardView | null>(null);
   const [report, setReport] = useState<import("@/lib/ipc").ReportView | null>(null);
   const [showReport, setShowReport] = useState(false);
-  const date = todayStr();
+  // F8：可翻到历史日期（getDashboard 本来就支持任意日期）。
+  const [date, setDate] = useState(todayStr());
+  const isToday = date === todayStr();
 
   const sheetRev = usePublishStore((s) => s.sheetRev);
 
@@ -153,12 +289,43 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
     void load();
   }, [load, sheetRev]);
 
+  const dateNav = (
+    <div className="fx ac gap6" style={{ padding: "10px 18px 0" }}>
+      <button
+        type="button"
+        className="icb"
+        aria-label="前一天"
+        onClick={() => setDate((d) => shiftDate(d, -1))}
+      >
+        <ChevronLeft className="ic12" />
+      </button>
+      <span className="fw6 fs13 mono nowrap">{date}</span>
+      <button
+        type="button"
+        className="icb"
+        aria-label="后一天"
+        onClick={() => setDate((d) => shiftDate(d, 1))}
+      >
+        <ChevronRight className="ic12" />
+      </button>
+      {!isToday && (
+        <button type="button" className="btn sm gho" onClick={() => setDate(todayStr())}>
+          回到今天
+        </button>
+      )}
+      <div className="f1" />
+    </div>
+  );
+
   if (!dash) {
     return (
-      <div className="bigempty" style={{ padding: "72px 20px" }}>
-        <div className="fs13 fw5 t2">今日暂无任务单</div>
-        <div className="fs12 t3">配置根目录并生成任务单后，看板展示今日发布进度</div>
-      </div>
+      <>
+        {dateNav}
+        <div className="bigempty" style={{ padding: "72px 20px" }}>
+          <div className="fs13 fw5 t2">{isToday ? "今日" : date} 暂无任务单</div>
+          <div className="fs12 t3">配置根目录并生成任务单后，看板展示发布进度</div>
+        </div>
+      </>
     );
   }
 
@@ -172,10 +339,34 @@ function Board({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
 
   return (
     <div className="pbody">
+      {dateNav}
+      {/* F9 同步链路：导出了但执行器一直没回写，先怀疑同步软件没把包送过去，
+          而不是急着重发（重发会触发平台查重，比失败更糟）。 */}
+      {dash.syncStalled && (
+        <div className="ban" style={{ margin: "10px 18px 0", borderColor: "var(--wr)" }}>
+          <span className="f1">
+            已导出 {tsLabel(dash.exportedAt)}，执行器至今没有任何回写 — 请检查同步软件是否把
+            任务包送到了执行机，以及执行器有没有在跑
+          </span>
+        </div>
+      )}
+      {dash.exportedAt != null && !dash.syncStalled && (
+        <div className="fs11 t3" style={{ padding: "8px 18px 0" }}>
+          已导出 {tsLabel(dash.exportedAt)}
+          {dash.firstReceiptAt != null && ` · 执行器 ${tsLabel(dash.firstReceiptAt)} 开始回写`}
+          {dash.lastReceiptAt != null && ` · 最后回写 ${tsLabel(dash.lastReceiptAt)}`}
+        </div>
+      )}
+
       <div className="statrow">
         <div className="statcard">
           <div className="stnum">{dash.plan}</div>
-          <div className="stlbl">今日计划任务</div>
+          <div className="stlbl">
+            {isToday ? "今日" : "当日"}计划任务
+            {dash.yesterdaySuccessRate != null && (
+              <span className="fs10 t3"> · 前一日成功率 {dash.yesterdaySuccessRate}%</span>
+            )}
+          </div>
         </div>
         <div className="statcard">
           <div className="stnum" style={{ color: "var(--ok)" }}>
@@ -979,7 +1170,41 @@ function VerifyModal({
         <span className="chip">{row.accountName}</span>
         <span className="chip">计划 {row.plannedTime ?? "立即发"}</span>
       </div>
+      <ReceiptShot row={row} />
     </Modal>
+  );
+}
+
+/**
+ * 回执截图（F2）：执行器回传的截图内嵌展示，核对时不用再去翻文件夹。
+ * 疑似已发的任务本来就没有回执，所以多半会看到占位文案——那本身就是信息。
+ */
+function ReceiptShot({ row }: { row: TaskRowView }) {
+  const src = assetSrc(row.screenshotPath);
+  return (
+    <div className="mt14">
+      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+        回执截图
+      </div>
+      {src ? (
+        <a href={src} target="_blank" rel="noreferrer">
+          <img
+            src={src}
+            alt="回执截图"
+            loading="lazy"
+            style={{
+              maxWidth: "100%",
+              maxHeight: 320,
+              marginTop: 6,
+              borderRadius: 8,
+              border: "1px solid var(--line)",
+            }}
+          />
+        </a>
+      ) : (
+        <div className="fs12 t3 mt6">执行器未回传截图</div>
+      )}
+    </div>
   );
 }
 
@@ -1323,6 +1548,8 @@ function StrategyTab() {
           minGap={s.minGapMinutes ?? 60}
           onSave={(next) => patch({ timeSlots: next })}
         />
+
+        <PreviewCard settings={s} />
       </div>
 
       {addAcct && (
@@ -1343,6 +1570,70 @@ function StrategyTab() {
             void load();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 排期预演（F4）：改了频率 / 平台矩阵 / 账号后，未来 7 天会排成什么样。
+ *
+ * 不选套装、不落库，所以**不反映缺料**——一个没素材的 SKU 照样出现在预演里。
+ * 它回答的是「频率设置合不合理」，不是「明天能不能发出去」。
+ */
+function PreviewCard({ settings }: { settings: PublishSettings }) {
+  const [days, setDays] = useState<import("@/lib/ipc").PreviewDay[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      setDays(await unwrap(commands.previewSchedule(7)));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 频率/矩阵改了 → 预演结果作废，收起来等重算（免得看着过期数据做决定）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只关心设置变化，不关心 days
+  useEffect(() => {
+    setDays(null);
+  }, [settings.tierRules, settings.platformMatrix]);
+
+  return (
+    <div className="card mt14" style={{ padding: "13px 16px" }}>
+      <div className="fx ac gap8" style={{ marginBottom: 8 }}>
+        <span className="fw6 fs13">未来 7 天预演</span>
+        <span className="fs11 t3 f1">按频率与账号推演 · 不含缺料过滤（没素材的 SKU 也会出现）</span>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => void run()}>
+          {busy ? "推演中…" : days ? "重新推演" : "预演"}
+        </button>
+      </div>
+      {days && (
+        <div className="col gap4">
+          {days.map((d) => (
+            <div key={d.date} className="fx ac gap8" style={{ padding: "4px 0" }}>
+              <span className="mono fs11 t3 nowrap" style={{ width: 88 }}>
+                {d.date}
+              </span>
+              <span className="fs12 fw6 nowrap" style={{ width: 44 }}>
+                {d.totalRows} 行
+              </span>
+              <span className="fs11 t3 f1 nowrap ohide">
+                {d.entries.length > 0
+                  ? d.entries.map((e) => `${e.skuCode}(${e.platforms.join("/")})`).join(" · ")
+                  : "无应发 SKU"}
+              </span>
+              {d.trimmed > 0 && (
+                <span className="bdg b-amber" title="超出账号日限，会被裁掉">
+                  裁 {d.trimmed}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

@@ -119,6 +119,18 @@ export function shortageLabel(reason: string, platforms?: string[]): string {
   }
 }
 
+/**
+ * 资产跑道（F3）→ 文案 + 颜色。null = 60 天内不会断（或不排期）。
+ * ≤3 天红、≤7 天琥珀——静态阈值只说明「现在少」，倒计时才说明「什么时候断」。
+ */
+export function runwayVisual(days: number | null): { label: string; cls: string } {
+  if (days == null) return { label: "充足", cls: "t3" };
+  if (days <= 0) return { label: "已断料", cls: "terr" };
+  if (days <= 3) return { label: `${days} 天见底`, cls: "terr" };
+  if (days <= 7) return { label: `${days} 天见底`, cls: "twarn" };
+  return { label: `${days} 天`, cls: "t3" };
+}
+
 /** 缺料项是否为真·缺料（false = 只是提示，不该进「缺料清单」横幅）。 */
 export function isShortage(reason: string): boolean {
   return reason !== "timeout_backfill";

@@ -5,6 +5,7 @@
 //! mod：generate_sheet 事务编排（DB 写在单事务内）。
 
 pub mod frequency;
+pub mod runway;
 pub mod scheduler;
 pub mod set_picker;
 

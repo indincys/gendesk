@@ -53,6 +53,10 @@ pub struct TaskRowView {
     pub fail_kind: Option<String>,
     pub result_url: Option<String>,
     pub result_msg: Option<String>,
+    /// 回执截图绝对本地路径（执行器回传时才有；F2 核对时内嵌展示）。
+    pub screenshot_path: Option<String>,
+    /// 取消原因：manual（人工）| risk（风控熔断）。
+    pub cancel_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -99,6 +103,7 @@ async fn build_detail(state: &AppState, sheet_id: i64) -> AppResult<SheetDetail>
         .await?
         .ok_or_else(|| AppError::InvalidInput("任务单不存在".into()))?;
     let root = publish_settings::root_local(&state.db).await.ok();
+    let yyyymmdd: String = sheet.date.chars().filter(|c| c.is_ascii_digit()).collect();
     let joined = planning::sheet_rows(&state.db, sheet_id).await?;
     let rows = joined
         .into_iter()
@@ -108,6 +113,21 @@ async fn build_detail(state: &AppState, sheet_id: i64) -> AppResult<SheetDetail>
                     let rel = crate::publish::paths::RelPath::new(&r.dir_rel).join(cover);
                     Some(rel.to_local(root).to_string_lossy().to_string())
                 }
+                _ => None,
+            };
+            // 回执截图：任务包/{date}/回执截图/{文件名}（执行器回写第 22 列时才有）。
+            let screenshot_path = match (&root, r.screenshot.as_deref().filter(|s| !s.is_empty())) {
+                (Some(root), Some(name)) => Some(
+                    crate::publish::paths::RelPath::from_parts([
+                        crate::publish::paths::TASK_PACKAGES,
+                        &yyyymmdd,
+                        crate::publish::paths::RECEIPTS_DIR,
+                        name,
+                    ])
+                    .to_local(root)
+                    .to_string_lossy()
+                    .to_string(),
+                ),
                 _ => None,
             };
             let topics: Vec<String> = serde_json::from_str(&r.topics_json).unwrap_or_default();
@@ -130,6 +150,8 @@ async fn build_detail(state: &AppState, sheet_id: i64) -> AppResult<SheetDetail>
                 fail_kind: r.fail_kind,
                 result_url: r.result_url,
                 result_msg: r.result_msg,
+                screenshot_path,
+                cancel_kind: r.cancel_kind,
             }
         })
         .collect();

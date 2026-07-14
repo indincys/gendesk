@@ -10,6 +10,7 @@ pub mod paths;
 pub mod planner;
 pub mod platform;
 pub mod reconcile;
+pub mod restock;
 pub mod sku_mapping;
 pub mod ticker;
 pub mod xlsx;

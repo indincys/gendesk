@@ -10,9 +10,10 @@ import {
   type SkuView,
   type TextItemView,
   commands,
+  subscribeFileDropWithPosition,
   unwrap,
 } from "@/lib/ipc";
-import { packLifeVisual, tierVisual } from "@/lib/status";
+import { packLifeVisual, runwayVisual, tierVisual } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { usePublishStore } from "@/stores/publish";
 import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
@@ -60,6 +61,7 @@ function AssetsList({
   const [preview, setPreview] = useState<{ path: string; report: MappingImportReport } | null>(
     null,
   );
+  const [restock, setRestock] = useState<SkuView[] | null>(null);
 
   // 映射导入：先预检（不落库）弹窗给用户看清「将新建/更新/冲突」，确认后才写库。
   const pickMappings = async () => {
@@ -124,6 +126,55 @@ function AssetsList({
   useEffect(() => {
     void load();
   }, [load, inboxRev]);
+
+  // F7 拖放直投：把图片/视频/TXT 拖到某个 SKU 行上，直接入该 SKU 的池。
+  const [dropTarget, setDropTarget] = useState<number | null>(null);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void subscribeFileDropWithPosition({
+      onOver: (pos) => setDropTarget(hitTestSku(pos)),
+      onLeave: () => setDropTarget(null),
+      onDrop: (paths, pos) => {
+        const sku = hitTestSku(pos);
+        setDropTarget(null);
+        void handleDrop(paths, sku);
+      },
+    }).then((f) => {
+      un = f;
+    });
+    return () => un?.();
+    // 订阅只需建立一次；handleDrop 通过闭包读到的都是稳定引用（commands / toast）。
+    // biome-ignore lint/correctness/useExhaustiveDependencies: 订阅只建立一次
+  }, []);
+
+  const handleDrop = async (paths: string[], skuId: number | null) => {
+    if (paths.length === 0) return;
+    const media = paths.filter((p) => /\.(jpe?g|png|webp|mp4|mov)$/i.test(p));
+    const txts = paths.filter((p) => /\.txt$/i.test(p));
+    if (media.length === 0 && txts.length === 0) {
+      toast.error("只支持图片 / 视频 / .txt");
+      return;
+    }
+    if (skuId == null) {
+      toast("请把文件拖到某个 SKU 行上；或直接放进「收件箱」文件夹由系统自动识别");
+      return;
+    }
+    try {
+      if (media.length > 0) {
+        const packs = await unwrap(commands.importMediaFiles(skuId, media));
+        toast.success(`已入库 ${packs.length} 个素材包`);
+      }
+      for (const t of txts) {
+        await unwrap(commands.importTextFile(skuId, t));
+      }
+      if (txts.length > 0) toast.success(`已收录 ${txts.length} 个文本文件`);
+      await load();
+      await refreshBadges();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
 
   const warnCount = badges.warn;
 
@@ -232,6 +283,16 @@ function AssetsList({
             >
               导入映射
             </button>
+            {/* 缺料 → 一段可直接粘贴给 Claude/Codex 的 prompt，内容生产因此闭环。 */}
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() => setRestock(rows.filter((r) => !r.isGeneral && needsRestock(r)))}
+              disabled={!rows.some((r) => !r.isGeneral && needsRestock(r))}
+              title="为跑道告警 / 余量低的 SKU 生成补料提示词"
+            >
+              补料提示词
+            </button>
             <button type="button" className="btn sm" onClick={() => setEditing("new")}>
               <Plus className="ic12" />
               新建 SKU
@@ -267,7 +328,7 @@ function AssetsList({
                   <span />
                 </div>
                 {rows.map((s) => (
-                  <SkuRow key={s.id} s={s} onOpen={onOpen} />
+                  <SkuRow key={s.id} s={s} onOpen={onOpen} dropping={dropTarget === s.id} />
                 ))}
                 {rows.length === 0 && <EmptyList />}
               </>
@@ -284,6 +345,8 @@ function AssetsList({
       ) : (
         <InboxPanel onChanged={() => void refreshBadges()} />
       )}
+
+      {restock && <RestockModal skus={restock} onClose={() => setRestock(null)} />}
 
       {editing && (
         <SkuEditModal
@@ -460,11 +523,29 @@ function lastPublishLabel(ts: number | null): string {
   return sameYear ? md : `${d.getFullYear()}年${md}`;
 }
 
-function SkuRow({ s, onOpen }: { s: SkuView; onOpen: (id: number) => void }) {
+function SkuRow({
+  s,
+  onOpen,
+  dropping,
+}: {
+  s: SkuView;
+  onOpen: (id: number) => void;
+  dropping?: boolean;
+}) {
   const t = tierVisual(s.tier, s.isGeneral);
   const off = s.status === "paused";
   return (
-    <div className={cn("sgrid tr", off && "droff")} onClick={() => onOpen(s.id)}>
+    <div
+      className={cn("sgrid tr", off && "droff")}
+      onClick={() => onOpen(s.id)}
+      // data-sku-id 是拖放命中测试的锚点（见 hitTestSku）。
+      data-sku-id={s.id}
+      style={
+        dropping
+          ? { outline: "2px solid var(--ac)", outlineOffset: -2, borderRadius: 6 }
+          : undefined
+      }
+    >
       <span className="pid">{s.code}</span>
       <span className="ohide">
         <span className="fw5 nowrap ohide" style={{ display: "block" }}>
@@ -479,12 +560,9 @@ function SkuRow({ s, onOpen }: { s: SkuView; onOpen: (id: number) => void }) {
       </span>
       <PoolCounts s={s} />
       <span className="fx ac gap6">
-        {s.warn && (
-          <span className="bdg b-amber">
-            <span className="dt" />
-            余量低
-          </span>
-        )}
+        {/* 跑道倒计时比「余量低」这个静态标签有用得多：同样剩 3 个包，
+            天天发五个平台的热款和每周一次的冷款，紧迫程度差一个数量级。 */}
+        <RunwayBadge s={s} />
         {off && <span className="bdg b-gray">停发</span>}
       </span>
       <span className="fs11 t3 nowrap">{lastPublishLabel(s.lastPublished)}</span>
@@ -492,6 +570,32 @@ function SkuRow({ s, onOpen }: { s: SkuView; onOpen: (id: number) => void }) {
         <ChevronRight className="ic12" />
       </span>
     </div>
+  );
+}
+
+/** 资产跑道徽标（F3）：取三池里最紧的那个。 */
+function RunwayBadge({ s }: { s: SkuView }) {
+  if (s.isGeneral) return null;
+  const days = [s.materialDays, s.titleDays, s.bodyDays].filter((d): d is number => d != null);
+  const min = days.length > 0 ? Math.min(...days) : null;
+  if (min == null) {
+    return s.warn ? (
+      <span className="bdg b-amber">
+        <span className="dt" />
+        余量低
+      </span>
+    ) : null;
+  }
+  const v = runwayVisual(min);
+  const which = min === s.materialDays ? "素材" : min === s.titleDays ? "标题" : "正文";
+  return (
+    <span
+      className={cn("bdg", min <= 3 ? "b-red" : min <= 7 ? "b-amber" : "b-gray")}
+      title={`按当前频率与查重窗口推演：${which}池 ${v.label}`}
+    >
+      <span className="dt" />
+      {which} {v.label}
+    </span>
   );
 }
 
@@ -968,6 +1072,10 @@ function PackGrid({ packs, onOpen }: { packs: PackView[]; onOpen: (p: PackView) 
             </div>
             <div className="fx ac gap6 mt6">
               <span className={cn("bdg", life.badgeClass)}>{life.label}</span>
+              {/* 发过几次 —— 人工决定要不要退役时最想知道的一个数字 */}
+              {p.publishCount > 0 && (
+                <span className="fs10 t3 nowrap">发过 {p.publishCount} 次</span>
+              )}
               {p.locked && <span className="fs10 t3 nowrap ohide">已锁定</span>}
             </div>
           </div>
@@ -1188,6 +1296,124 @@ function HistoryList({ detail }: { detail: SkuDetail }) {
 
 // ─────────────────────────────────────────────────────── 弹层
 
+/**
+ * 拖放坐标 → SKU 行（F7）。Tauri 的原生拖放不走 DOM，`dragover` 根本不触发，
+ * 只能拿事件里的窗口坐标反查元素。坐标是物理像素，要先除以 devicePixelRatio。
+ */
+function hitTestSku(pos: { x: number; y: number }): number | null {
+  const dpr = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(pos.x / dpr, pos.y / dpr);
+  const row = el?.closest<HTMLElement>("[data-sku-id]");
+  const id = row?.dataset.skuId;
+  return id ? Number(id) : null;
+}
+
+/** 该补料了：余量已低，或跑道 7 天内见底。 */
+function needsRestock(s: SkuView): boolean {
+  const soon = (d: number | null) => d != null && d <= 7;
+  return s.warn || soon(s.titleDays) || soon(s.bodyDays);
+}
+
+/**
+ * 补料提示词（F1）：把缺料 SKU 变成一段可直接粘贴给 Claude/Codex 的 prompt。
+ * 生成的 TXT 按 prompt 里的格式落盘后，收件箱会自动收录——内容生产由此闭环。
+ */
+function RestockModal({ skus, onClose }: { skus: SkuView[]; onClose: () => void }) {
+  const [kind, setKind] = useState<"both" | "title" | "body">("both");
+  // 默认勾选跑道 ≤7 天的（最紧的那批），其余可手动加。
+  const [picked, setPicked] = useState<number[]>(() =>
+    skus.filter((s) => needsRestock(s)).map((s) => s.id),
+  );
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    if (picked.length === 0) {
+      setText("");
+      return;
+    }
+    void unwrap(commands.restockPrompt(picked, kind))
+      .then(setText)
+      .catch((e) => toast.error(String(e)));
+  }, [picked, kind]);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("已复制，粘贴给 Claude / Codex 即可");
+    } catch {
+      toast.error("复制失败，请手动选中文本复制");
+    }
+  };
+
+  return (
+    <Modal
+      title="生成补料提示词"
+      width="w640"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">按提示词里的格式落盘到收件箱，会被自动收录</span>
+          <div className="f1" />
+          <button type="button" className="btn sm" onClick={onClose}>
+            关闭
+          </button>
+          <button type="button" className="btn sm pri" disabled={!text} onClick={() => void copy()}>
+            复制
+          </button>
+        </>
+      }
+    >
+      <div className="fx ac gap8" style={{ marginBottom: 8 }}>
+        <span className="fs11 t3">补</span>
+        <div className="seg">
+          {(
+            [
+              ["both", "标题 + 正文"],
+              ["title", "只补标题"],
+              ["body", "只补正文"],
+            ] as const
+          ).map(([v, label]) => (
+            <span key={v} className={cn("sgi", kind === v && "on")} onClick={() => setKind(v)}>
+              {label}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+        选择 SKU（{picked.length}/{skus.length}）
+      </div>
+      <div className="mt6" style={{ maxHeight: 140, overflow: "auto" }}>
+        {skus.map((s) => (
+          <div
+            key={s.id}
+            className="pickrow"
+            onClick={() =>
+              setPicked((p) => (p.includes(s.id) ? p.filter((x) => x !== s.id) : [...p, s.id]))
+            }
+          >
+            <span className={cn("ckb", picked.includes(s.id) && "on")}>✓</span>
+            <span className="pid">{s.code}</span>
+            <span className="fs12 f1 nowrap ohide">{s.styleName}</span>
+            <RunwayBadge s={s} />
+          </div>
+        ))}
+      </div>
+
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        提示词
+      </div>
+      <textarea
+        className="inp mt6 mono"
+        rows={12}
+        readOnly
+        value={text || "请先选择至少一个 SKU"}
+        style={{ fontSize: 11, lineHeight: 1.6 }}
+      />
+    </Modal>
+  );
+}
+
 /** 同目录下的兄弟文件绝对路径（后端只给了缩略图一条绝对路径，其余成员据此拼）。 */
 function siblingPath(abs: string, name: string): string {
   const i = Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"));
@@ -1363,7 +1589,46 @@ function PackModal({
           冷却中，预计 {lastPublishLabel(pack.availableAt)} 回可用。
         </div>
       )}
+
+      <PackHistory packId={pack.id} count={pack.publishCount} />
     </Modal>
+  );
+}
+
+/** 素材包发布台账明细（F10）：发过几次、发到哪、链接在哪 —— 退役决策的依据。 */
+function PackHistory({ packId, count }: { packId: number; count: number }) {
+  const [items, setItems] = useState<import("@/lib/ipc").PackHistoryItem[] | null>(null);
+  useEffect(() => {
+    if (count > 0)
+      void unwrap(commands.packHistory(packId))
+        .then(setItems)
+        .catch(() => {});
+  }, [packId, count]);
+
+  if (count === 0) return null;
+  return (
+    <>
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
+        发布记录 · {count} 次
+      </div>
+      <div className="mt6">
+        {(items ?? []).map((h) => (
+          <div key={h.taskCode} className="txrow" style={{ padding: "6px 0" }}>
+            <span className="fs11 t3 nowrap" style={{ width: 92 }}>
+              {h.date}
+            </span>
+            <span className="bdg b-gray">{h.platformZh}</span>
+            <span className="pid">{h.taskCode}</span>
+            <span className="f1" />
+            {h.url && (
+              <a className="fs11" href={h.url} target="_blank" rel="noreferrer">
+                链接 ↗
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 

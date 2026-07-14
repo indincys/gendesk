@@ -16,6 +16,9 @@ pub struct SheetRow {
     pub closed_at: Option<i64>,
     /// 最近一次「生成/重生成」的时刻（此后的行改动即人工调整，见 `is_edited`）。
     pub generated_at: Option<i64>,
+    /// 执行器首次 / 最近一次回写回执的时刻（同步链路健康，F9）。
+    pub first_receipt_at: Option<i64>,
+    pub last_receipt_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -128,6 +131,22 @@ pub async fn mark_generated(conn: &mut SqliteConnection, sheet_id: i64) -> Resul
         .bind(crate::db::now_unix())
         .execute(&mut *conn)
         .await?;
+    Ok(())
+}
+
+/// 记一次回执回写（首次只写一次，最近一次每次都刷新）。F9 同步链路健康。
+pub async fn touch_receipt(pool: &SqlitePool, sheet_id: i64) -> Result<(), sqlx::Error> {
+    let now = crate::db::now_unix();
+    sqlx::query(
+        "UPDATE task_sheets SET
+            first_receipt_at = COALESCE(first_receipt_at, ?2),
+            last_receipt_at  = ?2
+         WHERE id = ?1",
+    )
+    .bind(sheet_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

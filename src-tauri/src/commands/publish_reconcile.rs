@@ -209,6 +209,7 @@ pub struct AccountStat {
 pub struct DashboardView {
     pub date: String,
     pub sheet_id: Option<i64>,
+    pub status: Option<String>,
     pub plan: i64,
     pub published: i64,
     pub failed: i64,
@@ -217,7 +218,18 @@ pub struct DashboardView {
     pub platforms: Vec<PlatformStat>,
     pub accounts: Vec<AccountStat>,
     pub has_report: bool,
+    /// 同步链路（F9）：导出时刻 / 执行器首次回写 / 最近一次回写（Unix 秒）。
+    pub exported_at: Option<i64>,
+    pub first_receipt_at: Option<i64>,
+    pub last_receipt_at: Option<i64>,
+    /// 已导出超过 1 小时仍无任何回写 —— 优先怀疑同步软件没把包送到执行机。
+    pub sync_stalled: bool,
+    /// 昨日成功率（读昨日日报；无则 null）。
+    pub yesterday_success_rate: Option<i64>,
 }
+
+/// 导出后多久还没有任何回写就该起疑（先写死，够用；后续可进设置）。
+const SYNC_STALL_HOURS: i64 = 1;
 
 /// 今日看板：计划/已发布/失败/待核对 + 平台完成率 + 账号健康。
 #[tauri::command]
@@ -286,9 +298,36 @@ pub async fn get_dashboard(state: State<'_, AppState>, date: String) -> AppResul
         })
         .collect();
 
+    // 同步链路健康：已导出 + 超过阈值仍无任何回写 → 先查同步软件与执行机，别急着重发。
+    let now = crate::db::now_unix();
+    let exported_at = sheet.as_ref().and_then(|s| s.exported_at);
+    let first_receipt_at = sheet.as_ref().and_then(|s| s.first_receipt_at);
+    let sync_stalled = match (sheet.as_ref().map(|s| s.status.as_str()), exported_at) {
+        (Some("exported"), Some(t)) => {
+            first_receipt_at.is_none() && now - t > SYNC_STALL_HOURS * 3600
+        }
+        _ => false,
+    };
+
+    // 昨日成功率（读昨日日报）。
+    let yesterday_success_rate = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+        Ok(d) => {
+            let prev = (d - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string();
+            planning::get_sheet_by_date(&state.db, &prev)
+                .await?
+                .and_then(|s| s.report_json)
+                .and_then(|j| serde_json::from_str::<ReportView>(&j).ok())
+                .map(|r| r.success_rate)
+        }
+        Err(_) => None,
+    };
+
     Ok(DashboardView {
         date,
         sheet_id: sheet.as_ref().map(|s| s.id),
+        status: sheet.as_ref().map(|s| s.status.clone()),
         plan: rows.len() as i64,
         published: count("published"),
         failed: count("failed"),
@@ -296,6 +335,11 @@ pub async fn get_dashboard(state: State<'_, AppState>, date: String) -> AppResul
         pending: count("pending"),
         platforms,
         accounts: account_stats,
+        exported_at,
+        first_receipt_at,
+        last_receipt_at: sheet.as_ref().and_then(|s| s.last_receipt_at),
+        sync_stalled,
+        yesterday_success_rate,
         has_report: sheet.and_then(|s| s.report_json).is_some(),
     })
 }

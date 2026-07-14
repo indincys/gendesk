@@ -12,6 +12,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::commands::publish_settings;
 use crate::db::repo::{inbox, ledger, skus as repo};
 use crate::error::{AppError, AppResult};
+use crate::publish::planner::runway;
 use crate::publish::platform::Platform;
 use crate::publish::{paths, sku_mapping};
 use crate::state::AppState;
@@ -44,6 +45,11 @@ pub struct SkuView {
     pub warn_body: bool,
     /// 任一池预警。
     pub warn: bool,
+    /// 资产跑道（F3）：按分层频率 + 查重窗口推演「还能撑几天」。
+    /// null = 60 天内不会断（或该 SKU 不排期）。
+    pub material_days: Option<i64>,
+    pub title_days: Option<i64>,
+    pub body_days: Option<i64>,
 }
 
 /// 一条发布历史（读台账）。
@@ -135,6 +141,14 @@ async fn apply_alias(db: &sqlx::SqlitePool, id: i64, alias: &str) -> AppResult<(
 }
 
 fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuView {
+    to_view_with_runway(row, s, None)
+}
+
+fn to_view_with_runway(
+    row: &repo::SkuAggRow,
+    s: &publish_settings::PublishSettings,
+    runway: Option<runway::RunwayView>,
+) -> SkuView {
     let has_gallery = row.gallery_count > 0;
     let warn_material = row.material_count < s.warn_material;
     let warn_title = row.title_count < s.warn_title;
@@ -164,6 +178,9 @@ fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuV
         warn_title: !is_general && warn_title,
         warn_body: !is_general && warn_body,
         warn,
+        material_days: runway.as_ref().and_then(|r| r.material_days),
+        title_days: runway.as_ref().and_then(|r| r.title_days),
+        body_days: runway.as_ref().and_then(|r| r.body_days),
     }
 }
 
@@ -177,15 +194,106 @@ fn validate_platforms(platforms: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+/// 全部 SKU 的资产跑道（F3）。三条查询（包 / 台账批量 / 无），与 SKU 数无关——
+/// 跑道是列表页的常驻列，绝不能引入 N+1。
+async fn runways(
+    db: &sqlx::SqlitePool,
+    rows: &[repo::SkuAggRow],
+    s: &publish_settings::PublishSettings,
+) -> AppResult<HashMap<i64, runway::RunwayView>> {
+    use crate::db::repo::{assets, ledger};
+    use crate::publish::planner::frequency::FreqRules;
+
+    let now = crate::db::now_unix();
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let rules = FreqRules {
+        hot_daily: s.tier_rules.hot_daily,
+        warm_weekly: s.tier_rules.warm_weekly,
+        cold_weekly_rotate: s.tier_rules.cold_weekly_rotate,
+    };
+
+    // 一次拿全部在用包 + 一次批量拿它们的台账。
+    let mut packs_by_sku: HashMap<i64, Vec<assets::PackRow>> = HashMap::new();
+    let mut all_pack_ids: Vec<i64> = Vec::new();
+    for r in rows.iter().filter(|r| r.is_general == 0) {
+        let packs: Vec<assets::PackRow> = assets::list_by_sku(db, r.id)
+            .await?
+            .into_iter()
+            .filter(|p| p.lifecycle == "active")
+            .collect();
+        all_pack_ids.extend(packs.iter().map(|p| p.id));
+        packs_by_sku.insert(r.id, packs);
+    }
+    let usage = ledger::pack_usage_batch(db, &all_pack_ids).await?;
+
+    let mut out = HashMap::new();
+    for r in rows
+        .iter()
+        .filter(|r| r.is_general == 0 && r.status == "active")
+    {
+        let platforms = enabled_platforms_of(r, s);
+        let packs = packs_by_sku.remove(&r.id).unwrap_or_default();
+        let input = runway::RunwayInput {
+            sku_id: r.id,
+            tier: r.tier.clone(),
+            platforms,
+            packs: packs
+                .iter()
+                .map(|p| runway::RunwayPack {
+                    last_pub: usage
+                        .get(&p.id)
+                        .map(|u| u.last_by_platform.clone())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+            title_count: r.title_count,
+            body_count: r.body_count,
+            needs_body: r.gallery_count > 0,
+            dedup_days: s.dedup_days,
+            rules,
+            start_date: today.clone(),
+            now,
+        };
+        out.insert(r.id, runway::runway(&input));
+    }
+    Ok(out)
+}
+
+/// SKU 生效平台（覆盖优先，否则全局矩阵）。
+fn enabled_platforms_of(
+    row: &repo::SkuAggRow,
+    s: &publish_settings::PublishSettings,
+) -> Vec<String> {
+    if let Some(over) = parse_platforms(row.platforms_json.as_deref()) {
+        return over;
+    }
+    let m = &s.platform_matrix;
+    Platform::ALL
+        .into_iter()
+        .filter(|p| match p {
+            Platform::Douyin => m.douyin,
+            Platform::Xhs => m.xhs,
+            Platform::Kuaishou => m.kuaishou,
+            Platform::Shipinhao => m.shipinhao,
+            Platform::Bilibili => m.bilibili,
+        })
+        .map(|p| p.code().to_string())
+        .collect()
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn list_skus(state: State<'_, AppState>, filter: SkuFilter) -> AppResult<Vec<SkuView>> {
     let settings = publish_settings::load(&state.db).await?;
     let rows = repo::list_agg(&state.db).await?;
+    let rw = runways(&state.db, &rows, &settings).await?;
     let q = filter.query.as_deref().map(str::to_lowercase);
     let views = rows
         .iter()
-        .map(|r| to_view(r, &settings))
+        .map(|r| to_view_with_runway(r, &settings, rw.get(&r.id).cloned()))
         .filter(|v| {
             if let Some(t) = &filter.tier {
                 if !v.is_general && &v.tier != t {
@@ -663,6 +771,38 @@ pub async fn pick_mapping_file(app: AppHandle) -> AppResult<Option<String>> {
     Ok(picked
         .and_then(|p| p.into_path().ok())
         .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 补料提示词（F1）：把缺料 SKU 变成一段可直接粘贴给 Claude/Codex 的 prompt。
+/// `kind`：`title` | `body` | 其它（=两者都要）。
+#[tauri::command]
+#[specta::specta]
+pub async fn restock_prompt(
+    state: State<'_, AppState>,
+    sku_ids: Vec<i64>,
+    kind: String,
+) -> AppResult<String> {
+    use crate::publish::restock::{build_restock_prompt, RestockKind, RestockSku};
+    let rows = repo::list_agg(&state.db).await?;
+    let picked: Vec<RestockSku> = rows
+        .iter()
+        .filter(|r| sku_ids.contains(&r.id) && r.is_general == 0)
+        .map(|r| RestockSku {
+            code: r.code.clone(),
+            style_name: r.style_name.clone(),
+            product_name: r.product_name.clone(),
+            topics: parse_topics(&r.topics_json),
+            title_count: r.title_count,
+            body_count: r.body_count,
+        })
+        .collect();
+    if picked.is_empty() {
+        return Err(AppError::InvalidInput("请先选择要补料的 SKU".into()));
+    }
+    Ok(build_restock_prompt(
+        &picked,
+        RestockKind::from_str_or_both(&kind),
+    ))
 }
 
 /// 导出映射表模板 CSV（UTF-8 BOM，Excel 双击即用）。返回落盘路径；用户取消则 `None`。

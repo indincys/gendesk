@@ -265,6 +265,37 @@ pub async fn import_media_files(
     views_of(&state, rows, &s).await
 }
 
+/// 拖放直投 TXT（F7）：复制进 `收件箱/{SKU}/` 后走收录管线（强制该 SKU，跳过三冗余识别）。
+#[tauri::command]
+#[specta::specta]
+pub async fn import_text_file(
+    state: State<'_, AppState>,
+    sku_id: i64,
+    path: String,
+) -> AppResult<ingest::IngestOutcome> {
+    let root = publish_settings::root_local(&state.db).await?;
+    let sku = skus::get(&state.db, sku_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("SKU 不存在".into()))?;
+    let src = std::path::Path::new(&path);
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| AppError::InvalidInput("文件名无效".into()))?;
+    if !name.to_ascii_lowercase().ends_with(".txt") {
+        return Err(AppError::InvalidInput("只支持 .txt 文本文件".into()));
+    }
+    let dir_rel = RelPath::from_parts([crate::publish::paths::INBOX, &sku.code]);
+    let dir_abs = dir_rel.to_local(&root);
+    std::fs::create_dir_all(&dir_abs)?;
+    // 同名去重，避免覆盖收件箱里已有的文件。
+    let final_name = crate::publish::paths::dedupe_name(name, &|n| dir_abs.join(n).exists());
+    std::fs::copy(src, dir_abs.join(&final_name))?;
+
+    let rel = dir_rel.join(&final_name);
+    ingest::ingest_txt(&state.db, &root, &rel, Some(&sku.code)).await
+}
+
 /// 作品库联动：把选中的输出图复制为一个图集包。
 #[tauri::command]
 #[specta::specta]
@@ -368,6 +399,46 @@ pub async fn update_pack(state: State<'_, AppState>, id: i64, patch: PackPatch) 
     // 生命周期只由显式路径改（activate_pack / retire_pack / restore_pack）：
     // 改个备注就顺带让包参与排期是意料之外的副作用。
     Ok(())
+}
+
+/// 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackHistoryItem {
+    pub date: String,
+    pub platform_zh: String,
+    pub task_code: String,
+    pub url: Option<String>,
+    pub published_at: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn pack_history(
+    state: State<'_, AppState>,
+    pack_id: i64,
+) -> AppResult<Vec<PackHistoryItem>> {
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+        "SELECT date, platform, task_code, url, published_at FROM usage_ledger
+         WHERE pack_id = ?1 ORDER BY published_at DESC, id DESC LIMIT 100",
+    )
+    .bind(pack_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(date, platform, task_code, url, published_at)| PackHistoryItem {
+                date,
+                platform_zh: Platform::from_code(&platform)
+                    .map(|p| p.zh().to_string())
+                    .unwrap_or(platform),
+                task_code,
+                url,
+                published_at,
+            },
+        )
+        .collect())
 }
 
 /// 手动把 new 包标记为 active（可用）。

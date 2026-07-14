@@ -831,6 +831,14 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 警示文本（资产跑道 ≤7 天见底、同步链路停滞等）：比 .terr 缓和一档。 */
+.twarn {
+  font-size: 11.5px;
+  color: var(--wr);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ============================ Key 状态条 ============================ */
 .kbar {

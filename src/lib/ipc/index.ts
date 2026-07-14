@@ -76,6 +76,11 @@ export type {
   ShortageItem,
   ExportResult,
   PreflightReport,
+  PackHistoryItem,
+  PreviewDay,
+  PreviewEntry,
+  CalendarDay,
+  BriefView,
   DashboardView,
   PlatformStat,
   AccountStat,
@@ -209,6 +214,35 @@ export async function subscribeFileDrop(handler: (paths: string[]) => void): Pro
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
   const un = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type === "drop") handler(event.payload.paths);
+  });
+  return () => un();
+}
+
+/** 拖放位置（物理像素，需除以 devicePixelRatio 才是 CSS 像素）。 */
+export interface DropPosition {
+  x: number;
+  y: number;
+}
+
+/**
+ * 订阅带**位置**的文件拖放（F7 拖放直投）。
+ *
+ * Tauri 的原生拖放不经过 DOM，`dragover`/`drop` 那套 DOM 事件根本不会触发；
+ * 想知道「用户把文件拖到了哪一行」，只能靠事件里的窗口坐标做命中测试。
+ * 坐标是物理像素，调用方需自行换算（见 `AssetsPage` 的 `hitTestSku`）。
+ */
+export async function subscribeFileDropWithPosition(handlers: {
+  onOver?: (pos: DropPosition) => void;
+  onLeave?: () => void;
+  onDrop?: (paths: string[], pos: DropPosition) => void;
+}): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const un = await getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === "over") handlers.onOver?.(p.position);
+    else if (p.type === "drop") handlers.onDrop?.(p.paths, p.position);
+    else handlers.onLeave?.();
   });
   return () => un();
 }

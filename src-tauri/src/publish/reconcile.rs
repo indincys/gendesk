@@ -187,6 +187,10 @@ pub async fn apply_receipts(
             _ => {}
         }
     }
+    // 有任何一行被回执定态 → 执行器确实在回写（F9 同步链路健康的判据）。
+    if res.matched > 0 {
+        planning::touch_receipt(pool, sheet_id).await?;
+    }
     Ok(res)
 }
 

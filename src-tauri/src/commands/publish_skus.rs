@@ -28,6 +28,8 @@ pub struct SkuView {
     pub status: String,
     pub is_general: bool,
     pub note: String,
+    /// 收件箱文件夹别名（空串=无别名）。
+    pub folder_alias: String,
     pub material_count: i64,
     pub title_count: i64,
     pub body_count: i64,
@@ -81,6 +83,8 @@ pub struct CreateSkuInput {
     pub topics: Option<Vec<String>>,
     pub platforms: Option<Vec<String>>,
     pub note: Option<String>,
+    /// 收件箱文件夹别名（可选，中文亦可）。
+    pub folder_alias: Option<String>,
 }
 
 /// 编辑补丁。
@@ -94,6 +98,8 @@ pub struct SkuPatch {
     /// `Some(None)` = 清除覆盖（跟随全局矩阵）；`Some(Some(..))` = 设置覆盖。
     pub platforms: Option<Option<Vec<String>>>,
     pub note: Option<String>,
+    /// 收件箱文件夹别名（`Some("")`=清除别名）。
+    pub folder_alias: Option<String>,
 }
 
 fn parse_topics(json: &str) -> Vec<String> {
@@ -106,6 +112,23 @@ fn parse_platforms(json: Option<&str>) -> Option<Vec<String>> {
 
 fn valid_tier(t: &str) -> bool {
     matches!(t, "hot" | "warm" | "cold")
+}
+
+/// 设置/清除文件夹别名（空串=清除）；非空别名若已被别的 SKU 占用则报错。
+async fn apply_alias(db: &sqlx::SqlitePool, id: i64, alias: &str) -> AppResult<()> {
+    let alias = alias.trim();
+    if !alias.is_empty() {
+        if let Some(existing) = repo::find_by_alias(db, alias).await? {
+            if existing.id != id {
+                return Err(AppError::InvalidInput(format!(
+                    "文件夹别名已被 SKU {} 占用：{alias}",
+                    existing.code
+                )));
+            }
+        }
+    }
+    repo::set_alias(db, id, alias).await?;
+    Ok(())
 }
 
 fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuView {
@@ -128,6 +151,7 @@ fn to_view(row: &repo::SkuAggRow, s: &publish_settings::PublishSettings) -> SkuV
         status: row.status.clone(),
         is_general,
         note: row.note.clone(),
+        folder_alias: row.folder_alias.clone(),
         material_count: row.material_count,
         title_count: row.title_count,
         body_count: row.body_count,
@@ -222,6 +246,9 @@ pub async fn create_sku(state: State<'_, AppState>, input: CreateSkuInput) -> Ap
         },
     )
     .await?;
+    if let Some(alias) = &input.folder_alias {
+        apply_alias(&state.db, id, alias).await?;
+    }
     Ok(id)
 }
 
@@ -257,6 +284,9 @@ pub async fn update_sku(state: State<'_, AppState>, id: i64, patch: SkuPatch) ->
         patch.note.as_deref(),
     )
     .await?;
+    if let Some(alias) = &patch.folder_alias {
+        apply_alias(&state.db, id, alias).await?;
+    }
     Ok(())
 }
 
@@ -335,4 +365,136 @@ pub async fn get_sku_detail(state: State<'_, AppState>, id: i64) -> AppResult<Sk
         })
         .collect();
     Ok(SkuDetail { sku, history })
+}
+
+/// 批量映射导入结果。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MappingImportReport {
+    /// 至少设置了别名或话题的 SKU 行数。
+    pub updated: i64,
+    pub alias_set: i64,
+    pub topics_set: i64,
+    /// 跳过/出错行的说明（编码不存在、别名冲突等）。
+    pub skipped: Vec<String>,
+}
+
+/// 一行按 Tab 优先、否则逗号切列并去空白。
+fn split_cols(line: &str) -> Vec<String> {
+    let parts: Vec<&str> = if line.contains('\t') {
+        line.split('\t').collect()
+    } else {
+        line.split(',').collect()
+    };
+    parts.iter().map(|s| s.trim().to_string()).collect()
+}
+
+/// 解析话题列：空白分隔、去 `#`、去重、最多 5 个。
+fn parse_topic_field(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in s.split_whitespace() {
+        let t = tok.trim_start_matches('#').trim();
+        if !t.is_empty() && !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+        if out.len() >= 5 {
+            break;
+        }
+    }
+    out
+}
+
+/// 批量导入 SKU 映射：每行 `编码[<Tab/逗号>别名][<Tab/逗号>话题]`。
+/// 别名一对一（唯一），话题为显式设置/替换（区别于收件箱的「绝不覆盖」）。SKU 需已存在。
+#[tauri::command]
+#[specta::specta]
+pub async fn import_sku_mappings(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<MappingImportReport> {
+    let content = std::fs::read(&path)?;
+    let text = String::from_utf8_lossy(&content);
+    let mut report = MappingImportReport {
+        updated: 0,
+        alias_set: 0,
+        topics_set: 0,
+        skipped: Vec::new(),
+    };
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        let cols = split_cols(line);
+        let code = cols.first().map(String::as_str).unwrap_or("").trim();
+        if code.is_empty() {
+            continue;
+        }
+        let Some(sku) = repo::find_by_code(&state.db, code).await? else {
+            report
+                .skipped
+                .push(format!("第 {} 行：SKU 编码不存在「{code}」", i + 1));
+            continue;
+        };
+        let alias = cols.get(1).map(String::as_str).unwrap_or("").trim();
+        let topics_field = cols.get(2).map(String::as_str).unwrap_or("").trim();
+        let mut touched = false;
+        // 别名（唯一性冲突则跳过别名、仍尝试话题）。
+        if !alias.is_empty() {
+            match repo::find_by_alias(&state.db, alias).await? {
+                Some(other) if other.id != sku.id => {
+                    report.skipped.push(format!(
+                        "第 {} 行：别名「{alias}」已被 SKU {} 占用",
+                        i + 1,
+                        other.code
+                    ));
+                }
+                _ => {
+                    repo::set_alias(&state.db, sku.id, alias).await?;
+                    report.alias_set += 1;
+                    touched = true;
+                }
+            }
+        }
+        // 话题（显式设置/替换）。
+        if !topics_field.is_empty() {
+            let topics = parse_topic_field(topics_field);
+            let json = serde_json::to_string(&topics)?;
+            repo::set_topics(&state.db, sku.id, &json).await?;
+            report.topics_set += 1;
+            touched = true;
+        }
+        if touched {
+            report.updated += 1;
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_cols_tab_then_comma() {
+        assert_eq!(
+            split_cols("NFC-W-01\tA-敖瑞鹏-01\t#a #b"),
+            ["NFC-W-01", "A-敖瑞鹏-01", "#a #b"]
+        );
+        assert_eq!(
+            split_cols("NFC-W-01, A-敖瑞鹏-01 , 沙发 家居"),
+            ["NFC-W-01", "A-敖瑞鹏-01", "沙发 家居"]
+        );
+        assert_eq!(split_cols("NFC-W-01"), ["NFC-W-01"]);
+    }
+
+    #[test]
+    fn parse_topic_field_strips_hash_dedupes_caps_5() {
+        assert_eq!(
+            parse_topic_field("#沙发 #家居 沙发 #新品"),
+            ["沙发", "家居", "新品"]
+        );
+        assert_eq!(parse_topic_field("a b c d e f g").len(), 5);
+        assert!(parse_topic_field("   ").is_empty());
+    }
 }

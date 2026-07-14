@@ -975,6 +975,18 @@ async getPublishBadges() : Promise<Result<PublishBadges, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 批量导入 SKU 映射：每行 `编码[<Tab/逗号>别名][<Tab/逗号>话题]`。
+ * 别名一对一（唯一），话题为显式设置/替换（区别于收件箱的「绝不覆盖」）。SKU 需已存在。
+ */
+async importSkuMappings(path: string) : Promise<Result<MappingImportReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_sku_mappings", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listTextItems(skuId: number, kind: string) : Promise<Result<TextItemView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_text_items", { skuId, kind }) };
@@ -1500,7 +1512,11 @@ draws: number }
 /**
  * 新建 SKU 输入。
  */
-export type CreateSkuInput = { code: string; styleName: string; productName: string | null; tier: string | null; topics: string[] | null; platforms: string[] | null; note: string | null }
+export type CreateSkuInput = { code: string; styleName: string; productName: string | null; tier: string | null; topics: string[] | null; platforms: string[] | null; note: string | null; 
+/**
+ * 收件箱文件夹别名（可选，中文亦可）。
+ */
+folderAlias: string | null }
 export type DashboardView = { date: string; sheetId: number | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean }
 /**
  * 数据目录信息（E19：暴露落盘位置）。
@@ -1641,6 +1657,18 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  * Key 健康状态。
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
+/**
+ * 批量映射导入结果。
+ */
+export type MappingImportReport = { 
+/**
+ * 至少设置了别名或话题的 SKU 行数。
+ */
+updated: number; aliasSet: number; topicsSet: number; 
+/**
+ * 跳过/出错行的说明（编码不存在、别名冲突等）。
+ */
+skipped: string[] }
 export type PackFileView = { name: string; origName: string; bytes: number }
 export type PackPatch = { note: string | null; 
 /**
@@ -1906,7 +1934,11 @@ export type SkuPatch = { styleName: string | null; productName: string | null; t
 /**
  * `Some(None)` = 清除覆盖（跟随全局矩阵）；`Some(Some(..))` = 设置覆盖。
  */
-platforms: string[] | null; note: string | null }
+platforms: string[] | null; note: string | null; 
+/**
+ * 收件箱文件夹别名（`Some("")`=清除别名）。
+ */
+folderAlias: string | null }
 /**
  * SKU 列表/详情视图。
  */
@@ -1914,7 +1946,11 @@ export type SkuView = { id: number; code: string; styleName: string; productName
 /**
  * 平台覆盖（NULL=跟随全局矩阵）。
  */
-platforms: string[] | null; status: string; isGeneral: boolean; note: string; materialCount: number; titleCount: number; bodyCount: number; hasGallery: boolean; lastPublished: number | null; 
+platforms: string[] | null; status: string; isGeneral: boolean; note: string; 
+/**
+ * 收件箱文件夹别名（空串=无别名）。
+ */
+folderAlias: string; materialCount: number; titleCount: number; bodyCount: number; hasGallery: boolean; lastPublished: number | null; 
 /**
  * 各池预警（低于阈值）。
  */

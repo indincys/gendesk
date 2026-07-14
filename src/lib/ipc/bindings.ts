@@ -1175,14 +1175,20 @@ async setAccountStatus(id: number, status: string) : Promise<Result<null, AppErr
 export const events = __makeEvents__<{
 backupProgress: BackupProgress,
 batchSummary: BatchSummary,
+inboxIngestEvent: InboxIngestEvent,
 keyHealth: KeyHealth,
+publishBadgesEvent: PublishBadgesEvent,
+sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
+inboxIngestEvent: "inbox-ingest-event",
 keyHealth: "key-health",
+publishBadgesEvent: "publish-badges-event",
+sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
 updateStateChanged: "update-state-changed"
@@ -1403,6 +1409,14 @@ temp: boolean }
  * 导入诊断（E37：缺分组标记 / 悬空小标题等，含行号）。
  */
 export type ImportWarning = { line: number; message: string }
+/**
+ * `publish://inbox-ingest`：单文件收录结果（前端 toast + 列表刷新）。
+ */
+export type InboxIngestEvent = { 
+/**
+ * 收录文件名（末段）。
+ */
+fileName: string; outcome: IngestOutcome }
 export type InboxItemView = { id: number; fileRel: string; 
 /**
  * 文件名（末段，UI 展示）。
@@ -1512,6 +1526,10 @@ pendingSheets: number;
  * 待核对数（P3 起）。
  */
 pendingReconcile: number }
+/**
+ * `publish://badges`：资产库徽章（待认领 + 预警）、发布计划徽章（待确认 + 待核对）。
+ */
+export type PublishBadgesEvent = { unclaimed: number; warn: number; pendingSheets: number; pendingReconcile: number }
 /**
  * 发布与同步设置。
  */
@@ -1646,6 +1664,14 @@ onboarded?: boolean }
  * 设置补丁（部分更新）。
  */
 export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
+/**
+ * `publish://sheet-changed`：任务单状态/行状态变化（P2/P3 工作台与看板刷新）。
+ */
+export type SheetChangedEvent = { sheetId: number; date: string; status: string; 
+/**
+ * 汇总计数（待执行/已发布/失败/疑似/已取消）。
+ */
+pending: number; published: number; failed: number; suspect: number; canceled: number }
 /**
  * SKU 详情：档案视图 + 发布历史（池明细由 assets/texts 域命令单独取）。
  */

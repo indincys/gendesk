@@ -247,8 +247,10 @@ pub async fn get_publish_settings(state: State<'_, AppState>) -> AppResult<Publi
 #[specta::specta]
 pub async fn update_publish_settings(
     state: State<'_, AppState>,
+    publish_state: State<'_, crate::publish::PublishState>,
     patch: PublishSettingsPatch,
 ) -> AppResult<PublishSettings> {
+    let before_root = load(&state.db).await?.root_local;
     let mut s = load(&state.db).await?;
     if let Some(v) = patch.root_local {
         s.root_local = v;
@@ -300,6 +302,15 @@ pub async fn update_publish_settings(
     }
 
     save(&state.db, &s).await?;
+
+    // 本机根目录变更 → 热重启收件箱监听。
+    if s.root_local != before_root && !s.root_local.is_empty() {
+        if let Err(err) = publish_state.restart(std::path::PathBuf::from(&s.root_local)) {
+            tracing::warn!(error = %err, "重启收件箱监听失败");
+        }
+    } else if s.root_local.is_empty() {
+        publish_state.stop();
+    }
     Ok(s)
 }
 

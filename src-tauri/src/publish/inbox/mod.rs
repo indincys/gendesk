@@ -5,3 +5,4 @@
 
 pub mod ingest;
 pub mod parser;
+pub mod watcher;

@@ -174,6 +174,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             engine::events::KeyHealth,
             commands::updater::UpdateStateChanged,
             commands::backup::BackupProgress,
+            // 发布模块事件（P1 起）
+            publish::events::PublishBadgesEvent,
+            publish::events::InboxIngestEvent,
+            publish::events::SheetChangedEvent,
         ])
 }
 
@@ -282,7 +286,33 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings.trash_retention_days,
     ));
 
-    app.manage(state::AppState::new(pool, secrets, dirs, Arc::new(engine)));
+    app.manage(state::AppState::new(
+        pool.clone(),
+        secrets,
+        dirs,
+        Arc::new(engine),
+    ));
+
+    // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
+    let publish_state = publish::PublishState::new(pool.clone(), app.handle().clone());
+    if let Ok(pset) = tauri::async_runtime::block_on(commands::publish_settings::load(&pool)) {
+        if !pset.root_local.is_empty() {
+            let root = std::path::PathBuf::from(&pset.root_local);
+            if let Err(err) = publish_state.restart(root.clone()) {
+                tracing::warn!(error = %err, "启动收件箱监听失败");
+            }
+            // 启动补跑：全量扫描收件箱（异步，不阻塞启动）。
+            let pool_bg = pool.clone();
+            let app_bg = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = publish::inbox::ingest::rescan(&pool_bg, &root).await {
+                    tracing::warn!(error = %err, "启动补跑收录失败");
+                }
+                publish::inbox::watcher::emit_badges(&pool_bg, &app_bg).await;
+            });
+        }
+    }
+    app.manage(publish_state);
 
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
     if let Some(window) = app.get_webview_window("main") {

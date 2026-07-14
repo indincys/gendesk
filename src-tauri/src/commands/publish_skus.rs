@@ -284,27 +284,20 @@ pub struct PublishBadges {
     pub pending_reconcile: i64,
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn get_publish_badges(state: State<'_, AppState>) -> AppResult<PublishBadges> {
-    let settings = publish_settings::load(&state.db).await?;
-    let rows = repo::list_agg(&state.db).await?;
-    let warn = rows
-        .iter()
-        .filter(|r| {
-            let v = to_view(r, &settings);
-            v.warn
-        })
-        .count() as i64;
-    let unclaimed = inbox::count_pending(&state.db).await?;
+/// 徽章计数（命令与 watcher 事件共用，单点避免漂移）。
+pub async fn badge_counts(pool: &sqlx::SqlitePool) -> AppResult<PublishBadges> {
+    let settings = publish_settings::load(pool).await?;
+    let rows = repo::list_agg(pool).await?;
+    let warn = rows.iter().filter(|r| to_view(r, &settings).warn).count() as i64;
+    let unclaimed = inbox::count_pending(pool).await?;
     let pending_sheets: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM task_sheets WHERE status IN ('draft','confirmed')",
     )
-    .fetch_one(&state.db)
+    .fetch_one(pool)
     .await?;
     let pending_reconcile: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM publish_tasks WHERE status = 'suspect'")
-            .fetch_one(&state.db)
+            .fetch_one(pool)
             .await?;
     Ok(PublishBadges {
         unclaimed,
@@ -312,6 +305,12 @@ pub async fn get_publish_badges(state: State<'_, AppState>) -> AppResult<Publish
         pending_sheets,
         pending_reconcile,
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_publish_badges(state: State<'_, AppState>) -> AppResult<PublishBadges> {
+    badge_counts(&state.db).await
 }
 
 #[tauri::command]

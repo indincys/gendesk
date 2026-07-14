@@ -22,6 +22,8 @@ pub struct SkuRow {
     pub status: String,
     pub is_general: i64,
     pub note: String,
+    /// 收件箱文件夹别名（空串=无别名），一对一映射到 code。
+    pub folder_alias: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -39,6 +41,7 @@ pub struct SkuAggRow {
     pub status: String,
     pub is_general: i64,
     pub note: String,
+    pub folder_alias: String,
     pub created_at: i64,
     pub updated_at: i64,
     /// 可用素材包数（非退役）。
@@ -65,7 +68,7 @@ pub struct NewSku {
 }
 
 const AGG_SELECT: &str = "SELECT s.id, s.code, s.style_name, s.product_name, s.tier,
-        s.topics_json, s.platforms_json, s.status, s.is_general, s.note,
+        s.topics_json, s.platforms_json, s.status, s.is_general, s.note, s.folder_alias,
         s.created_at, s.updated_at,
         (SELECT COUNT(*) FROM asset_packs p WHERE p.sku_id = s.id AND p.lifecycle != 'retired') AS material_count,
         (SELECT COUNT(*) FROM text_items t WHERE t.sku_id = s.id AND t.kind = 'title' AND t.enabled = 1) AS title_count,
@@ -103,6 +106,40 @@ pub async fn find_by_code(pool: &SqlitePool, code: &str) -> Result<Option<SkuRow
         .bind(code)
         .fetch_optional(pool)
         .await
+}
+
+/// 按收件箱文件夹别名精确查库（空 token 返回 None，避免匹配到空别名行）。
+pub async fn find_by_alias(pool: &SqlitePool, alias: &str) -> Result<Option<SkuRow>, sqlx::Error> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, SkuRow>("SELECT * FROM skus WHERE folder_alias = ?1")
+        .bind(alias)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 先按编码、未命中再按别名查库（收件箱识别 SKU 归属用）。
+pub async fn find_by_code_or_alias(
+    pool: &SqlitePool,
+    token: &str,
+) -> Result<Option<SkuRow>, sqlx::Error> {
+    if let Some(row) = find_by_code(pool, token).await? {
+        return Ok(Some(row));
+    }
+    find_by_alias(pool, token).await
+}
+
+/// 设置/清除文件夹别名（空串=清除）。唯一性由分区唯一索引 + 命令层预检共同保证。
+pub async fn set_alias(pool: &SqlitePool, id: i64, alias: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE skus SET folder_alias = ?2, updated_at = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(alias.trim())
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 内置「通用」分组 id。

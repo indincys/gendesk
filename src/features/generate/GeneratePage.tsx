@@ -240,6 +240,13 @@ export function GeneratePage() {
         }),
       );
       setConfirm(null);
+      // 批次已开始：清空提示词组区与图片挂靠区，回到空白起点（本批内容不再滞留）。
+      setSelGroupIds([]);
+      setSelRefIds([]);
+      setMapping({});
+      setExpG(null);
+      setHovG(null);
+      setHovR(null);
       toast(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`);
       await loadBatchTasks(batch.id, null);
       go("tasks");

@@ -48,6 +48,26 @@ function AssetsList({
   const [rows, setRows] = useState<SkuView[]>([]);
   const [editing, setEditing] = useState<SkuView | "new" | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const importMappings = async () => {
+    try {
+      const path = await unwrap(commands.pickTxtFile());
+      if (!path) return;
+      const r = await unwrap(commands.importSkuMappings(path));
+      const parts = [`更新 ${r.updated} 个 SKU`];
+      if (r.aliasSet > 0) parts.push(`别名 ${r.aliasSet}`);
+      if (r.topicsSet > 0) parts.push(`话题 ${r.topicsSet}`);
+      if (r.skipped.length > 0) parts.push(`跳过 ${r.skipped.length} 行`);
+      setMsg(
+        `映射导入完成：${parts.join(" · ")}${r.skipped.length ? `\n${r.skipped.join("\n")}` : ""}`,
+      );
+      setErr(null);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -161,11 +181,24 @@ function AssetsList({
                 卡片
               </span>
             </div>
+            <button type="button" className="btn sm gho" onClick={() => void importMappings()}>
+              导入映射
+            </button>
             <button type="button" className="btn sm" onClick={() => setEditing("new")}>
               <Plus className="ic12" />
               新建 SKU
             </button>
           </div>
+
+          {msg && (
+            <div
+              className="ban"
+              style={{ margin: "0 18px", whiteSpace: "pre-wrap" }}
+              onClick={() => setMsg(null)}
+            >
+              {msg}
+            </div>
+          )}
 
           {err && (
             <div className="ban" style={{ margin: "0 18px" }}>
@@ -894,6 +927,7 @@ function SkuEditModal({
   const [product, setProduct] = useState(sku?.productName ?? "");
   const [tier, setTier] = useState<Tier>((sku?.tier as Tier) || "warm");
   const [tags, setTags] = useState<string[]>(sku?.topics ?? []);
+  const [alias, setAlias] = useState(sku?.folderAlias ?? "");
   const [newTag, setNewTag] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
@@ -909,6 +943,7 @@ function SkuEditModal({
             topics: tags,
             platforms: null,
             note: null,
+            folderAlias: alias.trim() || null,
           }),
         );
       } else {
@@ -920,6 +955,7 @@ function SkuEditModal({
             topics: tags,
             platforms: null,
             note: null,
+            folderAlias: alias.trim(),
           }),
         );
       }
@@ -973,6 +1009,18 @@ function SkuEditModal({
         <div className="col gap4">
           <span className="fs11 t3">商品名</span>
           <input className="inp" value={product} onChange={(e) => setProduct(e.target.value)} />
+        </div>
+        <div className="col gap4">
+          <span className="fs11 t3">收件箱文件夹别名（可选 · 中文亦可 · 唯一）</span>
+          <input
+            className="inp"
+            value={alias}
+            placeholder="A-敖瑞鹏-01"
+            onChange={(e) => setAlias(e.target.value)}
+          />
+          <span className="fs10 t3">
+            收件箱子文件夹用此名时自动归到本 SKU（如 A-敖瑞鹏-01 → {code || "本 SKU"}）
+          </span>
         </div>
         <div className="col gap4">
           <span className="fs11 t3">冷热分层</span>

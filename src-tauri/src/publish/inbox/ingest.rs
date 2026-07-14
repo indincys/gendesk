@@ -104,15 +104,34 @@ pub async fn ingest_txt(
         }
     };
 
-    let sku_candidate = forced_sku
+    // ASCII 三冗余候选（头【SKU】> 文件名前缀 > 文件夹名，用于按编码查库 + 报告）。
+    let ascii_candidate = forced_sku
         .map(str::to_string)
         .or_else(|| parser::resolve_sku(parsed.sku_code.as_deref(), &filename, folder.as_deref()));
 
-    // 查已知 SKU。
-    let sku = match &sku_candidate {
+    // 查已知 SKU：先按编码；未命中且非人工认领时，再按别名（头【SKU】原值 / 文件夹名原值，
+    // 可能是中文如 A-敖瑞鹏-01）查库。
+    let mut sku = match ascii_candidate.as_deref() {
         Some(code) => skus::find_by_code(pool, code).await?,
         None => None,
     };
+    if sku.is_none() && forced_sku.is_none() {
+        for tok in [parsed.sku_code.as_deref(), folder.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(s) = skus::find_by_alias(pool, tok).await? {
+                sku = Some(s);
+                break;
+            }
+        }
+    }
+    // 命中则用真实编码报告，否则回落 ASCII 候选。
+    let sku_candidate = sku
+        .as_ref()
+        .map(|s| s.code.clone())
+        .or_else(|| ascii_candidate.clone());
+
     let Some(sku) = sku else {
         let outcome = IngestOutcome::Unclaimed {
             sku_code: sku_candidate.clone(),
@@ -276,24 +295,58 @@ fn archive_ingested(root: &Path, file_rel: &RelPath) -> AppResult<RelPath> {
     Ok(dest_rel)
 }
 
-/// 收集一个 SKU 文件夹内的媒体文件为素材包（前置事实 10），移入资产库。
-/// 返回新建包的 id 列表。文件按名排序定图序；`cover.jpg`/`<video>_cover.jpg` 识别为封面。
-pub async fn collect_media(pool: &SqlitePool, root: &Path, sku_code: &str) -> AppResult<Vec<i64>> {
-    let sku = match skus::find_by_code(pool, sku_code).await? {
+/// 收集一个收件箱 SKU 文件夹内的媒体为素材包（前置事实 10），移入资产库。
+/// `folder_name` 为收件箱内的目录名（可为 SKU 编码或中文别名，如 A-敖瑞鹏-01）。
+/// 规则：
+/// - 文件夹**根目录**散放的图片整批 → 1 个默认图集包；每个视频 → 1 个视频包。
+/// - 每个**直接子文件夹** → 独立成包（子文件夹内图片 → 1 图集包；每个视频 → 1 视频包）。
+///
+/// 图序按文件名排序；`cover.*`/`<video>_cover.*` 识别为封面。
+pub async fn collect_media(
+    pool: &SqlitePool,
+    root: &Path,
+    folder_name: &str,
+) -> AppResult<Vec<i64>> {
+    let sku = match skus::find_by_code_or_alias(pool, folder_name).await? {
         Some(s) => s,
         None => return Ok(Vec::new()),
     };
-    let folder_rel = RelPath::from_parts([paths::INBOX, sku_code]);
-    let folder_abs = folder_rel.to_local(root);
+    let folder_abs = RelPath::from_parts([paths::INBOX, folder_name]).to_local(root);
     if !folder_abs.is_dir() {
         return Ok(Vec::new());
     }
 
-    // 枚举媒体文件（忽略隐藏/锁文件）。
+    let mut created = Vec::new();
+    // 1) 根目录散放媒体 → 默认图集（dir_base=gallery）+ 视频包。
+    created.extend(collect_dir_media(pool, root, &sku, &folder_abs, "gallery").await?);
+    // 2) 每个直接子文件夹 → 独立成包（图集目录名取子文件夹名）。
+    for entry in std::fs::read_dir(&folder_abs)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == paths::INGESTED || name.starts_with('.') {
+            continue;
+        }
+        created.extend(collect_dir_media(pool, root, &sku, &entry.path(), &name).await?);
+    }
+    Ok(created)
+}
+
+/// 从单个目录（非递归）归集媒体为素材包。`gallery_dir_base` 决定图集在资产库的目录名基。
+async fn collect_dir_media(
+    pool: &SqlitePool,
+    root: &Path,
+    sku: &skus::SkuRow,
+    src_dir: &Path,
+    gallery_dir_base: &str,
+) -> AppResult<Vec<i64>> {
+    // 枚举媒体文件（忽略隐藏/锁文件与子目录）。
     let mut galleries: Vec<(String, String)> = Vec::new(); // (filename, ext)
     let mut videos: Vec<(String, String)> = Vec::new();
     let mut covers: Vec<String> = Vec::new(); // 潜在封面文件名
-    for entry in std::fs::read_dir(&folder_abs)? {
+    for entry in std::fs::read_dir(src_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -333,16 +386,16 @@ pub async fn collect_media(pool: &SqlitePool, root: &Path, sku_code: &str) -> Ap
             &sku.code,
             sku.id,
             "gallery",
-            "gallery",
+            gallery_dir_base,
             &gallery_imgs,
             gallery_cover.map(|s| s.as_str()),
-            &folder_abs,
+            src_dir,
         )
         .await?;
         created.push(id);
     }
 
-    // 视频包：每个视频 → 1 包；`<video>_cover.jpg` 为其封面。
+    // 视频包：每个视频 → 1 包；`<video>_cover.*` 为其封面。
     for (vname, vext) in videos {
         let vstem = vname.rsplit_once('.').map(|(s, _)| s).unwrap_or(&vname);
         let vcover = covers.iter().find(|c| {
@@ -359,7 +412,7 @@ pub async fn collect_media(pool: &SqlitePool, root: &Path, sku_code: &str) -> Ap
             &base,
             &[(vname.clone(), vext)],
             vcover.map(|s| s.as_str()),
-            &folder_abs,
+            src_dir,
         )
         .await?;
         created.push(id);
@@ -715,5 +768,54 @@ mod tests {
         // 源文件夹已清空媒体（移入资产库）
         let moved = RelPath::new("资产库/SF-9").to_local(root);
         assert!(moved.is_dir());
+    }
+
+    #[tokio::test]
+    async fn collect_resolves_alias_and_subfolders() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        let sid = seed_sku(&pool, "NFC-W-01").await;
+        skus::set_alias(&pool, sid, "A-敖瑞鹏-01").await.unwrap();
+
+        // 收件箱文件夹用中文别名命名，根目录散图 + 两个子文件夹各成图集。
+        write(root, "收件箱/A-敖瑞鹏-01/img_a.jpg", b"x");
+        write(root, "收件箱/A-敖瑞鹏-01/img_b.jpg", b"x");
+        write(root, "收件箱/A-敖瑞鹏-01/图集1/p1.jpg", b"x");
+        write(root, "收件箱/A-敖瑞鹏-01/图集1/cover.jpg", b"x");
+        write(root, "收件箱/A-敖瑞鹏-01/图集2/q1.jpg", b"x");
+        write(root, "收件箱/A-敖瑞鹏-01/图集2/q2.jpg", b"x");
+
+        // 以磁盘上的中文目录名调用（rescan 即如此），应经别名解析到 NFC-W-01。
+        let ids = collect_media(&pool, root, "A-敖瑞鹏-01").await.unwrap();
+        assert_eq!(ids.len(), 3, "根目录默认图集 + 两个子文件夹图集");
+        let packs = assets::list_by_sku(&pool, sid).await.unwrap();
+        assert_eq!(packs.iter().filter(|p| p.kind == "gallery").count(), 3);
+        // 子文件夹图集封面被识别
+        assert!(packs
+            .iter()
+            .any(|p| p.cover.as_deref() == Some("cover.jpg")));
+        // 全部落在 资产库/NFC-W-01（用真实编码而非别名）
+        assert!(RelPath::new("资产库/NFC-W-01").to_local(root).is_dir());
+    }
+
+    #[tokio::test]
+    async fn ingest_txt_resolves_by_alias() {
+        let (pool, dir) = test_pool().await;
+        let root = dir.path();
+        ensure_partitions(root).unwrap();
+        let sid = seed_sku(&pool, "NFC-W-02").await;
+        skus::set_alias(&pool, sid, "B-张三-02").await.unwrap();
+        // TXT 无【SKU】头，仅靠中文文件夹别名识别。
+        write(
+            root,
+            "收件箱/B-张三-02/标题_小红书.txt",
+            "【类型】标题\n\n标题一\n".as_bytes(),
+        );
+        let rel = RelPath::new("收件箱/B-张三-02/标题_小红书.txt");
+        let outcome = ingest_txt(&pool, root, &rel, None).await.unwrap();
+        assert_eq!(outcome.state_code(), "ingested");
+        let titles = texts::list(&pool, sid, "title").await.unwrap();
+        assert_eq!(titles.len(), 1);
     }
 }

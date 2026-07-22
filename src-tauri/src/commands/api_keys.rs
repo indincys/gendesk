@@ -5,17 +5,13 @@ use specta::Type;
 use tauri::State;
 
 use crate::db::now_unix;
-use crate::db::repo::api_keys as repo;
+use crate::db::repo::api_keys::{self as repo, MAX_CONCURRENCY};
 use crate::error::{AppError, AppResult};
 use crate::secrets::{mask, SecretStore};
 use crate::state::AppState;
 
 /// 成功率统计窗口（近 50 次尝试）。
 const RATE_WINDOW: i64 = 50;
-
-/// 单 Key 并发上限的上界。**必须与 migration 0017 的 CHECK 一致** ——
-/// 夹取值越界会被 SQLite 的 CHECK 直接拒掉，表现为「保存 Key 失败」。
-const MAX_CONCURRENCY: i64 = 100;
 
 /// API Key 脱敏视图（Key 本体永不出 Rust）。
 #[derive(Debug, Clone, Serialize, Type)]

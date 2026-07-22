@@ -69,12 +69,12 @@ mod tests {
         assert!(api_keys::list(&pool).await.unwrap().is_empty());
     }
 
-    // 0016：并发上限放宽到 100。重建 api_keys 时**不得**碰到子表的外键指向 ——
-    // 若走「建新表 → DROP api_keys → 改名」，DROP 在 FK 开启时触发隐式 DELETE，
+    // 0017：并发上限放宽到 100。重建 api_keys 时**不得**碰到子表的外键指向 ——
+    // 若在 FK 开启下走「建新表 → DROP api_keys → 改名」，DROP 触发隐式 DELETE，
     // tasks / task_attempts.api_key_id 会被 ON DELETE SET NULL 整列清空（成功率统计与
     // 验收页「按 Key」分组一起报废）。此测试守住迁移方式，不只是守住上限数字。
     #[tokio::test]
-    async fn migration_0016_widens_concurrency_and_keeps_key_fk() {
+    async fn migration_0017_widens_concurrency_and_keeps_key_fk() {
         let (pool, _d) = test_pool().await;
         let mk = |conc: i64| api_keys::NewApiKey {
             name: "k".into(),

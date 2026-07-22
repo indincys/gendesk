@@ -13,7 +13,7 @@ use crate::state::AppState;
 /// 成功率统计窗口（近 50 次尝试）。
 const RATE_WINDOW: i64 = 50;
 
-/// 单 Key 并发上限的上界。**必须与 migration 0016 的 CHECK 一致** ——
+/// 单 Key 并发上限的上界。**必须与 migration 0017 的 CHECK 一致** ——
 /// 夹取值越界会被 SQLite 的 CHECK 直接拒掉，表现为「保存 Key 失败」。
 const MAX_CONCURRENCY: i64 = 100;
 

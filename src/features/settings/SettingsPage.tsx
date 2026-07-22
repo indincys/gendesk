@@ -647,7 +647,7 @@ export function SettingsPage() {
   );
 }
 
-/** 单 Key 并发上限的上界。**与 migration 0016 的 CHECK 及后端 MAX_CONCURRENCY 同值**。 */
+/** 单 Key 并发上限的上界。**与 migration 0017 的 CHECK 及后端 MAX_CONCURRENCY 同值**。 */
 const MAX_CONCURRENCY = 100;
 
 /** 把输入夹到 1–100 的整数；空/非法回退到 fallback。 */

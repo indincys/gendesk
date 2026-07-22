@@ -874,7 +874,10 @@ function PickGroups({
   const [showArchived, setShowArchived] = useState(false);
   const toggle = (id: number) =>
     setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
-  const hidden = groups.filter((g) => g.archived && !sel.includes(g.id));
+  // 打开弹窗时已选中的项恒可见。**取 initial selected 而非实时 sel**：否则取消勾选一个
+  // 已归档项，它会当场从列表消失，想改回来都点不着。
+  const [pinned] = useState(() => new Set(selected));
+  const hidden = groups.filter((g) => g.archived && !pinned.has(g.id));
   const hiddenIds = new Set(hidden.map((g) => g.id));
   const visible = showArchived ? groups : groups.filter((g) => !hiddenIds.has(g.id));
   return (
@@ -954,7 +957,9 @@ function PickRefs({
   const [showArchived, setShowArchived] = useState(false);
   const toggle = (id: number) =>
     setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
-  const hidden = refs.filter((r) => r.archived && !sel.includes(r.id));
+  // 同 PickGroups：取 initial selected，取消勾选不应让卡片当场消失。
+  const [pinned] = useState(() => new Set(selected));
+  const hidden = refs.filter((r) => r.archived && !pinned.has(r.id));
   const hiddenIds = new Set(hidden.map((r) => r.id));
   const visible = showArchived ? refs : refs.filter((r) => !hiddenIds.has(r.id));
   return (

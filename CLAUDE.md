@@ -167,4 +167,20 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
   `migrate_from_keyring` 幂等搬运（先写目的地再删源，单条失败不删源、不中断启动）。
   **安全水位如实记录**：防误不防恶（防备份/截图/grep 出明文），主密钥与密文同目录，
   不构成独立安全边界；爆炸半径 = 可轮换的第三方 API Key。无 migration / 无新 IPC / 无前端改动。
+- [x] **生成页归档 + 并发 100 + 验收批次序（v0.11.0）** — 四项用户反馈。migration 0016（归档位，
+  事务内）+ 0017（api_keys 重建，`-- no-transaction`）。
+  - **生成页开始即归档**：`engine::create_batch` 同事务给本批参考图与提示词组打 `archived_at`；
+    归档**只**决定生成页两个选择器是否列出它，库里仍在、可查、可一键取消归档（提示词库分组菜单 /
+    参考图详情）。选择器加「显示已归档 · N」开关，**打开弹窗时已选中的项恒可见**（取 initial
+    selected 而非实时 sel，否则取消勾选会让卡片当场消失）——「按此配置再来一批」照常可用。
+  - **单 Key 并发 10 → 100**：api_keys 是 tasks / task_attempts 的**父表**（ON DELETE SET NULL），
+    FK 开启时 DROP 父表触发隐式 DELETE 会把子表 api_key_id 整列置空（成功率统计 + 验收「按 Key」
+    分组一并报废），RENAME 又会改写子表 REFERENCES；故 0017 走 `PRAGMA foreign_keys=OFF` 的官方
+    12 步（`legacy_alter_table` 在事务内无效，已被测试抓到）。测试断言子表 schema 仍写
+    `REFERENCES api_keys` —— 守迁移方式而非上限数字。行内步进器改直接输入。
+  - **验收按批次倒序**：`ORDER BY t.batch_id DESC, t.id ASC`；前端新增「按批次」聚类并设为默认。
+  - **修复 Key 行「编辑/删除」被裁**：`.kline` 十列定宽合计 ≈773px > `.swrap` 内容宽 720px，
+    `.klist` 又是 `overflow:hidden` → 末两列被整齐切掉，表现为「没有删除和编辑功能」。
+    文本列改 fr 自适应 + `.klist` 兜横向滚动；`.kline .inp` 补 `width:100%`（否则 number 输入
+    按内在宽度撑出格子压到「成功率」列）。
 

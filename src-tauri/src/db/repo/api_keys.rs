@@ -7,6 +7,12 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::db::now_unix;
 
+/// 单 Key 并发上限的上界。**必须与 migration 0017 的 CHECK 一致**，且是
+/// 写入侧（命令层夹取）与执行侧（引擎 Semaphore 容量）的**唯一**来源 ——
+/// 两侧各写一份常量时，落后的那份会静默把设置页的值压回去（表现为
+/// 「设置 50 却只跑 10 个」），而 DB 里存的又确实是 50，从值上查不出来。
+pub const MAX_CONCURRENCY: i64 = 100;
+
 #[derive(Debug, Clone, FromRow)]
 pub struct ApiKeyRow {
     pub id: i64,

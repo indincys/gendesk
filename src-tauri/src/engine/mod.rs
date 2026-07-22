@@ -89,7 +89,7 @@ pub fn load_key_configs(rows: &[key_repo::ApiKeyRow], secrets: &dyn SecretStore)
                 base_url: r.base_url.clone(),
                 model: r.model.clone(),
                 api_key,
-                concurrency_limit: r.concurrency_limit.clamp(1, 10) as u32,
+                concurrency_limit: r.concurrency_limit.clamp(1, key_repo::MAX_CONCURRENCY) as u32,
                 enabled: r.enabled != 0,
                 rpm_limit: r
                     .rpm_limit
@@ -284,6 +284,27 @@ mod tests {
         assert_eq!(en.concurrency_limit, 5);
         let dis = cfgs.iter().find(|c| c.id == 2).unwrap();
         assert!(!dis.enabled, "enabled=0 → false");
+    }
+
+    /// v0.11.0 把上限放到 100，但引擎侧的夹取还写死 10：DB 存 50、设置页显示 50，
+    /// 实跑却恒为 10 个并发。此处必须用 >10 的值取样 —— 上面那条用 5 的断言在
+    /// 两种夹取下都通过，正是它让这个回归漏了过去。
+    #[test]
+    fn load_key_configs_preserves_limits_above_ten() {
+        let store = MemoryStore::default();
+        store.set("a", "sk-1").unwrap();
+        store.set("b", "sk-2").unwrap();
+        store.set("c", "sk-3").unwrap();
+        let rows = [
+            row(1, "a", 1, 50),
+            row(2, "b", 1, key_repo::MAX_CONCURRENCY + 1), // 越界仍夹到上界
+            row(3, "c", 1, 0),                             // 0/负数仍抬到 1
+        ];
+        let cfgs = load_key_configs(&rows, &store);
+        let at = |id: i64| cfgs.iter().find(|c| c.id == id).unwrap().concurrency_limit;
+        assert_eq!(at(1), 50, "设置页填 50 就要跑 50，不得被引擎侧夹回 10");
+        assert_eq!(at(2), key_repo::MAX_CONCURRENCY as u32);
+        assert_eq!(at(3), 1);
     }
 
     #[tokio::test]

@@ -183,4 +183,12 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
     `.klist` 又是 `overflow:hidden` → 末两列被整齐切掉，表现为「没有删除和编辑功能」。
     文本列改 fr 自适应 + `.klist` 兜横向滚动；`.kline .inp` 补 `width:100%`（否则 number 输入
     按内在宽度撑出格子压到「成功率」列）。
+- [x] **修复并发上限只生效到 10（v0.11.1）** — 上条「10 → 100」漏改引擎装载处：
+  `engine::load_key_configs` 仍是 `clamp(1, 10)`，于是设置页填 50 → 命令层按 100 夹取通过 →
+  DB 真存 50 → **引擎读出来夹回 10** → `set_keys` 据此建 `Semaphore::new(10)`，其余任务恒卡 `q`。
+  症状有欺骗性：设置页与 DB 查出来都是 50，只有真正跑的信号量是 10。修法是消除重复定义而非改
+  数字 —— `MAX_CONCURRENCY` 单点定义在 `db/repo/api_keys.rs`（与 0017 的 CHECK 同文件），
+  写入侧（命令层夹取）与执行侧（引擎 Semaphore 容量）都引用它。**回归测试取样值必须 >10**：
+  既有那条 `load_key_configs_*` 用 5 取样，夹到 10 和夹到 100 下都通过，正是它放过了这个回归。
+  无 migration / 无 IPC / 无前端改动；已存的 50 不必重填，重启即生效。
 

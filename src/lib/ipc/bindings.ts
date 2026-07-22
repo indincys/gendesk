@@ -248,6 +248,18 @@ async setRefImagesGroup(ids: number[], groupId: number | null) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 归档 / 取消归档参考图（0016）。批次开跑后由 `engine::create_batch` 自动归档；
+ * 此命令供参考图库手动恢复（或手动归档一张用不上的旧图）。
+ */
+async setRefImageArchived(id: number, archived: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_ref_image_archived", { id, archived }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getRefImage(id: number) : Promise<Result<RefImageDetail, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_ref_image", { id }) };
@@ -318,6 +330,18 @@ async createPromptGroup(name: string) : Promise<Result<GroupView, AppError>> {
 async renamePromptGroup(id: number, name: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("rename_prompt_group", { id, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 归档 / 取消归档分组（0016）。批次开跑后由 `engine::create_batch` 自动归档；
+ * 此命令供库页手动恢复（或手动归档一个用不上的旧组）。
+ */
+async setPromptGroupArchived(id: number, archived: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_prompt_group_archived", { id, archived }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1780,7 +1804,11 @@ export type GroupView = { id: number; name: string; prefix: string; scene: strin
 /**
  * 分组绑定的标签（E20 按标签筛选）。
  */
-tags: string[] }
+tags: string[]; 
+/**
+ * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+ */
+archived: boolean }
 /**
  * 一条发布历史（读台账）。
  */
@@ -2121,7 +2149,11 @@ export type RefImageView = { id: number; name: string; groupId: number | null; f
 /**
  * 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
  */
-lastGroupId: number | null }
+lastGroupId: number | null; 
+/**
+ * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+ */
+archived: boolean }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
 /**
  * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。

@@ -15,6 +15,8 @@ pub struct GroupRow {
     pub scene: String,
     pub is_temp: i64,
     pub created_at: i64,
+    /// 归档时间（0016）：非空表示已归档，生成页选择器默认不再列出。
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -36,6 +38,37 @@ pub async fn list_groups(pool: &SqlitePool) -> Result<Vec<GroupRow>, sqlx::Error
     sqlx::query_as::<_, GroupRow>("SELECT * FROM prompt_groups ORDER BY created_at ASC, id ASC")
         .fetch_all(pool)
         .await
+}
+
+/// 归档 / 取消归档一个分组（0016）。归档只影响生成页选择器可见性，不动提示词本体。
+pub async fn set_group_archived(
+    pool: &SqlitePool,
+    id: i64,
+    archived: bool,
+) -> Result<bool, sqlx::Error> {
+    let affected = sqlx::query("UPDATE prompt_groups SET archived_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(archived.then(now_unix))
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 批量归档（0016）：随批次创建同事务提交，故收 `SqliteConnection`。
+pub async fn archive_groups(
+    conn: &mut SqliteConnection,
+    ids: &[i64],
+    at: i64,
+) -> Result<(), sqlx::Error> {
+    for id in ids {
+        sqlx::query("UPDATE prompt_groups SET archived_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(at)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn find_group_by_prefix(

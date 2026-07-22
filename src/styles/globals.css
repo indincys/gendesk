@@ -1039,6 +1039,11 @@ a:hover {
 .rcard.pend .rcimg {
   opacity: 0.72;
 }
+/* 0016：已归档的参考图（在「显示已归档」时才出现）——降饱和以与在用素材区分。 */
+.rcard.arch .rcimg {
+  opacity: 0.5;
+  filter: grayscale(0.5);
+}
 .rpend {
   position: absolute;
   bottom: 34px;
@@ -1791,13 +1796,39 @@ a:hover {
 }
 .kline {
   display: grid;
-  /* 任务3：末尾新增「编辑」图标列（26px），略收其余列宽以容纳。 */
-  grid-template-columns: 158px minmax(92px, 1fr) 70px 80px 46px 86px 50px 34px 26px 26px;
+  /* 定宽列一路加到十列后，总宽（≈773px）已超出 .swrap 的 720px 内容宽，而 .klist 是
+     overflow:hidden —— 末尾的「编辑」「删除」两列被整齐裁掉，看起来就是没有这两个功能。
+     改为文本列走 fr 自适应、只有图标/控件列定宽，并给 .klist 兜一个横向滚动。 */
+  grid-template-columns:
+    minmax(96px, 1.3fr) minmax(80px, 1.6fr) minmax(56px, 0.9fr)
+    /* 并发输入（三位数） */ 62px 42px minmax(64px, 0.8fr) 48px 34px 24px 24px;
   align-items: center;
-  column-gap: 9px;
+  column-gap: 8px;
   padding: 0 12px;
+  /* 窗口再窄也不裁掉右端操作列：低于此宽度由 .klist 横向滚动接手。 */
+  min-width: 604px;
   height: 40px;
   font-size: 12px;
+}
+/* 并发上限输入：行内紧凑，居中，去掉 number 的上下箭头（占地且这里用不上）。 */
+.inp.sm {
+  height: 26px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+.inp.tc {
+  text-align: center;
+}
+/* .inp 本身不带宽度（靠父级 flex 拉伸）。网格单元里的 <span> 是被块化的 grid item，
+   不给 100% 的话 <input type=number> 会按内在宽度（约 180px）撑出格子压到「成功率」列上。 */
+.kline .inp {
+  width: 100%;
+  min-width: 0;
+}
+.inp[type="number"]::-webkit-inner-spin-button,
+.inp[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
 }
 .kline + .kline {
   border-top: 1px solid var(--line);
@@ -1812,6 +1843,8 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: 11px;
   overflow: hidden;
+  /* 容器比 .kline 的 min-width 还窄时横向滚动，而不是把右端操作列裁掉。 */
+  overflow-x: auto;
   box-shadow: var(--sh1);
   background: #fff;
 }

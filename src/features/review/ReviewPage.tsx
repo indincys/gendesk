@@ -138,7 +138,8 @@ export function ReviewPage() {
   const [onlyPending, setOnlyPending] = useState(false);
   // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
   // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
-  const [sortMode, setSortMode] = useState<"time" | "ref" | "group" | "key">("group");
+  // 默认按批次聚类：最近一批在最顶部，往下依次是更早的批次。
+  const [sortMode, setSortMode] = useState<"batch" | "time" | "ref" | "group" | "key">("batch");
   // E38：shift 范围多选锚点（索引进 displayed）。
   const lastClicked = useRef<number | null>(null);
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
@@ -266,7 +267,11 @@ export function ReviewPage() {
   // E38/E24：显示序——「仅看待定」筛选；按排序模式聚类；时间序下待定项稳定沉底。
   const displayed = useMemo(() => {
     const arr = onlyPending ? items.filter((i) => pending.has(i.id)) : [...items];
-    if (sortMode === "ref") {
+    if (sortMode === "batch") {
+      // 批次倒序（新批在上），批次内保持生成序。后端已是此序，这里显式排一遍，
+      // 使「仅看待定」筛掉部分项后顺序依然确定。
+      arr.sort((a, b) => b.batchId - a.batchId || a.id - b.id);
+    } else if (sortMode === "ref") {
       arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
     } else if (sortMode === "group") {
       arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
@@ -274,7 +279,7 @@ export function ReviewPage() {
       // "~" 使无 Key（keyAlias 为空）项排到末尾。
       arr.sort((a, b) => (a.keyAlias ?? "~").localeCompare(b.keyAlias ?? "~") || a.id - b.id);
     } else if (!onlyPending) {
-      // 时间序（后端已按 id 升序）：仅让待定项稳定沉底。
+      // 时间序（后端已按批次倒序 + 组内 id 升序）：仅让待定项稳定沉底。
       arr.sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
     }
     return arr;
@@ -283,13 +288,15 @@ export function ReviewPage() {
   // E24：聚类模式下某项所属的分段键（时间序无分段）。
   const clusterKey = useCallback(
     (it: ReviewItemView): string | null =>
-      sortMode === "ref"
-        ? it.refName
-        : sortMode === "group"
-          ? it.groupName
-          : sortMode === "key"
-            ? (it.keyAlias ?? "未标注 Key")
-            : null,
+      sortMode === "batch"
+        ? `#${it.batchId}`
+        : sortMode === "ref"
+          ? it.refName
+          : sortMode === "group"
+            ? it.groupName
+            : sortMode === "key"
+              ? (it.keyAlias ?? "未标注 Key")
+              : null,
     [sortMode],
   );
 
@@ -552,6 +559,13 @@ export function ReviewPage() {
         )}
         <div className="seg">
           <span
+            className={cn("sgi", sortMode === "batch" && "on")}
+            onClick={() => setSortMode("batch")}
+            title="最近一批在最顶部，往下依次是更早的批次"
+          >
+            按批次
+          </span>
+          <span
             className={cn("sgi", sortMode === "time" && "on")}
             onClick={() => setSortMode("time")}
           >
@@ -612,7 +626,13 @@ export function ReviewPage() {
                   {row.kind === "header" ? (
                     <div className="rclhead">
                       <span className="rcltag">
-                        {sortMode === "ref" ? "参考图" : sortMode === "key" ? "Key" : "提示词组"}
+                        {sortMode === "batch"
+                          ? "批次"
+                          : sortMode === "ref"
+                            ? "参考图"
+                            : sortMode === "key"
+                              ? "Key"
+                              : "提示词组"}
                       </span>
                       <span className="rclname" title={row.key}>
                         {row.key}

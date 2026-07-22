@@ -247,6 +247,8 @@ export function GeneratePage() {
       setExpG(null);
       setHovG(null);
       setHovR(null);
+      // 后端已随批次同事务归档本批的组与图（0016）；重新拉一遍库，让选择器立刻反映归档态。
+      void load();
       toast(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`);
       await loadBatchTasks(batch.id, null);
       go("tasks");
@@ -868,13 +870,32 @@ function PickGroups({
   onConfirm: (ids: number[]) => void;
 }) {
   const [sel, setSel] = useState<number[]>(selected);
+  // 归档（0016）：跑过批次的组默认折起，避免选择器被历次临时组淹没。已选中的永远可见。
+  const [showArchived, setShowArchived] = useState(false);
   const toggle = (id: number) =>
     setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
+  // 打开弹窗时已选中的项恒可见。**取 initial selected 而非实时 sel**：否则取消勾选一个
+  // 已归档项，它会当场从列表消失，想改回来都点不着。
+  const [pinned] = useState(() => new Set(selected));
+  const hidden = groups.filter((g) => g.archived && !pinned.has(g.id));
+  const hiddenIds = new Set(hidden.map((g) => g.id));
+  const visible = showArchived ? groups : groups.filter((g) => !hiddenIds.has(g.id));
   return (
     <Modal
       title="选择提示词组"
       width="w640"
       onClose={onClose}
+      headerExtra={
+        hidden.length > 0 ? (
+          <button
+            type="button"
+            className={cn("btn sm gho", showArchived && "on")}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            {showArchived ? "隐藏已归档" : `显示已归档 · ${hidden.length}`}
+          </button>
+        ) : undefined
+      }
       footer={
         <>
           <span className="fs11 t3">选中分组的全部提示词参与本批生成</span>
@@ -888,7 +909,7 @@ function PickGroups({
         </>
       }
     >
-      {groups.map((g) => (
+      {visible.map((g) => (
         <div
           key={g.id}
           className={cn("gpick", sel.includes(g.id) && "sel")}
@@ -903,12 +924,19 @@ function PickGroups({
             <span className="chip">{g.prefix}</span>
             {g.scene && <span className="bdg b-gray">{g.scene}</span>}
             {g.isTemp && <span className="bdg b-amber">临时</span>}
+            {g.archived && <span className="bdg b-gray">已归档</span>}
             <div className="f1" />
             <span className="t3 fs12 nowrap">{g.count} 条</span>
           </div>
         </div>
       ))}
-      {groups.length === 0 && <div className="fs12 t3">暂无提示词分组，请先在提示词库导入</div>}
+      {visible.length === 0 && (
+        <div className="fs12 t3">
+          {groups.length === 0
+            ? "暂无提示词分组，请先在提示词库导入"
+            : "全部分组都已归档 —— 导入新的 .txt，或点右上「显示已归档」取回"}
+        </div>
+      )}
     </Modal>
   );
 }
@@ -925,13 +953,31 @@ function PickRefs({
   onConfirm: (ids: number[]) => void;
 }) {
   const [sel, setSel] = useState<number[]>(selected);
+  // 归档（0016）：跑过批次的图默认折起，已选中的永远可见。
+  const [showArchived, setShowArchived] = useState(false);
   const toggle = (id: number) =>
     setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
+  // 同 PickGroups：取 initial selected，取消勾选不应让卡片当场消失。
+  const [pinned] = useState(() => new Set(selected));
+  const hidden = refs.filter((r) => r.archived && !pinned.has(r.id));
+  const hiddenIds = new Set(hidden.map((r) => r.id));
+  const visible = showArchived ? refs : refs.filter((r) => !hiddenIds.has(r.id));
   return (
     <Modal
       title="从参考图库选择"
       width="w640"
       onClose={onClose}
+      headerExtra={
+        hidden.length > 0 ? (
+          <button
+            type="button"
+            className={cn("btn sm gho", showArchived && "on")}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            {showArchived ? "隐藏已归档" : `显示已归档 · ${hidden.length}`}
+          </button>
+        ) : undefined
+      }
       footer={
         <>
           <span className="fs11 t3">选中的参考图会进入已选区</span>
@@ -946,12 +992,12 @@ function PickRefs({
       }
     >
       <div className="grid" style={{ gridTemplateColumns: "repeat(5,1fr)", gap: 10 }}>
-        {refs.map((r) => {
+        {visible.map((r) => {
           const src = assetSrc(r.thumbPath);
           return (
             <div
               key={r.id}
-              className={cn("rcard", sel.includes(r.id) && "sel")}
+              className={cn("rcard", sel.includes(r.id) && "sel", r.archived && "arch")}
               onClick={() => toggle(r.id)}
             >
               <div
@@ -974,7 +1020,13 @@ function PickRefs({
           );
         })}
       </div>
-      {refs.length === 0 && <div className="fs12 t3">参考图库为空，请先上传参考图</div>}
+      {visible.length === 0 && (
+        <div className="fs12 t3">
+          {refs.length === 0
+            ? "参考图库为空，请先上传参考图"
+            : "全部参考图都已归档 —— 上传新图，或点右上「显示已归档」取回"}
+        </div>
+      )}
     </Modal>
   );
 }

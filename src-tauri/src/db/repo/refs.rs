@@ -3,7 +3,7 @@
 // 数据层 API 先于 M3 消费者落地；未使用项在对应里程碑接入后收紧。
 #![allow(dead_code)]
 
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::db::now_unix;
 
@@ -25,6 +25,8 @@ pub struct RefImageRow {
     pub content_hash: Option<String>,
     /// 上传用压缩副本路径（E41）；空表示上传直接用原图。
     pub upload_path: Option<String>,
+    /// 归档时间（0016）：非空表示已归档，生成页选择器默认不再列出。
+    pub archived_at: Option<i64>,
 }
 
 pub struct NewRefImage {
@@ -104,6 +106,33 @@ pub async fn list_active(pool: &SqlitePool) -> Result<Vec<RefImageRow>, sqlx::Er
     )
     .fetch_all(pool)
     .await
+}
+
+/// 归档 / 取消归档一张参考图（0016）。归档只影响生成页选择器可见性，图仍在库里。
+pub async fn set_archived(pool: &SqlitePool, id: i64, archived: bool) -> Result<bool, sqlx::Error> {
+    let affected = sqlx::query("UPDATE ref_images SET archived_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(archived.then(now_unix))
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 批量归档（0016）：随批次创建同事务提交，故收 `SqliteConnection`。
+pub async fn archive_many(
+    conn: &mut SqliteConnection,
+    ids: &[i64],
+    at: i64,
+) -> Result<(), sqlx::Error> {
+    for id in ids {
+        sqlx::query("UPDATE ref_images SET archived_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(at)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn set_group(

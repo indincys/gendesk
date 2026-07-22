@@ -184,6 +184,8 @@ pub struct GroupView {
     pub count: i64,
     /// 分组绑定的标签（E20 按标签筛选）。
     pub tags: Vec<String>,
+    /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+    pub archived: bool,
 }
 
 /// 列出全部提示词分组（含 active 提示词数 + 标签）。
@@ -203,9 +205,25 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
             is_temp: g.is_temp != 0,
             count,
             tags,
+            archived: g.archived_at.is_some(),
         });
     }
     Ok(out)
+}
+
+/// 归档 / 取消归档分组（0016）。批次开跑后由 `engine::create_batch` 自动归档；
+/// 此命令供库页手动恢复（或手动归档一个用不上的旧组）。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_prompt_group_archived(
+    state: State<'_, AppState>,
+    id: i64,
+    archived: bool,
+) -> AppResult<()> {
+    if !repo::set_group_archived(&state.db, id, archived).await? {
+        return Err(AppError::InvalidInput("分组不存在".into()));
+    }
+    Ok(())
 }
 
 /// 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
@@ -239,6 +257,7 @@ pub async fn create_prompt_group(state: State<'_, AppState>, name: String) -> Ap
         is_temp: false,
         count: 0,
         tags: Vec::new(),
+        archived: false,
     })
 }
 

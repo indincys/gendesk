@@ -69,6 +69,46 @@ mod tests {
         assert!(api_keys::list(&pool).await.unwrap().is_empty());
     }
 
+    // 0017：并发上限放宽到 100。重建 api_keys 时**不得**碰到子表的外键指向 ——
+    // 若在 FK 开启下走「建新表 → DROP api_keys → 改名」，DROP 触发隐式 DELETE，
+    // tasks / task_attempts.api_key_id 会被 ON DELETE SET NULL 整列清空（成功率统计与
+    // 验收页「按 Key」分组一起报废）。此测试守住迁移方式，不只是守住上限数字。
+    #[tokio::test]
+    async fn migration_0017_widens_concurrency_and_keeps_key_fk() {
+        let (pool, _d) = test_pool().await;
+        let mk = |conc: i64| api_keys::NewApiKey {
+            name: "k".into(),
+            keyring_account: format!("acct-{conc}"),
+            base_url: "http://x/v1".into(),
+            model: "m".into(),
+            concurrency_limit: conc,
+            rpm_limit: None,
+        };
+        assert!(
+            api_keys::insert(&pool, &mk(100)).await.is_ok(),
+            "100 应可存"
+        );
+        assert!(
+            api_keys::insert(&pool, &mk(101)).await.is_err(),
+            "101 应被 CHECK 拒绝"
+        );
+
+        // 子表 FK 仍指向 api_keys（而非迁移中间体 api_keys_old）。
+        for table in ["tasks", "task_attempts"] {
+            let sql: String = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?1",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                sql.contains("REFERENCES api_keys "),
+                "{table} 的外键应仍指向 api_keys，实际：{sql}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn prompts_group_and_insert_with_ids() {
         let (pool, _d) = test_pool().await;

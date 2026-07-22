@@ -165,7 +165,7 @@ export function SettingsPage() {
                 <span>Key</span>
                 <span>Base URL</span>
                 <span>模型</span>
-                <span>并发 1–10</span>
+                <span>并发 1–100</span>
                 <span>成功率</span>
                 <span>状态</span>
                 <span />
@@ -184,11 +184,9 @@ export function SettingsPage() {
                   <span className="mono fs10 t3 nowrap ohide">{k.baseUrl}</span>
                   <span className="mono fs10 t3 nowrap ohide">{k.model}</span>
                   <span>
-                    <Stepper
+                    <ConcurrencyInput
                       value={k.concurrencyLimit}
-                      min={1}
-                      max={10}
-                      onChange={(v) => patchKeyConcurrency(k, v)}
+                      onCommit={(v) => patchKeyConcurrency(k, v)}
                     />
                   </span>
                   <span className="mono fs11 t2">
@@ -649,6 +647,46 @@ export function SettingsPage() {
   );
 }
 
+/** 单 Key 并发上限的上界。**与 migration 0016 的 CHECK 及后端 MAX_CONCURRENCY 同值**。 */
+const MAX_CONCURRENCY = 100;
+
+/** 把输入夹到 1–100 的整数；空/非法回退到 fallback。 */
+function clampConcurrency(raw: string, fallback: number): number {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(MAX_CONCURRENCY, n);
+}
+
+/**
+ * Key 行内的并发上限输入（1–100）。上限放宽到 100 后步进器要点近百下才到顶，
+ * 故改直接输入；失焦或回车才提交，避免中间态（"1" → "10"）打一串无用请求。
+ */
+function ConcurrencyInput({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  // 外部值变化（保存失败回滚 / 重新拉取）时同步显示。
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const v = clampConcurrency(draft, value);
+    setDraft(String(v));
+    if (v !== value) onCommit(v);
+  };
+  return (
+    <input
+      className="inp mono sm tc"
+      type="number"
+      min={1}
+      max={MAX_CONCURRENCY}
+      value={draft}
+      title={`并发上限 1–${MAX_CONCURRENCY}`}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+    />
+  );
+}
+
 function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [alias, setAlias] = useState("");
   const [key, setKey] = useState("");
@@ -688,7 +726,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
           key: key.trim(),
           baseUrl: baseUrl.trim(),
           model: model.trim() || "gpt-image-2",
-          concurrencyLimit: Number(concurrency) || 2,
+          concurrencyLimit: clampConcurrency(concurrency, 2),
           rpmLimit: rpm.trim() ? Number(rpm) : null,
         }),
       );
@@ -749,7 +787,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
             <input className="inp mono" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
           <div className="col gap4" style={{ width: 90 }}>
-            <span className="fs11 t3">并发上限</span>
+            <span className="fs11 t3">并发上限 1–100</span>
             <input
               className="inp mono"
               value={concurrency}
@@ -819,7 +857,7 @@ function EditKeyModal({
           name: alias.trim(),
           baseUrl: baseUrl.trim(),
           model: model.trim() || "gpt-image-2",
-          concurrencyLimit: Number(concurrency) || apiKey.concurrencyLimit,
+          concurrencyLimit: clampConcurrency(concurrency, apiKey.concurrencyLimit),
           // 空 rpm → 传 0（<=0 清除限速 = 不限）；否则设为该值。
           rpmLimit: rpm.trim() ? Number(rpm) : 0,
           // 空 → null（保持原 Key）；否则轮换。
@@ -883,7 +921,7 @@ function EditKeyModal({
             <input className="inp mono" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
           <div className="col gap4" style={{ width: 90 }}>
-            <span className="fs11 t3">并发上限</span>
+            <span className="fs11 t3">并发上限 1–100</span>
             <input
               className="inp mono"
               value={concurrency}

@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 
-use crate::db::repo::{api_keys as key_repo, prompts as prompt_repo, tasks as task_repo};
+use crate::db::repo::{
+    api_keys as key_repo, prompts as prompt_repo, refs as ref_repo, tasks as task_repo,
+};
 use crate::error::AppResult;
 use crate::files::DataDirs;
 use crate::provider::{openai::OpenAiCompatible, ImageProvider};
@@ -148,6 +150,19 @@ pub async fn create_batch(
                 .await?;
         }
     }
+    // 归档本批用到的参考图与提示词组（0016）：批次已开跑，这批素材的使命就此完成，
+    // 从生成页选择器里让位给下一批。同事务提交 —— 批次建成则必已归档，不会出现
+    // 「任务跑起来了但素材还留在选择器里」的中间态。库里仍在，可一键取消归档。
+    let at = crate::db::now_unix();
+    let mut ref_ids: Vec<i64> = mappings.iter().map(|m| m.ref_image_id).collect();
+    ref_ids.sort_unstable();
+    ref_ids.dedup();
+    let mut group_ids: Vec<i64> = mappings.iter().map(|m| m.prompt_group_id).collect();
+    group_ids.sort_unstable();
+    group_ids.dedup();
+    ref_repo::archive_many(&mut tx, &ref_ids, at).await?;
+    prompt_repo::archive_groups(&mut tx, &group_ids, at).await?;
+
     tx.commit().await?;
     Ok((batch_id, task_count))
 }
@@ -355,5 +370,80 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(draws, vec![1, 2], "同组合两次抽卡序号为 1、2");
+    }
+
+    // 0016：批次一建成，本批用到的参考图与提示词组必须已归档 —— 这是「开始生成后生成页
+    // 自动让位给下一批」的全部机制。归档只打时间戳，不得动到软删除位或提示词本身。
+    #[tokio::test]
+    async fn create_batch_archives_used_refs_and_groups() {
+        let (pool, _d) = test_pool().await;
+        let rid = ref_repo::insert(
+            &pool,
+            &ref_repo::NewRefImage {
+                name: "r".into(),
+                group_id: None,
+                file_path: "/r".into(),
+                thumb_path: "/t".into(),
+                width: 1,
+                height: 1,
+                file_size: 1,
+                content_hash: None,
+                upload_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let gid = prompt_repo::create_group(&mut tx, "g", "GG", "", false)
+            .await
+            .unwrap();
+        prompt_repo::insert_prompt(&mut tx, gid, "GG-0001", None, "t", "library")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        // 建批次前两者都未归档。
+        assert!(ref_repo::list_active(&pool).await.unwrap()[0]
+            .archived_at
+            .is_none());
+        assert!(prompt_repo::list_groups(&pool).await.unwrap()[0]
+            .archived_at
+            .is_none());
+
+        create_batch(
+            &pool,
+            "/out",
+            "{}",
+            &[RefMapping {
+                ref_image_id: rid,
+                prompt_group_id: gid,
+            }],
+            1,
+        )
+        .await
+        .unwrap();
+
+        let r = &ref_repo::list_active(&pool).await.unwrap()[0];
+        assert!(r.archived_at.is_some(), "本批参考图应随批次创建一并归档");
+        assert!(r.deleted_at.is_none(), "归档不是删除：参考图仍在库里");
+        let g = &prompt_repo::list_groups(&pool).await.unwrap()[0];
+        assert!(g.archived_at.is_some(), "本批提示词组应随批次创建一并归档");
+        assert_eq!(
+            prompt_repo::count_in_group(&pool, gid).await.unwrap(),
+            1,
+            "归档不动提示词本身"
+        );
+
+        // 取消归档可逆（库页「取消归档」走这条）。
+        prompt_repo::set_group_archived(&pool, gid, false)
+            .await
+            .unwrap();
+        ref_repo::set_archived(&pool, rid, false).await.unwrap();
+        assert!(prompt_repo::list_groups(&pool).await.unwrap()[0]
+            .archived_at
+            .is_none());
+        assert!(ref_repo::list_active(&pool).await.unwrap()[0]
+            .archived_at
+            .is_none());
     }
 }

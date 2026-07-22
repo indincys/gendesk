@@ -63,6 +63,18 @@ export function PromptsPage() {
     void load();
   }, [load]);
 
+  // 0016：归档只管「生成页选择器是否列出它」，分组与提示词本身分毫不动。
+  const toggleArchive = async (g: GroupView) => {
+    try {
+      await unwrap(commands.setPromptGroupArchived(g.id, !g.archived));
+      setGroups((cur) => cur.map((x) => (x.id === g.id ? { ...x, archived: !g.archived } : x)));
+      toast(g.archived ? `「${g.name}」已取消归档` : `「${g.name}」已归档`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      void load();
+    }
+  };
+
   useEffect(() => {
     const q = query.trim();
     if (!q) {
@@ -373,6 +385,11 @@ export function PromptsPage() {
                   <span className="chip">{g.prefix}</span>
                   {g.scene && <span className="bdg b-gray">{g.scene}</span>}
                   {g.isTemp && <span className="bdg b-amber">临时 · 待验收入库</span>}
+                  {g.archived && (
+                    <span className="bdg b-gray" title="已跑过批次，生成页选择器默认不再列出">
+                      已归档
+                    </span>
+                  )}
                   {g.tags.map((t) => (
                     <span key={t} className="bdg b-gray">
                       #{t}
@@ -398,6 +415,8 @@ export function PromptsPage() {
                       onRename={() => setRenaming(g)}
                       onMerge={() => setMerging(g)}
                       onDelete={() => setDeleting(g)}
+                      onToggleArchive={() => void toggleArchive(g)}
+                      archived={g.archived}
                       canMerge={groups.length > 1}
                     />
                   )}
@@ -508,8 +527,17 @@ function GroupMenu({
   onRename,
   onMerge,
   onDelete,
+  onToggleArchive,
+  archived,
   canMerge,
-}: { onRename: () => void; onMerge: () => void; onDelete: () => void; canMerge: boolean }) {
+}: {
+  onRename: () => void;
+  onMerge: () => void;
+  onDelete: () => void;
+  onToggleArchive: () => void;
+  archived: boolean;
+  canMerge: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -547,6 +575,14 @@ function GroupMenu({
             title={canMerge ? undefined : "至少两个分组才能合并"}
           >
             合并到…
+          </button>
+          <button
+            type="button"
+            className="gmi"
+            onClick={pick(onToggleArchive)}
+            title="已归档的分组不再出现在生成页的选择器里，分组本身与提示词都不受影响"
+          >
+            {archived ? "取消归档" : "归档分组"}
           </button>
           <button type="button" className="gmi dng" onClick={pick(onDelete)}>
             删除分组

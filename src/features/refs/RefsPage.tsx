@@ -149,6 +149,18 @@ export function RefsPage() {
     void openDetail(id);
   };
 
+  // 0016：归档只管「生成页选择器是否列出它」，图与分组归属分毫不动。
+  const toggleArchive = async (id: number, archived: boolean) => {
+    try {
+      await unwrap(commands.setRefImageArchived(id, !archived));
+      setRefs((cur) => cur.map((r) => (r.id === id ? { ...r, archived: !archived } : r)));
+      toast(archived ? "已取消归档" : "已归档");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      void load();
+    }
+  };
+
   const del = async (d: RefImageDetail) => {
     await unwrap(commands.trashRefImage(d.id)).catch(() => {});
     setDetail(null);
@@ -284,12 +296,21 @@ export function RefsPage() {
                   return (
                     <div
                       key={r.id}
-                      className={cn("rcard", selectMode && sel.has(r.id) && "sel")}
+                      className={cn(
+                        "rcard",
+                        selectMode && sel.has(r.id) && "sel",
+                        r.archived && "arch",
+                      )}
                       onClick={(e) => onCardClick(idx, r.id, e.shiftKey)}
                     >
                       <NatThumb path={r.thumbPath} className="rcimg rcnat" />
                       <div className="rmeta">
                         <span className="mono fs11 fw5 nowrap ohide f1">{r.name}</span>
+                        {r.archived && (
+                          <span className="bdg b-gray" title="已跑过批次，生成页选择器默认不再列出">
+                            已归档
+                          </span>
+                        )}
                       </div>
                     </div>
                   );
@@ -330,6 +351,19 @@ export function RefsPage() {
                 >
                   更换图片
                 </button>
+                {(() => {
+                  const archived = refs.find((r) => r.id === detail.id)?.archived ?? false;
+                  return (
+                    <button
+                      type="button"
+                      className="btn sm gho"
+                      title="归档后生成页的选择器默认不再列出这张图；图本身留在库里"
+                      onClick={() => void toggleArchive(detail.id, archived)}
+                    >
+                      {archived ? "取消归档" : "归档"}
+                    </button>
+                  );
+                })()}
                 <button
                   type="button"
                   className="btn sm gho dng"

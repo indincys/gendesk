@@ -57,12 +57,15 @@ pub async fn list_pending_review(
     state: State<'_, AppState>,
     batch_id: Option<i64>,
 ) -> AppResult<Vec<ReviewItemView>> {
+    // 批次倒序：最近一批排在最顶部，往下依次是更早的批次；批次内保持生成序（id 升序），
+    // 参考图 × 提示词的对应关系读起来才连贯。
+    const ORDER: &str = " ORDER BY t.batch_id DESC, t.id ASC";
     let (sql, bind) = match batch_id {
         Some(_) => (
-            format!("{REVIEW_SELECT} AND t.batch_id = ? ORDER BY t.id ASC"),
+            format!("{REVIEW_SELECT} AND t.batch_id = ?{ORDER}"),
             batch_id,
         ),
-        None => (format!("{REVIEW_SELECT} ORDER BY t.id ASC"), None),
+        None => (format!("{REVIEW_SELECT}{ORDER}"), None),
     };
     let mut q = sqlx::query_as::<_, ReviewItemView>(&sql);
     if let Some(b) = bind {
@@ -303,6 +306,31 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some(), "rev 待验收任务应被选中");
+    }
+
+    // 验收页排序：最近一批在最顶部（批次倒序），批次内保持生成序（id 升序）。
+    #[tokio::test]
+    async fn pending_review_lists_newest_batch_first() {
+        let (pool, _d) = test_pool().await;
+        seed_task(&pool, "rev").await;
+        // 第二个批次（id 更大 = 更近），内含两个任务。
+        sqlx::query("INSERT INTO batches (id,created_at,output_dir,params_json,status) VALUES (2,0,'/out','{}','running')").execute(&pool).await.unwrap();
+        for tid in [2, 3] {
+            sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,result_image_path,result_thumb_path,created_at,updated_at) VALUES (?1,2,1,1,'t','rev','/img.jpg','/thumb.jpg',0,0)")
+                .bind(tid).execute(&pool).await.unwrap();
+        }
+
+        let sql = format!("{REVIEW_SELECT} ORDER BY t.batch_id DESC, t.id ASC");
+        let rows = sqlx::query_as::<_, ReviewItemView>(&sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let order: Vec<(i64, i64)> = rows.iter().map(|r| (r.batch_id, r.id)).collect();
+        assert_eq!(
+            order,
+            vec![(2, 2), (2, 3), (1, 1)],
+            "最近批次(2)整体排在更早批次(1)之前，批次内按 id 升序"
+        );
     }
 
     // E02：不通过时原图必须进入待清理文件列表（不立即物理删除），否则误触即永久丢原图。

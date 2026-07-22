@@ -13,6 +13,10 @@ use crate::state::AppState;
 /// 成功率统计窗口（近 50 次尝试）。
 const RATE_WINDOW: i64 = 50;
 
+/// 单 Key 并发上限的上界。**必须与 migration 0016 的 CHECK 一致** ——
+/// 夹取值越界会被 SQLite 的 CHECK 直接拒掉，表现为「保存 Key 失败」。
+const MAX_CONCURRENCY: i64 = 100;
+
 /// API Key 脱敏视图（Key 本体永不出 Rust）。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -116,7 +120,7 @@ pub async fn add_api_key(
     if input.key.trim().is_empty() {
         return Err(AppError::InvalidInput("API Key 不能为空".into()));
     }
-    let concurrency = input.concurrency_limit.clamp(1, 10);
+    let concurrency = input.concurrency_limit.clamp(1, MAX_CONCURRENCY);
     let account = format!("apikey-{}-{}", now_unix(), nano_suffix());
 
     // 先写钥匙串，再写库；库中仅存引用。
@@ -158,7 +162,7 @@ pub async fn update_api_key(
     patch: UpdateApiKeyPatch,
 ) -> AppResult<ApiKeyView> {
     let base = patch.base_url.map(|u| normalize_base_url(&u));
-    let concurrency = patch.concurrency_limit.map(|c| c.clamp(1, 10));
+    let concurrency = patch.concurrency_limit.map(|c| c.clamp(1, MAX_CONCURRENCY));
     // rpm_limit：None 不改；Some(n>0) 设值；Some(n<=0) 清除。→ repo 的 Option<Option>。
     let rpm: Option<Option<i64>> = patch.rpm_limit.map(|n| (n > 0).then_some(n));
     repo::update_fields(

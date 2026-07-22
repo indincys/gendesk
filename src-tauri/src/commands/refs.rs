@@ -23,6 +23,8 @@ pub struct RefImageView {
     pub height: i64,
     /// 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
     pub last_group_id: Option<i64>,
+    /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+    pub archived: bool,
 }
 
 /// 在目录内生成不冲突的路径。
@@ -116,6 +118,7 @@ pub async fn import_ref_images(
             width: new.width,
             height: new.height,
             last_group_id: None,
+            archived: false,
         });
     }
 
@@ -232,6 +235,7 @@ pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefIma
             width: r.width,
             height: r.height,
             last_group_id: r.last_group_id,
+            archived: r.archived_at.is_some(),
         })
         .collect())
 }
@@ -245,6 +249,21 @@ pub async fn set_ref_image_group(
     group_id: Option<i64>,
 ) -> AppResult<()> {
     repo::set_group(&state.db, id, group_id).await?;
+    Ok(())
+}
+
+/// 归档 / 取消归档参考图（0016）。批次开跑后由 `engine::create_batch` 自动归档；
+/// 此命令供参考图库手动恢复（或手动归档一张用不上的旧图）。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_ref_image_archived(
+    state: State<'_, AppState>,
+    id: i64,
+    archived: bool,
+) -> AppResult<()> {
+    if !repo::set_archived(&state.db, id, archived).await? {
+        return Err(AppError::InvalidInput("参考图不存在".into()));
+    }
     Ok(())
 }
 

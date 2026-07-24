@@ -138,7 +138,8 @@ mod tests {
             &pool,
             &refs::NewRefImage {
                 name: "productA".into(),
-                group_id: None,
+                ref_group_id: None,
+                ephemeral: false,
                 file_path: "/x/a.jpg".into(),
                 thumb_path: "/x/a_t.jpg".into(),
                 width: 1024,
@@ -151,15 +152,172 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(refs::list_active(&pool).await.unwrap().len(), 1);
-        // set_group 需要一个真实分组以满足外键
+        // 0019：归属的是**图库分组**（ref_groups），不再是提示词组。
+        // 此处原本建的是 prompt_group —— 迁移后那样写会直接撞外键（正是它抓到了语义切换）。
+        let g = refs::create_group(&pool, "产品图").await.unwrap();
+        refs::set_group(&pool, id, Some(g.id)).await.unwrap();
+        let rows = refs::list_active(&pool).await.unwrap();
+        assert_eq!(rows[0].ref_group_id, Some(g.id));
+        // 历史列 group_id 不再被任何写路径碰到。
+        assert_eq!(rows[0].group_id, None);
+    }
+
+    // 0019：图库分组 CRUD。删组不删图——图回到未分组。
+    #[tokio::test]
+    async fn ref_groups_crud_and_delete_keeps_images() {
+        let (pool, _d) = test_pool().await;
+        let g = refs::create_group(&pool, "场景图").await.unwrap();
+        // NOCASE 唯一：同名（含大小写变体）不得再建一个。
+        assert!(refs::find_group_by_name(&pool, "场景图")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(refs::create_group(&pool, "场景图").await.is_err());
+
+        let id = refs::insert(
+            &pool,
+            &refs::NewRefImage {
+                name: "a".into(),
+                ref_group_id: Some(g.id),
+                ephemeral: false,
+                file_path: "/x/a.jpg".into(),
+                thumb_path: "/x/a_t.jpg".into(),
+                width: 1,
+                height: 1,
+                file_size: 1,
+                content_hash: None,
+                upload_path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let listed = refs::list_groups(&pool).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].1, 1, "组内计数");
+
+        assert!(refs::rename_group(&pool, g.id, "场景素材").await.unwrap());
+        assert_eq!(
+            refs::list_groups(&pool).await.unwrap()[0].0.name,
+            "场景素材"
+        );
+
+        assert!(refs::delete_group(&pool, g.id).await.unwrap());
+        assert!(refs::list_groups(&pool).await.unwrap().is_empty());
+        let rows = refs::list_active(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1, "删分组不该删图");
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].ref_group_id, None, "图回到未分组");
+    }
+
+    // 0019 的数据搬运：既有「按提示词组名」的归属须原样落到同名图库分组，不能塌成未分组。
+    //
+    // migrate!() 一次跑完全部迁移，测试无法在 0018 与 0019 之间插数据，故这里对齐一张
+    // 「迁移前形态」的行（group_id 有值 / ref_group_id 为空）后，逐字重放 0019 的两条
+    // 搬运语句。迁移文件一旦发布即不可改（forward-only），复制不会漂。
+    #[tokio::test]
+    async fn migration_0019_moves_prompt_group_association_to_ref_groups() {
+        let (pool, _d) = test_pool().await;
         let mut tx = pool.begin().await.unwrap();
-        let gid = prompts::create_group(&mut tx, "组", "GG", "", false)
+        let pg = prompts::create_group(&mut tx, "场景图", "CJ", "", false)
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        refs::set_group(&pool, id, Some(gid)).await.unwrap();
+
+        // 迁移前形态：归属写在指向 prompt_groups 的历史列上。
+        let rid = refs::insert(
+            &pool,
+            &refs::NewRefImage {
+                name: "a".into(),
+                ref_group_id: None,
+                ephemeral: false,
+                file_path: "/x/a.jpg".into(),
+                thumb_path: "/x/a_t.jpg".into(),
+                width: 1,
+                height: 1,
+                file_size: 1,
+                content_hash: None,
+                upload_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE ref_images SET group_id = ?2 WHERE id = ?1")
+            .bind(rid)
+            .bind(pg)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // —— 以下两条逐字来自 0019_ref_groups.sql ——
+        sqlx::query(
+            "INSERT OR IGNORE INTO ref_groups (name, sort_order, created_at)
+             SELECT DISTINCT pg.name, 0, strftime('%s', 'now')
+             FROM ref_images ri
+             JOIN prompt_groups pg ON pg.id = ri.group_id
+             WHERE ri.deleted_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE ref_images
+             SET ref_group_id = (
+               SELECT rg.id FROM ref_groups rg
+               WHERE rg.name = (SELECT pg.name FROM prompt_groups pg WHERE pg.id = ref_images.group_id)
+                 COLLATE NOCASE
+               LIMIT 1
+             )
+             WHERE group_id IS NOT NULL AND deleted_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let groups = refs::list_groups(&pool).await.unwrap();
+        assert_eq!(groups.len(), 1, "应按提示词组名建出同名图库分组");
+        assert_eq!(groups[0].0.name, "场景图");
+        assert_eq!(groups[0].1, 1, "图应挂在该组下，而不是掉进未分组");
         let rows = refs::list_active(&pool).await.unwrap();
-        assert_eq!(rows[0].group_id, Some(gid));
+        assert_eq!(rows[0].ref_group_id, Some(groups[0].0.id));
+    }
+
+    // 0019：临时上传进 ref_images（tasks 要以它为父），但不作去重基准、不计入组内张数。
+    #[tokio::test]
+    async fn ephemeral_uploads_stay_out_of_library() {
+        let (pool, _d) = test_pool().await;
+        let g = refs::create_group(&pool, "长期").await.unwrap();
+        let mk = |name: &str, hash: &str, eph: bool, gid: Option<i64>| refs::NewRefImage {
+            name: name.into(),
+            ref_group_id: gid,
+            ephemeral: eph,
+            file_path: format!("/x/{name}.jpg"),
+            thumb_path: format!("/x/{name}_t.jpg"),
+            width: 1,
+            height: 1,
+            file_size: 1,
+            content_hash: Some(hash.into()),
+            upload_path: None,
+        };
+        refs::insert(&pool, &mk("lib", "H1", false, Some(g.id)))
+            .await
+            .unwrap();
+        refs::insert(&pool, &mk("tmp", "H2", true, Some(g.id)))
+            .await
+            .unwrap();
+
+        // 去重基准只认图库的图：否则用户正式导入一张自己刚在生成页试过的图会被判「重复」。
+        let hn = refs::active_hash_names(&pool).await.unwrap();
+        assert_eq!(hn.len(), 1);
+        assert_eq!(hn[0].1, "lib");
+
+        // 组内计数同样不含临时上传。
+        assert_eq!(refs::list_groups(&pool).await.unwrap()[0].1, 1);
+
+        // 但 list_active 仍返回它——生成页要靠它渲染刚上传的那几张。
+        let rows = refs::list_active(&pool).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.ephemeral && r.name == "tmp"));
     }
 
     // E30b：内容 hash 记录可查（去重比对源）+ 批量改分组。
@@ -168,7 +326,8 @@ mod tests {
         let (pool, _d) = test_pool().await;
         let mk = |name: &str, hash: &str| refs::NewRefImage {
             name: name.into(),
-            group_id: None,
+            ref_group_id: None,
+            ephemeral: false,
             file_path: format!("/x/{name}.jpg"),
             thumb_path: format!("/x/{name}_t.jpg"),
             width: 10,
@@ -184,17 +343,14 @@ mod tests {
         assert_eq!(hn.len(), 2);
         assert!(hn.iter().any(|(h, n)| h == "H1" && n == "a"));
 
-        let mut tx = pool.begin().await.unwrap();
-        let gid = prompts::create_group(&mut tx, "组", "GG", "", false)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        let n = refs::set_group_many(&pool, &[a, b], Some(gid))
+        // 0019：批量改的是图库分组。
+        let g = refs::create_group(&pool, "组").await.unwrap();
+        let n = refs::set_group_many(&pool, &[a, b], Some(g.id))
             .await
             .unwrap();
         assert_eq!(n, 2);
         let rows = refs::list_active(&pool).await.unwrap();
-        assert!(rows.iter().all(|r| r.group_id == Some(gid)));
+        assert!(rows.iter().all(|r| r.ref_group_id == Some(g.id)));
     }
 
     #[tokio::test]
@@ -205,7 +361,8 @@ mod tests {
             &pool,
             &refs::NewRefImage {
                 name: "a".into(),
-                group_id: None,
+                ref_group_id: None,
+                ephemeral: false,
                 file_path: "/a".into(),
                 thumb_path: "/t".into(),
                 width: 1,

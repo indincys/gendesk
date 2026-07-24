@@ -57,6 +57,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::refs::import_ref_images,
             commands::refs::scan_ref_imports,
             commands::refs::list_ref_images,
+            commands::refs::list_ref_groups,
+            commands::refs::create_ref_group,
+            commands::refs::rename_ref_group,
+            commands::refs::delete_ref_group,
             commands::refs::set_ref_image_group,
             commands::refs::set_ref_images_group,
             commands::refs::set_ref_image_archived,
@@ -213,6 +217,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             engine::events::KeyHealth,
             commands::updater::UpdateStateChanged,
             commands::backup::BackupProgress,
+            commands::refs::RefImportProgress,
             // 发布模块事件（P1 起）
             publish::events::PublishBadgesEvent,
             publish::events::InboxIngestEvent,

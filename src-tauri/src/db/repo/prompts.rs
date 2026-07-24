@@ -363,7 +363,8 @@ pub async fn merge_into(
         .bind(now_unix())
         .execute(&mut *conn)
         .await?;
-    // 参考图当前分组 + 挂靠记忆。
+    // 参考图挂靠记忆（E32）；外加历史列 group_id 的顺手维护 —— 0019 起图库分组已改由
+    // ref_groups 承担，没有读者了，这条只是不让旧行留下指向已删组的悬垂 id。
     sqlx::query("UPDATE ref_images SET group_id = ?2 WHERE group_id = ?1")
         .bind(from)
         .bind(into)

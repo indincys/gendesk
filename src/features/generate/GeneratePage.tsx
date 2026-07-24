@@ -1,6 +1,7 @@
 import { Modal } from "@/components/ui/Modal";
 import { Stepper } from "@/components/ui/Stepper";
 import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
+import { RefImportOverlay, useRefImport } from "@/features/_shared/RefImport";
 import { assetSrc } from "@/lib/img";
 import {
   type ApiKeyView,
@@ -80,6 +81,8 @@ export function GeneratePage() {
   const [apop, setApop] = useState<number | null>(null);
   const [paramPop, setParamPop] = useState(false);
   const [viewer, setViewer] = useState<null | { gid: number; index: number }>(null);
+  // 上传进度（生成页上传的图为「临时上传」，不进参考图库）。
+  const { state: uploading, run: runImport } = useRefImport();
 
   const load = useCallback(async () => {
     try {
@@ -175,20 +178,27 @@ export function GeneratePage() {
     }
   };
 
+  // 生成页上传 = **临时上传**（ephemeral，0019）：只作本批附件，不进长期参考图库。
+  // 参考图库是长期资产库，有它自己的批量上传入口；随手拖一张来跑一次的图不该长住那里。
   const importImages = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0) return;
-      const added = await unwrap(commands.importRefImages(paths, null)).catch((e) => {
-        toast.error(String(e));
-        return [];
-      });
-      if (added.length > 0) {
-        toast(`已上传 ${added.length} 张参考图`);
+      try {
+        const added = await runImport(paths, null, true);
+        if (added.length === 0) return;
+        const skipped = paths.length - added.length;
+        toast(
+          skipped > 0
+            ? `已上传 ${added.length} 张（${skipped} 张读取失败已跳过）· 本批临时使用`
+            : `已上传 ${added.length} 张 · 本批临时使用，不进参考图库`,
+        );
         await load();
         setSelRefIds((cur) => [...new Set([...cur, ...added.map((r) => r.id)])]);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e));
       }
     },
-    [load, setSelRefIds],
+    [load, setSelRefIds, runImport],
   );
 
   const uploadRefs = async () => {
@@ -212,14 +222,20 @@ export function GeneratePage() {
   }, [parseTxt, importImages]);
 
   // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
+  //
+  // size / quality 是**会发到远端**的两项（Rust GenParams 只认这两个键）；
+  // 其余键是本批配置快照，供「按此配置再来一批」还原 UI，后端静默忽略。
   const buildParamsJson = () => {
-    const p: Record<string, string | boolean> = {};
+    const p: Record<string, string | boolean | number> = {};
     if (size) p.size = size;
     if (quality) p.quality = quality;
     // 任务1：输出处理开关随批次记忆（后端缺省视为开启，故显式写入以便「再来一批」还原）。
     p.watermark = watermark;
     p.clearAiMetadata = clearAiMetadata;
     p.removeC2pa = removeC2pa;
+    // 抽卡次数是 createBatch 的独立入参、不进 GenParams；但不写进快照，
+    // 「再来一批」就会把 ×3 悄悄还原成 ×1，任务数对不上而没人知道为什么。
+    p.draws = draws;
     return JSON.stringify(p);
   };
 
@@ -642,6 +658,17 @@ export function GeneratePage() {
               <Seg value={size} options={SIZE_OPTS} onChange={setSize} />
             </div>
             <div className="prow2 mt8">
+              <span className="plabel">自定义尺寸</span>
+              <input
+                className="inp"
+                style={{ width: 130 }}
+                placeholder="如 1080x1920"
+                value={size && !SIZE_PRESETS.has(size) ? size : ""}
+                onChange={(e) => setSize(e.target.value.trim() || null)}
+              />
+              <span className="fs11 t3">端点只认特定枚举时按其文档填；留空则用上面的预设</span>
+            </div>
+            <div className="prow2 mt8">
               <span className="plabel">质量</span>
               <Seg value={quality} options={QUALITY_OPTS} onChange={setQuality} />
             </div>
@@ -701,6 +728,13 @@ export function GeneratePage() {
                 ? "输出统一重编码为干净 JPEG：不含 EXIF/XMP、PNG 文本、IPTC 与 C2PA 内容凭据。"
                 : "关闭任一项将保留原图格式，仅按所选清除对应信息。"}
             </div>
+            <div className="psep" />
+            <div className="fs11 t3" style={{ lineHeight: 1.7 }}>
+              <span className="fw6">实际发往接口的字段：</span>
+              <span className="mono"> {wireParamsLabel(size, quality)}</span>
+              <br />
+              抽卡与输出处理在本机执行，不进请求；「跟随」= 不带该字段，由提示词与模型默认决定。
+            </div>
           </div>
         )}
       </div>
@@ -742,6 +776,8 @@ export function GeneratePage() {
               label="预计耗时"
               value={etaLabel(confirm.avgSec, taskTotal, enabledKeys)}
             />
+            {/* 把「远端到底会收到什么」摆在确认前：设置了却没生效，只能在这里被看见。 */}
+            <SummaryLine label="接口参数" value={wireParamsLabel(size, quality)} />
             <div>
               <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
                 参与的启用 Key（{enabledKeys.length}）
@@ -778,7 +814,8 @@ export function GeneratePage() {
       )}
       {modal === "refs" && (
         <PickRefs
-          refs={refs}
+          // 临时上传只属于本批，不该出现在「从参考图库选择」里（0019）。
+          refs={refs.filter((r) => !r.ephemeral)}
           selected={selRefIds}
           onClose={() => setModal(null)}
           onConfirm={(ids) => {
@@ -797,6 +834,7 @@ export function GeneratePage() {
           onClose={() => setViewer(null)}
         />
       )}
+      {uploading && <RefImportOverlay state={uploading} title="正在上传参考图" />}
       {importPreview && (
         <ImportPreviewModal
           preview={importPreview}
@@ -816,8 +854,13 @@ const SIZE_OPTS: ParamOpt[] = [
   { v: "1024x1024", label: "1:1" },
   { v: "1536x1024", label: "3:2 横" },
   { v: "1024x1536", label: "2:3 竖" },
+  // 9:16 竖幅（短视频首帧的实际画幅）。1080×1920 是精确的 9:16；不同兼容端点
+  // 认的取值不一样（有的只认 1024x1536 这类枚举），所以旁边留了「自定义」直填。
+  { v: "1080x1920", label: "9:16 竖" },
   { v: "auto", label: "自动" },
 ];
+/** 预设之外的取值一律视为自定义（由输入框接管）。 */
+const SIZE_PRESETS = new Set(SIZE_OPTS.map((o) => o.v).filter((v): v is string => v !== null));
 const QUALITY_OPTS: ParamOpt[] = [
   { v: null, label: "跟随" },
   { v: "low", label: "低" },
@@ -825,6 +868,19 @@ const QUALITY_OPTS: ParamOpt[] = [
   { v: "high", label: "高" },
   { v: "auto", label: "自动" },
 ];
+
+/**
+ * 「实际发往接口的字段」文案。
+ *
+ * Rust 侧 `GenParams` 只有 size / quality 两个键会进 multipart 表单（provider/openai.rs），
+ * 抽卡次数与输出处理全在本机执行。这条文案就是那份契约的镜子——它写什么，远端收什么。
+ */
+function wireParamsLabel(size: string | null, quality: string | null): string {
+  const parts: string[] = [];
+  if (size) parts.push(`size=${size}`);
+  if (quality) parts.push(`quality=${quality}`);
+  return parts.length > 0 ? parts.join(" · ") : "无（全部跟随提示词与模型默认）";
+}
 
 /** 分段控件：第一项「跟随」为未设置态（虚线强调，D1）。 */
 function Seg({

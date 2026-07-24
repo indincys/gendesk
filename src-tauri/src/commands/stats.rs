@@ -91,7 +91,8 @@ mod tests {
             &pool,
             &refs::NewRefImage {
                 name: "r".into(),
-                group_id: None,
+                ref_group_id: None,
+                ephemeral: false,
                 file_path: "/r".into(),
                 thumb_path: "/t".into(),
                 width: 1,

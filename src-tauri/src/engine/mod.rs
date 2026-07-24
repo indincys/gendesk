@@ -315,7 +315,8 @@ mod tests {
             &pool,
             &ref_repo::NewRefImage {
                 name: "r".into(),
-                group_id: None,
+                ref_group_id: None,
+                ephemeral: false,
                 file_path: "/r".into(),
                 thumb_path: "/t".into(),
                 width: 1,
@@ -402,7 +403,8 @@ mod tests {
             &pool,
             &ref_repo::NewRefImage {
                 name: "r".into(),
-                group_id: None,
+                ref_group_id: None,
+                ephemeral: false,
                 file_path: "/r".into(),
                 thumb_path: "/t".into(),
                 width: 1,

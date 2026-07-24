@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::State;
+use tauri_specta::Event;
 
 use crate::db::repo::refs as repo;
 use crate::error::{AppError, AppResult};
@@ -16,6 +17,7 @@ use crate::state::AppState;
 pub struct RefImageView {
     pub id: i64,
     pub name: String,
+    /// 图库分组（0019 起为 `ref_groups.id`，与提示词组无关）。
     pub group_id: Option<i64>,
     pub file_path: String,
     pub thumb_path: String,
@@ -25,6 +27,38 @@ pub struct RefImageView {
     pub last_group_id: Option<i64>,
     /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
     pub archived: bool,
+    /// 生成页临时上传（0019）：不进长期图库，图库页与「从参考图库选择」都不列它。
+    pub ephemeral: bool,
+}
+
+/// 图库分组视图（0019）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RefGroupView {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    /// 组内图片数（不含临时上传与已删除）。
+    pub count: i64,
+}
+
+/// `refs://import-progress`：批量导入逐张进度。
+///
+/// 导入是「拷贝 + 解码 + 缩略图 + hash + 压缩副本」，单张几百毫秒起，一次十几张就是
+/// 十几秒静默。没有这条事件，用户看到的是一个完全无响应的界面——于是反复重按上传，
+/// 同一批图进库五六遍（这正是本次要修的现场）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct RefImportProgress {
+    /// 已处理张数（含失败）。
+    pub done: i64,
+    pub total: i64,
+    /// 当前正在处理的文件名（done 阶段为空串）。
+    pub name: String,
+    /// running / done
+    pub phase: String,
+    /// 失败张数（逐张容错：一张坏图不该中断整批）。
+    pub failed: i64,
 }
 
 /// 在目录内生成不冲突的路径。
@@ -52,77 +86,160 @@ fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     }
 }
 
+/// 单张落盘产物（拷贝 + 缩略图 + hash + 上传副本），入库前的纯文件侧结果。
+struct Ingested {
+    name: String,
+    file_path: String,
+    thumb_path: String,
+    width: i64,
+    height: i64,
+    file_size: i64,
+    content_hash: Option<String>,
+    upload_path: Option<String>,
+}
+
+/// 把一张源图落进库目录（同步、CPU/IO 密集，调用方须放在阻塞线程）。
+fn ingest_one(path: &str, refs_dir: &Path, thumbs_dir: &Path) -> AppResult<Ingested> {
+    let src = PathBuf::from(path);
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(files::sanitize_filename)
+        .ok_or_else(|| AppError::InvalidInput(format!("无效文件路径：{path}")))?;
+    let ext = src
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+
+    // 拷入 refs/
+    let dest = unique_path(refs_dir, &stem, &ext);
+    std::fs::copy(&src, &dest)?;
+
+    // 生成缩略图
+    let thumb = unique_path(thumbs_dir, &stem, "jpg");
+    let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
+    let file_size = std::fs::metadata(&dest)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    // E30b：内容 hash（去重比对用）。E41：超限则生成上传用压缩副本。
+    let content_hash = files::content_hash(&dest).ok();
+    let upload_dest = unique_path(refs_dir, &format!("{stem}_up"), "jpg");
+    let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
+        Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
+        _ => None,
+    };
+
+    Ok(Ingested {
+        name: stem,
+        file_path: dest.to_string_lossy().to_string(),
+        thumb_path: thumb.to_string_lossy().to_string(),
+        width: w as i64,
+        height: h as i64,
+        file_size,
+        content_hash,
+        upload_path,
+    })
+}
+
 /// 导入参考图：拷入库、生成缩略图、写记录，返回视图列表。
+///
+/// `ephemeral = true` 为生成页的临时上传（不进长期图库，见 0019）。
+/// 全程逐张推 `refs://import-progress`：一张坏图只算失败一张，不中断整批。
 #[tauri::command]
 #[specta::specta]
 pub async fn import_ref_images(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     paths: Vec<String>,
     group_id: Option<i64>,
+    ephemeral: bool,
 ) -> AppResult<Vec<RefImageView>> {
     state.dirs.init()?;
     let refs_dir = state.dirs.refs();
     let thumbs_dir = state.dirs.thumbs();
+    let total = paths.len() as i64;
     let mut views = Vec::with_capacity(paths.len());
+    let mut failed = 0i64;
 
-    for path in paths {
-        let src = PathBuf::from(&path);
-        let stem = src
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(files::sanitize_filename)
-            .ok_or_else(|| AppError::InvalidInput(format!("无效文件路径：{path}")))?;
-        let ext = src
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
+    for (i, path) in paths.into_iter().enumerate() {
+        let short = short_name(&path);
+        // 开始处理这一张就先报一次：进度条在第一张的几百毫秒里也是动的。
+        emit_progress(&app, i as i64, total, &short, "running", failed);
 
-        // 拷入 refs/
-        let dest = unique_path(&refs_dir, &stem, &ext);
-        std::fs::copy(&src, &dest)?;
+        let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
+        let p = path.clone();
+        // 解码 + 缩放 + 重编码是纯 CPU；留在异步执行器上会把整个 IPC 卡住。
+        let res = tokio::task::spawn_blocking(move || ingest_one(&p, &rd, &td))
+            .await
+            .map_err(|e| AppError::Io(format!("导入任务失败：{e}")))?;
 
-        // 生成缩略图
-        let thumb = unique_path(&thumbs_dir, &stem, "jpg");
-        let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
-        let file_size = std::fs::metadata(&dest)
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
-
-        // E30b：内容 hash（去重比对用）。E41：超限则生成上传用压缩副本。
-        let content_hash = files::content_hash(&dest).ok();
-        let upload_dest = unique_path(&refs_dir, &format!("{stem}_up"), "jpg");
-        let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
-            Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
-            _ => None,
-        };
-
-        let new = repo::NewRefImage {
-            name: stem.clone(),
-            group_id,
-            file_path: dest.to_string_lossy().to_string(),
-            thumb_path: thumb.to_string_lossy().to_string(),
-            width: w as i64,
-            height: h as i64,
-            file_size,
-            content_hash,
-            upload_path,
-        };
-        let id = repo::insert(&state.db, &new).await?;
-        views.push(RefImageView {
-            id,
-            name: new.name,
-            group_id,
-            file_path: new.file_path,
-            thumb_path: new.thumb_path,
-            width: new.width,
-            height: new.height,
-            last_group_id: None,
-            archived: false,
-        });
+        match res {
+            Ok(ing) => {
+                let new = repo::NewRefImage {
+                    name: ing.name,
+                    ref_group_id: group_id,
+                    file_path: ing.file_path,
+                    thumb_path: ing.thumb_path,
+                    width: ing.width,
+                    height: ing.height,
+                    file_size: ing.file_size,
+                    content_hash: ing.content_hash,
+                    upload_path: ing.upload_path,
+                    ephemeral,
+                };
+                let id = repo::insert(&state.db, &new).await?;
+                views.push(RefImageView {
+                    id,
+                    name: new.name,
+                    group_id,
+                    file_path: new.file_path,
+                    thumb_path: new.thumb_path,
+                    width: new.width,
+                    height: new.height,
+                    last_group_id: None,
+                    archived: false,
+                    ephemeral,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(path = %path, error = %e, "参考图导入失败，跳过该张");
+            }
+        }
+        emit_progress(&app, i as i64 + 1, total, &short, "running", failed);
     }
 
+    emit_progress(&app, total, total, "", "done", failed);
     Ok(views)
+}
+
+/// 展示用短名（含扩展名，用户在文件管理器里看到的那个名字）。
+fn short_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn emit_progress(
+    app: &tauri::AppHandle,
+    done: i64,
+    total: i64,
+    name: &str,
+    phase: &str,
+    failed: i64,
+) {
+    let _ = RefImportProgress {
+        done,
+        total,
+        name: name.to_string(),
+        phase: phase.to_string(),
+        failed,
+    }
+    .emit(app);
 }
 
 /// 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
@@ -220,6 +337,10 @@ async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
 }
 
 /// 列出全部未删除参考图（供参考图库/生成页选择）。
+///
+/// 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
+/// 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
+/// 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
 #[tauri::command]
 #[specta::specta]
 pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefImageView>> {
@@ -229,15 +350,93 @@ pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefIma
         .map(|r| RefImageView {
             id: r.id,
             name: r.name,
-            group_id: r.group_id,
+            group_id: r.ref_group_id,
             file_path: r.file_path,
             thumb_path: r.thumb_path,
             width: r.width,
             height: r.height,
             last_group_id: r.last_group_id,
             archived: r.archived_at.is_some(),
+            ephemeral: r.ephemeral,
         })
         .collect())
+}
+
+// ---------- 图库分组（0019） ----------
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_ref_groups(state: State<'_, AppState>) -> AppResult<Vec<RefGroupView>> {
+    Ok(repo::list_groups(&state.db)
+        .await?
+        .into_iter()
+        .map(|(g, count)| RefGroupView {
+            id: g.id,
+            name: g.name,
+            sort_order: g.sort_order,
+            count,
+        })
+        .collect())
+}
+
+/// 新建图库分组。重名（NOCASE）直接返回既有那个，不报错——用户要的是「有这个组」，
+/// 不是一句「名字被占了」。
+#[tauri::command]
+#[specta::specta]
+pub async fn create_ref_group(state: State<'_, AppState>, name: String) -> AppResult<RefGroupView> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput("分组名不能为空".into()));
+    }
+    if let Some(g) = repo::find_group_by_name(&state.db, name).await? {
+        let count = repo::list_groups(&state.db)
+            .await?
+            .into_iter()
+            .find(|(r, _)| r.id == g.id)
+            .map(|(_, c)| c)
+            .unwrap_or(0);
+        return Ok(RefGroupView {
+            id: g.id,
+            name: g.name,
+            sort_order: g.sort_order,
+            count,
+        });
+    }
+    let g = repo::create_group(&state.db, name).await?;
+    Ok(RefGroupView {
+        id: g.id,
+        name: g.name,
+        sort_order: g.sort_order,
+        count: 0,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_ref_group(state: State<'_, AppState>, id: i64, name: String) -> AppResult<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput("分组名不能为空".into()));
+    }
+    if let Some(other) = repo::find_group_by_name(&state.db, name).await? {
+        if other.id != id {
+            return Err(AppError::InvalidInput(format!("已有同名分组「{name}」")));
+        }
+    }
+    if !repo::rename_group(&state.db, id, name).await? {
+        return Err(AppError::InvalidInput("分组不存在".into()));
+    }
+    Ok(())
+}
+
+/// 删除图库分组。组内图片**不删**，只是回到未分组。
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_ref_group(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    if !repo::delete_group(&state.db, id).await? {
+        return Err(AppError::InvalidInput("分组不存在".into()));
+    }
+    Ok(())
 }
 
 /// 调整参考图分组。
@@ -292,7 +491,7 @@ pub async fn get_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<Ref
     Ok(RefImageDetail {
         id: r.id,
         name: r.name,
-        group_id: r.group_id,
+        group_id: r.ref_group_id,
         file_path: r.file_path,
         thumb_path: r.thumb_path,
         width: r.width,

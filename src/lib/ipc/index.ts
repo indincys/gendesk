@@ -30,8 +30,10 @@ export type {
   ImportResult,
   KeyHealth,
   PromptView,
+  RefGroupView,
   RefImageDetail,
   RefImageView,
+  RefImportProgress,
   RefMappingInput,
   RefScanItem,
   Result,
@@ -145,6 +147,18 @@ export async function subscribeBackupProgress(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const un = await events.backupProgress.listen((e) => handler(e.payload));
+  return () => un();
+}
+
+/**
+ * 订阅参考图导入进度（生成页上传 / 图库批量上传共用）。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribeRefImportProgress(
+  handler: (e: import("./bindings").RefImportProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.refImportProgress.listen((e) => handler(e.payload));
   return () => un();
 }
 

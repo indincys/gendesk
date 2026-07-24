@@ -126,7 +126,9 @@ export function TasksPage() {
   const reuseBatch = async (id: number) => {
     try {
       const cfg = await unwrap(commands.getBatchConfig(id));
-      let params: { size?: string | null; quality?: string | null } = {};
+      // 快照里除 size/quality 外还带输出处理开关与抽卡次数（纯 UI 键，后端忽略）；
+      // 类型写窄会让它们看着像没还原，实际却在运行时传了过去——照实写全。
+      let params: Parameters<typeof restoreFromBatch>[1] = {};
       try {
         params = JSON.parse(cfg.paramsJson);
       } catch {
@@ -832,12 +834,14 @@ function tasksEta(avgSec: number | null, remaining: number, concurrency: number)
 }
 
 /** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。 */
+/** 批次参数摘要。size/quality 是真发到接口的两项，抽卡是本机展开，分开表述以免误读。 */
 function paramsLabel(json: string): string {
   try {
-    const p = JSON.parse(json) as { size?: string; quality?: string };
+    const p = JSON.parse(json) as { size?: string; quality?: string; draws?: number };
     const parts: string[] = [];
     if (p.size) parts.push(p.size);
     if (p.quality) parts.push(`质量 ${p.quality}`);
+    if (p.draws && p.draws > 1) parts.push(`抽卡 ×${p.draws}`);
     return parts.length > 0 ? parts.join(" · ") : "跟随提示词";
   } catch {
     return "跟随提示词";

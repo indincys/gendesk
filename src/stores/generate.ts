@@ -44,6 +44,7 @@ interface GenerateState {
       watermark?: string | null;
       clearAiMetadata?: boolean | null;
       removeC2pa?: boolean | null;
+      draws?: number | null;
     },
   ) => void;
 }
@@ -81,7 +82,9 @@ export const useGenerateStore = create<GenerateState>()(
           // 缺省（旧批次快照无此字段）视为开启，与生成页默认一致。
           clearAiMetadata: params.clearAiMetadata ?? true,
           removeC2pa: params.removeC2pa ?? true,
-          draws: 1,
+          // 抽卡次数进了批次快照（否则「再来一批」会把 ×3 悄悄变回 ×1，任务数对不上）。
+          // 旧批次快照没有这个键，退回 1；夹取到 1..=5，与生成页步进器一致。
+          draws: Math.min(5, Math.max(1, Math.round(params.draws ?? 1))),
         }),
     }),
     { name: "gendesk-generate" },

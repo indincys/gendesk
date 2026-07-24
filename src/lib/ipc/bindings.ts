@@ -198,10 +198,13 @@ async testApiKeySaved(id: number) : Promise<Result<null, AppError>> {
 },
 /**
  * 导入参考图：拷入库、生成缩略图、写记录，返回视图列表。
+ * 
+ * `ephemeral = true` 为生成页的临时上传（不进长期图库，见 0019）。
+ * 全程逐张推 `refs://import-progress`：一张坏图只算失败一张，不中断整批。
  */
-async importRefImages(paths: string[], groupId: number | null) : Promise<Result<RefImageView[], AppError>> {
+async importRefImages(paths: string[], groupId: number | null, ephemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, groupId }) };
+    return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, groupId, ephemeral }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -217,10 +220,53 @@ async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>>
 },
 /**
  * 列出全部未删除参考图（供参考图库/生成页选择）。
+ * 
+ * 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
+ * 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
+ * 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
  */
 async listRefImages() : Promise<Result<RefImageView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_ref_images") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listRefGroups() : Promise<Result<RefGroupView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_ref_groups") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 新建图库分组。重名（NOCASE）直接返回既有那个，不报错——用户要的是「有这个组」，
+ * 不是一句「名字被占了」。
+ */
+async createRefGroup(name: string) : Promise<Result<RefGroupView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_ref_group", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async renameRefGroup(id: number, name: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_ref_group", { id, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除图库分组。组内图片**不删**，只是回到未分组。
+ */
+async deleteRefGroup(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_ref_group", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1586,6 +1632,7 @@ exportProgressEvent: ExportProgressEvent,
 inboxIngestEvent: InboxIngestEvent,
 keyHealth: KeyHealth,
 publishBadgesEvent: PublishBadgesEvent,
+refImportProgress: RefImportProgress,
 sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
@@ -1597,6 +1644,7 @@ exportProgressEvent: "export-progress-event",
 inboxIngestEvent: "inbox-ingest-event",
 keyHealth: "key-health",
 publishBadgesEvent: "publish-badges-event",
+refImportProgress: "ref-import-progress",
 sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
@@ -2236,10 +2284,22 @@ retiredPacks: number;
  */
 loginFailAccounts: string[] }
 /**
+ * 图库分组视图（0019）。
+ */
+export type RefGroupView = { id: number; name: string; sortOrder: number; 
+/**
+ * 组内图片数（不含临时上传与已删除）。
+ */
+count: number }
+/**
  * 参考图详情（含使用统计）。
  */
 export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
-export type RefImageView = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; 
+export type RefImageView = { id: number; name: string; 
+/**
+ * 图库分组（0019 起为 `ref_groups.id`，与提示词组无关）。
+ */
+groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; 
 /**
  * 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
  */
@@ -2247,7 +2307,35 @@ lastGroupId: number | null;
 /**
  * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
  */
-archived: boolean }
+archived: boolean; 
+/**
+ * 生成页临时上传（0019）：不进长期图库，图库页与「从参考图库选择」都不列它。
+ */
+ephemeral: boolean }
+/**
+ * `refs://import-progress`：批量导入逐张进度。
+ * 
+ * 导入是「拷贝 + 解码 + 缩略图 + hash + 压缩副本」，单张几百毫秒起，一次十几张就是
+ * 十几秒静默。没有这条事件，用户看到的是一个完全无响应的界面——于是反复重按上传，
+ * 同一批图进库五六遍（这正是本次要修的现场）。
+ */
+export type RefImportProgress = { 
+/**
+ * 已处理张数（含失败）。
+ */
+done: number; total: number; 
+/**
+ * 当前正在处理的文件名（done 阶段为空串）。
+ */
+name: string; 
+/**
+ * running / done
+ */
+phase: string; 
+/**
+ * 失败张数（逐张容错：一张坏图不该中断整批）。
+ */
+failed: number }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
 /**
  * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。

@@ -1,12 +1,29 @@
-# &#x20;CLAUDE.md — GenDesk 开发约定
+# CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## GenDesk — 内部图片生产工具 · 开发约定
+
+> 本地批量图生图流水线：参考图素材库 → 提示词分组 → 批量生成 → 进度追踪 → 人工验收 →
+> 合格图输出归档；v0.7.0 起并入发布与资产管理模块。
+>
 > 本文件是 AI 开发本仓库的操作手册。**每条铁律都有 guardrails/CI 对应检查**；
-> 改规则必须同步改检查（否则等于没规则）。权威文档：
-> `内部图片生产工具_V1需求文档.md`（功能）· `..._技术选型定稿.md`（技术）·
-> `..._开发执行计划.md`（任务拆解 + DoD）· 原型 `docs/prototype/prototype.dc.html`（像素基准）·
-> `docs/prototype/Design-Tokens.md`（token 基准）。
+> 改规则必须同步改检查（否则等于没规则）。
+>
+> **V1 的四份规划文档（需求/技术选型/开发执行计划/UX 优化计划）已于 445b396 删除**——
+> 内容浓缩进本文末尾的「里程碑进度」，那里就是它们的现存形态，**不要去找那些文件**。
+> 现存参考物：`docs/prototype/prototype.dc.html`（V1 八页像素基准）·
+> `docs/prototype/publish.dc.html`（发布模块原型）· `docs/prototype/Design-Tokens.md`（token 基准）·
+> 发布模块三份（`内部图片生产工具_发布与资产管理需求文档.md` / `..._发布模块开发执行计划.md` /
+> `..._发布模块优化执行计划.md`）· `内部图片生产工具_密钥存储迁移执行计划.md` ·
+> `内部图片生产工具_验收与体验修复执行计划.md` · `发布模块_设计输入摘要.md` ·
+> `docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/mutants-exemptions.md` ·
+> `docs/收件箱收录格式规范.md`。
 
 ## 常用命令
+
+前置：Node ≥ 22 · pnpm 9.15（`packageManager` 已锁）· Rust stable。
+仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon（**Intel Mac 不支持**）。
 
 | 目的                   | 命令                                                          |
 | -------------------- | ----------------------------------------------------------- |
@@ -23,14 +40,81 @@
 | 变异测试（里程碑关卡）          | `cd src-tauri && cargo mutants -- --package gendesk`        |
 | 安装 pre-commit        | `pnpm dlx lefthook install`                                 |
 
+**本机 shell 陷阱**：非交互 shell 里 `cd <repo> && <node/pnpm 命令>` 会被 fnm 的 use-on-cd
+钩子打断（`We can't find the necessary environment variables to replace the Node version`），
+**报错来自 cd 而非命令本身**。用 `--dir` 绕开，别去改 shell 配置：
+
+```bash
+pnpm --dir /Users/indincys/Documents/Code/GenDesk check
+```
+
+同理 Rust 侧用 `cargo <cmd> --manifest-path <repo>/src-tauri/Cargo.toml`。
+（表格里的 `cd src-tauri && ...` 在交互终端里正常，仅 AI 的非交互 shell 需绕行。）
+
+**跑单个测试**（迭代时别整套跑，Rust 全量 ~7s、`pnpm check` ~1min）：
+
+```bash
+cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocapture
+```
+
+- 按模块过滤：`cargo test --lib publish::planner::`（子串匹配，无需 `--exact`）。
+- 前端单测：`pnpm vitest run src/routes.test.ts` 或 `pnpm test:watch`。
+- 前端测试极少（仅 `routes.test.ts` / `stores/settings.test.ts`）——**业务真相在 Rust，
+  测试也在 Rust**，别为了「补前端覆盖率」去测 UI 壳。
+
+## 架构地图
+
+**形态**：Tauri 2 桌面应用，单实例、纯本地（SQLite + 本地文件），无服务端。
+前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），
+二者只经 tauri-specta 生成的类型化 IPC 通信。
+
+### 后端（`src-tauri/src/`）
+
+| 模块           | 职责                                                                     |
+| ------------ | ---------------------------------------------------------------------- |
+| `lib.rs`     | **命令/事件的唯一登记点**（`specta_builder()`）+ 应用启动装配。加命令必改这里。                    |
+| `state.rs`   | `AppState`：DB 池 · 密钥存储 · 数据目录 · 引擎。业务真相的持有者。                            |
+| `commands/`  | IPC 命令层（薄）：校验入参 → 调 repo/引擎 → 组视图结构体。按域分文件。                             |
+| `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。          |
+| `engine/`    | 任务引擎：`dispatcher`（单循环 + per-Key Semaphore）· `status`（7 态机）· `strategy` · `classify`（错误六类）· `progress`（伪进度）· `recovery`（中断恢复）· `events`（EventSink 抽象，故引擎可脱离 Tauri 测试）。 |
+| `provider/`  | 生图 Provider 抽象；V1 唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`（元数据/C2PA 剥离）。 |
+| `publish/`   | 发布与资产管理（最大子系统）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。 |
+| `v2v/`       | 图生视频导出包（manifest.jsonl + ledger.jsonl + images/ + thumbs/ + READY.txt）。 |
+| `purpose.rs` | 用途（管线）受控取值单点，同 `publish/platform.rs` 的模式。                               |
+| `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）+ 一次性 keyring 迁移。                   |
+| `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                  |
+
+### 前端（`src/`）
+
+`features/<页面>/` 一页一文件（普遍 600–1900 行，就地展开而非过度拆组件）·
+`routes.tsx` 是**路由/侧栏/⌘K/快捷键的单一来源** · `stores/` Zustand（engine 镜像事件、
+generate 选择态、ui、settings、publish）· `lib/ipc/` 唯一 IPC 出入口 ·
+`styles/globals.css` 唯一 token 来源。
+
+### 一条请求的完整链路（改生成相关代码前先读懂这条）
+
+```
+GeneratePage 选组/挂靠 → commands::batches::create_batch
+  → engine::create_batch（同事务：展开组合 × 抽卡 → tasks + batch_refs + 归档本批组与图）
+  → Scheduler 循环取 q 态 → per-Key Semaphore 限并发 → provider.generate(multipart)
+  → 落盘 outputs/ + 缩略图 → 状态迁移 rev（待验收）
+  → EventSink 推 task://status-changed · task://progress · batch://summary（250ms 节流）
+  → stores/engine 镜像 → 任务页/导航徽章
+```
+
+**生成参数只有 `size` / `quality` 会进 multipart**（`provider::GenParams`）；批次的
+`params_json` 比它宽（还有 `draws`/`watermark`/输出处理开关等纯 UI 键，供「再来一批」还原），
+Rust 侧静默忽略。**故意不加 `deny_unknown_fields`**：严格解析会让整份快照退化成「全部空」，
+用户选的尺寸反而一个字段都发不出去。
+
 ## 架构铁律（均有机器检查）
 
 1. **业务真相只在 Rust**：任务状态、编号发放、文件操作、DB 读写全部经 Rust 命令；
    前端不持有可变业务状态，Zustand 只做事件镜像与 UI 态。
 2. **单写者事务**：所有状态迁移由调度器串行提交；配合 single-instance 禁双开。
-3. **前端只经&#x20;********`src/lib/ipc/`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\* 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
+3. **前端只经 `src/lib/ipc/` 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
 4. **事件驱动不轮询**：进度/汇总/健康经 Tauri 事件推送，250ms 节流；导航徽章由事件驱动。
-5. **token 只从&#x20;********`src/styles/globals.css`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\* 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
+5. **token 只从 `src/styles/globals.css` 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
 6. **视觉以原型 HTML 源码为准**（读源码，不截图猜测）。
 
 ## IPC 约定
@@ -45,16 +129,19 @@
 ## 错误处理规范
 
 - 统一 `thiserror` 错误类型（`src-tauri/src/error.rs`）经 IPC 序列化给前端。
-- **非测试代码禁&#x20;********`unwrap`********\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*/********`expect`************/\*\*\*\*\*\*\*\*\*\*\*\*********\*\*\*\*****`panic`** → Cargo `[lints.clippy]` 强制（deny）。
+- **非测试代码禁 `unwrap` / `expect` / `panic`** → Cargo `[lints.clippy]` 强制（deny）。
   测试内允许，但须以带说明注释的 `#[allow(...)]` 局部放开（guardrails 校验说明）。
 - 前端未捕获错误经 `reportFrontendError` → `log_frontend_error` 命令汇入统一 tracing 日志。
-- 业务错误六类：Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other（技术文档 4.2）。
+- 业务错误六类：Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other
+  （分类器 `engine/classify.rs`；Interrupted 为引擎内部态，不来自 provider）。
 
 ## 视觉规范
 
 - 颜色/圆角/间距/字号/阴影/动效时长全部为 `globals.css` 的 CSS 变量（oklch 原值仅此一处）。
-- **8 态 → 5 视觉组映射**：待生成 `q`=灰；生成中 `run`+重试中 `retry`=蓝(spinner)；
+- **7 态 → 5 视觉组映射**：待生成 `q`=灰；生成中 `run`+重试中 `retry`=蓝(spinner)；
   失败 `fail`=红；成功 `rev`(待验收)=琥珀；已通过 `pass`=绿 / 未通过 `rej`=灰。
+  （`TaskStatus` 与 0001 的 CHECK 都是 7 个：q/run/retry/rev/pass/rej/fail。早期文档与
+  0001 注释里的「八态」是沿用初版规划的笔误，以枚举为准。）
 - 动效尊重 `prefers-reduced-motion`，另有设置页「标准/减弱」开关。
 
 ## 领域词汇表
@@ -62,6 +149,15 @@
 - **批次(batch)**：一次「开始生成」创建的任务集合；全部达终态后自动 `archived`。
 - **挂靠**：生成页每张参考图指定一个提示词组；任务数 = Σ(参考图 × 其挂靠组提示词数)（非笛卡尔积）。
 - **临时分组(is\_temp)**：生成页导入 txt 产生；该组任一提示词首次验收通过 → 整组转正式。
+- **归档(archived\_at, 0016)**：批次开跑后自动给本批的提示词组与参考图打戳。**只**决定
+  生成页选择器是否默认列出，库里仍在、可查、可一键取消。与「删除」无关。
+- **图库分组(ref\_groups, 0019)**：参考图库自己的目录，**与提示词组无关**。历史列
+  `ref_images.group_id`（指向 prompt\_groups）已废弃，不读不写。
+- **临时上传(ephemeral, 0019)**：生成页上传的参考图，只作本批附件。仍是 ref\_images 行
+  （tasks/batch\_refs/accepted\_works 以它为父表），但图库页、「从参考图库选择」、
+  去重基准三处都不含它。
+- **用途标签(purpose)**：标在**提示词组**上（不在图上、不在批次上——批次会混组）；
+  受控取值单点 `purpose.rs`，当前只有「图生视频」。是筛选默认值，**不是门禁**。
 - **号池**：编号 `前缀-0001` 递增发放，回收优先；发放/回收与业务写同事务。输出文件名去连字符。
 - **废纸篓**：未通过/删除内容暂存（留缩略图+提示词记录，删原图）；清理=物理删+级联删+编号回收，不可恢复。
 - **伪进度**：生图 API 无真实进度；排队 0→请求 10%→elapsed/expected 线性至 90%→下载 90-98%→落盘 100%。
@@ -99,15 +195,27 @@
 guardrails · Biome ci · tsc strict · vitest · vite build · cargo fmt · clippy -D warnings ·
 cargo test（含 bindings 同步）· cargo check。
 
+`pnpm check` 与 CI（`.github/workflows/check.yml`）互为镜像；`lefthook.yml` 是它的秒级
+子集（guardrails + biome + tsc + fmt + clippy），装了 pre-commit 也仍需在提交前跑全门禁。
+
+**注意**：门禁第 8 步会校验 `bindings.ts` 已同步（`git diff --exit-code`）。改过 Rust
+契约后若只重新生成而未 `git add`，这步会红——**先 stage 再跑 `pnpm check`**。
+
 **数据层实现说明**：sqlx 采用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的
 `cargo test` 集成测试覆盖（比仅编译期检查更强）；故未接入 `cargo sqlx prepare --check`。
-CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml）与每周 `cargo audit`
-（`--ignore` 无修复传递告警，audit.yml）。
+CI 已接入 `cargo llvm-cov`（**engine / ids / importer / publish 纯逻辑 ≥ 85%** 行闸门，
+check.yml；`commands/` · `db/repo/` · `provider/` · publish 的 IO/glue 由集成测试覆盖，
+经 `--ignore-filename-regex` 排除出闸门）与每周 `cargo audit`（`--ignore` 无修复传递告警，
+audit.yml）。
+
+**迁移约定**：`src-tauri/migrations/` forward-only，发布后不可改（`db/repo/mod.rs` 里
+「重放 0019 搬运语句」那条测试正是建立在这个前提上）。默认留在事务内；只有必须
+`PRAGMA foreign_keys=OFF` 的表重建才用 `-- no-transaction`（见 0017 的教训）。
 
 ## 里程碑进度
 
 - [x] **M0 骨架与门禁** — Tauri2+React19 骨架、设计 tokens、窗口壳、命令面板、质量门禁全套。
-- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api\_keys(keyring)/refs/prompts 域命令 + 前端 settings store。
+- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api\_keys(当时用 keyring，v0.10.0 已改本地加密文件)/refs/prompts 域命令 + 前端 settings store。
 - [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
   调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
   域命令 + 4 事件(status/progress/summary/keyHealth)。M2 出口 cargo-mutants 已跑（见 M5）。
@@ -120,9 +228,11 @@ CI 已接入 `cargo llvm-cov`（engine/ids/importer ≥ 85% 闸门，check.yml�
 - [x] **M5 收尾质量关** — pnpm/cargo audit 清零（无修复传递告警书面豁免）；cargo-mutants(engine/+ids/)
   存活体全部补测试或书面豁免（docs/mutants-exemptions.md）；八页 UI 冒烟 + reduced-motion；
   §7 V2 预留自检 + V2 backlog（docs/V2-backlog.md）。**人工收尾清单**（AI 不可替代，交付前执行）见 V2-backlog.md。
-- [x] **UX 优化阶段 E01–E41（v0.3.0）** — 三批 41 条 UX 评审建议全数落地（《内部图片生产工具_UX优化执行计划.md》
-  M6 安全修正 → M7 生成调度 → M8 验收工作台 → M9 资产运维）。migration 到 0009；单分支
-  `feat/ux-overhaul` 小步提交（每项/组一 commit 注明 Exx，保 bisect），一次 PR 合入 main。
+- [x] **UX 优化阶段 E01–E41（v0.3.0）** — 三批 41 条 UX 评审建议全数落地（计划文档已随 445b396
+  删除；四阶段为 M6 安全修正 → M7 生成调度 → M8 验收工作台 → M9 资产运维）。migration 到 0009；
+  单分支 `feat/ux-overhaul` 小步提交（每项/组一 commit 注明 Exx，保 bisect），一次 PR 合入 main。
+  **代码里 `E07`/`E30b`/`E41` 这类编号仍在注释中大量出现**，指的就是这批条目——文档没了，
+  但 `git log --grep=E30b` 能找到对应 commit。
 - [x] **生成输出处理 + 6 项 UX（v0.4.0）** — 输出元数据/C2PA 剥离（provider::sanitize）、生成页两栏消留白、
   缩略图瀑布流、废纸篓详情、任务多选删/重试、提示词 txt 宽泛解析等（PR #5）。
 - [x] **图片生成页 1:1 重构（v0.5.0）** — 按 Claude Design handoff 原型将生成页由堆叠卡片改为两栏就地挂靠：

@@ -466,6 +466,18 @@ async parsePromptTxt(path: string) : Promise<Result<ImportPreview, AppError>> {
 }
 },
 /**
+ * 用户在预览里改过组名 / 拆并分组后，重算前缀、编号区间与「是否新建组」。
+ * 解析器只负责给出**初稿**：认错分组不再需要回去改 txt，改完这里重新预览即可。
+ */
+async repreviewImport(preview: ImportPreview) : Promise<Result<ImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("repreview_import", { preview }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 第二步：落库（ctx=generate 时建临时分组）。号池发放与写入同事务。
  */
 async commitPromptImport(preview: ImportPreview, ctx: string) : Promise<Result<ImportResult, AppError>> {
@@ -1826,6 +1838,14 @@ export type ImportPreviewGroup = { name: string; prefix: string; scene: string; 
  * 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
  */
 codeRange: string; isNewGroup: boolean; 
+/**
+ * 组名是猜的（文档没有显式分组标记，按行的形态推断）→ UI 标「疑似」并请用户确认。
+ */
+inferred: boolean; 
+/**
+ * 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
+ */
+prefixExplicit: boolean; 
 /**
  * 提示词（正文 + 可选小标题；commit 阶段回传落库）
  */

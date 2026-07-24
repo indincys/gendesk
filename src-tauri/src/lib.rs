@@ -79,6 +79,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::prompts::toggle_prompt_favorite,
             commands::prompts::trash_prompt,
             commands::prompts::parse_prompt_txt,
+            commands::prompts::repreview_import,
             commands::prompts::commit_prompt_import,
             commands::prompts::save_prompt_template,
             // batches / tasks 域（引擎）

@@ -1602,6 +1602,80 @@ a:hover {
   margin-top: 5px;
   line-height: 1.6;
 }
+/* 可编辑导入预览：分组卡 + 逐条编辑 */
+.impgrps {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.impgrp {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.impgrp.sus {
+  border-color: oklch(70% 0.13 80 / 0.55);
+  background: var(--wrbg);
+}
+.impgrp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+}
+.impname {
+  flex: 1;
+  min-width: 90px;
+}
+.impprefix {
+  width: 74px;
+  font-family: var(--mono);
+  text-align: center;
+  padding: 0 4px;
+}
+.impsus {
+  border: none;
+  cursor: pointer;
+}
+.impsus:hover {
+  filter: brightness(0.96);
+}
+.icb.impdel:hover {
+  color: var(--er);
+  background: var(--erbg);
+}
+.impgrp-body {
+  border-top: 1px solid var(--line);
+  background: var(--sub);
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.improw {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+.improw-n {
+  width: 22px;
+  flex: none;
+  padding-top: 8px;
+  font: 500 10.5px var(--mono);
+  color: var(--t3);
+  text-align: right;
+}
+.ta.impbody {
+  min-height: 52px;
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.65;
+  background: #fff;
+}
 /* E20 分组操作菜单 */
 .gwrap {
   position: relative;

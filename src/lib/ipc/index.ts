@@ -24,6 +24,7 @@ export type {
   PromptStat,
   ImportPreview,
   ImportPreviewGroup,
+  ImportPreviewPrompt,
   ImportResult,
   KeyHealth,
   PromptView,

@@ -167,9 +167,9 @@ export function PromptsPage() {
     return () => un();
   }, [parsePath]);
 
-  const confirmImport = async () => {
-    if (!importPreview) return;
-    const res = await unwrap(commands.commitPromptImport(importPreview, "library")).catch((e) => {
+  // edited = 用户在预览弹窗里改过分组/条目后的最终态。
+  const confirmImport = async (edited: ImportPreview) => {
+    const res = await unwrap(commands.commitPromptImport(edited, "library")).catch((e) => {
       toast.error(String(e));
       return null;
     });
@@ -495,7 +495,7 @@ export function PromptsPage() {
       {importPreview && (
         <ImportPreviewModal
           preview={importPreview}
-          confirmLabel={`导入 ${importPreview.total} 条`}
+          confirmLabel="导入"
           onConfirm={confirmImport}
           onClose={() => setImportPreview(null)}
         />

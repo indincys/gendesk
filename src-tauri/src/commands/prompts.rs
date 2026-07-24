@@ -42,6 +42,10 @@ pub struct ImportPreviewGroup {
     /// 预分配编号区间预览，如 "DZ-0001 ~ DZ-0024"（忽略回收池，仅供参考）
     pub code_range: String,
     pub is_new_group: bool,
+    /// 组名是猜的（文档没有显式分组标记，按行的形态推断）→ UI 标「疑似」并请用户确认。
+    pub inferred: bool,
+    /// 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
+    pub prefix_explicit: bool,
     /// 提示词（正文 + 可选小标题；commit 阶段回传落库）
     pub prompts: Vec<ImportPreviewPrompt>,
 }
@@ -76,6 +80,17 @@ fn gen_prefix_from_name(name: &str) -> String {
     } else {
         "IM".to_string()
     }
+}
+
+/// 规整用户手填的前缀：只留 ASCII 字母数字、大写、最长 6 位；剩不下东西则返回 None。
+fn sanitize_prefix(raw: &str) -> Option<String> {
+    let s: String = raw
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(6)
+        .collect::<String>()
+        .to_uppercase();
+    (!s.is_empty()).then_some(s)
 }
 
 /// 提示词视图（编号网格 / 详情）。
@@ -413,7 +428,11 @@ pub async fn parse_prompt_txt(
     path: String,
 ) -> AppResult<ImportPreview> {
     let bytes = std::fs::read(&path)?;
-    let parsed = importer::parse(&bytes);
+    // 文件名（不含扩展名）作为「文档里没写分组名」时的兜底组名。
+    let stem = std::path::Path::new(&path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string());
+    let parsed = importer::parse_named(&bytes, stem.as_deref());
     if parsed.groups.is_empty() {
         return Err(AppError::InvalidInput("未从文件解析出任何提示词".into()));
     }
@@ -423,21 +442,16 @@ pub async fn parse_prompt_txt(
     for g in &parsed.groups {
         let (prefix, is_new) = resolve_prefix(&state, g, &mut used_prefixes).await?;
         let count = g.prompts.len() as i64;
-        let start = ids::peek_next(&state.db, &prefix).await.unwrap_or(1);
-        let end = start + count - 1;
-        let code_range = format!(
-            "{} ~ {}",
-            ids::format_code(&prefix, start),
-            ids::format_code(&prefix, end)
-        );
         groups.push(ImportPreviewGroup {
             name: g.name.clone(),
+            code_range: code_range(&state, &prefix, count).await,
+            prefix_explicit: g.prefix.is_some(),
             prefix,
             scene: g.scene.clone(),
             tags: g.tags.clone(),
             count,
-            code_range,
             is_new_group: is_new,
+            inferred: g.origin == importer::GroupOrigin::Inferred,
             prompts: g
                 .prompts
                 .iter()
@@ -463,6 +477,79 @@ pub async fn parse_prompt_txt(
         total,
         groups,
         warnings,
+    })
+}
+
+/// 编号区间预览字符串（忽略回收池，仅供参考）。空组返回空串。
+async fn code_range(state: &AppState, prefix: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    let start = ids::peek_next(&state.db, prefix).await.unwrap_or(1);
+    format!(
+        "{} ~ {}",
+        ids::format_code(prefix, start),
+        ids::format_code(prefix, start + count - 1)
+    )
+}
+
+/// 用户在预览里改过组名 / 拆并分组后，重算前缀、编号区间与「是否新建组」。
+/// 解析器只负责给出**初稿**：认错分组不再需要回去改 txt，改完这里重新预览即可。
+#[tauri::command]
+#[specta::specta]
+pub async fn repreview_import(
+    state: State<'_, AppState>,
+    preview: ImportPreview,
+) -> AppResult<ImportPreview> {
+    let mut used_prefixes: HashSet<String> = HashSet::new();
+    let mut groups = Vec::with_capacity(preview.groups.len());
+    for g in &preview.groups {
+        if g.prompts.is_empty() {
+            continue; // 用户把组清空了 → 直接消失
+        }
+        let name = g.name.trim();
+        let name = if name.is_empty() {
+            "未命名分组"
+        } else {
+            name
+        };
+        // 显式前缀（文件里写的 / 用户手填的）沿用，其余按当前组名重新生成并保证唯一。
+        let parsed = ParsedGroup {
+            name: name.to_string(),
+            prefix: g
+                .prefix_explicit
+                .then(|| sanitize_prefix(&g.prefix))
+                .flatten(),
+            scene: g.scene.clone(),
+            tags: g.tags.clone(),
+            prompts: Vec::new(),
+            origin: importer::GroupOrigin::Explicit,
+        };
+        let (prefix, is_new) = resolve_prefix(&state, &parsed, &mut used_prefixes).await?;
+        let count = g.prompts.len() as i64;
+        groups.push(ImportPreviewGroup {
+            name: name.to_string(),
+            code_range: code_range(&state, &prefix, count).await,
+            prefix,
+            prefix_explicit: g.prefix_explicit,
+            scene: g.scene.clone(),
+            tags: g.tags.clone(),
+            count,
+            is_new_group: is_new,
+            // 「疑似」由用户在预览里点确认才消，不因为改了别处而自动消失。
+            inferred: g.inferred,
+            prompts: g.prompts.clone(),
+        });
+    }
+    if groups.is_empty() {
+        return Err(AppError::InvalidInput("没有可导入的提示词".into()));
+    }
+    let total = groups.iter().map(|g| g.count).sum();
+    Ok(ImportPreview {
+        encoding: preview.encoding,
+        total,
+        groups,
+        warnings: preview.warnings,
     })
 }
 
@@ -543,21 +630,41 @@ pub async fn commit_prompt_import(
     let is_temp = ctx == "generate";
     let source = if is_temp { "temp_import" } else { "library" };
 
+    // 预览可被用户改过（改名/拆并/删条），这里按最终态兜底校验，不信任前端结构。
+    if preview.groups.iter().all(|g| g.prompts.is_empty()) {
+        return Err(AppError::InvalidInput("没有可导入的提示词".into()));
+    }
+
     let mut tx = state.db.begin().await?;
     let mut group_ids = Vec::new();
     let mut inserted = 0i64;
 
     for pg in &preview.groups {
+        let prompts: Vec<&ImportPreviewPrompt> = pg
+            .prompts
+            .iter()
+            .filter(|p| !p.text.trim().is_empty())
+            .collect();
+        if prompts.is_empty() {
+            continue; // 空组不落库
+        }
+        let name = pg.name.trim();
+        let name = if name.is_empty() {
+            "未命名分组"
+        } else {
+            name
+        };
+        let prefix = sanitize_prefix(&pg.prefix).unwrap_or_else(|| gen_prefix_from_name(name));
         // 复用已有同前缀分组，或新建。
-        let group_id = match repo::find_group_by_prefix(&state.db, &pg.prefix).await? {
+        let group_id = match repo::find_group_by_prefix(&state.db, &prefix).await? {
             Some(existing) => existing.id,
-            None => repo::create_group(&mut tx, &pg.name, &pg.prefix, &pg.scene, is_temp).await?,
+            None => repo::create_group(&mut tx, name, &prefix, &pg.scene, is_temp).await?,
         };
         group_ids.push(group_id);
 
-        for p in &pg.prompts {
-            let number = ids::allocate(&mut tx, &pg.prefix).await?;
-            let code = ids::format_code(&pg.prefix, number);
+        for p in prompts {
+            let number = ids::allocate(&mut tx, &prefix).await?;
+            let code = ids::format_code(&prefix, number);
             repo::insert_prompt(
                 &mut tx,
                 group_id,
@@ -603,6 +710,17 @@ pub async fn commit_prompt_import(
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
     use super::*;
+
+    // 前缀在预览里可手填，落库前必须规整成号池能用的形状（编号 `前缀-0001`）。
+    #[test]
+    fn sanitize_prefix_keeps_only_ascii_alnum() {
+        assert_eq!(sanitize_prefix(" dz ").as_deref(), Some("DZ"));
+        assert_eq!(sanitize_prefix("电商DZ主图").as_deref(), Some("DZ"));
+        assert_eq!(sanitize_prefix("A-B_C").as_deref(), Some("ABC"));
+        assert_eq!(sanitize_prefix("ABCDEFGHIJ").as_deref(), Some("ABCDEF")); // 截 6 位
+        assert_eq!(sanitize_prefix("纯中文"), None);
+        assert_eq!(sanitize_prefix(""), None);
+    }
 
     #[test]
     fn gen_prefix_takes_ascii_or_default() {

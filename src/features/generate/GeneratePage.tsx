@@ -161,9 +161,9 @@ export function GeneratePage() {
     await parseTxt(path);
   };
 
-  const confirmImport = async () => {
-    if (!importPreview) return;
-    const res = await unwrap(commands.commitPromptImport(importPreview, "generate")).catch((e) => {
+  // edited = 用户在预览弹窗里改过分组/条目后的最终态。
+  const confirmImport = async (edited: ImportPreview) => {
+    const res = await unwrap(commands.commitPromptImport(edited, "generate")).catch((e) => {
       toast.error(String(e));
       return null;
     });
@@ -801,7 +801,7 @@ export function GeneratePage() {
         <ImportPreviewModal
           preview={importPreview}
           note="将作为本批次临时分组"
-          confirmLabel={`导入 ${importPreview.total} 条`}
+          confirmLabel="导入"
           onConfirm={confirmImport}
           onClose={() => setImportPreview(null)}
         />

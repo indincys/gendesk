@@ -12,10 +12,15 @@
 //! - **裸括号自动判层**：独占一行的括号块 `【名称】`（亦支持 `[名称]`/`［名称］`/`〖名称〗`），
 //!   若其下一条非空行是「正文」→ 视为该正文的**小标题**；否则（下一条是另一括号块 / 元信息头）
 //!   → 视为**分组头**。这样图中「`【分组】` 换行 `【小标题】` 换行 `1．正文`」结构可零配置识别。
+//! - **无标记文档的形态推断**（`heuristic_mode`：全文一处显式分组关键字都没有时才启用）：
+//!   「明显短于正文的独立行」按其**管辖的正文条数**判层 —— 管 ≥2 条 → 分组头；恰好 1 条 → 小标题。
+//!   这条规则让「首行写个标题、下面全是长段落」这种最常见的手写 txt 零配置就能分对组；
+//!   门槛严（正文中位数 ≥60 字、标题 ≤40 字且 ≤ 中位数 1/3、无句末标点、无前导序号）以免误吃正文。
+//!   推断出的分组标 `origin = Inferred`，UI 以「疑似」呈现并允许改名/并组。
 //! - 其它头部行 `前缀:`/`场景:`/`标签:` 设置当前分组元信息；
 //! - 正文行前导序号（`1.`/`2、`/`3）`/`(4)`/`（5）`/`①` 等）自动剥离；
 //! - 其余每条非空行 = 一条提示词（一行一提示词，空行忽略）；
-//! - 缺分组 → 归入默认分组「未分组导入」；缺前缀 → 由 commit 阶段自动分配。
+//! - 缺分组 → 用文件名兜底（`parse_named`），再兜底「未分组导入」；缺前缀 → 由 commit 阶段自动分配。
 
 /// 单条解析出的提示词（正文 + 可选小标题）。
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +28,17 @@ pub struct ParsedPrompt {
     /// 来自 `【小标题】` 行；无则 None。
     pub title: Option<String>,
     pub text: String,
+}
+
+/// 分组名的来源，决定 UI 的确信度呈现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupOrigin {
+    /// 文档里有明确的分组标记（`分组: X` / 独立括号行）。
+    Explicit,
+    /// 由行的形态推断（短标题行 + 其下多条正文）——UI 标「疑似」。
+    Inferred,
+    /// 文档里没有任何线索，用文件名或默认名兜底。
+    Fallback,
 }
 
 /// 单个解析出的分组。
@@ -33,6 +49,8 @@ pub struct ParsedGroup {
     pub scene: String,
     pub tags: Vec<String>,
     pub prompts: Vec<ParsedPrompt>,
+    /// 分组名从哪来（Explicit / Inferred / Fallback）。
+    pub origin: GroupOrigin,
 }
 
 /// 解析诊断（E37：行号级报错/提示，非致命）。
@@ -71,14 +89,117 @@ pub fn decode(bytes: &[u8]) -> (String, String) {
 }
 
 /// 解析字节流为结构化导入结果（不落库、不 panic）。
-pub fn parse(bytes: &[u8]) -> ParsedImport {
+///
+/// `file_stem` = 文件名（不含扩展名），用作「文档里没写分组名」时的兜底组名：比固定的
+/// 「未分组导入」有意义得多，`B-Roll素材分镜提示词_20260724.txt` → 组名
+/// `B-Roll素材分镜提示词`（尾部日期/副本后缀会被清掉）。无文件名时传 None。
+pub fn parse_named(bytes: &[u8], file_stem: Option<&str>) -> ParsedImport {
     let (encoding, text) = decode(bytes);
-    let (groups, warnings) = parse_text(&text);
+    let (mut groups, mut warnings) = parse_text(&text);
+
+    // 全文没给出任何分组线索 → 用文件名兜底命名那个默认组。
+    if groups.len() == 1 && groups[0].origin == GroupOrigin::Fallback {
+        let named = file_stem.map(clean_file_stem).filter(|s| !s.is_empty());
+        if let Some(name) = named {
+            warnings.push(ParseWarning {
+                line: 0,
+                message: format!(
+                    "文件里没有分组标记，已用文件名作为分组名「{name}」。可直接在下方改名。"
+                ),
+            });
+            groups[0].name = name;
+        }
+    }
+
     ParsedImport {
         encoding,
         groups,
         warnings,
     }
+}
+
+/// 文件名 → 分组名：去掉尾部日期戳（`_20260724` / `-2026-07-24`）、`(1)`、`副本`/`copy`
+/// 之类的噪声后缀，压缩空白。清不出东西时返回空串（调用方回落默认名）。
+fn clean_file_stem(stem: &str) -> String {
+    let mut s = stem.trim();
+    loop {
+        let before = s;
+        s = s
+            .trim_end_matches([' ', '_', '-', '－', '—', '·'])
+            .trim_end();
+        for suffix in ["副本", "copy", "Copy", "COPY"] {
+            if let Some(rest) = s.strip_suffix(suffix) {
+                s = rest.trim_end();
+            }
+        }
+        // 尾部 `(1)` / `（2）`
+        if let Some(rest) = s.strip_suffix([')', '）']) {
+            if let Some(open) = rest.rfind(['(', '（']) {
+                let inner = &rest[open..];
+                if inner.chars().skip(1).all(|c| c.is_ascii_digit()) && inner.chars().count() > 1 {
+                    s = rest[..open].trim_end();
+                }
+            }
+        }
+        // 尾部日期戳：连续 6~8 位数字，或 `2026-07-24` / `2026_07_24`。
+        let tail_len = s
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+            .count();
+        if tail_len > 0 {
+            let cut = s.len()
+                - s.chars()
+                    .rev()
+                    .take(tail_len)
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            let tail = &s[cut..];
+            let digits = tail.chars().filter(char::is_ascii_digit).count();
+            // 只吃「像日期」的尾巴，且不能把整个名字吃光。
+            if (6..=8).contains(&digits) && cut > 0 {
+                s = s[..cut].trim_end();
+            }
+        }
+        if s == before {
+            break;
+        }
+    }
+    s.trim().to_string()
+}
+
+/// 形态推断的门槛（见模块文档）。定得保守：只在「长段落正文 + 短标题行」这种
+/// 一眼可辨的文档上生效，宁可不认也不误吃正文。
+const HEADING_MAX_CHARS: usize = 40;
+const HEADING_MIN_BODY_MEDIAN: usize = 60;
+const HEADING_MIN_BODY_LINES: usize = 3;
+
+/// 「典型正文长度」基准（字符数），取 75 分位而非中位数：标题行本身也计入样本，
+/// 中位数会被它们拉低（两层结构「标题 / 小标题 / 长正文」里短行可占一半）。
+/// 样本不足或基准过短（=文档本来就都是短句）则返回 None，即不启用形态推断。
+fn body_scale(lines: &[(usize, &str)]) -> Option<usize> {
+    let mut lens: Vec<usize> = lines
+        .iter()
+        .filter(|(_, l)| is_body_line(l))
+        .map(|(_, l)| l.chars().count())
+        .collect();
+    if lens.len() < HEADING_MIN_BODY_LINES {
+        return None;
+    }
+    lens.sort_unstable();
+    let scale = lens[lens.len() * 3 / 4];
+    (scale >= HEADING_MIN_BODY_MEDIAN).then_some(scale)
+}
+
+/// 一行是否「长得像标题」：显著短于正文中位数、无句末标点、无前导序号。
+/// 仅在 `heuristic_mode`（全文无显式分组标记）下参与判层。
+fn is_heading_shape(line: &str, median: usize) -> bool {
+    let n = line.chars().count();
+    n > 0
+        && n <= HEADING_MAX_CHARS
+        && n * 3 <= median
+        && !line.contains(['。', '！', '？', '；', '，', '!', '?', ';'])
+        && strip_leading_number(line) == line
 }
 
 fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
@@ -99,7 +220,25 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     let mut pending_title: Option<(String, usize)> = None;
     // 是否已见过任一「分组」标记（E37：正文出现在分组标记前时告警一次）。
     let mut seen_group_header = false;
-    let mut warned_missing_group = false;
+    let mut orphan_warning: Option<ParseWarning> = None;
+
+    // 形态推断只在「全文一处显式分组关键字都没有」时启用：文档一旦自己表过态，就完全听它的。
+    let heuristic_mode = !lines.iter().any(|(_, l)| {
+        parse_group_header(l).is_some()
+            || parse_bracket_line(l).is_some_and(|inner| parse_group_header(&inner).is_some())
+    });
+    let median = if heuristic_mode {
+        body_scale(&lines)
+    } else {
+        None
+    };
+    // 第 i 行之后连续「纯正文」行的条数（标题形态的行不算正文）。判层用：管 ≥2 条 → 分组。
+    let body_run = |i: usize| -> usize {
+        lines[i + 1..]
+            .iter()
+            .take_while(|(_, l)| is_body_line(l) && !median.is_some_and(|m| is_heading_shape(l, m)))
+            .count()
+    };
 
     // 确保存在「当前分组」；否则建默认分组。
     fn ensure(cur: &mut Option<ParsedGroup>) -> &mut ParsedGroup {
@@ -109,15 +248,17 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
             scene: String::new(),
             tags: Vec::new(),
             prompts: Vec::new(),
+            origin: GroupOrigin::Fallback,
         })
     }
-    fn new_group(name: String) -> ParsedGroup {
+    fn new_group(name: String, origin: GroupOrigin) -> ParsedGroup {
         ParsedGroup {
             name,
             prefix: None,
             scene: String::new(),
             tags: Vec::new(),
             prompts: Vec::new(),
+            origin,
         }
     }
     fn warn_dangling(warnings: &mut Vec<ParseWarning>, pending: Option<(String, usize)>) {
@@ -140,7 +281,7 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
             if let Some(g) = cur.take() {
                 groups.push(g);
             }
-            cur = Some(new_group(name));
+            cur = Some(new_group(name, GroupOrigin::Explicit));
             seen_group_header = true;
             continue;
         }
@@ -165,39 +306,68 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
                 if let Some(g) = cur.take() {
                     groups.push(g);
                 }
-                cur = Some(new_group(name));
+                cur = Some(new_group(name, GroupOrigin::Explicit));
                 seen_group_header = true;
                 continue;
             }
-            match lines.get(i + 1) {
-                Some(&(_, next)) if is_body_line(next) => {
-                    warn_dangling(&mut warnings, pending_title.replace((inner, line)));
+            // 下一条是正文时通常是小标题；但若尚未出现过任何分组、且它下面管着 ≥2 条正文，
+            // 那它是这批正文的分组头（`【某某场景图】` 换行 一堆长正文 的常见写法）。
+            let as_group = match lines.get(i + 1) {
+                Some(&(_, next)) if is_body_line(next) => !seen_group_header && body_run(i) >= 2,
+                Some(_) => true,
+                None => false,
+            };
+            if as_group {
+                warn_dangling(&mut warnings, pending_title.take());
+                if let Some(g) = cur.take() {
+                    groups.push(g);
                 }
-                Some(_) => {
-                    warn_dangling(&mut warnings, pending_title.take());
-                    if let Some(g) = cur.take() {
-                        groups.push(g);
-                    }
-                    cur = Some(new_group(inner));
-                    seen_group_header = true;
-                }
-                None => {
-                    warn_dangling(&mut warnings, pending_title.replace((inner, line)));
-                }
+                cur = Some(new_group(inner, GroupOrigin::Explicit));
+                seen_group_header = true;
+            } else {
+                warn_dangling(&mut warnings, pending_title.replace((inner, line)));
             }
             continue;
         }
 
-        // 正文行：若此前从未见过「分组」标记，告警一次（含行号）。
-        if !seen_group_header && !warned_missing_group {
-            warnings.push(ParseWarning {
+        // 无标记文档：按形态判层。短标题行管 ≥2 条正文 → 分组头；恰管 1 条 → 小标题。
+        if let Some(m) = median {
+            if is_heading_shape(trimmed, m) {
+                let run = body_run(i);
+                let next_is_heading = lines
+                    .get(i + 1)
+                    .is_some_and(|(_, l)| !is_body_line(l) || is_heading_shape(l, m));
+                if run >= 2 || (run == 0 && next_is_heading) {
+                    warn_dangling(&mut warnings, pending_title.take());
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    cur = Some(new_group(trimmed.to_string(), GroupOrigin::Inferred));
+                    seen_group_header = true;
+                    continue;
+                }
+                if run == 1 {
+                    warn_dangling(
+                        &mut warnings,
+                        pending_title.replace((trimmed.to_string(), line)),
+                    );
+                    continue;
+                }
+                // run == 0 且已到文件尾 → 当作普通正文落下去。
+            }
+        }
+
+        // 正文行：若此前从未见过「分组」标记，暂存一条告警（含行号）。
+        // 只有当它最终真的成了「一堆正常分组旁边的孤儿组」才发出——整份文档都没分组时
+        // 那是常态，不该拿告警吓人（组名由文件名兜底，见 parse_named）。
+        if !seen_group_header && orphan_warning.is_none() {
+            orphan_warning = Some(ParseWarning {
                 line,
                 message: format!(
-                    "此行正文出现在任何「分组」标记之前，已归入默认分组「{DEFAULT_GROUP}」。\
-                     可在文件开头加一行「分组: 名称」。"
+                    "此行起的正文出现在第一个分组标记之前，已单独归入「{DEFAULT_GROUP}」。\
+                     可在下方改名，或用「并入下一组」合掉。"
                 ),
             });
-            warned_missing_group = true;
         }
         ensure(&mut cur).prompts.push(ParsedPrompt {
             title: pending_title.take().map(|(t, _)| t),
@@ -211,9 +381,57 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     if let Some(g) = cur.take() {
         groups.push(g);
     }
+    // 推断出来却一条正文都没管到的分组，说明这行八成本来就是条（短）提示词——
+    // 把它还回相邻分组的正文里，绝不因为猜错而丢内容。
+    salvage_empty_inferred(&mut groups);
     // 丢弃完全为空（无提示词）的分组。
     groups.retain(|g| !g.prompts.is_empty());
+    // 孤儿组告警：仅当它旁边确实还有别的分组时才有意义。
+    if let Some(w) = orphan_warning {
+        if groups.len() > 1 {
+            warnings.push(w);
+        }
+    }
+    warnings.sort_by_key(|w| w.line);
     (groups, warnings)
+}
+
+/// 把「推断出来但没管到任何正文」的分组名还原成提示词，挂到后一个（没有则前一个）分组上。
+/// 保证形态推断在猜错时最多是「分组分歧」，不会静默吞掉一条提示词。
+fn salvage_empty_inferred(groups: &mut Vec<ParsedGroup>) {
+    let mut orphans: Vec<ParsedPrompt> = Vec::new();
+    let mut kept: Vec<ParsedGroup> = Vec::with_capacity(groups.len());
+    for g in groups.drain(..) {
+        if g.origin == GroupOrigin::Inferred && g.prompts.is_empty() {
+            orphans.push(ParsedPrompt {
+                title: None,
+                text: g.name,
+            });
+            continue;
+        }
+        let mut g = g;
+        if !orphans.is_empty() {
+            let mut merged = std::mem::take(&mut orphans);
+            merged.append(&mut g.prompts);
+            g.prompts = merged;
+        }
+        kept.push(g);
+    }
+    if !orphans.is_empty() {
+        match kept.last_mut() {
+            Some(last) => last.prompts.append(&mut orphans),
+            // 全文只推断出空组：退回单个默认组，内容一条不落。
+            None => kept.push(ParsedGroup {
+                name: DEFAULT_GROUP.to_string(),
+                prefix: None,
+                scene: String::new(),
+                tags: Vec::new(),
+                prompts: orphans,
+                origin: GroupOrigin::Fallback,
+            }),
+        }
+    }
+    *groups = kept;
 }
 
 /// 一行是否为「正文」：既非显式分组头、亦非元信息头、亦非裸括号块。
@@ -401,6 +619,11 @@ fn split_tags(value: &str) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
     use super::*;
+
+    /// 测试便捷：不带文件名的解析（生产路径一律走 `parse_named`）。
+    fn parse(bytes: &[u8]) -> ParsedImport {
+        parse_named(bytes, None)
+    }
 
     /// 测试便捷：把 ParsedPrompt 拍平成 (title, text) 便于断言。
     fn flat(g: &ParsedGroup) -> Vec<(Option<&str>, &str)> {
@@ -738,6 +961,183 @@ mod tests {
     fn clean_document_has_no_warnings() {
         let out = parse("分组: A\n前缀: AA\n【标题】\n正文".as_bytes());
         assert!(out.warnings.is_empty());
+    }
+
+    /// 造一条「长段落正文」，长度远超形态推断的中位数门槛。
+    fn long_body(tag: &str) -> String {
+        format!(
+            "参考图中的卡套挂件产品完整原样保留，{}{}",
+            tag,
+            "光影自然。".repeat(30)
+        )
+    }
+
+    // 用户真实文件（B-Roll 素材分镜提示词）：首行一个裸标题，下面全是长段落，没有任何分组标记。
+    // 旧行为：整份塌进「未分组导入」并告警「请在文件开头加一行 分组:」。现在应推断出分组名。
+    #[test]
+    fn plain_heading_over_long_bodies_is_inferred_group() {
+        let mut doc = String::from("鹿晗-B-Roll素材分镜图\n\n");
+        for i in 0..5 {
+            doc.push_str(&long_body(&format!("第{i}帧")));
+            doc.push_str("\n\n");
+        }
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "鹿晗-B-Roll素材分镜图");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Inferred, "应标为疑似");
+        assert_eq!(out.groups[0].prompts.len(), 5, "标题行不得混进正文");
+        assert!(out.warnings.is_empty(), "认出来了就不该再告警");
+    }
+
+    // 多个裸标题各自管一批长正文 → 按标题拆分多组。
+    #[test]
+    fn multiple_plain_headings_split_groups() {
+        let doc = format!(
+            "鹿晗\n{}\n{}\n\n鞠婧祎\n{}\n{}\n{}\n",
+            long_body("a"),
+            long_body("b"),
+            long_body("c"),
+            long_body("d"),
+            long_body("e"),
+        );
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.groups[0].name, "鹿晗");
+        assert_eq!(out.groups[0].prompts.len(), 2);
+        assert_eq!(out.groups[1].name, "鞠婧祎");
+        assert_eq!(out.groups[1].prompts.len(), 3);
+    }
+
+    // 短标题与长正文 1:1 交替 → 是小标题而非分组（管辖条数才是判层依据）。
+    #[test]
+    fn plain_heading_governing_one_body_is_a_title() {
+        let doc = format!(
+            "奶茶店午后\n{}\n\n画室调色台\n{}\n",
+            long_body("a"),
+            long_body("b")
+        );
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1, "1:1 交替不应拆成分组");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Fallback);
+        let titles: Vec<_> = out.groups[0]
+            .prompts
+            .iter()
+            .map(|p| p.title.as_deref())
+            .collect();
+        assert_eq!(titles, vec![Some("奶茶店午后"), Some("画室调色台")]);
+    }
+
+    // 顶层分组 + 其下 1:1 小标题：两层结构都认。
+    #[test]
+    fn plain_heading_two_levels() {
+        let doc = format!(
+            "鹿晗-B-Roll素材分镜图\n奶茶店午后\n{}\n画室调色台\n{}\n",
+            long_body("a"),
+            long_body("b")
+        );
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "鹿晗-B-Roll素材分镜图");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Inferred);
+        assert_eq!(
+            flat(&out.groups[0]),
+            vec![
+                (Some("奶茶店午后"), long_body("a").as_str()),
+                (Some("画室调色台"), long_body("b").as_str()),
+            ]
+        );
+    }
+
+    // 防误吃：短正文文档（无长段落）不启用形态推断，短行仍是一条条提示词。
+    #[test]
+    fn short_body_document_is_not_reinterpreted() {
+        let doc = "白底商品正面\n商品材质细节特写\n楼道骑行随手拍\n天台画速写";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].prompts.len(), 4, "短文档每行仍是一条提示词");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Fallback);
+    }
+
+    // 防误吃：文档一旦有显式分组标记，就完全听它的，不再做形态推断。
+    #[test]
+    fn explicit_marker_disables_heuristics() {
+        let doc = format!(
+            "分组: 正式组\n短行也是一条正文\n{}\n{}\n{}\n",
+            long_body("a"),
+            long_body("b"),
+            long_body("c")
+        );
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "正式组");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Explicit);
+        assert_eq!(out.groups[0].prompts.len(), 4, "短行不得被吃成标题");
+    }
+
+    // 裸括号 + 其下多条正文（此前会被判成小标题，把正文全塞进默认组）。
+    #[test]
+    fn bare_bracket_governing_many_bodies_is_group() {
+        let doc = "【时代少年团场景图】\n甲正文\n乙正文\n丙正文";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].name, "时代少年团场景图");
+        assert_eq!(texts(&out.groups[0]), vec!["甲正文", "乙正文", "丙正文"]);
+        assert!(out.warnings.is_empty());
+    }
+
+    // 长短混排、其实没有标题的文档：推断可能猜错分层，但**一条都不能丢**。
+    #[test]
+    fn misjudged_short_lines_are_salvaged_not_dropped() {
+        let doc = format!(
+            "白底商品正面\n商品材质细节特写\n楼道骑行随手拍\n{}\n{}\n",
+            long_body("a"),
+            long_body("b")
+        );
+        let out = parse(doc.as_bytes());
+        let all: Vec<&str> = out
+            .groups
+            .iter()
+            .flat_map(|g| g.prompts.iter().map(|p| p.text.as_str()))
+            .collect();
+        // 最多一行被当成了组名，其余全部作为提示词保留。
+        assert!(all.contains(&"白底商品正面"), "短行不得被吞掉：{all:?}");
+        assert!(all.contains(&"商品材质细节特写"), "短行不得被吞掉：{all:?}");
+        assert_eq!(out.total_prompts(), 4);
+    }
+
+    // 文件名兜底：文档确实没线索时，用文件名而不是「未分组导入」。
+    #[test]
+    fn file_stem_names_the_fallback_group() {
+        let out = parse_named(
+            "只有一条正文。".as_bytes(),
+            Some("B-Roll素材分镜提示词_20260724"),
+        );
+        assert_eq!(out.groups[0].name, "B-Roll素材分镜提示词");
+        assert_eq!(out.groups[0].origin, GroupOrigin::Fallback);
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(out.warnings[0].line, 0, "非行内问题用 0 表示无行号");
+    }
+
+    // 文件名兜底只作用于「无线索」的默认组，认出来的分组名不被覆盖。
+    #[test]
+    fn file_stem_does_not_override_detected_group() {
+        let out = parse_named("分组: 真名\n正文".as_bytes(), Some("随便什么文件名"));
+        assert_eq!(out.groups[0].name, "真名");
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn cleans_file_stem_noise() {
+        assert_eq!(clean_file_stem("提示词_20260724"), "提示词");
+        assert_eq!(clean_file_stem("提示词 2026-07-24"), "提示词");
+        assert_eq!(clean_file_stem("提示词 (1)"), "提示词");
+        assert_eq!(clean_file_stem("提示词 副本"), "提示词");
+        assert_eq!(
+            clean_file_stem("B-Roll素材分镜提示词"),
+            "B-Roll素材分镜提示词"
+        );
+        // 不把名字吃光：纯数字文件名原样保留。
+        assert_eq!(clean_file_stem("20260724"), "20260724");
     }
 
     #[test]

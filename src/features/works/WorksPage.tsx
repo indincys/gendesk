@@ -2,13 +2,21 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
-import { type GroupView, type SkuView, type WorkView, commands, unwrap } from "@/lib/ipc";
+import {
+  type GroupView,
+  type PurposeView,
+  type SkuView,
+  type WorkView,
+  commands,
+  unwrap,
+} from "@/lib/ipc";
 import { tierVisual } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
 import {
   CheckSquare,
+  Clapperboard,
   Copy,
   Download,
   FolderOpen,
@@ -37,6 +45,10 @@ export function WorksPage() {
   const [confirmBatchDel, setConfirmBatchDel] = useState(false);
   const [assetPick, setAssetPick] = useState(false);
   const lastClicked = useRef<number | null>(null);
+  // 受控用途（后端单点）+ 当前用途筛选 + 是否隐藏已导出的。
+  const [purposes, setPurposes] = useState<PurposeView[]>([]);
+  const [purposeFilter, setPurposeFilter] = useState<string | null>(null);
+  const [hideExported, setHideExported] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -44,12 +56,20 @@ export function WorksPage() {
       const f = {
         groupId: typeof filter === "number" ? filter : null,
         favoriteOnly: filter === "fav",
+        tag: purposeFilter,
+        hideExported,
       };
       setWorks(await unwrap(commands.listWorks(f, null)));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [filter]);
+  }, [filter, purposeFilter, hideExported]);
+
+  useEffect(() => {
+    void unwrap(commands.listPurposes())
+      .then(setPurposes)
+      .catch(() => setPurposes([]));
+  }, []);
   useEffect(() => {
     void load();
   }, [load]);
@@ -179,6 +199,25 @@ export function WorksPage() {
     else toast.success(`已导出 ${n} 张到所选文件夹`);
     exitSelect();
   };
+  // 导出图生视频包：所选作品按分组分堆，一组一包（同组分镜要剪进同一条成片，
+  // 运镜语言与时长必须统一，跨组混包改写风格会飘）。
+  const batchExportV2v = async () => {
+    const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
+    if (!dir) return;
+    const ids = [...sel];
+    const packs = await unwrap(commands.exportWorksV2v(ids, dir)).catch((e) => {
+      toast.error(String(e));
+      return null;
+    });
+    if (!packs) return;
+    const total = packs.reduce((n, p) => n + p.exported, 0);
+    const skipped = packs.reduce((n, p) => n + p.skipped, 0);
+    toast.success(
+      `已导出 ${packs.length} 个包 · 共 ${total} 条${skipped > 0 ? `（${skipped} 条源文件缺失已跳过）` : ""}`,
+    );
+    exitSelect();
+    void load();
+  };
   const batchDelete = async () => {
     const ids = [...sel];
     await unwrap(commands.trashWorks(ids)).catch((e) => toast.error(String(e)));
@@ -203,6 +242,16 @@ export function WorksPage() {
             >
               <Download className="ic12" />
               导出到文件夹
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={batchExportV2v}
+              title="按分组导出为图生视频包（图 + 提示词 + manifest），供 Claude Code skill 调用即梦"
+            >
+              <Clapperboard className="ic12" />
+              导出图生视频包
             </button>
             <button
               type="button"
@@ -246,6 +295,29 @@ export function WorksPage() {
               >
                 <CheckSquare className="ic12" />
                 多选
+              </button>
+            )}
+            {/* 用途筛选：作品自身无标签，标签绑在它的提示词组上。
+                库里混着场景图/分镜图/别的用途，不按用途分开就挑不出该做视频的那批。 */}
+            {purposes.map((p) => (
+              <button
+                key={p.tag}
+                type="button"
+                className={cn("btn sm", purposeFilter === p.tag ? "" : "gho")}
+                onClick={() => setPurposeFilter(purposeFilter === p.tag ? null : p.tag)}
+                title={p.hint}
+              >
+                {p.tag}
+              </button>
+            ))}
+            {purposeFilter != null && (
+              <button
+                type="button"
+                className={cn("btn sm", hideExported ? "" : "gho")}
+                onClick={() => setHideExported((v) => !v)}
+                title="隐藏已经导出过图生视频包的作品（跨包去重，读导出台账）"
+              >
+                隐藏已导出
               </button>
             )}
             <div className="f1" />

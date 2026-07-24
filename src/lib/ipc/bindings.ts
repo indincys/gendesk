@@ -348,6 +348,38 @@ async setPromptGroupArchived(id: number, archived: boolean) : Promise<Result<nul
 }
 },
 /**
+ * 设置分组的受控「用途」，返回该组的最终标签集合。
+ * 
+ * 标签此前只有导入 txt 里写 `标签: xxx` 一条写入路径——而实测用户的 txt 从不带任何语法标记
+ * （v0.12.0 的形态推断就是为此而生），于是全库 tags 表长期一条记录都没有：机制建好了，
+ * 但入口只开在一个没人走的地方。此命令补上第二条、也是实际会走的那条路径。
+ * 
+ * **只替换用途标签，保留该组从 txt 导入的自由标签**：用途选择器不该顺手抹掉用户
+ * 在 txt 里写的 `标签: 白底,3C`。
+ * 
+ * 取值在此**强制校验**，不只靠 UI 只给选择器：命令是公开边界，一旦放进自由字符串，
+ * 「图生视频 / 图转视频 / v2v」三种拼法就会同时进库，下游按名字筛选各漏一半。
+ */
+async setPromptGroupPurposes(id: number, purposes: string[]) : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_prompt_group_purposes", { id, purposes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
+ */
+async listPurposes() : Promise<Result<PurposeView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_purposes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
  * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
  */
@@ -796,6 +828,20 @@ async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
 async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_works", { ids, destDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导出图生视频包（一包一组）。
+ * 
+ * 一包一组不是为了目录整齐：同组的分镜图最后要剪进同一条成片，运镜语言与时长必须统一，
+ * 跨组混一个包改写出来的风格会飘。所选作品按 group_id 分堆，每堆一个包。
+ */
+async exportWorksV2v(ids: number[], destDir: string) : Promise<Result<PackSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_works_v2v", { ids, destDir }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1966,6 +2012,22 @@ export type PackPatch = { note: string | null;
  * `Some(None)` = 清除封面；`Some(Some)` = 设为该包内文件名。
  */
 cover: string | null }
+/**
+ * 一次导出的结果摘要（回前端 toast）。
+ */
+export type PackSummary = { 
+/**
+ * 包目录绝对路径。
+ */
+packDir: string; 
+/**
+ * 包目录名（= work_exports.pack_id）。
+ */
+packId: string; exported: number; 
+/**
+ * 源文件缺失而跳过的条目数。
+ */
+skipped: number; strippedPrefixChars: number; strippedSuffixChars: number }
 export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
 /**
  * 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
@@ -2145,6 +2207,18 @@ schedulePaused?: boolean }
  * 设置补丁（部分更新）。
  */
 export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
+/**
+ * 一个用途选项（前端选择器渲染源）。
+ */
+export type PurposeView = { 
+/**
+ * 落库的标签名（tags.name）。
+ */
+tag: string; 
+/**
+ * 一句话说明，选择器里做副标题。
+ */
+hint: string }
 /**
  * 对账结果汇总。
  */
@@ -2480,7 +2554,15 @@ export type UpdateStateChanged = {
  * checking / downloading / ready / uptodate / error
  */
 state: string; version: string | null }
-export type WorkFilter = { groupId: number | null; favoriteOnly: boolean }
+export type WorkFilter = { groupId: number | null; favoriteOnly: boolean; 
+/**
+ * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
+ */
+tag: string | null; 
+/**
+ * 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
+ */
+hideExported: boolean }
 export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
 /**
  * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。

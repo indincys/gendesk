@@ -6,6 +6,7 @@ import {
   type GroupView,
   type ImportPreview,
   type PromptView,
+  type PurposeView,
   commands,
   subscribeFileDrop,
   unwrap,
@@ -33,6 +34,9 @@ export function PromptsPage() {
 
   // 分组排序：默认按拼音首字母升序；可切回导入/创建的原始顺序。
   const [sortByPinyin, setSortByPinyin] = useState(true);
+
+  // 受控用途清单（单点定义在后端 purpose.rs；前端不硬编码标签名）。
+  const [purposes, setPurposes] = useState<PurposeView[]>([]);
 
   // E36 多选态
   const [selectMode, setSelectMode] = useState(false);
@@ -62,6 +66,31 @@ export function PromptsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void unwrap(commands.listPurposes())
+      .then(setPurposes)
+      .catch(() => setPurposes([]));
+  }, []);
+
+  // 用途标在**分组**上：一张图的用途由它的提示词决定，提示词的用途由那份 txt 决定，
+  // 而一份 txt = 一个组。批次会混组，所以批次不是用途单元。
+  const togglePurpose = async (g: GroupView, tag: string) => {
+    const next = g.tags.includes(tag)
+      ? g.tags.filter((t) => t !== tag && purposes.some((p) => p.tag === t))
+      : [...g.tags.filter((t) => purposes.some((p) => p.tag === t)), tag];
+    try {
+      // 后端返回合并后的完整标签集（自由标签原样保留），以它为准回填。
+      const tags = await unwrap(commands.setPromptGroupPurposes(g.id, next));
+      setGroups((cur) => cur.map((x) => (x.id === g.id ? { ...x, tags } : x)));
+      toast(
+        g.tags.includes(tag) ? `「${g.name}」已取消「${tag}」` : `「${g.name}」已标记「${tag}」`,
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      void load();
+    }
+  };
 
   // 0016：归档只管「生成页选择器是否列出它」，分组与提示词本身分毫不动。
   const toggleArchive = async (g: GroupView) => {
@@ -418,6 +447,9 @@ export function PromptsPage() {
                       onToggleArchive={() => void toggleArchive(g)}
                       archived={g.archived}
                       canMerge={groups.length > 1}
+                      purposes={purposes}
+                      activePurposes={g.tags}
+                      onTogglePurpose={(tag) => void togglePurpose(g, tag)}
                     />
                   )}
                 </div>
@@ -522,7 +554,7 @@ function PChip({
   );
 }
 
-/** 分组操作菜单（E20：重命名 / 合并 / 删除）。 */
+/** 分组操作菜单（E20：重命名 / 合并 / 删除；用途标记）。 */
 function GroupMenu({
   onRename,
   onMerge,
@@ -530,6 +562,9 @@ function GroupMenu({
   onToggleArchive,
   archived,
   canMerge,
+  purposes,
+  activePurposes,
+  onTogglePurpose,
 }: {
   onRename: () => void;
   onMerge: () => void;
@@ -537,6 +572,9 @@ function GroupMenu({
   onToggleArchive: () => void;
   archived: boolean;
   canMerge: boolean;
+  purposes: PurposeView[];
+  activePurposes: string[];
+  onTogglePurpose: (tag: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -564,6 +602,24 @@ function GroupMenu({
       </button>
       {open && (
         <div className="gmenu">
+          {purposes.length > 0 && (
+            <>
+              <div className="gmlbl">用途</div>
+              {purposes.map((p) => (
+                <button
+                  key={p.tag}
+                  type="button"
+                  className="gmi"
+                  onClick={pick(() => onTogglePurpose(p.tag))}
+                  title={p.hint}
+                >
+                  {activePurposes.includes(p.tag) ? "✓ " : "　"}
+                  {p.tag}
+                </button>
+              ))}
+              <div className="gmsep" />
+            </>
+          )}
           <button type="button" className="gmi" onClick={pick(onRename)}>
             重命名
           </button>

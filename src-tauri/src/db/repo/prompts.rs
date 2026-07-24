@@ -259,6 +259,58 @@ pub async fn group_tags(pool: &SqlitePool, group_id: i64) -> Result<Vec<String>,
     .await
 }
 
+/// 追加绑定分组标签（幂等）。标签名去空白，空串跳过；同名标签全库共用一行。
+///
+/// 导入与 UI 两条写路径共用此函数：标签名的规整规则只此一处，否则
+/// 「导入写的 `图生视频` 与 UI 写的 `图生视频 `」会成为两个标签，下游筛选各漏一半。
+pub async fn bind_group_tags(
+    conn: &mut SqliteConnection,
+    group_id: i64,
+    tags: &[String],
+) -> Result<(), sqlx::Error> {
+    for raw in tags {
+        let tag = raw.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        sqlx::query("INSERT INTO tags (name) VALUES (?1) ON CONFLICT(name) DO NOTHING")
+            .bind(tag)
+            .execute(&mut *conn)
+            .await?;
+        let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?1")
+            .bind(tag)
+            .fetch_one(&mut *conn)
+            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO tag_bindings (tag_id, entity_type, entity_id)
+             VALUES (?1, 'prompt_group', ?2)",
+        )
+        .bind(tag_id)
+        .bind(group_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// 全量替换分组标签（UI 用途选择器）：先解绑该组全部标签，再按新集合绑定。
+/// 解绑后清理无人引用的 tags 行，避免标签下拉里堆积再也选不到的死名字。
+pub async fn set_group_tags(
+    conn: &mut SqliteConnection,
+    group_id: i64,
+    tags: &[String],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM tag_bindings WHERE entity_type = 'prompt_group' AND entity_id = ?1")
+        .bind(group_id)
+        .execute(&mut *conn)
+        .await?;
+    bind_group_tags(&mut *conn, group_id, tags).await?;
+    sqlx::query("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM tag_bindings)")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// 批量移动提示词到指定分组（编号/前缀保留原值不重编，E20/E36）。
 pub async fn move_prompts(
     conn: &mut SqliteConnection,

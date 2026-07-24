@@ -241,6 +241,49 @@ pub async fn set_prompt_group_archived(
     Ok(())
 }
 
+/// 设置分组的受控「用途」，返回该组的最终标签集合。
+///
+/// 标签此前只有导入 txt 里写 `标签: xxx` 一条写入路径——而实测用户的 txt 从不带任何语法标记
+/// （v0.12.0 的形态推断就是为此而生），于是全库 tags 表长期一条记录都没有：机制建好了，
+/// 但入口只开在一个没人走的地方。此命令补上第二条、也是实际会走的那条路径。
+///
+/// **只替换用途标签，保留该组从 txt 导入的自由标签**：用途选择器不该顺手抹掉用户
+/// 在 txt 里写的 `标签: 白底,3C`。
+///
+/// 取值在此**强制校验**，不只靠 UI 只给选择器：命令是公开边界，一旦放进自由字符串，
+/// 「图生视频 / 图转视频 / v2v」三种拼法就会同时进库，下游按名字筛选各漏一半。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_prompt_group_purposes(
+    state: State<'_, AppState>,
+    id: i64,
+    purposes: Vec<String>,
+) -> AppResult<Vec<String>> {
+    if repo::get_group(&state.db, id).await?.is_none() {
+        return Err(AppError::InvalidInput("分组不存在".into()));
+    }
+    for p in &purposes {
+        if !crate::purpose::is_purpose(p) {
+            return Err(AppError::InvalidInput(format!("未知用途：{p}")));
+        }
+    }
+    let existing = repo::group_tags(&state.db, id).await?;
+    let merged = crate::purpose::merge_purposes(&existing, &purposes);
+
+    let mut tx = state.db.begin().await?;
+    repo::set_group_tags(&mut tx, id, &merged).await?;
+    tx.commit().await?;
+    // 回读而非回显入参：去空白/去重/排序后的真实落库值才是前端该显示的。
+    Ok(repo::group_tags(&state.db, id).await?)
+}
+
+/// 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
+#[tauri::command]
+#[specta::specta]
+pub async fn list_purposes() -> AppResult<Vec<crate::purpose::PurposeView>> {
+    Ok(crate::purpose::all())
+}
+
 /// 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
 /// 自动从分组名生成唯一前缀（号池按前缀发放）。
 #[tauri::command]
@@ -677,25 +720,8 @@ pub async fn commit_prompt_import(
             inserted += 1;
         }
 
-        // 分组级标签绑定（V1：entity_type='prompt_group'）。
-        for tag in &pg.tags {
-            sqlx::query("INSERT INTO tags (name) VALUES (?1) ON CONFLICT(name) DO NOTHING")
-                .bind(tag)
-                .execute(&mut *tx)
-                .await?;
-            let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?1")
-                .bind(tag)
-                .fetch_one(&mut *tx)
-                .await?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO tag_bindings (tag_id, entity_type, entity_id)
-                 VALUES (?1, 'prompt_group', ?2)",
-            )
-            .bind(tag_id)
-            .bind(group_id)
-            .execute(&mut *tx)
-            .await?;
-        }
+        // 分组级标签绑定（V1：entity_type='prompt_group'）。与 UI 用途选择器同一写路径。
+        repo::bind_group_tags(&mut tx, group_id, &pg.tags).await?;
     }
 
     tx.commit().await?;

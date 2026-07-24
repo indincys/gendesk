@@ -13,8 +13,10 @@ mod importer;
 mod logging;
 mod provider;
 mod publish;
+mod purpose;
 mod secrets;
 mod state;
+mod v2v;
 
 use std::sync::Arc;
 
@@ -67,6 +69,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::prompts::create_prompt_group,
             commands::prompts::rename_prompt_group,
             commands::prompts::set_prompt_group_archived,
+            commands::prompts::set_prompt_group_purposes,
+            commands::prompts::list_purposes,
             commands::prompts::delete_prompt_group,
             commands::prompts::merge_prompt_groups,
             commands::prompts::move_prompts_to_group,
@@ -114,6 +118,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::set_works_favorite,
             commands::works::trash_works,
             commands::works::export_works,
+            commands::works::export_works_v2v,
             // stats 域（E25）
             commands::stats::list_group_stats,
             commands::stats::prompt_stats,

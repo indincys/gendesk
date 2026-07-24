@@ -1715,6 +1715,17 @@ a:hover {
 .gmi.dng:hover {
   background: var(--erbg);
 }
+/* 用途分区标题与分隔线（分组菜单顶部）。 */
+.gmlbl {
+  font-size: 11px;
+  color: var(--t3);
+  padding: 6px 9px 3px;
+}
+.gmsep {
+  height: 1px;
+  background: var(--line2);
+  margin: 4px 2px;
+}
 
 /* ============================ 废纸篓 ============================ */
 .xrow {

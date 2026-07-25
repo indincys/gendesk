@@ -133,6 +133,33 @@ pub async fn pick_handoff_root(app: AppHandle) -> AppResult<Option<String>> {
         .map(|p| p.to_string_lossy().to_string()))
 }
 
+/// 选即梦 CLI 可执行文件。
+///
+/// 「怎么知道路径填什么」不该由用户回答：给个文件选择器，再不济也有 [`resolve_v2v_bin`]
+/// 的自动探测兜着。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_dreamina_bin(app: AppHandle) -> AppResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 当前设置能解析到的 CLI 绝对路径（设置页直接显示「实际会执行哪个文件」）。
+///
+/// 回 `None` 而不是报错：设置页每次打开都调它，探测失败是常态（还没装），
+/// 不该每次进设置都弹一个红条。
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_v2v_bin(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    let s = load_settings(&state.db).await?;
+    Ok(dreamina::detect_bin(&s.bin))
+}
+
 /// 受控模型清单（前端选择器渲染源，单点在 `v2v::dreamina`）。
 #[tauri::command]
 #[specta::specta]
@@ -421,11 +448,14 @@ pub async fn preview_v2v_commands(
 ) -> AppResult<Vec<String>> {
     let s = load_settings(&state.db).await?;
     let defaults = s.defaults();
+    // 展示的就是即将 exec 的那一串，所以这里也要解析成绝对路径 —— 顺带让「CLI 找不到」
+    // 在花钱之前就报出来，而不是点了提交才发现。
+    let bin = dreamina::resolve_bin(&s.bin)?;
     let mut out = Vec::new();
     for clip in repo::take_ready(&state.db, &ids).await? {
         let opts = dreamina::normalize_opts(&runner::opts_for(&clip, &defaults))?;
         let argv = dreamina::command_line(
-            &s.bin,
+            &bin,
             &clip.image_path,
             clip.video_prompt.as_deref().unwrap_or(""),
             &opts,

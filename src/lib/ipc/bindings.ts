@@ -936,6 +936,34 @@ async pickHandoffRoot() : Promise<Result<string | null, AppError>> {
 }
 },
 /**
+ * 选即梦 CLI 可执行文件。
+ * 
+ * 「怎么知道路径填什么」不该由用户回答：给个文件选择器，再不济也有 [`resolve_v2v_bin`]
+ * 的自动探测兜着。
+ */
+async pickDreaminaBin() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_dreamina_bin") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 当前设置能解析到的 CLI 绝对路径（设置页直接显示「实际会执行哪个文件」）。
+ * 
+ * 回 `None` 而不是报错：设置页每次打开都调它，探测失败是常态（还没装），
+ * 不该每次进设置都弹一个红条。
+ */
+async resolveV2vBin() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_v2v_bin") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 受控模型清单（前端选择器渲染源，单点在 `v2v::dreamina`）。
  */
 async v2vModels() : Promise<Result<ModelInfo[], AppError>> {

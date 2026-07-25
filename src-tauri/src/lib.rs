@@ -128,6 +128,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,
             commands::v2v::pick_handoff_root,
+            commands::v2v::pick_dreamina_bin,
+            commands::v2v::resolve_v2v_bin,
             commands::v2v::v2v_models,
             commands::v2v::v2v_credit,
             commands::v2v::list_v2v_clips,

@@ -44,6 +44,16 @@ pub struct ImportPreviewGroup {
     pub is_new_group: bool,
     /// 组名是猜的（文档没有显式分组标记，按行的形态推断）→ UI 标「疑似」并请用户确认。
     pub inferred: bool,
+    /// 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
+    /// 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
+    ///
+    /// 刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段导成可选（`purposes?`），
+    /// 于是前端每一处读它都要先判 undefined，而后端其实永远都序列化它。
+    /// 预览结构是前后端整体往返的，缺字段只可能是手写调用，那本就该报错。
+    pub purposes: Vec<String>,
+    /// 用途是关键词预猜出来的（组名含 B-Roll/分镜/首帧…）→ UI 标琥珀「疑似」。
+    /// 与 `inferred` 分开：一个说的是组名的来源，一个说的是用途的来源，可以各自为真。
+    pub purpose_inferred: bool,
     /// 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
     pub prefix_explicit: bool,
     /// 提示词（正文 + 可选小标题；commit 阶段回传落库）
@@ -277,6 +287,89 @@ pub async fn set_prompt_group_purposes(
     Ok(repo::group_tags(&state.db, id).await?)
 }
 
+/// 按组名批量补标用途的一条命中。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PurposeHit {
+    pub group_id: i64,
+    pub name: String,
+    /// 该组下已验收通过的作品数（让人判断这一条值不值得标）。
+    pub work_count: i64,
+    pub purposes: Vec<String>,
+}
+
+/// 批量补标结果。`apply=false` 时只预览（applied=0）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PurposeBackfill {
+    pub hits: Vec<PurposeHit>,
+    pub applied: i64,
+    /// 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
+    pub scanned: i64,
+}
+
+/// 一个存量分组该补哪些用途（纯规则，便于测试）。空 = 跳过它。
+///
+/// **已标过用途的组一律跳过**：人可能刚刚手动取消过，下一轮重扫又给它加回去是最气人的
+/// 那种「软件比我懂」。补标只解决「从来没标过」这一种情况。
+fn backfill_candidates(existing: &[String], name: &str, scene: &str) -> Vec<String> {
+    if existing.iter().any(|t| crate::purpose::is_purpose(t)) {
+        return Vec::new();
+    }
+    crate::purpose::infer_purposes(name, scene, existing)
+}
+
+/// 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
+///
+/// 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
+/// `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
+/// `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
+/// 而不补就等于「验收自动入队」对全部历史资产失效。
+///
+/// **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
+#[tauri::command]
+#[specta::specta]
+pub async fn backfill_group_purposes(
+    state: State<'_, AppState>,
+    apply: bool,
+) -> AppResult<PurposeBackfill> {
+    let groups = repo::list_groups(&state.db).await?;
+    let scanned = groups.len() as i64;
+    let mut hits: Vec<PurposeHit> = Vec::new();
+    let mut applied = 0i64;
+
+    for g in groups {
+        let existing = repo::group_tags(&state.db, g.id).await?;
+        let guessed = backfill_candidates(&existing, &g.name, &g.scene);
+        if guessed.is_empty() {
+            continue;
+        }
+        let work_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works WHERE group_id = ?1")
+                .bind(g.id)
+                .fetch_one(&state.db)
+                .await?;
+        if apply {
+            let merged = crate::purpose::merge_purposes(&existing, &guessed);
+            let mut tx = state.db.begin().await?;
+            repo::set_group_tags(&mut tx, g.id, &merged).await?;
+            tx.commit().await?;
+            applied += 1;
+        }
+        hits.push(PurposeHit {
+            group_id: g.id,
+            name: g.name,
+            work_count,
+            purposes: guessed,
+        });
+    }
+    Ok(PurposeBackfill {
+        hits,
+        applied,
+        scanned,
+    })
+}
+
 /// 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
 #[tauri::command]
 #[specta::specta]
@@ -485,6 +578,20 @@ pub async fn parse_prompt_txt(
     for g in &parsed.groups {
         let (prefix, is_new) = resolve_prefix(&state, g, &mut used_prefixes).await?;
         let count = g.prompts.len() as i64;
+        // txt 里显式写了 `标签: 图生视频` 时它已在 tags 里，此时不算「预猜」。
+        let explicit: Vec<String> = g
+            .tags
+            .iter()
+            .filter(|t| crate::purpose::is_purpose(t))
+            .cloned()
+            .collect();
+        let guessed = crate::purpose::infer_purposes(&g.name, &g.scene, &g.tags);
+        let purpose_inferred = explicit.is_empty() && !guessed.is_empty();
+        let purposes = if explicit.is_empty() {
+            guessed
+        } else {
+            explicit
+        };
         groups.push(ImportPreviewGroup {
             name: g.name.clone(),
             code_range: code_range(&state, &prefix, count).await,
@@ -495,6 +602,8 @@ pub async fn parse_prompt_txt(
             count,
             is_new_group: is_new,
             inferred: g.origin == importer::GroupOrigin::Inferred,
+            purposes,
+            purpose_inferred,
             prompts: g
                 .prompts
                 .iter()
@@ -570,6 +679,14 @@ pub async fn repreview_import(
         };
         let (prefix, is_new) = resolve_prefix(&state, &parsed, &mut used_prefixes).await?;
         let count = g.prompts.len() as i64;
+        // 用途仍是预猜（用户没表态）→ 按**当前**组名重新推断：改名/拆组后猜测要跟着更新，
+        // 否则把 `B-Roll分镜` 改成 `电商主图` 之后那个视频用途还赖着不走。
+        // 用户一旦自己选过（purpose_inferred=false），原样沿用——同 prefix_explicit 的门道。
+        let purposes = if g.purpose_inferred {
+            crate::purpose::infer_purposes(name, &g.scene, &g.tags)
+        } else {
+            validate_purposes(&g.purposes)?
+        };
         groups.push(ImportPreviewGroup {
             name: name.to_string(),
             code_range: code_range(&state, &prefix, count).await,
@@ -581,6 +698,8 @@ pub async fn repreview_import(
             is_new_group: is_new,
             // 「疑似」由用户在预览里点确认才消，不因为改了别处而自动消失。
             inferred: g.inferred,
+            purpose_inferred: g.purpose_inferred && !purposes.is_empty(),
+            purposes,
             prompts: g.prompts.clone(),
         });
     }
@@ -631,6 +750,23 @@ pub async fn save_prompt_template(app: tauri::AppHandle) -> AppResult<Option<Str
     };
     std::fs::write(&path, PROMPT_TXT_TEMPLATE)?;
     Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// 校验用途取值（命令边界强制，不只靠 UI 给选择器）。
+///
+/// 命令是公开边界：放进自由字符串就会「图生视频/图转视频/v2v」三种拼法同时进库，
+/// 下游按字符串精确筛选时静默漏掉，且毫无报错。去重后返回，顺序按 `purpose::all()`。
+fn validate_purposes(input: &[String]) -> AppResult<Vec<String>> {
+    for p in input {
+        if !crate::purpose::is_purpose(p) {
+            return Err(AppError::InvalidInput(format!("未知用途：{p}")));
+        }
+    }
+    Ok(crate::purpose::all()
+        .into_iter()
+        .map(|p| p.tag)
+        .filter(|t| input.contains(t))
+        .collect())
 }
 
 /// 解析前缀：显式前缀优先；否则由名字生成并保证（本次导入 + DB）唯一。
@@ -721,7 +857,21 @@ pub async fn commit_prompt_import(
         }
 
         // 分组级标签绑定（V1：entity_type='prompt_group'）。与 UI 用途选择器同一写路径。
-        repo::bind_group_tags(&mut tx, group_id, &pg.tags).await?;
+        //
+        // 用途与 txt 里自由写的 `标签: 白底,3C` 恰好共用一张 tags 表，故经 merge_purposes
+        // 合并：先剔掉 tags 里混着的用途拼写，再补上校验过的受控值。**追加已有组时不覆盖**
+        // 组上原有的用途——同前缀二次导入不该把上次标好的用途抹掉。
+        // **导入只增不减**：追加进已有组（同前缀二次导入）时，绝不因为这份新 txt 的组名
+        // 不带关键词就把上次标好的用途抹掉。取消用途是提示词库那个选择器的职责
+        // （`set_prompt_group_purposes`），那里用户是明确冲着「改用途」去的。
+        let purposes = validate_purposes(&pg.purposes)?;
+        let mut merged = repo::group_tags(&state.db, group_id).await?;
+        for t in pg.tags.iter().chain(purposes.iter()) {
+            if !merged.contains(t) {
+                merged.push(t.clone());
+            }
+        }
+        repo::bind_group_tags(&mut tx, group_id, &merged).await?;
     }
 
     tx.commit().await?;
@@ -746,6 +896,45 @@ mod tests {
         assert_eq!(sanitize_prefix("ABCDEFGHIJ").as_deref(), Some("ABCDEF")); // 截 6 位
         assert_eq!(sanitize_prefix("纯中文"), None);
         assert_eq!(sanitize_prefix(""), None);
+    }
+
+    // 补标只解决「从来没标过」：已标过用途的组必须跳过，否则人手动取消掉的用途
+    // 会在下一轮补标里复活。
+    #[test]
+    fn backfill_skips_groups_that_already_have_a_purpose() {
+        let tagged = vec![crate::purpose::PURPOSE_I2V.to_string()];
+        assert!(
+            backfill_candidates(&tagged, "鹿晗-B-Roll素材分镜图", "").is_empty(),
+            "已标过的组不得重复补标"
+        );
+        // 只有自由标签的组照常补（自由标签与用途是两套东西）。
+        let free = vec!["白底".to_string()];
+        assert_eq!(
+            backfill_candidates(&free, "鹿晗-B-Roll素材分镜图", ""),
+            vec![crate::purpose::PURPOSE_I2V.to_string()]
+        );
+    }
+
+    // 真实组名（用户库里 187 组中的 33 个长这样）必须命中；普通组名不得被误标。
+    #[test]
+    fn backfill_matches_real_group_names_only() {
+        for name in [
+            "梓渝——b-roll图片素材",
+            "鹿晗-B-Roll素材分镜图",
+            "G-Dragon-B-Roll素材分镜图",
+        ] {
+            assert_eq!(
+                backfill_candidates(&[], name, ""),
+                vec![crate::purpose::PURPOSE_I2V.to_string()],
+                "{name} 应命中"
+            );
+        }
+        for name in ["电商主图", "白底商品", "详情页"] {
+            assert!(
+                backfill_candidates(&[], name, "").is_empty(),
+                "{name} 不应命中"
+            );
+        }
     }
 
     #[test]

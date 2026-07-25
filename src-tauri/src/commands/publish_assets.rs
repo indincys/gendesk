@@ -329,6 +329,57 @@ pub async fn pack_from_works(
     }
 }
 
+/// 成片 → 视频型素材包（视频流水线闭环的最后一步）。
+///
+/// 这一步是「视频的终点本来就在库内」那句话的落地：做视频的目的就是发布，而发布模块
+/// 早已有「视频型素材包 = 1 视频 + 封面」。让成片从另一个门回来纯属浪费。
+///
+/// **只接受已验收通过的成片**：未验收的片子进了资产库就会被排期选中发出去，
+/// 而验收正是为了拦住那种事。
+#[tauri::command]
+#[specta::specta]
+pub async fn pack_from_clip(
+    state: State<'_, AppState>,
+    sku_id: i64,
+    clip_id: i64,
+) -> AppResult<Option<PackView>> {
+    let root = publish_settings::root_local(&state.db).await?;
+    let sku = skus::get(&state.db, sku_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("SKU 不存在".into()))?;
+    let clip = crate::db::repo::v2v::get(&state.db, clip_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("视频条目不存在".into()))?;
+    if clip.stage != "pass" {
+        return Err(AppError::InvalidInput(
+            "只有验收通过的成片才能入资产库（未验收的片子会被排期直接发出去）".into(),
+        ));
+    }
+    let video = clip
+        .video_path
+        .ok_or_else(|| AppError::InvalidInput("该条目还没有成片文件".into()))?;
+    let id = ingest::build_video_from_paths(
+        &state.db,
+        &root,
+        sku_id,
+        &sku.code,
+        &video,
+        clip.poster_path.as_deref(),
+        "v2v",
+    )
+    .await?;
+    match id {
+        Some(id) => {
+            let s = publish_settings::load(&state.db).await?;
+            let r = repo::get(&state.db, id)
+                .await?
+                .ok_or_else(|| AppError::Internal("新建包读取失败".into()))?;
+            Ok(views_of(&state, vec![r], &s).await?.into_iter().next())
+        }
+        None => Ok(None),
+    }
+}
+
 async fn ensure_unlocked(state: &AppState, id: i64) -> AppResult<()> {
     if repo::is_locked(&state.db, id).await? {
         return Err(AppError::InvalidInput(

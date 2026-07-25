@@ -31,7 +31,7 @@ export function CommandPalette() {
     const jump: PaletteItem[] = ROUTES.map((r) => ({
       cat: "跳转",
       label: r.label,
-      shortcut: `${mod}${r.shortcut}`,
+      ...(r.shortcut === null ? {} : { shortcut: `${mod}${r.shortcut}` }),
       run: () => go(r.key as RouteKey),
     }));
     const paused = useEngineStore.getState().paused;

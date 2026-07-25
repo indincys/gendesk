@@ -6,13 +6,23 @@ import {
   type GroupView,
   type ImportPreview,
   type PromptView,
+  type PurposeBackfill,
   type PurposeView,
   commands,
   subscribeFileDrop,
   unwrap,
 } from "@/lib/ipc";
 import { cn, promptLabel, sortGroupsByPinyin } from "@/lib/utils";
-import { CheckSquare, FileUp, FolderInput, MoreHorizontal, Plus, Search, Star } from "lucide-react";
+import {
+  CheckSquare,
+  Clapperboard,
+  FileUp,
+  FolderInput,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Star,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -37,6 +47,8 @@ export function PromptsPage() {
 
   // 受控用途清单（单点定义在后端 purpose.rs；前端不硬编码标签名）。
   const [purposes, setPurposes] = useState<PurposeView[]>([]);
+  // 存量分组按组名补标用途：先预览再应用。
+  const [backfill, setBackfill] = useState<PurposeBackfill | null>(null);
 
   // E36 多选态
   const [selectMode, setSelectMode] = useState(false);
@@ -176,6 +188,31 @@ export function PromptsPage() {
     });
     if (preview) setImportPreview(preview);
   }, []);
+
+  /** 预览「按组名补标用途」的命中（不落库）。 */
+  const openBackfill = async () => {
+    try {
+      const r = await unwrap(commands.backfillGroupPurposes(false));
+      if (r.hits.length === 0) {
+        toast(`扫了 ${r.scanned} 个分组，没有组名能推断出用途（或都已标过）`);
+        return;
+      }
+      setBackfill(r);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
+
+  const applyBackfill = async () => {
+    try {
+      const r = await unwrap(commands.backfillGroupPurposes(true));
+      toast.success(`已给 ${r.applied} 个分组标上用途`);
+      setBackfill(null);
+      void load();
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
 
   const doImport = async () => {
     const path = await unwrap(commands.pickTxtFile()).catch(() => null);
@@ -333,6 +370,15 @@ export function PromptsPage() {
             >
               <CheckSquare className="ic12" />
               多选
+            </button>
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() => void openBackfill()}
+              title="按组名给存量分组补标用途（B-Roll / 分镜 / 首帧…）"
+            >
+              <Clapperboard className="ic12" />
+              补标用途
             </button>
             <button type="button" className="btn sm gho" onClick={() => setCreating(true)}>
               <Plus className="ic12" />
@@ -522,6 +568,49 @@ export function PromptsPage() {
           onConfirm={doDelete}
           onClose={() => setDeleting(null)}
         />
+      )}
+
+      {backfill && (
+        <Modal
+          title="按组名补标用途"
+          width="w700"
+          onClose={() => setBackfill(null)}
+          headerExtra={
+            <span className="chip">
+              {backfill.hits.length} / {backfill.scanned} 个分组
+            </span>
+          }
+          footer={
+            <>
+              <span className="fs11 t3">只增不减：已标过用途的分组会跳过，不会摘掉你手动标的</span>
+              <div className="f1" />
+              <button type="button" className="btn sm gho" onClick={() => setBackfill(null)}>
+                取消
+              </button>
+              <button type="button" className="btn sm pri" onClick={() => void applyBackfill()}>
+                全部标上
+              </button>
+            </>
+          }
+        >
+          <div style={{ padding: 8 }}>
+            <div className="fs12 t2 mb8" style={{ lineHeight: 1.7 }}>
+              用途只在导入 .txt 时选，那只覆盖以后导入的。下面是按**组名**推断出用途的存量分组 ——
+              标上之后，这些组的图<b>验收通过即自动进视频流水线</b>，不用再回作品库找。
+            </div>
+            {backfill.hits.map((h) => (
+              <div key={h.groupId} className="pickrow" style={{ cursor: "default" }}>
+                <span className="fw5 fs12 f1 nowrap ohide">{h.name}</span>
+                <span className="fs11 t3 nowrap">{h.workCount} 张已验收</span>
+                {h.purposes.map((p) => (
+                  <span key={p} className="bdg b-amber">
+                    {p}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </Modal>
       )}
 
       {importPreview && (

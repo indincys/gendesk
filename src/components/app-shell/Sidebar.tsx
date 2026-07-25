@@ -4,6 +4,7 @@ import { ROUTES, type RouteDef } from "@/routes";
 import { navBadges, useEngineStore } from "@/stores/engine";
 import { usePublishStore } from "@/stores/publish";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
+import { useV2vStore } from "@/stores/v2v";
 import { Search } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -16,6 +17,8 @@ export function Sidebar() {
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
   const pubBadges = usePublishStore((s) => s.badges);
+  // 视频流水线徽章只数「人能立刻处理的」（待提交 + 待验收），规则在 Rust 侧算。
+  const v2vN = useV2vStore((s) => s.counts.actionable);
   const version = useAppVersion();
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
@@ -38,9 +41,11 @@ export function Sidebar() {
             ? { cls: "nb-amb", n: assetsN, spin: false }
             : r.key === "plan" && planN > 0
               ? { cls: "nb-amb", n: planN, spin: false }
-              : r.key === "trash" && badges.trash > 0
-                ? { cls: "", n: badges.trash, spin: false }
-                : null;
+              : r.key === "v2v" && v2vN > 0
+                ? { cls: "nb-amb", n: v2vN, spin: false }
+                : r.key === "trash" && badges.trash > 0
+                  ? { cls: "", n: badges.trash, spin: false }
+                  : null;
     return (
       <div
         className={cn("nv", route === r.key && "on")}
@@ -57,10 +62,12 @@ export function Sidebar() {
             {badge.n}
           </span>
         )}
-        <span className="kbd">
-          {mod}
-          {r.shortcut}
-        </span>
+        {r.shortcut !== null && (
+          <span className="kbd">
+            {mod}
+            {r.shortcut}
+          </span>
+        )}
       </div>
     );
   };

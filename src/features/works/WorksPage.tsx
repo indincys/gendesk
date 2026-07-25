@@ -1,6 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
 import { assetSrc } from "@/lib/img";
 import {
   type GroupView,
@@ -23,18 +24,35 @@ import {
   ImageIcon,
   Layers,
   RefreshCw,
+  Search,
   Star,
   Wand2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+
+/** 分节方式。批次是默认值 —— 工作是一阵一阵的，「近期这批」才是找图的实际起点。 */
+type GroupBy = "batch" | "date" | "group";
+
+const GROUP_BY_LABEL: Record<GroupBy, string> = {
+  batch: "按批次",
+  date: "按日期",
+  group: "按分组",
+};
+
+/** 一个分节：标题 + 副标题 + 该节的作品。 */
+interface Section {
+  key: string;
+  title: string;
+  meta: string;
+  works: WorkView[];
+}
 
 export function WorksPage() {
   const go = useUiStore((s) => s.go);
   const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
   const [works, setWorks] = useState<WorkView[]>([]);
   const [groups, setGroups] = useState<GroupView[]>([]);
-  const [filter, setFilter] = useState<"all" | "fav" | number>("all");
   const [detail, setDetail] = useState<WorkView | null>(null);
   const [confirmDel, setConfirmDel] = useState<WorkView | null>(null);
   // E21：源输出文件是否缺失（懒检测：打开详情时校验）。
@@ -45,25 +63,38 @@ export function WorksPage() {
   const [confirmBatchDel, setConfirmBatchDel] = useState(false);
   const [assetPick, setAssetPick] = useState(false);
   const lastClicked = useRef<number | null>(null);
-  // 受控用途（后端单点）+ 当前用途筛选 + 是否隐藏已导出的。
+
+  // ── 筛选态 ───────────────────────────────────────────────────
+  const [groupBy, setGroupBy] = useState<GroupBy>("batch");
+  const [rawQuery, setRawQuery] = useState("");
+  const query = useDebouncedValue(rawQuery, 220);
+  const [favOnly, setFavOnly] = useState(false);
+  const [groupFilter, setGroupFilter] = useState<number | null>(null);
   const [purposes, setPurposes] = useState<PurposeView[]>([]);
   const [purposeFilter, setPurposeFilter] = useState<string | null>(null);
   const [hideExported, setHideExported] = useState(false);
+  const [page, setPage] = useState(0);
+  const [atEnd, setAtEnd] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setGroups(await unwrap(commands.listPromptGroups()));
       const f = {
-        groupId: typeof filter === "number" ? filter : null,
-        favoriteOnly: filter === "fav",
+        groupId: groupFilter,
+        favoriteOnly: favOnly,
         tag: purposeFilter,
         hideExported,
+        query: query.trim() === "" ? null : query.trim(),
+        batchId: null,
       };
-      setWorks(await unwrap(commands.listWorks(f, null)));
+      const rows = await unwrap(commands.listWorks(f, page));
+      setWorks(rows);
+      // 后端一页 300 条；不足即到底（不额外查 count，省一次全表扫描）。
+      setAtEnd(rows.length < 300);
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [filter, purposeFilter, hideExported]);
+  }, [groupFilter, favOnly, purposeFilter, hideExported, query, page]);
 
   useEffect(() => {
     void unwrap(commands.listPurposes())
@@ -73,6 +104,14 @@ export function WorksPage() {
   useEffect(() => {
     void load();
   }, [load]);
+  // 改筛选条件即回到第一页，否则筛完停在第 3 页会显示成「什么都没有」。
+  useEffect(() => {
+    setPage(0);
+  }, [groupFilter, favOnly, purposeFilter, hideExported, query]);
+
+  // ── 分节 ─────────────────────────────────────────────────────
+  // 后端已按「批次倒序 + 批次内生成序」返回，这里只做连续切分，不重排序。
+  const sections = useMemo<Section[]>(() => buildSections(works, groupBy), [works, groupBy]);
 
   const toggleFav = async (w: WorkView) => {
     setWorks((cur) => cur.map((x) => (x.id === w.id ? { ...x, favorite: x.favorite ? 0 : 1 } : x)));
@@ -180,6 +219,15 @@ export function WorksPage() {
       lastClicked.current = idx;
     }
   };
+  /** 全选本节 —— 「快速多选需要做视频的素材」的实际操作，不必再一张张点。 */
+  const selectSection = (s: Section) => {
+    setSelectMode(true);
+    setSel((cur) => {
+      const n = new Set(cur);
+      for (const w of s.works) n.add(w.id);
+      return n;
+    });
+  };
   const batchFavorite = async () => {
     const ids = [...sel];
     await unwrap(commands.setWorksFavorite(ids, true)).catch((e) => toast.error(String(e)));
@@ -199,24 +247,24 @@ export function WorksPage() {
     else toast.success(`已导出 ${n} 张到所选文件夹`);
     exitSelect();
   };
-  // 导出图生视频包：所选作品按分组分堆，一组一包（同组分镜要剪进同一条成片，
-  // 运镜语言与时长必须统一，跨组混包改写风格会飘）。
-  const batchExportV2v = async () => {
-    const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
-    if (!dir) return;
+  /**
+   * 手动加入视频流水线。
+   *
+   * 正常路径是**验收通过即自动入队**（用途=图生视频的组），这个按钮是逃生口：
+   * 用途是筛选默认值不是门禁，堵死了就得改代码。
+   */
+  const batchToPipeline = async () => {
     const ids = [...sel];
-    const packs = await unwrap(commands.exportWorksV2v(ids, dir)).catch((e) => {
-      toast.error(String(e));
-      return null;
-    });
-    if (!packs) return;
-    const total = packs.reduce((n, p) => n + p.exported, 0);
-    const skipped = packs.reduce((n, p) => n + p.skipped, 0);
-    toast.success(
-      `已导出 ${packs.length} 个包 · 共 ${total} 条${skipped > 0 ? `（${skipped} 条源文件缺失已跳过）` : ""}`,
-    );
-    exitSelect();
-    void load();
+    try {
+      const n = await unwrap(commands.enqueueWorksV2v(ids));
+      if (n === 0) toast("所选作品都已在视频流水线里");
+      else toast.success(`已加入视频流水线 ${n} 条`);
+      exitSelect();
+      void load();
+      if (n > 0) go("v2v");
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
   };
   const batchDelete = async () => {
     const ids = [...sel];
@@ -227,13 +275,25 @@ export function WorksPage() {
     void load();
   };
 
+  const activeGroup = groups.find((g) => g.id === groupFilter);
+
   return (
     <PageScaffold title="作品库" caption={`${works.length} 张已通过`}>
-      <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
+      <div className="fbar">
         {selectMode ? (
           <>
             <span className="fs12 t2 nowrap">已选 {sel.size}</span>
             <div className="f1" />
+            <button
+              type="button"
+              className="btn sm"
+              disabled={sel.size === 0}
+              onClick={batchToPipeline}
+              title="加入视频流水线（正常无需手动：用途=图生视频的组，验收通过即自动入队）"
+            >
+              <Clapperboard className="ic12" />
+              加入视频流水线
+            </button>
             <button
               type="button"
               className="btn sm"
@@ -245,17 +305,7 @@ export function WorksPage() {
             </button>
             <button
               type="button"
-              className="btn sm"
-              disabled={sel.size === 0}
-              onClick={batchExportV2v}
-              title="按分组导出为图生视频包（图 + 提示词 + manifest），供 Claude Code skill 调用即梦"
-            >
-              <Clapperboard className="ic12" />
-              导出图生视频包
-            </button>
-            <button
-              type="button"
-              className="btn sm"
+              className="btn sm gho"
               disabled={sel.size === 0}
               onClick={batchFavorite}
             >
@@ -264,7 +314,7 @@ export function WorksPage() {
             </button>
             <button
               type="button"
-              className="btn sm"
+              className="btn sm gho"
               disabled={sel.size === 0}
               onClick={() => setAssetPick(true)}
               title="打包为图集素材包入资产库"
@@ -286,19 +336,22 @@ export function WorksPage() {
           </>
         ) : (
           <>
-            {works.length > 0 && (
-              <button
-                type="button"
-                className="btn sm gho"
-                onClick={() => setSelectMode(true)}
-                title="多选作品做批量操作"
-              >
-                <CheckSquare className="ic12" />
-                多选
-              </button>
-            )}
-            {/* 用途筛选：作品自身无标签，标签绑在它的提示词组上。
-                库里混着场景图/分镜图/别的用途，不按用途分开就挑不出该做视频的那批。 */}
+            <div className="srch" style={{ width: 240 }}>
+              <Search className="ic ic12" />
+              <input
+                className="inp sm"
+                style={{ width: "100%", paddingLeft: 26 }}
+                placeholder="搜编号 / 分组 / 参考图 / 提示词"
+                value={rawQuery}
+                onChange={(e) => setRawQuery(e.target.value)}
+              />
+            </div>
+            {/* 分组降级为可搜索的筛选器：上百个分组平铺成分段控件在物理上就不可用。 */}
+            <GroupFilter
+              groups={groups}
+              active={activeGroup ?? null}
+              onPick={(id) => setGroupFilter(id)}
+            />
             {purposes.map((p) => (
               <button
                 key={p.tag}
@@ -310,6 +363,14 @@ export function WorksPage() {
                 {p.tag}
               </button>
             ))}
+            <button
+              type="button"
+              className={cn("btn sm", favOnly ? "" : "gho")}
+              onClick={() => setFavOnly((v) => !v)}
+            >
+              <Star className="ic12" />
+              收藏
+            </button>
             {purposeFilter != null && (
               <button
                 type="button"
@@ -322,67 +383,112 @@ export function WorksPage() {
             )}
             <div className="f1" />
             <div className="seg">
-              <span
-                className={cn("sgi", filter === "all" && "on")}
-                onClick={() => setFilter("all")}
-              >
-                全部
-              </span>
-              <span
-                className={cn("sgi", filter === "fav" && "on")}
-                onClick={() => setFilter("fav")}
-              >
-                收藏
-              </span>
-              {groups.map((g) => (
+              {(Object.keys(GROUP_BY_LABEL) as GroupBy[]).map((k) => (
                 <span
-                  key={g.id}
-                  className={cn("sgi", filter === g.id && "on")}
-                  onClick={() => setFilter(g.id)}
+                  key={k}
+                  className={cn("sgi", groupBy === k && "on")}
+                  onClick={() => setGroupBy(k)}
                 >
-                  {g.name}
+                  {GROUP_BY_LABEL[k]}
                 </span>
               ))}
             </div>
+            {works.length > 0 && (
+              <button
+                type="button"
+                className="btn sm gho"
+                onClick={() => setSelectMode(true)}
+                title="多选作品做批量操作"
+              >
+                <CheckSquare className="ic12" />
+                多选
+              </button>
+            )}
           </>
         )}
       </div>
 
       {works.length === 0 ? (
         <div className="bigempty">
-          <div className="fs13 fw5 t2">该筛选下暂无作品</div>
+          <div className="fs13 fw5 t2">
+            {query || groupFilter || purposeFilter || favOnly ? "该筛选下暂无作品" : "还没有作品"}
+          </div>
           <div className="fs12 t3">通过验收的图片会归档到这里，并同步输出到本地批次文件夹</div>
         </div>
       ) : (
         <div className="pbody">
-          <div className="wgrid">
-            {works.map((w, idx) => (
-              <div
-                key={w.id}
-                className={cn("wcard", selectMode && sel.has(w.id) && "sel")}
-                onClick={(e) => onCardClick(idx, w.id, e.shiftKey)}
-              >
-                <NatThumb path={w.thumbPath} className="wcimg wcnat" />
-                <div className="rmeta">
-                  <span className="pid">{w.promptCode}</span>
-                  <span className="fs10 t3 nowrap ohide f1">
-                    {w.groupName} · {fmtDate(w.acceptedAt)}
-                  </span>
-                  <button
-                    type="button"
-                    className={cn("star", w.favorite && "on")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void toggleFav(w);
-                    }}
-                    title="收藏"
-                  >
-                    <Star className="ic12" fill={w.favorite ? "currentColor" : "none"} />
-                  </button>
-                </div>
+          {sections.map((s) => (
+            <div key={s.key}>
+              <div className="wsec">
+                <span className="wst">{s.title}</span>
+                <span className="wsm f1">{s.meta}</span>
+                <button
+                  type="button"
+                  className="btn xs gho"
+                  onClick={() => selectSection(s)}
+                  title="把本节全部作品加入选择"
+                >
+                  全选本节
+                </button>
               </div>
-            ))}
-          </div>
+              <div className="wgrid" style={{ paddingTop: 0 }}>
+                {s.works.map((w) => {
+                  const idx = works.findIndex((x) => x.id === w.id);
+                  return (
+                    <div
+                      key={w.id}
+                      className={cn("wcard", selectMode && sel.has(w.id) && "sel")}
+                      onClick={(e) => onCardClick(idx, w.id, e.shiftKey)}
+                    >
+                      <NatThumb path={w.thumbPath} className="wcimg wcnat" />
+                      <div className="rmeta">
+                        <span className="pid">{w.promptCode}</span>
+                        <span className="fs10 t3 nowrap ohide f1">{w.groupName}</span>
+                        <button
+                          type="button"
+                          className={cn("star", w.favorite && "on")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleFav(w);
+                          }}
+                          title="收藏"
+                        >
+                          <Star className="ic12" fill={w.favorite ? "currentColor" : "none"} />
+                        </button>
+                      </div>
+                      {(w.isI2V || w.inPipeline) && (
+                        <div className="wflags">
+                          {w.isI2V && <span className="wfl i2v">图生视频</span>}
+                          {w.inPipeline && <span className="wfl inq">已入流水线</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {(page > 0 || !atEnd) && (
+            <div className="fx ac jc gap8" style={{ padding: "4px 0 28px" }}>
+              <button
+                type="button"
+                className="btn sm gho"
+                disabled={page === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+              >
+                上一页
+              </button>
+              <span className="fs11 t3">第 {page + 1} 页</span>
+              <button
+                type="button"
+                className="btn sm gho"
+                disabled={atEnd}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                下一页
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -394,6 +500,7 @@ export function WorksPage() {
           headerExtra={
             <>
               <span className="bdg b-green">已通过</span>
+              {detail.isI2V && <span className="bdg b-gray">图生视频</span>}
               {sourceMissing && <span className="bdg b-red">源文件缺失</span>}
             </>
           }
@@ -428,6 +535,7 @@ export function WorksPage() {
               <div className="fx ac gap6 mt10 wrap">
                 <span className="chip">{detail.refName}</span>
                 <span className="chip">{fmtDate(detail.acceptedAt)}</span>
+                {detail.batchId != null && <span className="chip">批次 {detail.batchId}</span>}
               </div>
               <div className="pathwell mt10" style={{ fontSize: "10.5px" }}>
                 {detail.imagePath}
@@ -479,13 +587,32 @@ export function WorksPage() {
                 </button>
                 <button
                   type="button"
-                  className="btn sm"
+                  className="btn sm gho"
                   onClick={() => remix(detail)}
                   title="带此提示词与参考图预填生成页"
                 >
                   <Wand2 className="ic12" />
                   用此配置再生成
                 </button>
+                {!detail.inPipeline && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={async () => {
+                      try {
+                        await unwrap(commands.enqueueWorksV2v([detail.id]));
+                        toast.success("已加入视频流水线");
+                        setDetail(null);
+                        void load();
+                      } catch (e) {
+                        if (e instanceof Error) toast.error(e.message);
+                      }
+                    }}
+                  >
+                    <Clapperboard className="ic12" />
+                    加入视频流水线
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -528,6 +655,138 @@ export function WorksPage() {
         />
       )}
     </PageScaffold>
+  );
+}
+
+/**
+ * 把已排好序的作品切成连续分节。
+ *
+ * **只切不排**：后端已按「批次倒序 + 批次内生成序」返回，前端再排一次只会与后端分叉。
+ */
+export function buildSections(works: WorkView[], by: GroupBy): Section[] {
+  const out: Section[] = [];
+  for (const w of works) {
+    const key = sectionKey(w, by);
+    const last = out[out.length - 1];
+    if (last && last.key === key) last.works.push(w);
+    else out.push({ key, title: "", meta: "", works: [w] });
+  }
+  for (const s of out) {
+    const first = s.works[0];
+    if (!first) continue;
+    s.key = sectionKey(first, by);
+    const names = [...new Set(s.works.map((w) => w.groupName).filter(Boolean))];
+    // 组名列出前三个：一个批次混几十个组时，铺满整行的组名反而什么都读不出来。
+    const groupsText =
+      names.length === 0
+        ? ""
+        : names.length <= 3
+          ? names.join(" · ")
+          : `${names.slice(0, 3).join(" · ")} 等 ${names.length} 组`;
+    const i2v = s.works.filter((w) => w.isI2V).length;
+    const parts = [`${s.works.length} 张`];
+    if (groupsText) parts.push(groupsText);
+    if (i2v > 0) parts.push(`图生视频 ${i2v}`);
+    s.meta = parts.join(" · ");
+    switch (by) {
+      case "batch":
+        s.title = first.batchId == null ? "无批次（历史作品）" : `批次 #${first.batchId}`;
+        break;
+      case "date":
+        s.title = fmtDate(first.acceptedAt);
+        break;
+      default:
+        s.title = first.groupName || "未分组";
+    }
+    if (by === "batch") s.meta = `${fmtDate(first.acceptedAt)} · ${s.meta}`;
+  }
+  return out;
+}
+
+function sectionKey(w: WorkView, by: GroupBy): string {
+  switch (by) {
+    case "batch":
+      return `b${w.batchId ?? "none"}`;
+    case "date":
+      return `d${fmtDate(w.acceptedAt)}`;
+    default:
+      return `g${w.groupId ?? "none"}`;
+  }
+}
+
+/** 可搜索的分组筛选。取代平铺上百个分段控件 —— 那个控件在 100 个组时物理上不可用。 */
+function GroupFilter({
+  groups,
+  active,
+  onPick,
+}: {
+  groups: GroupView[];
+  active: GroupView | null;
+  onPick: (id: number | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDoc);
+    return () => window.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const hits = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const list = s === "" ? groups : groups.filter((g) => g.name.toLowerCase().includes(s));
+    return list.slice(0, 60);
+  }, [groups, q]);
+  return (
+    <div className="gwrap" ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        className={cn("btn sm", active ? "" : "gho")}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {active ? `分组：${active.name}` : "分组"}
+      </button>
+      {open && (
+        <div className="gmenu gpick" style={{ left: 0, right: "auto" }}>
+          <input
+            className="inp sm"
+            style={{ width: "100%", marginBottom: 4 }}
+            placeholder={`搜索 ${groups.length} 个分组`}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <button
+            type="button"
+            className="gmi"
+            onClick={() => {
+              onPick(null);
+              setOpen(false);
+            }}
+          >
+            {active ? "　" : "✓ "}全部分组
+          </button>
+          {hits.map((g) => (
+            <button
+              key={g.id}
+              type="button"
+              className="gmi"
+              onClick={() => {
+                onPick(g.id);
+                setOpen(false);
+              }}
+            >
+              {active?.id === g.id ? "✓ " : "　"}
+              {g.name}
+              <span className="f1" />
+              <span className="fs10 t3">{g.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

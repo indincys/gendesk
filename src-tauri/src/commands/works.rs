@@ -28,6 +28,10 @@ pub struct WorkView {
     pub ref_image_id: Option<i64>,
     pub group_id: Option<i64>,
     pub task_id: Option<i64>,
+    /// 已在视频流水线里（任一阶段）。卡片角标用，避免把同一张图重复入队。
+    pub in_pipeline: bool,
+    /// 其提示词组用途 = 图生视频。卡片角标 + 「本批全选」的默认取样。
+    pub is_i2v: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -39,12 +43,25 @@ pub struct WorkFilter {
     pub tag: Option<String>,
     /// 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
     pub hide_exported: bool,
+    /// 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
+    ///
+    /// 分组是「一份 txt = 一个组」的产物，会长到几十上百个——它天然是**出货单位**而不是
+    /// 分类法，永远不会是好的浏览轴。搜索 + 批次分节才是找回一张历史图的实际路径。
+    #[serde(default)]
+    pub query: Option<String>,
+    /// 只看某一批次。
+    #[serde(default)]
+    pub batch_id: Option<i64>,
 }
 
 const WORK_SELECT: &str = "SELECT w.id, COALESCE(p.code,'') AS prompt_code,
         COALESCE(g.name,'') AS group_name, COALESCE(r.name,'') AS ref_name,
         w.batch_id, w.favorite, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text,
-        w.ref_image_id, w.group_id, w.task_id
+        w.ref_image_id, w.group_id, w.task_id,
+        EXISTS (SELECT 1 FROM v2v_clips c WHERE c.work_id = w.id) AS in_pipeline,
+        EXISTS (SELECT 1 FROM tag_bindings tb JOIN tags tg ON tg.id = tb.tag_id
+                WHERE tb.entity_type = 'prompt_group' AND tb.entity_id = w.group_id
+                  AND tg.name = '图生视频') AS is_i2v
     FROM accepted_works w
     LEFT JOIN prompts p ON p.id = w.prompt_id
     LEFT JOIN prompt_groups g ON g.id = w.group_id
@@ -80,13 +97,32 @@ pub async fn list_works(
                 .into(),
         );
     }
+    if filter.batch_id.is_some() {
+        conds.push("w.batch_id = ?".into());
+    }
+    // 全文搜索一次覆盖四处：编号 / 分组名 / 参考图名 / 提示词正文。
+    // 分开成四个筛选器毫无意义——人搜的时候并不知道自己记住的是哪一处。
+    let query = filter
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"));
+    if query.is_some() {
+        conds.push(
+            "(p.code LIKE ? OR g.name LIKE ? OR r.name LIKE ? OR w.prompt_text LIKE ?)".into(),
+        );
+    }
     if !conds.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conds.join(" AND "));
     }
-    sql.push_str(" ORDER BY w.accepted_at DESC, w.id DESC LIMIT ? OFFSET ?");
+    // 批次倒序 + 批次内生成序：与验收页（v0.11.0）同一排序，两页读起来对得上。
+    // 批次是一阵工作的天然单元，也是「近期这批」唯一稳定的锚点；accepted_at 会因为
+    // 隔天补验收而把同一批切散到两个日期里。NULL batch 在 DESC 下自然排到最后。
+    sql.push_str(" ORDER BY w.batch_id DESC, w.id ASC LIMIT ? OFFSET ?");
 
-    let limit = 200i64;
+    let limit = 300i64;
     let offset = page.unwrap_or(0).max(0) * limit;
     let mut q = sqlx::query_as::<_, WorkView>(&sql);
     // 绑定序必须与上面 push 条件的先后严格一致。
@@ -98,6 +134,16 @@ pub async fn list_works(
     }
     if filter.hide_exported {
         q = q.bind(crate::v2v::CHANNEL_I2V);
+    }
+    if let Some(b) = filter.batch_id {
+        q = q.bind(b);
+    }
+    if let Some(pat) = &query {
+        q = q
+            .bind(pat.clone())
+            .bind(pat.clone())
+            .bind(pat.clone())
+            .bind(pat.clone());
     }
     Ok(q.bind(limit).bind(offset).fetch_all(&state.db).await?)
 }
@@ -473,8 +519,92 @@ pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()>
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
+    use super::{WorkView, WORK_SELECT};
     use crate::db::test_support::test_pool;
     use sqlx::SqlitePool;
+
+    /// 批次倒序 + 批次内 id 升序：与验收页同一排序，两页读起来对得上。
+    /// 这条排序是「按批次分节」这个 UI 决定的地基——换成 accepted_at 排序，
+    /// 隔天补验收的同一批就会被切散到两个日期里，分节当场失效。
+    #[tokio::test]
+    async fn lists_newest_batch_first_then_generation_order() {
+        let (pool, _d) = test_pool().await;
+        seed(&pool, 1, "AA", &[(1, "甲"), (2, "乙")]).await;
+        // 第二个批次（id 更大 = 更近），且 accepted_at **更早**——模拟隔天补验收：
+        // 若按 accepted_at 排序，这两条会跑到旧批次后面去。
+        sqlx::query("INSERT INTO batches (id,created_at,output_dir,params_json,status) VALUES (2,0,'/out','{}','running')")
+            .execute(&pool).await.unwrap();
+        for wid in [3i64, 4] {
+            sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (?1,1,?2,'x','active','library',0,0)")
+                .bind(wid).bind(format!("AA-{wid:04}")).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at) VALUES (?1,'/i','/t',?1,'x',1,2,-999)")
+                .bind(wid).execute(&pool).await.unwrap();
+        }
+        let sql = format!("{WORK_SELECT} ORDER BY w.batch_id DESC, w.id ASC");
+        let rows = sqlx::query_as::<_, WorkView>(&sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let order: Vec<(Option<i64>, i64)> = rows.iter().map(|r| (r.batch_id, r.id)).collect();
+        assert_eq!(
+            order,
+            vec![(Some(2), 3), (Some(2), 4), (Some(1), 1), (Some(1), 2)],
+            "近批整体在前，批内按生成序；不受 accepted_at 干扰"
+        );
+    }
+
+    // 全文搜索一次覆盖编号/组名/参考图名/正文：人搜的时候并不知道自己记住的是哪一处。
+    #[tokio::test]
+    async fn search_matches_code_group_ref_and_body() {
+        let (pool, _d) = test_pool().await;
+        seed(&pool, 1, "AA", &[(1, "屋顶花园的木地台"), (2, "宠物餐吧")]).await;
+        let sql = format!(
+            "{WORK_SELECT} WHERE (p.code LIKE ?1 OR g.name LIKE ?1 OR r.name LIKE ?1 OR w.prompt_text LIKE ?1) ORDER BY w.id"
+        );
+        let hit = |pat: &str| {
+            let sql = sql.clone();
+            let pool = pool.clone();
+            let pat = format!("%{pat}%");
+            async move {
+                sqlx::query_as::<_, WorkView>(&sql)
+                    .bind(pat)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(hit("屋顶花园").await, vec![1], "命中正文");
+        assert_eq!(hit("AA-0002").await, vec![2], "命中编号");
+        assert_eq!(hit("组1").await, vec![1, 2], "命中分组名");
+        assert!(hit("查无此物").await.is_empty());
+    }
+
+    // 卡片角标：已在流水线 / 用途是图生视频。前者防重复入队，后者是「本批全选」的取样依据。
+    #[tokio::test]
+    async fn view_flags_reflect_pipeline_and_purpose() {
+        let (pool, _d) = test_pool().await;
+        seed(&pool, 1, "AA", &[(1, "甲"), (2, "乙")]).await;
+        bind_tag(&pool, 1, "图生视频").await;
+        sqlx::query(
+            "INSERT INTO v2v_clips (work_id,group_id,group_name,stage,source_prompt,created_at,updated_at)
+             VALUES (1,1,'组1','rewrite','甲',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let sql = format!("{WORK_SELECT} ORDER BY w.id");
+        let rows = sqlx::query_as::<_, WorkView>(&sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(rows[0].in_pipeline, "已入队的图须带角标");
+        assert!(!rows[1].in_pipeline, "未入队的图不得带角标");
+        assert!(rows[0].is_i2v && rows[1].is_i2v, "同组两张的用途一致");
+    }
 
     /// 种一个组 + 一条提示词 + 一张参考图 + 一个批次 + N 条已验收作品。
     async fn seed(pool: &SqlitePool, group_id: i64, prefix: &str, works: &[(i64, &str)]) {

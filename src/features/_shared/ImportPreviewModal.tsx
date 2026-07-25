@@ -3,6 +3,7 @@ import {
   type ImportPreview,
   type ImportPreviewGroup,
   type ImportPreviewPrompt,
+  type PurposeView,
   commands,
   unwrap,
 } from "@/lib/ipc";
@@ -19,7 +20,7 @@ import {
   Scissors,
   Trash2,
 } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
@@ -48,6 +49,13 @@ export function ImportPreviewModal({
 }) {
   const [showHelp, setShowHelp] = useState(false);
   const [draft, setDraft] = useState<ImportPreview>(preview);
+  // 受控用途取自后端单点（purpose.rs），前端不硬编码取值。
+  const [purposes, setPurposes] = useState<PurposeView[]>([]);
+  useEffect(() => {
+    void unwrap(commands.listPurposes())
+      .then(setPurposes)
+      .catch(() => setPurposes([]));
+  }, []);
   const [expanded, setExpanded] = useState<number | null>(null);
   const seq = useRef(0);
 
@@ -103,6 +111,10 @@ export function ImportPreviewModal({
       prefix: "",
       prefixExplicit: false,
       inferred: false,
+      // 拆出来的新组仍来自同一份 txt → 用途照抄；但已不算「预猜」，
+      // 否则 repreview 会按新组名（原名 + " 2"）重新推断，可能把它推翻。
+      purposes: g.purposes,
+      purposeInferred: false,
       prompts: g.prompts.slice(j),
     };
     void restructure(mapGroups((gs) => [...gs.slice(0, i), head, tail, ...gs.slice(i + 1)]));
@@ -274,6 +286,26 @@ export function ImportPreviewModal({
               ) : (
                 g.isNewGroup === false && <span className="bdg b-gray">并入已有组</span>
               )}
+              {/* 用途在**导入这一刻**就定下来：一份 txt 是为一个用途写的，这是唯一
+                  100% 知道答案的时刻。等到验收后再回提示词库补标，等于把活推给以后
+                  —— 而实测那个入口从来没人走（全库 tags 表长期一条记录都没有）。 */}
+              <PurposePick
+                purposes={purposes}
+                active={g.purposes}
+                guessed={g.purposeInferred}
+                onToggle={(tag) =>
+                  patch(
+                    withGroup(i, (x) => ({
+                      ...x,
+                      purposes: x.purposes.includes(tag)
+                        ? x.purposes.filter((t) => t !== tag)
+                        : [...x.purposes, tag],
+                      // 人一表态，「预猜」就结束：之后改组名不再重新推断（同 prefixExplicit）。
+                      purposeInferred: false,
+                    })),
+                  )
+                }
+              />
               <div className="f1" />
               <span className="chip nowrap">{g.codeRange}</span>
               <span className="t3 fs11 nowrap">{g.prompts.length} 条</span>
@@ -352,5 +384,47 @@ export function ImportPreviewModal({
         ))}
       </div>
     </Modal>
+  );
+}
+
+/**
+ * 用途选择器（导入预览行内）。
+ *
+ * 关键词预猜命中时标琥珀「疑似」，与分组名的「疑似」同一套视觉语言 —— 都是
+ * 「机器猜的，你看一眼」。取值只从后端受控清单来，不给自由输入框：
+ * 一旦允许手打，「图生视频 / 图转视频 / v2v」三种拼法就会同时进库。
+ */
+function PurposePick({
+  purposes,
+  active,
+  guessed,
+  onToggle,
+}: {
+  purposes: PurposeView[];
+  active: string[];
+  guessed: boolean;
+  onToggle: (tag: string) => void;
+}) {
+  if (purposes.length === 0) return null;
+  return (
+    <>
+      {purposes.map((p) => {
+        const on = active.includes(p.tag);
+        return (
+          <button
+            key={p.tag}
+            type="button"
+            className={cn("bdg", on ? (guessed ? "b-amber" : "b-green") : "b-gray")}
+            style={{ cursor: "pointer", border: "none" }}
+            title={`${p.hint}${guessed && on ? "（按组名预猜，点一下确认或取消）" : ""}`}
+            onClick={() => onToggle(p.tag)}
+          >
+            {on ? <Check className="ic12" /> : null}
+            {p.tag}
+            {on && guessed ? " · 疑似" : ""}
+          </button>
+        );
+      })}
+    </>
   );
 }

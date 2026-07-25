@@ -3141,3 +3141,170 @@ a:hover {
 .kd-off {
   background: oklch(82% 0.008 260);
 }
+
+/* ============================ 作品库按批次分节（v0.15.0） ============================ */
+/* 分组是「一份 txt = 一个组」的出货单位，会长到几十上百个 —— 拿它当浏览轴永远不成立。
+   批次才是一阵工作的天然单元，也是「近期这批」唯一稳定的锚点。 */
+.wsec {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px 8px;
+  background: linear-gradient(var(--panel) 68%, oklch(100% 0 0 / 0));
+}
+.wsec .wst {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--t1);
+  white-space: nowrap;
+}
+.wsec .wsm {
+  font-size: 11px;
+  color: var(--t3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 卡片角标行（用途 / 已入流水线 / 已导出）。 */
+.wflags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+.wfl {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--inset);
+  color: var(--t3);
+  white-space: nowrap;
+}
+.wfl.i2v {
+  background: var(--accbg);
+  color: oklch(42% 0.16 257);
+}
+.wfl.inq {
+  background: var(--okbg);
+  color: oklch(40% 0.1 155);
+}
+/* 筛选条：搜索框 + 可搜索的分组筛选（取代平铺上百个分段控件）。 */
+.fbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  flex-wrap: wrap;
+}
+.gpick {
+  max-height: 260px;
+  overflow: auto;
+  min-width: 220px;
+}
+
+/* ============================ 视频流水线看板（v0.15.0） ============================ */
+.vkb {
+  display: flex;
+  gap: 12px;
+  padding: 14px 18px 40px;
+  align-items: flex-start;
+  min-height: 100%;
+}
+.vcol {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--inset);
+  border-radius: 12px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vcolh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t1);
+}
+.vcolh .n {
+  font: 500 11px var(--mono);
+  color: var(--t3);
+}
+.vcard {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  gap: 8px;
+  cursor: pointer;
+  transition: box-shadow 0.12s, border-color 0.12s;
+}
+.vcard:hover {
+  box-shadow: var(--sh1);
+}
+.vcard.sel {
+  border-color: var(--accln);
+  box-shadow: 0 0 0 2px var(--accbg);
+}
+.vth {
+  width: 52px;
+  height: 52px;
+  border-radius: 7px;
+  object-fit: cover;
+  flex: none;
+  border: 1px solid var(--line);
+  background: var(--inset);
+}
+.vbody {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vptxt {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.vempty {
+  font-size: 11px;
+  color: var(--t3);
+  padding: 14px 6px;
+  text-align: center;
+}
+/* 成片播放器（验收）。 */
+.vplayer {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #000;
+  display: block;
+}
+/* 命令行预览：等宽 + 可横向滚动，不换行折断参数。 */
+.cmdwell {
+  font: 400 10.5px var(--mono);
+  color: var(--t2);
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 9px;
+  overflow-x: auto;
+  white-space: pre;
+}

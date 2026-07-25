@@ -13,7 +13,10 @@ export function HelpPanel() {
     [`${mod}K`, "命令面板"],
     [`${mod}/`, "本速查面板"],
     ["?", "本速查面板"],
-    ...ROUTES.map((r) => [`${mod}${r.shortcut}`, r.label] as [string, string]),
+    // 无数字快捷键的页面不列进速查表——列一个空的修饰键比不列更让人困惑。
+    ...ROUTES.filter((r) => r.shortcut !== null).map(
+      (r) => [`${mod}${r.shortcut}`, r.label] as [string, string],
+    ),
   ];
   const reviewKeys: [string, string][] = [
     ["↑ ↓ ← →", "移动焦点"],

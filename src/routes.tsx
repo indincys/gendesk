@@ -7,10 +7,12 @@ import { ReviewPage } from "@/features/review/ReviewPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { TasksPage } from "@/features/tasks/TasksPage";
 import { TrashPage } from "@/features/trash/TrashPage";
+import { V2vPage } from "@/features/v2v/V2vPage";
 import { WorksPage } from "@/features/works/WorksPage";
 import {
   AlignLeft,
   CheckCircle2,
+  Clapperboard,
   Grid2x2,
   Image,
   Layers,
@@ -27,6 +29,7 @@ export type RouteKey =
   | "generate"
   | "tasks"
   | "review"
+  | "v2v"
   | "library"
   | "prompts"
   | "refs"
@@ -40,8 +43,13 @@ export type NavGroup = "make" | "asset" | "publish" | "system";
 export interface RouteDef {
   key: RouteKey;
   label: string;
-  /** ⌘/Ctrl+N 数字（1–8） */
-  shortcut: number;
+  /**
+   * ⌘/Ctrl+N 数字；`null` = 无数字快捷键（十个数字已用尽，新页经侧栏与 ⌘K 进）。
+   *
+   * 不为了给新页腾位而重排既有数字：那会把每个人的肌肉记忆一次性作废，
+   * 代价远大于「少一个快捷键」。
+   */
+  shortcut: number | null;
   group: NavGroup;
   icon: ComponentType<{ className?: string }>;
   component: ComponentType;
@@ -72,6 +80,14 @@ export const ROUTES: readonly RouteDef[] = [
     group: "make",
     icon: CheckCircle2,
     component: ReviewPage,
+  },
+  {
+    key: "v2v",
+    label: "视频流水线",
+    shortcut: null,
+    group: "make",
+    icon: Clapperboard,
+    component: V2vPage,
   },
   {
     key: "library",
@@ -128,7 +144,7 @@ export const ROUTE_BY_KEY: Record<RouteKey, RouteDef> = Object.fromEntries(
   ROUTES.map((r) => [r.key, r]),
 ) as Record<RouteKey, RouteDef>;
 
-/** ⌘1–8 数字 → 路由键（快捷键分发用） */
+/** ⌘1–8 数字 → 路由键（快捷键分发用）。无数字快捷键的页面不进此表。 */
 export const ROUTE_BY_SHORTCUT: Record<number, RouteKey> = Object.fromEntries(
-  ROUTES.map((r) => [r.shortcut, r.key]),
+  ROUTES.filter((r) => r.shortcut !== null).map((r) => [r.shortcut, r.key]),
 );

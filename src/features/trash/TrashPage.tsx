@@ -222,9 +222,13 @@ export function TrashPage() {
 
 function entityLabel(t: string): string {
   return (
-    { task: "验收未通过的结果", work: "已删除作品", prompt: "已删除提示词", ref: "已删除参考图" }[
-      t
-    ] ?? t
+    {
+      task: "验收未通过的结果",
+      work: "已删除作品",
+      prompt: "已删除提示词",
+      ref: "已删除参考图",
+      clip: "验收未通过的视频",
+    }[t] ?? t
   );
 }
 function fmtTime(unix: number): string {

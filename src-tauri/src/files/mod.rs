@@ -49,6 +49,13 @@ impl DataDirs {
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
+    /// 图生视频成片与封面落盘处（`clips/{clip_id}.mp4` + `.jpg`）。
+    ///
+    /// 与 outputs/ 分开：成片不是「验收通过的图片输出」，它有自己的验收与去向
+    /// （入资产库做视频型素材包）。混在 outputs/{批次}/ 下会让批次文件夹的含义漂移。
+    pub fn clips(&self) -> PathBuf {
+        self.root.join("clips")
+    }
 
     /// 初始化全部子目录（幂等）。
     pub fn init(&self) -> AppResult<()> {
@@ -59,6 +66,7 @@ impl DataDirs {
             self.results(),
             self.trash(),
             self.logs(),
+            self.clips(),
         ] {
             std::fs::create_dir_all(d)?;
         }

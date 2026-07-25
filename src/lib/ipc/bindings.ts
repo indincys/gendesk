@@ -426,6 +426,24 @@ async listPurposes() : Promise<Result<PurposeView[], AppError>> {
 }
 },
 /**
+ * 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
+ * 
+ * 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
+ * `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
+ * `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
+ * 而不补就等于「验收自动入队」对全部历史资产失效。
+ * 
+ * **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
+ */
+async backfillGroupPurposes(apply: boolean) : Promise<Result<PurposeBackfill, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("backfill_group_purposes", { apply }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
  * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
  */
@@ -893,6 +911,194 @@ async exportWorksV2v(ids: number[], destDir: string) : Promise<Result<PackSummar
     else return { status: "error", error: e  as any };
 }
 },
+async getV2vSettings() : Promise<Result<V2vSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_v2v_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateV2vSettings(settings: V2vSettings) : Promise<Result<V2vSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_v2v_settings", { settings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pickHandoffRoot() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_handoff_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 受控模型清单（前端选择器渲染源，单点在 `v2v::dreamina`）。
+ */
+async v2vModels() : Promise<Result<ModelInfo[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 查即梦余额（设置页显示 + 批量提交前预检）。
+ */
+async v2vCredit() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_credit") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 全部在流水线内的条目（看板一次取完；量级是几十到几百，不必分页）。
+ */
+async listV2vClips(stages: string[]) : Promise<Result<ClipView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_v2v_clips", { stages }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vCounts() : Promise<Result<StageCounts, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_counts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动把作品加入流水线（用途只是筛选默认值，不是门禁 —— 堵死了就得改代码）。
+ */
+async enqueueWorksV2v(workIds: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("enqueue_works_v2v", { workIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 立刻重写工单（用户点「重新物化」，或想确认路径时）。
+ */
+async materializeV2vHandoff() : Promise<Result<MaterializeSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("materialize_v2v_handoff") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动收录改写结果（watcher 之外的兜底：用户等不及 2 秒防抖，或 watcher 没起来）。
+ */
+async ingestV2vRewrites() : Promise<Result<IngestSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ingest_v2v_rewrites") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openHandoffDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_handoff_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 人工编辑待提交条目的视频提示词与参数。
+ */
+async updateV2vClip(id: number, videoPrompt: string, modelVersion: string | null, duration: number | null, videoResolution: string | null) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_v2v_clip", { id, videoPrompt, modelVersion, duration, videoResolution }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 提交前给人看的**真实命令行**（每条一行）。
+ * 
+ * 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
+ * 同源（`dreamina::command_line`），不是另写一份格式化字符串。
+ */
+async previewV2vCommands(ids: number[]) : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_v2v_commands", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量提交到即梦。
+ */
+async submitV2vClips(ids: number[]) : Promise<Result<SubmitSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("submit_v2v_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 立刻轮询一轮（用户点「刷新」；后台轮询器照常在跑）。
+ */
+async pollV2vNow() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("poll_v2v_now") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 视频验收：通过 / 不通过。不通过时成片进废纸篓（留封面 + 提示词记录）。
+ */
+async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("review_v2v_clips", { ids, pass }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重跑（同提示词）/ 退回改写。
+ * 
+ * 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
+ */
+async requeueV2vClips(ids: number[], mode: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("requeue_v2v_clips", { ids, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从流水线移除（不想给这张图做视频了）。作品本体不受影响。
+ */
+async removeV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_v2v_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 各分组产出统计（E25）。按当前 prompts.group_id 归属（提示词移组后随之变化）。
  */
@@ -1197,6 +1403,23 @@ async importMediaFiles(skuId: number, paths: string[]) : Promise<Result<PackView
 async packFromWorks(skuId: number, workIds: number[]) : Promise<Result<PackView | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pack_from_works", { skuId, workIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 成片 → 视频型素材包（视频流水线闭环的最后一步）。
+ * 
+ * 这一步是「视频的终点本来就在库内」那句话的落地：做视频的目的就是发布，而发布模块
+ * 早已有「视频型素材包 = 1 视频 + 封面」。让成片从另一个门回来纯属浪费。
+ * 
+ * **只接受已验收通过的成片**：未验收的片子进了资产库就会被排期选中发出去，
+ * 而验收正是为了拦住那种事。
+ */
+async packFromClip(skuId: number, clipId: number) : Promise<Result<PackView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pack_from_clip", { skuId, clipId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1636,7 +1859,9 @@ refImportProgress: RefImportProgress,
 sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
-updateStateChanged: UpdateStateChanged
+updateStateChanged: UpdateStateChanged,
+v2vChanged: V2vChanged,
+v2vProgress: V2vProgress
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
@@ -1648,7 +1873,9 @@ refImportProgress: "ref-import-progress",
 sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
-updateStateChanged: "update-state-changed"
+updateStateChanged: "update-state-changed",
+v2vChanged: "v2v-changed",
+v2vProgress: "v2v-progress"
 })
 
 /** user-defined constants **/
@@ -1664,7 +1891,14 @@ export type AcceptResult = { accepted: number;
 /**
  * 本次因验收通过而转正的临时分组名（前端 toast）
  */
-promotedGroups: string[] }
+promotedGroups: string[]; 
+/**
+ * 本次自动进入视频流水线「待改写」的条数（提示词组用途 = 图生视频）。
+ * 
+ * 交接从「你要记得回作品库找出来再点导出」变成「它自己就在那了」——
+ * 那个「找出来」的动作本来就不该存在：哪些图是首帧图，在写那份 txt 时就已经决定了。
+ */
+queuedV2V: number }
 export type AccountPatch = { name: string | null; dailyLimit: number | null; 
 /**
  * `Some(None)` = 清除（跟随全局时段模板）；`Some(Some)` = 设置。
@@ -1812,6 +2046,14 @@ planned: number; failed: number; sheetId: number | null;
  * 当日涉及的 SKU 编码（去重，最多 6 个，供格子悬停展示）。
  */
 skus: string[] }
+/**
+ * 看板条目视图。
+ */
+export type ClipView = { id: number; workId: number; groupId: number | null; groupName: string; batchId: number | null; stage: string; promptCode: string; 
+/**
+ * 首帧图（父作品）原图与缩略图。
+ */
+imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string; videoPrompt: string | null; modelVersion: string | null; duration: number | null; videoResolution: string | null; submitId: string | null; creditCount: number | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; attempt: number; errorType: string | null; errorMessage: string | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -1937,6 +2179,20 @@ codeRange: string; isNewGroup: boolean;
  */
 inferred: boolean; 
 /**
+ * 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
+ * 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
+ * 
+ * 刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段导成可选（`purposes?`），
+ * 于是前端每一处读它都要先判 undefined，而后端其实永远都序列化它。
+ * 预览结构是前后端整体往返的，缺字段只可能是手写调用，那本就该报错。
+ */
+purposes: string[]; 
+/**
+ * 用途是关键词预猜出来的（组名含 B-Roll/分镜/首帧…）→ UI 标琥珀「疑似」。
+ * 与 `inferred` 分开：一个说的是组名的来源，一个说的是用途的来源，可以各自为真。
+ */
+purposeInferred: boolean; 
+/**
  * 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
  */
 prefixExplicit: boolean; 
@@ -1999,6 +2255,18 @@ export type IngestOutcome =
  */
 { state: "failed"; reason: string }
 /**
+ * 收录摘要。
+ */
+export type IngestSummary = { applied: number; 
+/**
+ * 认不出目标（缺 id / 编号对不上任何在队条目）的行数。
+ */
+unmatched: number; 
+/**
+ * 目标已越过待提交阶段（已提交/已出片）而被拒绝的行数。
+ */
+stale: number }
+/**
  * `keys://health`
  */
 export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: number; successRate: number }
@@ -2050,6 +2318,22 @@ conflicts: string[];
  * 无法导入的行，以及被忽略的单元格。
  */
 errors: string[] }
+/**
+ * 物化结果摘要。
+ */
+export type MaterializeSummary = { 
+/**
+ * 工单根目录（待改写）绝对路径 —— 前端把它显示出来供用户复制给 skill。
+ */
+pendingDir: string; groups: number; items: number; 
+/**
+ * 缩略图缺失而无法写进工单的条目数（父图被清理掉了）。
+ */
+skipped: number }
+/**
+ * 受控模型清单（前端选择器渲染源）。
+ */
+export type ModelInfo = { modelVersion: string; minDuration: number; maxDuration: number; resolutions: string[] }
 export type PackFileView = { name: string; origName: string; bytes: number }
 /**
  * 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
@@ -2255,6 +2539,22 @@ schedulePaused?: boolean }
  * 设置补丁（部分更新）。
  */
 export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
+/**
+ * 批量补标结果。`apply=false` 时只预览（applied=0）。
+ */
+export type PurposeBackfill = { hits: PurposeHit[]; applied: number; 
+/**
+ * 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
+ */
+scanned: number }
+/**
+ * 按组名批量补标用途的一条命中。
+ */
+export type PurposeHit = { groupId: number; name: string; 
+/**
+ * 该组下已验收通过的作品数（让人判断这一条值不值得标）。
+ */
+workCount: number; purposes: string[] }
 /**
  * 一个用途选项（前端选择器渲染源）。
  */
@@ -2491,6 +2791,28 @@ warn: boolean;
  */
 materialDays: number | null; titleDays: number | null; bodyDays: number | null }
 /**
+ * 七态计数。看板列头、侧栏徽章、开屏提示都读它。
+ */
+export type StageCounts = { rewrite: number; ready: number; run: number; rev: number; pass: number; rej: number; fail: number; 
+/**
+ * 侧栏徽章数：需要人动手的两处 —— 待提交与待验收。
+ * 
+ * 刻意**不含**待改写（那一步在 Claude Code 里做，催也没用）与已提交（机器在跑，
+ * 人插不上手）。徽章只该催人能立刻处理的事。
+ * 
+ * 在 Rust 侧算好而不是让前端 `ready + rev`：这条「什么算待办」的规则会随流水线
+ * 演进（将来 fail 也许该催），留在前端就会与后端的判断悄悄分叉。
+ */
+actionable: number }
+/**
+ * 提交摘要。
+ */
+export type SubmitSummary = { submitted: number; failed: number; 
+/**
+ * 第一条失败的原因（批量提交时逐条上报太吵，给一条代表 + 计数）。
+ */
+firstError: string | null }
+/**
  * 5 视觉组计数。
  */
 export type SummaryCounts = { 
@@ -2642,6 +2964,49 @@ export type UpdateStateChanged = {
  * checking / downloading / ready / uptodate / error
  */
 state: string; version: string | null }
+/**
+ * `v2v://changed` —— 流水线任何阶段变动即推送。
+ */
+export type V2vChanged = { counts: StageCounts; 
+/**
+ * 本次变动涉及的 clip（前端可据此做局部刷新）；批量操作时可能为空。
+ */
+clipId: number | null }
+/**
+ * `v2v://progress` —— 已提交条目的轮询进度（队列位次 / 状态原文）。
+ */
+export type V2vProgress = { clipId: number; 
+/**
+ * 即梦返回的 `gen_status` 原文，直接显示给人看。
+ * 
+ * 不映射成自造的中文态：轮询状态是**别人系统的**真相，翻译一层只会在它加了新态时
+ * 显示成「未知」。原文加一行 hint 比一个翻译错的标签有用。
+ */
+genStatus: string; queueIdx: number | null }
+/**
+ * 图生视频设置（`settings` 表 key='v2v' 单行 JSON）。
+ */
+export type V2vSettings = { 
+/**
+ * 交接根目录。skill 侧把它写死才能做到「什么都不用输入」，故默认值必须可预测。
+ */
+handoffRoot?: string; 
+/**
+ * 即梦 CLI 可执行（默认走 PATH 的 `dreamina`；可填绝对路径）。
+ */
+bin?: string; 
+/**
+ * 默认模型。空 = 不发高级控制，走 CLI 自己的默认路径（最稳，不锁定模型名）。
+ */
+modelVersion?: string; duration?: number | null; videoResolution?: string; 
+/**
+ * 即梦会话 id（`--session`）。
+ */
+session?: number | null; 
+/**
+ * 后台轮询开关。关掉后已提交的条目不再自动取回（排查问题时用）。
+ */
+pollEnabled?: boolean }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean; 
 /**
  * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
@@ -2650,12 +3015,31 @@ tag: string | null;
 /**
  * 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
  */
-hideExported: boolean }
+hideExported: boolean; 
+/**
+ * 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
+ * 
+ * 分组是「一份 txt = 一个组」的产物，会长到几十上百个——它天然是**出货单位**而不是
+ * 分类法，永远不会是好的浏览轴。搜索 + 批次分节才是找回一张历史图的实际路径。
+ */
+query?: string | null; 
+/**
+ * 只看某一批次。
+ */
+batchId?: number | null }
 export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
 /**
  * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。
  */
-refImageId: number | null; groupId: number | null; taskId: number | null }
+refImageId: number | null; groupId: number | null; taskId: number | null; 
+/**
+ * 已在视频流水线里（任一阶段）。卡片角标用，避免把同一张图重复入队。
+ */
+inPipeline: boolean; 
+/**
+ * 其提示词组用途 = 图生视频。卡片角标 + 「本批全选」的默认取样。
+ */
+isI2V: boolean }
 
 /** tauri-specta globals **/
 

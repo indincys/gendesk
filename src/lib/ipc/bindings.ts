@@ -1390,6 +1390,23 @@ async packFromWorks(skuId: number, workIds: number[]) : Promise<Result<PackView 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 成片 → 视频型素材包（视频流水线闭环的最后一步）。
+ * 
+ * 这一步是「视频的终点本来就在库内」那句话的落地：做视频的目的就是发布，而发布模块
+ * 早已有「视频型素材包 = 1 视频 + 封面」。让成片从另一个门回来纯属浪费。
+ * 
+ * **只接受已验收通过的成片**：未验收的片子进了资产库就会被排期选中发出去，
+ * 而验收正是为了拦住那种事。
+ */
+async packFromClip(skuId: number, clipId: number) : Promise<Result<PackView | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pack_from_clip", { skuId, clipId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async retirePack(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("retire_pack", { id }) };
@@ -2146,13 +2163,17 @@ inferred: boolean;
 /**
  * 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
  * 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
+ * 
+ * 刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段导成可选（`purposes?`），
+ * 于是前端每一处读它都要先判 undefined，而后端其实永远都序列化它。
+ * 预览结构是前后端整体往返的，缺字段只可能是手写调用，那本就该报错。
  */
-purposes?: string[]; 
+purposes: string[]; 
 /**
  * 用途是关键词预猜出来的（组名含 B-Roll/分镜/首帧…）→ UI 标琥珀「疑似」。
  * 与 `inferred` 分开：一个说的是组名的来源，一个说的是用途的来源，可以各自为真。
  */
-purposeInferred?: boolean; 
+purposeInferred: boolean; 
 /**
  * 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
  */
@@ -2960,12 +2981,31 @@ tag: string | null;
 /**
  * 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
  */
-hideExported: boolean }
+hideExported: boolean; 
+/**
+ * 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
+ * 
+ * 分组是「一份 txt = 一个组」的产物，会长到几十上百个——它天然是**出货单位**而不是
+ * 分类法，永远不会是好的浏览轴。搜索 + 批次分节才是找回一张历史图的实际路径。
+ */
+query?: string | null; 
+/**
+ * 只看某一批次。
+ */
+batchId?: number | null }
 export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
 /**
  * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。
  */
-refImageId: number | null; groupId: number | null; taskId: number | null }
+refImageId: number | null; groupId: number | null; taskId: number | null; 
+/**
+ * 已在视频流水线里（任一阶段）。卡片角标用，避免把同一张图重复入队。
+ */
+inPipeline: boolean; 
+/**
+ * 其提示词组用途 = 图生视频。卡片角标 + 「本批全选」的默认取样。
+ */
+isI2V: boolean }
 
 /** tauri-specta globals **/
 

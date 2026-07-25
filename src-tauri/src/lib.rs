@@ -184,6 +184,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_assets::list_asset_packs,
             commands::publish_assets::import_media_files,
             commands::publish_assets::pack_from_works,
+            commands::publish_assets::pack_from_clip,
             commands::publish_assets::retire_pack,
             commands::publish_assets::restore_pack,
             commands::publish_assets::delete_pack,

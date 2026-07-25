@@ -97,6 +97,16 @@ export type {
   InboxIngestEvent,
   SheetChangedEvent,
   ExportProgressEvent,
+  // 视频流水线（图生视频）
+  ClipView,
+  StageCounts,
+  V2vSettings,
+  V2vChanged,
+  V2vProgress,
+  ModelInfo,
+  SubmitSummary,
+  MaterializeSummary,
+  IngestSummary,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -192,6 +202,24 @@ export async function subscribeExportProgress(
   if (!isTauri()) return () => {};
   const un = await events.exportProgressEvent.listen((e) => handler(e.payload));
   return () => un();
+}
+
+/**
+ * 订阅视频流水线事件（阶段变化 / 已提交条目的轮询进度）。
+ * 返回反订阅函数；非 Tauri 环境为 no-op。
+ */
+export async function subscribeV2v(handlers: {
+  onChanged?: (e: import("./bindings").V2vChanged) => void;
+  onProgress?: (e: import("./bindings").V2vProgress) => void;
+}): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisteners = await Promise.all([
+    events.v2vChanged.listen((e) => handlers.onChanged?.(e.payload)),
+    events.v2vProgress.listen((e) => handlers.onProgress?.(e.payload)),
+  ]);
+  return () => {
+    for (const un of unlisteners) un();
+  };
 }
 
 /**

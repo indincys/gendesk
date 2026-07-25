@@ -46,11 +46,13 @@ pub struct ImportPreviewGroup {
     pub inferred: bool,
     /// 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
     /// 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
-    #[serde(default)]
+    ///
+    /// 刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段导成可选（`purposes?`），
+    /// 于是前端每一处读它都要先判 undefined，而后端其实永远都序列化它。
+    /// 预览结构是前后端整体往返的，缺字段只可能是手写调用，那本就该报错。
     pub purposes: Vec<String>,
     /// 用途是关键词预猜出来的（组名含 B-Roll/分镜/首帧…）→ UI 标琥珀「疑似」。
     /// 与 `inferred` 分开：一个说的是组名的来源，一个说的是用途的来源，可以各自为真。
-    #[serde(default)]
     pub purpose_inferred: bool,
     /// 前缀是文件里写死的或用户手改的 → `repreview_import` 不再按组名重算。
     pub prefix_explicit: bool,

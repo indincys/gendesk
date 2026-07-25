@@ -38,6 +38,11 @@ pub struct AcceptResult {
     pub accepted: i64,
     /// 本次因验收通过而转正的临时分组名（前端 toast）
     pub promoted_groups: Vec<String>,
+    /// 本次自动进入视频流水线「待改写」的条数（提示词组用途 = 图生视频）。
+    ///
+    /// 交接从「你要记得回作品库找出来再点导出」变成「它自己就在那了」——
+    /// 那个「找出来」的动作本来就不该存在：哪些图是首帧图，在写那份 txt 时就已经决定了。
+    pub queued_v2v: i64,
 }
 
 const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref_name,
@@ -111,11 +116,16 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
 #[specta::specta]
 pub async fn accept_tasks(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     task_ids: Vec<i64>,
 ) -> AppResult<AcceptResult> {
     let mut promoted: Vec<String> = Vec::new();
     let mut accepted = 0i64;
     let mut batches: Vec<i64> = Vec::new();
+    // 用途 = 图生视频的组，其通过图自动入视频流水线。用途缓存按组算一次：
+    // 一个批次里同组常有十几张，逐张查标签是白跑十几次 SQL。
+    let mut i2v_groups: Vec<(i64, bool)> = Vec::new();
+    let mut to_queue: Vec<i64> = Vec::new();
     let date = files::date_yymmdd(now_unix());
 
     for tid in task_ids {
@@ -156,7 +166,7 @@ pub async fn accept_tasks(
 
         // 事务：写作品 + 微调写回 + 临时组转正 + 状态迁移。
         let mut tx = state.db.begin().await?;
-        work_repo::insert(
+        let work_id = work_repo::insert(
             &mut tx,
             &work_repo::NewWork {
                 task_id: row.id,
@@ -184,11 +194,34 @@ pub async fn accept_tasks(
                 }
             }
         }
+        // 用途 = 图生视频 → 这张通过图自动进「待改写」。
+        // 用途标在**提示词组**上：一张图的用途由它的提示词决定，提示词的用途由那份 txt 决定。
+        if let Some(gid) = row.group_id {
+            let is_i2v = match i2v_groups.iter().find(|(g, _)| *g == gid) {
+                Some((_, v)) => *v,
+                None => {
+                    let tags = prompt_repo::group_tags(&state.db, gid).await?;
+                    let v = tags.iter().any(|t| t == crate::purpose::PURPOSE_I2V);
+                    i2v_groups.push((gid, v));
+                    v
+                }
+            };
+            if is_i2v {
+                to_queue.push(work_id);
+            }
+        }
+
         task_repo::set_status(&state.db, row.id, "pass").await?;
         accepted += 1;
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
+    }
+
+    // 入队 + 物化工单。**放在验收循环之后**：一批验收只重写一次工单，而不是每张一次。
+    let queued_v2v = crate::commands::v2v::enqueue_works(&state.db, &to_queue).await?;
+    if queued_v2v > 0 {
+        crate::commands::v2v::refresh_handoff(&state.db, &app).await;
     }
 
     for b in &batches {
@@ -200,6 +233,7 @@ pub async fn accept_tasks(
     Ok(AcceptResult {
         accepted,
         promoted_groups: promoted,
+        queued_v2v,
     })
 }
 

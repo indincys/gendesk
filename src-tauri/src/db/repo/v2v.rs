@@ -33,7 +33,6 @@ pub struct ClipRow {
     pub error_message: Option<String>,
     /// 提交时刻。轮询器的超时兜底读它（「未知态判 Running」必须有个尽头）。
     pub submitted_at: Option<i64>,
-    pub created_at: i64,
     pub updated_at: i64,
     /// 父图编号（`accepted_works` → `prompts.code`）。
     pub prompt_code: String,
@@ -48,7 +47,7 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.source_prompt, c.variable_part, c.video_prompt, c.model_version, c.duration,
         c.video_resolution, c.submit_id, c.credit_count, c.video_path, c.poster_path,
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
-        c.submitted_at, c.created_at, c.updated_at,
+        c.submitted_at, c.updated_at,
         COALESCE(p.code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
         COALESCE(w.thumb_path,'') AS thumb_path,
@@ -114,11 +113,9 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<ClipRow>, sqlx::Er
 
 /// 各阶段计数（看板列头 + 侧栏徽章）。
 pub async fn stage_counts(pool: &SqlitePool) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    sqlx::query_as::<_, (String, i64)>(
-        "SELECT stage, COUNT(*) FROM v2v_clips GROUP BY stage",
-    )
-    .fetch_all(pool)
-    .await
+    sqlx::query_as::<_, (String, i64)>("SELECT stage, COUNT(*) FROM v2v_clips GROUP BY stage")
+        .fetch_all(pool)
+        .await
 }
 
 /// 写入组内公共前后缀剥离结果（工单物化时按组批量算一次）。
@@ -478,9 +475,17 @@ mod tests {
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
         let mut tx = pool.begin().await.unwrap();
-        apply_rewrite(&mut tx, id, "视频提示词", Some("seedance2.0fast"), Some(5), None, 200)
-            .await
-            .unwrap();
+        apply_rewrite(
+            &mut tx,
+            id,
+            "视频提示词",
+            Some("seedance2.0fast"),
+            Some(5),
+            None,
+            200,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
         mark_ready_for_review(

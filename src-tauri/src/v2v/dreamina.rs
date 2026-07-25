@@ -370,7 +370,11 @@ pub async fn submit(bin: &str, image: &Path, prompt: &str, opts: &GenOpts) -> Ap
 }
 
 /// 查一条任务；`download_dir` 非空则同时把成片下载到该目录。
-pub async fn query(bin: &str, submit_id: &str, download_dir: Option<&Path>) -> AppResult<QueryResult> {
+pub async fn query(
+    bin: &str,
+    submit_id: &str,
+    download_dir: Option<&Path>,
+) -> AppResult<QueryResult> {
     let mut argv = vec![
         bin.to_string(),
         "query_result".to_string(),
@@ -438,8 +442,12 @@ mod tests {
     #[test]
     fn resolution_constraint_is_enforced_per_model() {
         assert!(normalize_opts(&opts(Some("seedance2.0_vip"), Some(5), Some("4k"))).is_ok());
-        let err = normalize_opts(&opts(Some("seedance2.0fast"), Some(5), Some("1080p"))).unwrap_err();
-        assert!(format!("{err}").contains("720p"), "须指出该模型只支持 720p: {err}");
+        let err =
+            normalize_opts(&opts(Some("seedance2.0fast"), Some(5), Some("1080p"))).unwrap_err();
+        assert!(
+            format!("{err}").contains("720p"),
+            "须指出该模型只支持 720p: {err}"
+        );
     }
 
     // 时长范围按模型族不同（1.0 族 3–10、1.5pro 4–12、2.0 族 4–15）。
@@ -480,7 +488,10 @@ mod tests {
     #[test]
     fn polling_is_delegated_to_our_own_poller() {
         let argv = command_line("dreamina", "/a.jpg", "p", &opts(None, None, None));
-        assert!(argv.contains(&"--poll=0".to_string()), "须显式 --poll=0: {argv:?}");
+        assert!(
+            argv.contains(&"--poll=0".to_string()),
+            "须显式 --poll=0: {argv:?}"
+        );
     }
 
     // 确认卡显示的命令行必须与即将执行的 argv 同源，只截断提示词。
@@ -524,7 +535,10 @@ mod tests {
         let q = parse_query(&extract_json(raw).unwrap());
         assert_eq!(q.gen_status, "success");
         assert_eq!(classify_status(&q.gen_status), Outcome::Done);
-        assert_eq!(q.video_path.as_deref(), Some("/tmp/dl/02c1cafe_video_1.mp4"));
+        assert_eq!(
+            q.video_path.as_deref(),
+            Some("/tmp/dl/02c1cafe_video_1.mp4")
+        );
         assert_eq!(q.width, Some(960));
         assert_eq!(q.fps, Some(24.0));
         assert_eq!(q.duration_sec, Some(4.042));
@@ -558,7 +572,10 @@ mod tests {
     // **未知态判 Running**：CLI 加新中间态时，判失败会把正在跑、额度已扣的任务标死。
     #[test]
     fn unknown_status_is_treated_as_running_not_failed() {
-        assert_eq!(classify_status("some_new_intermediate_state"), Outcome::Running);
+        assert_eq!(
+            classify_status("some_new_intermediate_state"),
+            Outcome::Running
+        );
         assert_eq!(classify_status(""), Outcome::Running);
     }
 

@@ -26,6 +26,7 @@ pub mod dreamina;
 pub mod events;
 pub mod handoff;
 pub mod runner;
+pub mod watcher;
 
 use serde::Serialize;
 

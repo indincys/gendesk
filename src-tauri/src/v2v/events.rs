@@ -15,6 +15,14 @@ pub struct StageCounts {
     pub pass: i64,
     pub rej: i64,
     pub fail: i64,
+    /// 侧栏徽章数：需要人动手的两处 —— 待提交与待验收。
+    ///
+    /// 刻意**不含**待改写（那一步在 Claude Code 里做，催也没用）与已提交（机器在跑，
+    /// 人插不上手）。徽章只该催人能立刻处理的事。
+    ///
+    /// 在 Rust 侧算好而不是让前端 `ready + rev`：这条「什么算待办」的规则会随流水线
+    /// 演进（将来 fail 也许该催），留在前端就会与后端的判断悄悄分叉。
+    pub actionable: i64,
 }
 
 impl StageCounts {
@@ -33,15 +41,8 @@ impl StageCounts {
                 _ => {}
             }
         }
+        c.actionable = c.ready + c.rev;
         c
-    }
-
-    /// 侧栏徽章数：需要人动手的两处 —— 待提交与待验收。
-    ///
-    /// 刻意**不含**待改写：那一步在 Claude Code 里做，催也没用；
-    /// 也不含已提交：那是机器在跑，人插不上手。徽章只该催人能立刻处理的事。
-    pub fn actionable(&self) -> i64 {
-        self.ready + self.rev
     }
 }
 
@@ -91,15 +92,15 @@ mod tests {
     // 待改写要去 Claude Code 做、已提交是机器在跑，催了也没用。
     #[test]
     fn badge_counts_only_actionable_stages() {
-        let c = StageCounts {
-            rewrite: 10,
-            ready: 2,
-            run: 5,
-            rev: 3,
-            pass: 100,
-            rej: 4,
-            fail: 1,
-        };
-        assert_eq!(c.actionable(), 5, "只该是 ready(2) + rev(3)");
+        let c = StageCounts::from_rows(&[
+            ("rewrite".to_string(), 10),
+            ("ready".to_string(), 2),
+            ("run".to_string(), 5),
+            ("rev".to_string(), 3),
+            ("pass".to_string(), 100),
+            ("rej".to_string(), 4),
+            ("fail".to_string(), 1),
+        ]);
+        assert_eq!(c.actionable, 5, "只该是 ready(2) + rev(3)");
     }
 }

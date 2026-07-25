@@ -502,7 +502,11 @@ pub async fn parse_prompt_txt(
             .collect();
         let guessed = crate::purpose::infer_purposes(&g.name, &g.scene, &g.tags);
         let purpose_inferred = explicit.is_empty() && !guessed.is_empty();
-        let purposes = if explicit.is_empty() { guessed } else { explicit };
+        let purposes = if explicit.is_empty() {
+            guessed
+        } else {
+            explicit
+        };
         groups.push(ImportPreviewGroup {
             name: g.name.clone(),
             code_range: code_range(&state, &prefix, count).await,

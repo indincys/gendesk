@@ -78,7 +78,10 @@ pub fn infer_purposes(group_name: &str, scene: &str, tags: &[String]) -> Vec<Str
     for t in tags {
         haystack.push_str(&normalize(t));
     }
-    if I2V_KEYWORDS.iter().any(|k| haystack.contains(&normalize(k))) {
+    if I2V_KEYWORDS
+        .iter()
+        .any(|k| haystack.contains(&normalize(k)))
+    {
         vec![PURPOSE_I2V.to_string()]
     } else {
         Vec::new()
@@ -167,7 +170,8 @@ mod tests {
     // 预猜错的代价必须低于不猜：普通图片组不得被默认标成视频用途。
     #[test]
     fn does_not_infer_for_ordinary_groups() {
-        for name in ["电商主图", "白底商品", "人物场景", "详情页长图", "DZ 主图"] {
+        for name in ["电商主图", "白底商品", "人物场景", "详情页长图", "DZ 主图"]
+        {
             assert!(
                 infer_purposes(name, "", &[]).is_empty(),
                 "普通组名「{name}」不应被预猜为视频用途"

@@ -24,4 +24,5 @@ pub mod stats;
 pub mod tasks;
 pub mod trash;
 pub mod updater;
+pub mod v2v;
 pub mod works;

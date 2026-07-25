@@ -249,13 +249,13 @@ pub async fn materialize(pool: &SqlitePool, root: &Path) -> AppResult<Materializ
             manifest.push('\n');
         }
         write_atomic(&dir.join(MANIFEST), &manifest)?;
-        write_atomic(&dir.join("改写说明.md"), &readme(group_name, &items, pre, suf))?;
+        write_atomic(
+            &dir.join("改写说明.md"),
+            &readme(group_name, &items, pre, suf),
+        )?;
         // READY.txt **最后写**：skill 只认带 READY.txt 的目录，写到一半的工单
         // （磁盘满 / 进程被杀）不会被当成可执行输入。
-        write_atomic(
-            &dir.join(READY),
-            &format!("{} 条待改写\n", items.len()),
-        )?;
+        write_atomic(&dir.join(READY), &format!("{} 条待改写\n", items.len()))?;
 
         summary.groups += 1;
         summary.items += items.len() as i64;
@@ -301,9 +301,11 @@ async fn group_prompt_corpus(pool: &SqlitePool, group_id: Option<i64>) -> AppRes
                 .await?
         }
         None => {
-            sqlx::query_as("SELECT prompt_text FROM accepted_works WHERE group_id IS NULL ORDER BY id")
-                .fetch_all(pool)
-                .await?
+            sqlx::query_as(
+                "SELECT prompt_text FROM accepted_works WHERE group_id IS NULL ORDER BY id",
+            )
+            .fetch_all(pool)
+            .await?
         }
     };
     Ok(rows.into_iter().map(|(t,)| t).collect())
@@ -473,7 +475,13 @@ mod tests {
     use super::*;
     use crate::db::test_support::test_pool;
 
-    async fn seed(pool: &SqlitePool, work_id: i64, group_id: i64, prompt: &str, thumb: &str) -> i64 {
+    async fn seed(
+        pool: &SqlitePool,
+        work_id: i64,
+        group_id: i64,
+        prompt: &str,
+        thumb: &str,
+    ) -> i64 {
         sqlx::query("INSERT OR IGNORE INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (?1,?2,'GG','',0,0)")
             .bind(group_id).bind(format!("组{group_id}")).execute(pool).await.unwrap();
         sqlx::query("INSERT OR IGNORE INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (?1,?2,?3,'t','active','library',0,0)")
@@ -482,9 +490,17 @@ mod tests {
             .bind(work_id).bind(thumb).bind(prompt).bind(group_id)
             .execute(pool).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
-        repo::enqueue(&mut tx, work_id, Some(group_id), &format!("组{group_id}"), Some(7), prompt, 100)
-            .await
-            .unwrap();
+        repo::enqueue(
+            &mut tx,
+            work_id,
+            Some(group_id),
+            &format!("组{group_id}"),
+            Some(7),
+            prompt,
+            100,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         work_id
     }
@@ -575,8 +591,22 @@ mod tests {
         // 同组两条，共享产品保真前后缀。
         let t1 = touch_thumb(&thumbs, "a.jpg");
         let t2 = touch_thumb(&thumbs, "b.jpg");
-        seed(&pool, 1, 5, "保留产品原样。背景换成屋顶花园。像素级完整保留。", &t1).await;
-        seed(&pool, 2, 5, "保留产品原样。背景换成宠物餐吧。像素级完整保留。", &t2).await;
+        seed(
+            &pool,
+            1,
+            5,
+            "保留产品原样。背景换成屋顶花园。像素级完整保留。",
+            &t1,
+        )
+        .await;
+        seed(
+            &pool,
+            2,
+            5,
+            "保留产品原样。背景换成宠物餐吧。像素级完整保留。",
+            &t2,
+        )
+        .await;
 
         let sum = materialize(&pool, &root).await.unwrap();
         assert_eq!(sum.groups, 1);
@@ -604,7 +634,10 @@ mod tests {
             "场景差异须保留：{first}"
         );
         assert!(
-            !first["variablePart"].as_str().unwrap().contains("像素级完整保留"),
+            !first["variablePart"]
+                .as_str()
+                .unwrap()
+                .contains("像素级完整保留"),
             "组内公共尾巴须剥掉：{first}"
         );
         // 原图**不**进工单：喂 skill 只给缩略图省一个量级的 token。
@@ -649,7 +682,10 @@ mod tests {
         assert_eq!(sum.items, 0);
         assert_eq!(sum.skipped, 1);
         assert_eq!(
-            repo::list_by_stages(&pool, &["rewrite"]).await.unwrap().len(),
+            repo::list_by_stages(&pool, &["rewrite"])
+                .await
+                .unwrap()
+                .len(),
             1,
             "条目须留在待改写，人能在看板上看见它卡着"
         );
@@ -661,7 +697,10 @@ mod tests {
         let (pool, _d) = test_pool().await;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let done = root.join(V2V).join(DONE).join(group_dir_name(Some(5), "组5"));
+        let done = root
+            .join(V2V)
+            .join(DONE)
+            .join(group_dir_name(Some(5), "组5"));
         std::fs::create_dir_all(&done).unwrap();
         std::fs::write(
             done.join(REWRITE),
@@ -670,7 +709,10 @@ mod tests {
         .unwrap();
         let ing = ingest(&pool, &root).await.unwrap();
         assert_eq!(ing.applied, 0);
-        assert_eq!(ing.unmatched, 4, "找不到目标/缺 id/坏 JSON/缺提示词 各计一次");
+        assert_eq!(
+            ing.unmatched, 4,
+            "找不到目标/缺 id/坏 JSON/缺提示词 各计一次"
+        );
     }
 
     // 迟到的改写结果不得把已提交的条目打回（白烧额度），要计入 stale。
@@ -691,9 +733,16 @@ mod tests {
         tx.commit().await.unwrap();
         repo::mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
 
-        let done = root.join(V2V).join(DONE).join(group_dir_name(Some(5), "组5"));
+        let done = root
+            .join(V2V)
+            .join(DONE)
+            .join(group_dir_name(Some(5), "组5"));
         std::fs::create_dir_all(&done).unwrap();
-        std::fs::write(done.join(REWRITE), "{\"id\":\"W1\",\"videoPrompt\":\"第二版\"}\n").unwrap();
+        std::fs::write(
+            done.join(REWRITE),
+            "{\"id\":\"W1\",\"videoPrompt\":\"第二版\"}\n",
+        )
+        .unwrap();
         let ing = ingest(&pool, &root).await.unwrap();
         assert_eq!(ing.applied, 0);
         assert_eq!(ing.stale, 1);

@@ -123,6 +123,25 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::trash_works,
             commands::works::export_works,
             commands::works::export_works_v2v,
+            // v2v 域（图生视频流水线）
+            commands::v2v::get_v2v_settings,
+            commands::v2v::update_v2v_settings,
+            commands::v2v::pick_handoff_root,
+            commands::v2v::v2v_models,
+            commands::v2v::v2v_credit,
+            commands::v2v::list_v2v_clips,
+            commands::v2v::v2v_counts,
+            commands::v2v::enqueue_works_v2v,
+            commands::v2v::materialize_v2v_handoff,
+            commands::v2v::ingest_v2v_rewrites,
+            commands::v2v::open_handoff_dir,
+            commands::v2v::update_v2v_clip,
+            commands::v2v::preview_v2v_commands,
+            commands::v2v::submit_v2v_clips,
+            commands::v2v::poll_v2v_now,
+            commands::v2v::review_v2v_clips,
+            commands::v2v::requeue_v2v_clips,
+            commands::v2v::remove_v2v_clips,
             // stats 域（E25）
             commands::stats::list_group_stats,
             commands::stats::prompt_stats,
@@ -223,6 +242,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             publish::events::InboxIngestEvent,
             publish::events::SheetChangedEvent,
             publish::events::ExportProgressEvent,
+            // 视频流水线事件
+            v2v::events::V2vChanged,
+            v2v::events::V2vProgress,
         ])
 }
 
@@ -341,6 +363,7 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings.trash_retention_days,
     ));
 
+    let dirs_for_v2v = dirs.clone();
     app.manage(state::AppState::new(
         pool.clone(),
         secrets,
@@ -370,6 +393,30 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     app.manage(publish_state);
+
+    // 视频流水线：监听交接目录（skill 写回改写结果）+ 后台轮询已提交条目。
+    //
+    // 启动即物化一次工单：上次退出后新验收的条目、或用户手动改过交接根，
+    // 都要在这一刻把磁盘上的工单对齐成库里的真相，否则 skill 会对着旧内容干活。
+    if let Ok(vset) = tauri::async_runtime::block_on(commands::v2v::load_settings(&pool)) {
+        let root = vset.root();
+        match v2v::watcher::start(pool.clone(), root.clone(), app.handle().clone()) {
+            Ok(w) => {
+                app.manage(w);
+            }
+            Err(err) => tracing::warn!(error = %err, "启动交接目录监听失败"),
+        }
+        let pool_bg = pool.clone();
+        let app_bg = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            // 先收录一次（应用没开时 skill 也可能写回了），再按最新队列物化。
+            if let Err(err) = v2v::handoff::ingest(&pool_bg, &root).await {
+                tracing::warn!(error = %err, "启动补跑收录改写结果失败");
+            }
+            commands::v2v::refresh_handoff(&pool_bg, &app_bg).await;
+        });
+        v2v::runner::spawn(pool.clone(), dirs_for_v2v, app.handle().clone());
+    }
 
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
     if let Some(window) = app.get_webview_window("main") {

@@ -234,6 +234,61 @@ pub async fn counts(pool: &SqlitePool) -> AppResult<StageCounts> {
     Ok(StageCounts::from_rows(&repo::stage_counts(pool).await?))
 }
 
+/// 后台轮询循环。
+///
+/// 每轮**重读设置**而不是把配置捕获进闭包：改了 CLI 路径或关掉轮询开关应当立刻生效，
+/// 而不是要求重启应用（那种「改了没反应」正是 v0.11.1 那个 bug 的手感）。
+pub fn spawn(pool: SqlitePool, dirs: std::sync::Arc<DataDirs>, app: tauri::AppHandle) {
+    use crate::v2v::events::V2vProgress;
+    use tauri_specta::Event;
+
+    tauri::async_runtime::spawn(async move {
+        // 启动恢复：提交过程中被杀的（run 但无 submit_id）退回 ready 让人重提。
+        // 有 submit_id 的一条都不动——额度已扣，重提等于花两份钱买同一条视频。
+        match repo::recover_orphan_submits(&pool, now_unix()).await {
+            Ok(n) if n > 0 => tracing::info!(count = n, "视频任务中断恢复：退回待提交"),
+            Err(e) => tracing::warn!(error = %e, "视频任务中断恢复失败"),
+            _ => {}
+        }
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let settings = match crate::commands::v2v::load_settings(&pool).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "读图生视频设置失败，跳过本轮轮询");
+                    continue;
+                }
+            };
+            if !settings.poll_enabled {
+                continue;
+            }
+            match poll_once(&pool, &dirs, &settings.bin).await {
+                Ok(sum) => {
+                    for (clip_id, gen_status, queue_idx) in &sum.progress {
+                        let _ = V2vProgress {
+                            clip_id: *clip_id,
+                            gen_status: gen_status.clone(),
+                            queue_idx: *queue_idx,
+                        }
+                        .emit(&app);
+                    }
+                    if sum.finished > 0 || sum.failed > 0 {
+                        crate::commands::v2v::emit_changed(&pool, &app, None).await;
+                        if sum.finished > 0 {
+                            use crate::engine::events::EventSink;
+                            crate::engine::events::TauriSink::new(app.clone()).notify(
+                                "视频已出片".into(),
+                                format!("{} 条成片待验收", sum.finished),
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "视频轮询失败"),
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
@@ -265,7 +320,6 @@ mod tests {
             error_type: None,
             error_message: None,
             submitted_at: None,
-            created_at: 0,
             updated_at: 0,
             prompt_code: "GG-0001".into(),
             image_path: "/img.jpg".into(),
@@ -284,7 +338,10 @@ mod tests {
             video_resolution: Some("720p".into()),
             session: Some(0),
         };
-        let o = opts_for(&clip(Some("seedance2.0_vip"), Some(8), Some("1080p")), &defaults);
+        let o = opts_for(
+            &clip(Some("seedance2.0_vip"), Some(8), Some("1080p")),
+            &defaults,
+        );
         assert_eq!(o.model_version.as_deref(), Some("seedance2.0_vip"));
         assert_eq!(o.duration, Some(8));
         assert_eq!(o.video_resolution.as_deref(), Some("1080p"));
@@ -339,7 +396,11 @@ mod tests {
     #[test]
     fn timeout_bounds_the_unknown_status_policy() {
         assert!(!is_timed_out(Some(1000), 1000 + 10, RUN_TIMEOUT_SECS));
-        assert!(is_timed_out(Some(1000), 1000 + RUN_TIMEOUT_SECS + 1, RUN_TIMEOUT_SECS));
+        assert!(is_timed_out(
+            Some(1000),
+            1000 + RUN_TIMEOUT_SECS + 1,
+            RUN_TIMEOUT_SECS
+        ));
         assert!(
             !is_timed_out(None, 999_999, RUN_TIMEOUT_SECS),
             "没有提交时间的条目不该被判超时"

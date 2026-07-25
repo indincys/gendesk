@@ -1,6 +1,6 @@
 import { type ModelInfo, type V2vSettings, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { FolderOpen, RefreshCw } from "lucide-react";
+import { AlertTriangle, Check, FolderOpen, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -16,6 +16,13 @@ export function V2vSection() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [credit, setCredit] = useState<number | null>(null);
   const [checking, setChecking] = useState(false);
+  /** 当前设置实际会执行哪个文件（后端探测结果）；null = 没找到。 */
+  const [resolved, setResolved] = useState<string | null>(null);
+
+  const refreshResolved = () =>
+    void unwrap(commands.resolveV2vBin())
+      .then(setResolved)
+      .catch(() => setResolved(null));
 
   useEffect(() => {
     void unwrap(commands.getV2vSettings())
@@ -24,6 +31,7 @@ export function V2vSection() {
     void unwrap(commands.v2vModels())
       .then(setModels)
       .catch(() => setModels([]));
+    refreshResolved();
   }, []);
 
   const save = async (p: Partial<V2vSettings>) => {
@@ -35,6 +43,7 @@ export function V2vSection() {
       toast.error(String(e));
       setS(await unwrap(commands.getV2vSettings()));
     }
+    if (p.bin !== undefined) refreshResolved();
   };
 
   const checkCredit = async () => {
@@ -92,19 +101,46 @@ export function V2vSection() {
         <input
           className="inp f1"
           value={s.bin}
-          placeholder="dreamina（走 PATH）或绝对路径"
+          placeholder="留空自动探测"
           onChange={(e) => setS({ ...s, bin: e.target.value })}
           onBlur={() => void save({ bin: s.bin ?? "" })}
         />
+        <button
+          type="button"
+          className="btn sm"
+          onClick={async () => {
+            const f = await unwrap(commands.pickDreaminaBin()).catch(() => null);
+            if (f) await save({ bin: f });
+          }}
+        >
+          <FolderOpen className="ic12" />
+          选择文件
+        </button>
         <button type="button" className="btn sm gho" disabled={checking} onClick={checkCredit}>
           <RefreshCw className="ic12" />
           查余额
         </button>
         {credit != null && <span className="bdg b-green">{credit} 额度</span>}
       </div>
-      <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
-        需先在终端跑一次 <span className="chip">dreamina login</span> 完成授权。 CLI 的 flags
-        会随版本变，故提交前会把<b>即将执行的完整命令行</b>摆在确认卡里。
+      {/* 「路径填什么」不该由人回答：直接把解析结果摆出来，说清实际会执行哪个文件。 */}
+      <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
+        {resolved ? (
+          <span className="fx ac gap6">
+            <Check className="ic12" style={{ color: "var(--ok)" }} />
+            实际会执行：<span className="chip">{resolved}</span>
+          </span>
+        ) : (
+          <span className="fx ac gap6" style={{ color: "var(--wr)" }}>
+            <AlertTriangle className="ic12" />
+            没探测到即梦 CLI。终端里跑 <span className="chip">which dreamina</span>
+            ，把输出用「选择文件」选中或粘贴到上面。
+          </span>
+        )}
+        <br />
+        留空即自动探测（PATH 与 <span className="chip">~/.local/bin</span> 等常见安装位置）。
+        <b>从访达启动的应用拿不到终端的 PATH</b>，所以「终端里能跑」不等于这里能找到 ——
+        探测不到时填绝对路径最稳。需先在终端跑一次 <span className="chip">dreamina login</span>{" "}
+        完成授权。
       </div>
 
       <div className="fx ac gap10 mt14">

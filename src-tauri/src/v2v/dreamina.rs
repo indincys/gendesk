@@ -23,8 +23,131 @@ use specta::Type;
 
 use crate::error::{AppError, AppResult};
 
-/// 默认可执行名（走 PATH）。设置里可改成绝对路径。
+/// 默认可执行名。设置里留空即用它，并走 [`resolve_bin`] 自动探测。
 pub const DEFAULT_BIN: &str = "dreamina";
+
+/// 除 `PATH` 之外还要翻的安装目录。
+///
+/// **「走 PATH」对 GUI 应用基本是句空话**：macOS 上从 Finder/Dock 启动的进程不经过登录
+/// shell，`PATH` 恒为 `/usr/bin:/bin:/usr/sbin:/sbin`，而 dreamina 的默认安装位置
+/// `~/.local/bin` 不在其中 —— 于是终端里跑得好好的命令，在应用里必然「找不到」。
+/// 从终端 `pnpm tauri dev` 起的开发实例反而继承了完整 PATH，正好把这个坑藏起来。
+fn probe_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let rel = [
+        ".local/bin",
+        "bin",
+        ".cargo/bin",
+        ".bun/bin",
+        "go/bin",
+        ".npm-global/bin",
+    ];
+    let abs = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+        "/usr/bin",
+    ];
+    home.iter()
+        .flat_map(|h| rel.iter().map(|r| h.join(r)))
+        .chain(abs.iter().map(std::path::PathBuf::from))
+        .collect()
+}
+
+/// 该路径是否是一个能执行的文件。
+fn is_exec(p: &Path) -> bool {
+    if !p.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Windows 下同一个名字要试几个扩展名。
+fn name_variants(name: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if Path::new(name).extension().is_some() {
+            return vec![name.to_string()];
+        }
+        ["", ".exe", ".cmd", ".bat"]
+            .iter()
+            .map(|e| format!("{name}{e}"))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![name.to_string()]
+    }
+}
+
+/// 把设置里的 `bin` 解析成一个**确实存在且可执行**的绝对路径。
+///
+/// 三条分支：
+/// - 填了路径（含分隔符）→ 只认它，不存在就直说是哪个路径不存在（别偷偷回退到探测结果，
+///   否则用户填错了路径却「跑起来了」，下次换台机器又神秘失败）。
+/// - 留空 → 用默认名去探。
+/// - 裸名字 → 先 `PATH`，再 [`probe_dirs`]。
+///
+/// 找不到时把翻过的目录一并报出来：这个错误的唯一有用信息就是「我找过哪儿」。
+pub fn resolve_bin(configured: &str) -> AppResult<String> {
+    let path_dirs = std::env::var_os("PATH")
+        .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let dirs: Vec<std::path::PathBuf> = path_dirs.into_iter().chain(probe_dirs()).collect();
+    resolve_in(configured, &dirs)
+}
+
+/// [`resolve_bin`] 的内核，搜索目录由外部给。
+///
+/// 抽出来是为了可测：本仓库 `-F unsafe-code`，而改 `PATH` 需要 `unsafe`（Rust 2024 起
+/// `set_var` 是 unsafe fn），所以测试只能从这一侧注入目录。
+fn resolve_in(configured: &str, dirs: &[std::path::PathBuf]) -> AppResult<String> {
+    let raw = configured.trim();
+    if raw.contains('/') || raw.contains('\\') {
+        let p = Path::new(raw);
+        return if is_exec(p) {
+            Ok(p.to_string_lossy().to_string())
+        } else {
+            Err(AppError::InvalidInput(format!(
+                "设置里填的即梦 CLI 路径不可用：{raw}\n（文件不存在，或没有执行权限）"
+            )))
+        };
+    }
+    let name = if raw.is_empty() { DEFAULT_BIN } else { raw };
+    for dir in dirs {
+        for variant in name_variants(name) {
+            let cand = dir.join(&variant);
+            if is_exec(&cand) {
+                return Ok(cand.to_string_lossy().to_string());
+            }
+        }
+    }
+    let looked: Vec<String> = probe_dirs()
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Err(AppError::InvalidInput(format!(
+        "找不到即梦 CLI「{name}」。请先安装并在终端跑一次 `dreamina login`；\
+         若已安装，请在设置页填它的绝对路径（终端里 `which dreamina` 的输出）。\n\
+         已找过 PATH 与：{}",
+        looked.join("、")
+    )))
+}
+
+/// 探测结果（设置页展示用）：找到就给绝对路径，找不到给 `None`。
+pub fn detect_bin(configured: &str) -> Option<String> {
+    resolve_bin(configured).ok()
+}
 
 /// 即梦模型族的取值与约束。**只作提交前的本地预检**，最终真相仍是 CLI 自己的 `-h`。
 ///
@@ -344,7 +467,8 @@ async fn run(argv: Vec<String>) -> AppResult<String> {
 
 /// 查余额（提交前预检 + 设置页显示）。
 pub async fn user_credit(bin: &str) -> AppResult<i64> {
-    let v = extract_json(&run(vec![bin.to_string(), "user_credit".to_string()]).await?)?;
+    let bin = resolve_bin(bin)?;
+    let v = extract_json(&run(vec![bin, "user_credit".to_string()]).await?)?;
     v.get("total_credit")
         .and_then(|x| x.as_i64())
         .ok_or_else(|| AppError::Internal("即梦 CLI 未返回 total_credit（可能未登录）".into()))
@@ -359,7 +483,8 @@ pub async fn submit(bin: &str, image: &Path, prompt: &str, opts: &GenOpts) -> Ap
         )));
     }
     let opts = normalize_opts(opts)?;
-    let argv = command_line(bin, &image.to_string_lossy(), prompt, &opts);
+    let bin = resolve_bin(bin)?;
+    let argv = command_line(&bin, &image.to_string_lossy(), prompt, &opts);
     let stdout = run(argv.clone()).await?;
     extract_submit_id(&extract_json(&stdout)?).ok_or_else(|| {
         AppError::Internal(format!(
@@ -376,7 +501,7 @@ pub async fn query(
     download_dir: Option<&Path>,
 ) -> AppResult<QueryResult> {
     let mut argv = vec![
-        bin.to_string(),
+        resolve_bin(bin)?,
         "query_result".to_string(),
         format!("--submit_id={submit_id}"),
     ];
@@ -390,6 +515,89 @@ pub async fn query(
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
     use super::*;
+
+    /// 造一个可执行的假 CLI。
+    fn fake_bin(dir: &Path, name: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    // 填了绝对路径就只认它。
+    #[test]
+    fn resolve_bin_takes_explicit_path() {
+        let td = tempfile::tempdir().unwrap();
+        let p = fake_bin(td.path(), "dreamina");
+        let got = resolve_bin(&p.to_string_lossy()).unwrap();
+        assert_eq!(got, p.to_string_lossy());
+    }
+
+    // 填错的路径必须直说是哪个路径错了，**不能**偷偷回退到探测结果：
+    // 那样用户在这台机器上「跑起来了」，换台机器又神秘失败，且错的那行还留在设置里。
+    #[test]
+    fn resolve_bin_rejects_bad_explicit_path_without_falling_back() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path().to_path_buf();
+        fake_bin(&dir, "dreamina"); // 探测得到的话就会「意外成功」
+        let bogus = dir.join("nope").join("dreamina");
+        let err = resolve_bin(&bogus.to_string_lossy())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    // 留空 → 用默认名去搜索目录里探。
+    //
+    // 这条同时守住那个把整件事引爆的回归：设置里存了空串时，argv[0] 曾原样变成 ""，
+    // 于是报错报成「找不到即梦 CLI「」」——一个连名字都没有的提示。
+    #[test]
+    fn resolve_bin_finds_default_name_when_blank() {
+        let td = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "dreamina.exe"
+        } else {
+            "dreamina"
+        };
+        let want = fake_bin(td.path(), name);
+        let got = resolve_in("  ", &[td.path().to_path_buf()]).unwrap();
+        assert_eq!(got, want.to_string_lossy());
+    }
+
+    // 裸名字（用户手打了 "dreamina"）与留空走同一条路。
+    #[test]
+    fn resolve_bin_finds_bare_name_in_search_dirs() {
+        let td = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "dreamina.exe"
+        } else {
+            "dreamina"
+        };
+        let want = fake_bin(td.path(), name);
+        let got = resolve_in("dreamina", &[td.path().to_path_buf()]).unwrap();
+        assert_eq!(got, want.to_string_lossy());
+    }
+
+    // 不可执行的同名文件不算数（否则会拿到一个必然 exec 失败的路径）。
+    #[cfg(unix)]
+    #[test]
+    fn resolve_bin_skips_non_executable_file() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join("dreamina"), b"not a program").unwrap();
+        assert!(resolve_in("dreamina", &[td.path().to_path_buf()]).is_err());
+    }
+
+    // 探不到时，错误里要写清「找过哪儿」——这个错误的全部价值就在这一句。
+    #[test]
+    fn resolve_bin_error_lists_where_it_looked() {
+        let err = resolve_bin("no-such-cli-anywhere").unwrap_err().to_string();
+        assert!(err.contains("已找过 PATH 与"), "{err}");
+        assert!(err.contains(".local/bin"), "{err}");
+    }
 
     fn opts(m: Option<&str>, d: Option<i64>, r: Option<&str>) -> GenOpts {
         GenOpts {

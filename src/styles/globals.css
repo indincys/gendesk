@@ -936,6 +936,12 @@ a:hover {
   opacity: 0.4;
   cursor: not-allowed;
 }
+/* 取值多的分段（如 8 个宽高比）：换行而非撑破弹层。 */
+.segw {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
 .rng {
   appearance: none;
   -webkit-appearance: none;
@@ -2744,6 +2750,9 @@ a:hover {
   padding: 13px 14px;
   z-index: 9;
   animation: slup 0.18s ease;
+  /* 参数项按端点文档补齐后行数变多：内部滚动，不让弹层顶出窗口。 */
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
 }
 .prow2 {
   display: flex;

@@ -102,10 +102,14 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
   → stores/engine 镜像 → 任务页/导航徽章
 ```
 
-**生成参数只有 `size` / `quality` 会进 multipart**（`provider::GenParams`）；批次的
-`params_json` 比它宽（还有 `draws`/`watermark`/输出处理开关等纯 UI 键，供「再来一批」还原），
-Rust 侧静默忽略。**故意不加 `deny_unknown_fields`**：严格解析会让整份快照退化成「全部空」，
-用户选的尺寸反而一个字段都发不出去。
+**进 multipart 的生成参数只有三个**（`provider::GenParams`，v0.15.2）：`aspect_ratio` /
+`size` / `output_format`，外加恒定的 `n=1`。**画幅走 `aspect_ratio` 而非 `size`**；
+端点文档里的 quality / response_format / background / output_compression / extra_fields
+**一律不做**（用户明确不需要——参数摆在界面上却没人用，只会让「到底哪个在起作用」更难回答）。
+批次的 `params_json` 比它宽（还有 `draws`/本地去水印档位 `watermark`/输出处理开关等纯 UI 键，
+供「再来一批」还原），Rust 侧静默忽略。**故意不加 `deny_unknown_fields`**：严格解析会让整份
+快照退化成「全部空」，用户选的比例反而一个字段都发不出去。入口侧另有 `parse_checked`
+（严格 + 预检），见下文 v0.15.2。
 
 ## 架构铁律（均有机器检查）
 
@@ -490,3 +494,30 @@ audit.yml）。
     推断），故镜头是否动只能写在提示词里。
   - `改写说明.md`（GenDesk 自动物化进交接目录的那份）同步带上这套要点：用户也在 Codex 里跑，
     那边没有 Claude skill，工单必须自解释。
+- [x] **画幅改走 aspect_ratio + 生成参数收敛到三项（v0.15.2）** — 用户报「设了 9:16 报错
+  `edges must be multiples of 16 (got "1080x1920")`，不设又常回 1:1，可我每条提示词都写了 9:16」。
+  两件事叠在一起：
+  - **1080 不是 16 的倍数**（1920 是）。v0.14.0 那个「9:16 竖」预设 `1080x1920` 是精确比例，
+    却撞上端点对边长的硬要求，于是这个预设**从来就没成功过**。
+  - **更根本的是参数选错了**：该端点的 gpt-image-2 系列用 `aspect_ratio` 控制画幅
+    （1:1/16:9/9:16/4:3/3:4/3:2/2:3/21:9，**仅保证比例**，像素由上游定），而我们只发 `size`。
+    不发比例参数 → 模型默认 1:1；**提示词里写「9:16」对模型不构成约束**，那是描述不是参数。
+  - **参数只做三项**（用户定的范围）：`aspect_ratio` / `size` / `output_format`，外加恒定
+    `n=1`。文档里的 quality / response_format / background / output_compression /
+    extra_fields **一律不做**——先按文档全做了一版，用户看完直说「绝大部分用不到」；参数
+    摆在界面上却没人用，只会让「到底哪个在起作用」更难回答。删的时候连 `GenParams` 字段
+    一起删，不留「界面上没有、后台仍在发」的隐形参数。
+  - **抽卡不是 `n`**：抽卡 k 次 = **k 个任务**（各自独立重试与验收），不是发 `n=k`——
+    一次响应里 k 张图只有一张能落进当前任务，其余直接丢掉且照样计费。故 `n` 恒为 1。
+  - **`output_format` 同时决定本地交付格式**（`openai::deliver`）：默认那条「清元数据 +
+    去 C2PA 全开 → 统一重编码 JPEG」的规则会把选中的 PNG 悄悄变成 JPG，而「选了 PNG 拿到
+    JPG」是纯粹的失信。故显式选择优先：PNG 走容器级剥离（抹 tEXt/zTXt/iTXt/eXIf 与 caBX），
+    远端给的不是 PNG 就重编码成 PNG；未选格式则一字不改沿用旧规则（有防回归测试）。
+  - **入口严格、内部宽松**：`parse_checked`（命令边界，键类型不对就报错 + 受控取值/边长
+    预检）vs `from_json`（调度器读已落库批次，坏了也要能跑）。预检放在 create_batch
+    是因为端点的拒绝发生在**计费之后**，一批 20 个任务会连报 20 次同一个错。
+  - 生成页参数弹层收敛为：比例（首项，旁边直说「提示词里写 9:16 对模型不构成约束」）·
+    精确尺寸（选填，边长非 16 倍数当场标红并给出可用值，同时禁用「开始生成」）· 输出格式
+    （PNG/JPG）· 抽卡次数，再加本地的去水印/AI 元数据/C2PA。「实际发往接口的字段」由构建
+    请求用的那份 wire 记录直接渲染——展示与执行同一来源。
+  - 371 Rust 测试。无 migration / 无 IPC 改动（`params_json` 是字符串，bindings 不变）。

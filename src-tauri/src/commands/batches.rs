@@ -52,6 +52,11 @@ pub async fn create_batch(
     if input.refs.is_empty() {
         return Err(AppError::InvalidInput("未选择任何参考图挂靠".into()));
     }
+    // 花钱之前的本地预检：受控取值/尺寸边长/压缩区间。端点的拒绝发生在计费之后，
+    // 一批 20 个任务会连报 20 次同一个错。严格解析同时挡住「键类型不对 → 整份参数
+    // 静默退化成空 → 选了 9:16 却一个字段都没发出去」。
+    crate::provider::GenParams::parse_checked(&input.params_json)
+        .map_err(AppError::InvalidInput)?;
     let mappings: Vec<RefMapping> = input
         .refs
         .iter()

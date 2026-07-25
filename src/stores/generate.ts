@@ -18,8 +18,14 @@ interface GenerateState {
   selGroupIds: number[];
   selRefIds: number[];
   mapping: Record<number, number>;
+  // ── 会发到远端的生成参数（字段名与端点文档的参数表一一对应）──────────
+  // null = 未设置 → 不带该字段。**画幅走 aspectRatio**：提示词里写「9:16」
+  // 对模型不构成约束，不显式给参数多数会回来 1:1。
+  aspectRatio: string | null;
+  /** 精确尺寸（仅部分模型认）；边长须为 16 的倍数。留空即只发比例。 */
   size: string | null;
-  quality: string | null;
+  /** 输出格式 "png" / "jpeg"；它同时决定本地交付的文件格式。 */
+  outputFormat: string | null;
   draws: number;
   // 任务1 输出处理：去水印档位（V1 仅 "none"）+ 清除 AI 元数据 + 去除 C2PA。
   watermark: string;
@@ -29,8 +35,9 @@ interface GenerateState {
   setSelGroupIds: (u: Updater<number[]>) => void;
   setSelRefIds: (u: Updater<number[]>) => void;
   setMapping: (u: Updater<Record<number, number>>) => void;
+  setAspectRatio: (v: string | null) => void;
   setSize: (v: string | null) => void;
-  setQuality: (v: string | null) => void;
+  setOutputFormat: (v: string | null) => void;
   setDraws: (v: number) => void;
   setWatermark: (v: string) => void;
   setClearAiMetadata: (v: boolean) => void;
@@ -39,8 +46,9 @@ interface GenerateState {
   restoreFromBatch: (
     refs: { refImageId: number; promptGroupId: number }[],
     params: {
+      aspectRatio?: string | null;
       size?: string | null;
-      quality?: string | null;
+      outputFormat?: string | null;
       watermark?: string | null;
       clearAiMetadata?: boolean | null;
       removeC2pa?: boolean | null;
@@ -55,8 +63,9 @@ export const useGenerateStore = create<GenerateState>()(
       selGroupIds: [],
       selRefIds: [],
       mapping: {},
+      aspectRatio: null,
       size: null,
-      quality: null,
+      outputFormat: null,
       draws: 1,
       watermark: "none",
       clearAiMetadata: true,
@@ -65,8 +74,9 @@ export const useGenerateStore = create<GenerateState>()(
       setSelGroupIds: (u) => set((s) => ({ selGroupIds: apply(u, s.selGroupIds) })),
       setSelRefIds: (u) => set((s) => ({ selRefIds: apply(u, s.selRefIds) })),
       setMapping: (u) => set((s) => ({ mapping: apply(u, s.mapping) })),
+      setAspectRatio: (v) => set({ aspectRatio: v }),
       setSize: (v) => set({ size: v }),
-      setQuality: (v) => set({ quality: v }),
+      setOutputFormat: (v) => set({ outputFormat: v }),
       setDraws: (v) => set({ draws: v }),
       setWatermark: (v) => set({ watermark: v }),
       setClearAiMetadata: (v) => set({ clearAiMetadata: v }),
@@ -76,8 +86,9 @@ export const useGenerateStore = create<GenerateState>()(
           selRefIds: [...new Set(refs.map((r) => r.refImageId))],
           selGroupIds: [...new Set(refs.map((r) => r.promptGroupId))],
           mapping: Object.fromEntries(refs.map((r) => [r.refImageId, r.promptGroupId])),
+          aspectRatio: params.aspectRatio ?? null,
           size: params.size ?? null,
-          quality: params.quality ?? null,
+          outputFormat: params.outputFormat ?? null,
           watermark: params.watermark ?? "none",
           // 缺省（旧批次快照无此字段）视为开启，与生成页默认一致。
           clearAiMetadata: params.clearAiMetadata ?? true,

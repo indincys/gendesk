@@ -46,10 +46,13 @@ export function GeneratePage() {
   const mapping = useGenerateStore((s) => s.mapping);
   const setMapping = useGenerateStore((s) => s.setMapping);
   // E16 / D1：生成参数，null = 未设置（不传该参数，跟随提示词）。
+  // 只保留真的会用到的三项：比例（画幅首选，size 只有部分模型认）+ 精确尺寸 + 输出格式。
+  const aspectRatio = useGenerateStore((s) => s.aspectRatio);
+  const setAspectRatio = useGenerateStore((s) => s.setAspectRatio);
   const size = useGenerateStore((s) => s.size);
   const setSize = useGenerateStore((s) => s.setSize);
-  const quality = useGenerateStore((s) => s.quality);
-  const setQuality = useGenerateStore((s) => s.setQuality);
+  const outputFormat = useGenerateStore((s) => s.outputFormat);
+  const setOutputFormat = useGenerateStore((s) => s.setOutputFormat);
   // E17 / D2：抽卡次数 k（每组合独立生成 k 次），默认 1，上限 5。
   const draws = useGenerateStore((s) => s.draws);
   const setDraws = useGenerateStore((s) => s.setDraws);
@@ -223,12 +226,24 @@ export function GeneratePage() {
 
   // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
   //
-  // size / quality 是**会发到远端**的两项（Rust GenParams 只认这两个键）；
-  // 其余键是本批配置快照，供「按此配置再来一批」还原 UI，后端静默忽略。
+  // 这些是**会发到远端**的键（Rust GenParams 认它们，键名对齐端点文档的参数表）。
+  // 确认卡与参数弹层里的「实际发往接口的字段」直接由它渲染——展示与执行同一来源，
+  // 「我设了却没生效」这类怀疑才无处可生。
+  //
+  // 每项 = [multipart 字段名, 快照键名, 值]。快照键名是 camelCase（Rust serde 配置）。
+  // 快照里另有一个 `watermark` 是**本地**去水印档位，不是远端参数，故不在此表。
+  const wireEntries: [string, string, unknown][] = (
+    [
+      ["aspect_ratio", "aspectRatio", aspectRatio],
+      ["size", "size", size],
+      ["output_format", "outputFormat", outputFormat],
+    ] as [string, string, unknown][]
+  ).filter(([, , v]) => v != null && v !== "");
+  const wire = Object.fromEntries(wireEntries.map(([w, , v]) => [w, v]));
+
   const buildParamsJson = () => {
-    const p: Record<string, string | boolean | number> = {};
-    if (size) p.size = size;
-    if (quality) p.quality = quality;
+    const p: Record<string, unknown> = {};
+    for (const [, snapKey, v] of wireEntries) p[snapKey] = v;
     // 任务1：输出处理开关随批次记忆（后端缺省视为开启，故显式写入以便「再来一批」还原）。
     p.watermark = watermark;
     p.clearAiMetadata = clearAiMetadata;
@@ -293,10 +308,12 @@ export function GeneratePage() {
     setApop(null);
   };
 
-  const paramShort = `${size ?? "跟随"} · ${quality ?? "跟随"} · ×${draws}`;
-  const paramSum = `尺寸 ${size ?? "跟随提示词"} · 质量 ${quality ?? "跟随提示词"} · 抽卡 ×${draws}${
-    clearAiMetadata && removeC2pa ? " · 输出干净 JPEG" : ""
-  }`;
+  // 参数自检：把端点会拒的取值挡在花钱之前（后端 create_batch 有同规则的兜底）。
+  const paramErr = sizeIssue(size);
+
+  const fmtLabel = outputFormat === "png" ? "PNG" : outputFormat === "jpeg" ? "JPG" : "跟随";
+  const paramShort = `${aspectRatio ?? size ?? "跟随"} · ${fmtLabel} · ×${draws}`;
+  const paramSum = `比例 ${aspectRatio ?? "跟随提示词"} · 输出 ${fmtLabel} · 抽卡 ×${draws}`;
 
   return (
     <div className="col f1 ohide">
@@ -628,15 +645,16 @@ export function GeneratePage() {
         <button
           type="button"
           className="btn sm gho nowrap"
-          title={paramSum}
+          title={paramErr ?? paramSum}
           onClick={() => setParamPop((v) => !v)}
         >
-          参数 {paramShort} ▾
+          参数 {paramShort} {paramErr && <span style={{ color: "var(--wr)" }}>· 有误</span>} ▾
         </button>
         <button
           type="button"
           className="btn pri"
-          disabled={!allMapped || combos === 0 || starting || !hasUsableKey}
+          disabled={!allMapped || combos === 0 || starting || !hasUsableKey || paramErr != null}
+          title={paramErr ?? undefined}
           onClick={openConfirm}
         >
           <Play className="ic12" />
@@ -653,29 +671,41 @@ export function GeneratePage() {
                 <X className="ic12" />
               </button>
             </div>
-            <div className="prow2 mt12">
-              <span className="plabel">尺寸 / 比例</span>
-              <Seg value={size} options={SIZE_OPTS} onChange={setSize} />
+            <div className="prow2 mt12" style={{ alignItems: "flex-start" }}>
+              <span className="plabel" style={{ marginTop: 3 }}>
+                比例
+              </span>
+              <Seg value={aspectRatio} options={RATIO_OPTS} onChange={setAspectRatio} wrap />
+            </div>
+            <div className="fs11 t3 mt6" style={{ lineHeight: 1.7, paddingLeft: 80 }}>
+              画幅由 <span className="mono">aspect_ratio</span> 决定，实际像素由上游定。
+              <b>提示词里写「9:16」对模型不构成约束</b>——不显式选，多数会回 1:1。
             </div>
             <div className="prow2 mt8">
-              <span className="plabel">自定义尺寸</span>
+              <span className="plabel">精确尺寸</span>
               <input
                 className="inp"
-                style={{ width: 130 }}
-                placeholder="如 1080x1920"
-                value={size && !SIZE_PRESETS.has(size) ? size : ""}
+                style={{ width: 148 }}
+                placeholder="留空，如 1152x2048"
+                value={size ?? ""}
                 onChange={(e) => setSize(e.target.value.trim() || null)}
               />
-              <span className="fs11 t3">端点只认特定枚举时按其文档填；留空则用上面的预设</span>
+              <span className="fs11 t3">选填，仅部分模型认；边长须为 16 的倍数</span>
             </div>
+            {paramErr && (
+              <div className="fs11 mt6" style={{ color: "var(--wr)", paddingLeft: 80 }}>
+                {paramErr}
+              </div>
+            )}
             <div className="prow2 mt8">
-              <span className="plabel">质量</span>
-              <Seg value={quality} options={QUALITY_OPTS} onChange={setQuality} />
+              <span className="plabel">输出格式</span>
+              <Seg value={outputFormat} options={OUT_FMT_OPTS} onChange={setOutputFormat} />
+              <span className="fs11 t3">也决定本地存盘的格式</span>
             </div>
             <div className="prow2 mt8">
               <span className="plabel">抽卡次数</span>
               <Stepper value={draws} min={1} max={5} onChange={setDraws} />
-              <span className="fs11 t3">每个组合独立生成 k 次，各占一个任务</span>
+              <span className="fs11 t3">每个组合独立请求 k 次，各占一个任务</span>
             </div>
             <div className="psep" />
             <div className="prow2">
@@ -724,16 +754,15 @@ export function GeneratePage() {
               </div>
             </div>
             <div className="fs11 t3 mt8" style={{ lineHeight: 1.7 }}>
-              {clearAiMetadata && removeC2pa
-                ? "输出统一重编码为干净 JPEG：不含 EXIF/XMP、PNG 文本、IPTC 与 C2PA 内容凭据。"
-                : "关闭任一项将保留原图格式，仅按所选清除对应信息。"}
+              {deliveryNote(outputFormat, clearAiMetadata, removeC2pa)}
             </div>
             <div className="psep" />
             <div className="fs11 t3" style={{ lineHeight: 1.7 }}>
               <span className="fw6">实际发往接口的字段：</span>
-              <span className="mono"> {wireParamsLabel(size, quality)}</span>
+              <span className="mono"> {wireParamsLabel(wire)}</span>
               <br />
-              抽卡与输出处理在本机执行，不进请求；「跟随」= 不带该字段，由提示词与模型默认决定。
+              抽卡 ×{draws} = 每个组合请求 {draws} 次（每次 <span className="mono">n=1</span>
+              ，各自独立重试与验收）；去水印/元数据处理在本机执行，不进请求。
             </div>
           </div>
         )}
@@ -777,7 +806,7 @@ export function GeneratePage() {
               value={etaLabel(confirm.avgSec, taskTotal, enabledKeys)}
             />
             {/* 把「远端到底会收到什么」摆在确认前：设置了却没生效，只能在这里被看见。 */}
-            <SummaryLine label="接口参数" value={wireParamsLabel(size, quality)} />
+            <SummaryLine label="接口参数" value={wireParamsLabel(wire)} />
             <div>
               <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
                 参与的启用 Key（{enabledKeys.length}）
@@ -849,51 +878,93 @@ export function GeneratePage() {
 }
 
 type ParamOpt = { v: string | null; label: string };
-const SIZE_OPTS: ParamOpt[] = [
+/**
+ * `aspect_ratio` 受控取值（端点文档：gpt-image-2 系列经此参数控制输出比例，
+ * 仅保证比例，像素由上游决定）。须与 Rust `provider::ASPECT_RATIOS` 一致——
+ * 那边是真相，命令边界会据此校验，这里只是它的镜子。
+ */
+const RATIO_OPTS: ParamOpt[] = [
   { v: null, label: "跟随" },
-  { v: "1024x1024", label: "1:1" },
-  { v: "1536x1024", label: "3:2 横" },
-  { v: "1024x1536", label: "2:3 竖" },
-  // 9:16 竖幅（短视频首帧的实际画幅）。1080×1920 是精确的 9:16；不同兼容端点
-  // 认的取值不一样（有的只认 1024x1536 这类枚举），所以旁边留了「自定义」直填。
-  { v: "1080x1920", label: "9:16 竖" },
-  { v: "auto", label: "自动" },
+  { v: "1:1", label: "1:1" },
+  { v: "9:16", label: "9:16 竖" },
+  { v: "16:9", label: "16:9 横" },
+  { v: "3:4", label: "3:4 竖" },
+  { v: "4:3", label: "4:3 横" },
+  { v: "2:3", label: "2:3 竖" },
+  { v: "3:2", label: "3:2 横" },
+  { v: "21:9", label: "21:9" },
 ];
-/** 预设之外的取值一律视为自定义（由输入框接管）。 */
-const SIZE_PRESETS = new Set(SIZE_OPTS.map((o) => o.v).filter((v): v is string => v !== null));
-const QUALITY_OPTS: ParamOpt[] = [
+/** 输出格式：须与 Rust `provider::OUTPUT_FORMATS` 一致（那边是真相）。 */
+const OUT_FMT_OPTS: ParamOpt[] = [
   { v: null, label: "跟随" },
-  { v: "low", label: "低" },
-  { v: "medium", label: "中" },
-  { v: "high", label: "高" },
-  { v: "auto", label: "自动" },
+  { v: "png", label: "PNG" },
+  { v: "jpeg", label: "JPG" },
 ];
+
+/**
+ * 「本地最终存成什么」的说明。输出格式一旦显式选中就说了算——默认那条
+ * 「全清 → 统一重编码 JPEG」的规则会把选中的 PNG 悄悄变成 JPG。
+ */
+function deliveryNote(fmt: string | null, clearMeta: boolean, rmC2pa: boolean): string {
+  if (fmt === "png")
+    return clearMeta || rmC2pa
+      ? "输出存为 PNG：按上面的开关剥离 PNG 文本块与 C2PA，不重编码成 JPEG。"
+      : "输出存为 PNG，原样保留其元数据与内容凭据。";
+  if (fmt === "jpeg" || (fmt === null && clearMeta && rmC2pa))
+    return "输出存为干净 JPG：不含 EXIF/XMP、PNG 文本、IPTC 与 C2PA 内容凭据。";
+  return "输出保留远端返回的格式，仅按所选清除对应信息。";
+}
+
+/** 该端点对显式 `size` 的硬性要求（与 Rust `provider::validate_size` 同规则）。 */
+const SIZE_EDGE_MULTIPLE = 16;
+
+/**
+ * 精确尺寸自检：返回错误文案，null = 没问题。
+ *
+ * 用户实际踩的坑：`1080x1920` 看着是标准 9:16，1080 却不是 16 的倍数，端点回
+ * 「edges must be multiples of 16」——而那时钱已经花了。
+ */
+function sizeIssue(size: string | null): string | null {
+  if (!size || size.toLowerCase() === "auto") return null;
+  const m = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(size.trim());
+  if (!m) return `尺寸「${size}」格式不对，应形如 1024x1024 或 auto`;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (w % SIZE_EDGE_MULTIPLE !== 0 || h % SIZE_EDGE_MULTIPLE !== 0) {
+    const r = (v: number) => Math.max(1, Math.round(v / SIZE_EDGE_MULTIPLE)) * SIZE_EDGE_MULTIPLE;
+    return `尺寸「${size}」边长须为 ${SIZE_EDGE_MULTIPLE} 的倍数（端点限制），可改为 ${r(w)}x${r(h)}，或清空改用上面的「比例」`;
+  }
+  return null;
+}
 
 /**
  * 「实际发往接口的字段」文案。
  *
- * Rust 侧 `GenParams` 只有 size / quality 两个键会进 multipart 表单（provider/openai.rs），
- * 抽卡次数与输出处理全在本机执行。这条文案就是那份契约的镜子——它写什么，远端收什么。
+ * 入参就是构建请求用的那份 wire 记录（键名 = multipart 字段名），故这条文案与
+ * `provider/openai.rs` 真正发出去的表单是同一来源——它写什么，远端收什么。
+ * 抽卡次数与输出处理全在本机执行，不进请求。
  */
-function wireParamsLabel(size: string | null, quality: string | null): string {
-  const parts: string[] = [];
-  if (size) parts.push(`size=${size}`);
-  if (quality) parts.push(`quality=${quality}`);
+function wireParamsLabel(wire: Record<string, unknown>): string {
+  const parts = Object.entries(wire).map(
+    ([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : String(v)}`,
+  );
   return parts.length > 0 ? parts.join(" · ") : "无（全部跟随提示词与模型默认）";
 }
 
-/** 分段控件：第一项「跟随」为未设置态（虚线强调，D1）。 */
+/** 分段控件：第一项「跟随」为未设置态（虚线强调，D1）。`wrap` 供取值多的行换行。 */
 function Seg({
   value,
   options,
   onChange,
+  wrap,
 }: {
   value: string | null;
   options: ParamOpt[];
   onChange: (v: string | null) => void;
+  wrap?: boolean;
 }) {
   return (
-    <div className="seg">
+    <div className={cn("seg", wrap && "segw")}>
       {options.map((o) => {
         const active = value === o.v;
         const isUnset = o.v === null;

@@ -833,14 +833,20 @@ function tasksEta(avgSec: number | null, remaining: number, concurrency: number)
   return s > 0 ? `约 ${m} 分 ${s} 秒` : `约 ${m} 分`;
 }
 
-/** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。 */
-/** 批次参数摘要。size/quality 是真发到接口的两项，抽卡是本机展开，分开表述以免误读。 */
+/** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。
+ *  比例/尺寸/输出格式是真发到接口的三项，抽卡是本机展开，分开表述以免误读。 */
 function paramsLabel(json: string): string {
   try {
-    const p = JSON.parse(json) as { size?: string; quality?: string; draws?: number };
+    const p = JSON.parse(json) as {
+      aspectRatio?: string;
+      size?: string;
+      outputFormat?: string;
+      draws?: number;
+    };
     const parts: string[] = [];
+    if (p.aspectRatio) parts.push(p.aspectRatio);
     if (p.size) parts.push(p.size);
-    if (p.quality) parts.push(`质量 ${p.quality}`);
+    if (p.outputFormat) parts.push(p.outputFormat === "png" ? "PNG" : "JPG");
     if (p.draws && p.draws > 1) parts.push(`抽卡 ×${p.draws}`);
     return parts.length > 0 ? parts.join(" · ") : "跟随提示词";
   } catch {

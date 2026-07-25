@@ -138,6 +138,16 @@ fn to_jpeg(bytes: &[u8]) -> Result<Vec<u8>, ProviderError> {
     Ok(out.into_inner())
 }
 
+/// 重编码为 PNG（用户选了 PNG 而远端给的不是 PNG 时）。重编码本身也抹掉附属段。
+fn to_png(bytes: &[u8]) -> Result<Vec<u8>, ProviderError> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| ProviderError::new(ProviderErrorKind::BadResponse, None, e.to_string()))?;
+    let mut out = Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| ProviderError::new(ProviderErrorKind::Other, None, e.to_string()))?;
+    Ok(out.into_inner())
+}
+
 #[async_trait::async_trait]
 impl ImageProvider for OpenAiCompatible {
     async fn generate(
@@ -165,13 +175,20 @@ impl ImageProvider for OpenAiCompatible {
             .part("image", part)
             .text("prompt", req.prompt)
             .text("model", req.model)
+            // n 恒为 1：一个任务 = 一张图（抽卡 k 次在引擎侧展开成 k 个任务）。
             .text("n", "1");
         // E16 / D1：仅透传显式设置的参数；未设置不带该字段（跟随提示词/模型默认）。
-        if let Some(size) = req.params.size {
-            form = form.text("size", size);
-        }
-        if let Some(quality) = req.params.quality {
-            form = form.text("quality", quality);
+        // 字段名与端点文档的参数表一一对应；比例首选 aspect_ratio（size 只有部分模型认）。
+        let p = req.params;
+        let want_format = p.output_format.clone();
+        for (name, value) in [
+            ("aspect_ratio", p.aspect_ratio),
+            ("size", p.size),
+            ("output_format", p.output_format),
+        ] {
+            if let Some(v) = value {
+                form = form.text(name, v);
+            }
         }
 
         let resp = self
@@ -243,25 +260,61 @@ impl ImageProvider for OpenAiCompatible {
             ));
         };
 
-        // 输出处理（任务1）：默认「清元数据 + 去 C2PA」→ 统一重编码 JPEG（本身抹除全部附属段）；
-        // 用户任一开关关闭 → 保留原格式做容器级定向剥离（保留其想留的元数据/C2PA）。
-        if clear_meta && remove_c2pa {
-            return Ok(GenImage {
-                bytes: to_jpeg(&raw)?,
+        deliver(&raw, want_format.as_deref(), clear_meta, remove_c2pa)
+    }
+}
+
+/// 交付本地文件：**用户选的输出格式说了算**。
+///
+/// 默认（未选格式）沿用既有规则：「清元数据 + 去 C2PA」全开 → 统一重编码 JPEG
+/// （本身抹除全部附属段）；任一开关关闭 → 保留原容器做定向剥离。但用户显式选了
+/// PNG 时那条规则会把 PNG 悄悄变成 JPG——「选了 PNG 拿到 JPG」是纯粹的失信，
+/// 故显式选择优先：PNG 走容器级剥离（抹 tEXt/zTXt/iTXt/eXIf 与 caBX），
+/// 拿到的不是 PNG 就重编码成 PNG。
+fn deliver(
+    raw: &[u8],
+    want_format: Option<&str>,
+    clear_meta: bool,
+    remove_c2pa: bool,
+) -> Result<GenImage, ProviderError> {
+    let jpeg = |raw: &[u8]| -> Result<GenImage, ProviderError> {
+        Ok(GenImage {
+            bytes: to_jpeg(raw)?,
+            ext: "jpg".to_string(),
+        })
+    };
+    let stripped = super::sanitize::strip_preserve(raw, clear_meta, remove_c2pa);
+    match want_format {
+        Some("png") => match stripped {
+            Some((bytes, "png")) => Ok(GenImage {
+                bytes,
+                ext: "png".to_string(),
+            }),
+            // 远端没给 PNG（或容器不认识）：按用户所选重编码为 PNG。
+            _ => Ok(GenImage {
+                bytes: to_png(raw)?,
+                ext: "png".to_string(),
+            }),
+        },
+        // 选了 JPEG：全清时重编码（更彻底），否则原样保留其想留的元数据。
+        Some("jpeg") if !(clear_meta && remove_c2pa) => match stripped {
+            Some((bytes, "jpg")) => Ok(GenImage {
+                bytes,
                 ext: "jpg".to_string(),
-            });
-        }
-        match super::sanitize::strip_preserve(&raw, clear_meta, remove_c2pa) {
+            }),
+            _ => jpeg(raw),
+        },
+        Some("jpeg") => jpeg(raw),
+        // 未选格式：既有默认规则原样保留。
+        _ if clear_meta && remove_c2pa => jpeg(raw),
+        _ => match stripped {
             Some((bytes, ext)) => Ok(GenImage {
                 bytes,
                 ext: ext.to_string(),
             }),
             // 无法识别的容器：退化为重编码 JPEG（无法保留其元数据）。
-            None => Ok(GenImage {
-                bytes: to_jpeg(&raw)?,
-                ext: "jpg".to_string(),
-            }),
-        }
+            None => jpeg(raw),
+        },
     }
 }
 
@@ -327,6 +380,15 @@ mod tests {
         buf.into_inner()
     }
 
+    fn tiny_jpeg() -> Vec<u8> {
+        let mut buf = StdCursor::new(Vec::new());
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([0, 255, 0]));
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        buf.into_inner()
+    }
+
     async fn ref_file() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("ref.png");
@@ -387,7 +449,7 @@ mod tests {
         server
     }
 
-    // E16 / D1：未设置生成参数时，请求体不得带 size / quality 字段。
+    // E16 / D1：未设置生成参数时，请求体不得带任何可选字段。
     #[tokio::test]
     async fn params_omitted_when_unset() {
         let server = ok_server().await;
@@ -398,31 +460,91 @@ mod tests {
             .unwrap();
         let reqs = server.received_requests().await.unwrap();
         let body = String::from_utf8_lossy(&reqs[0].body);
-        assert!(!body.contains("name=\"size\""), "未设置时请求体不应带 size");
-        assert!(
-            !body.contains("name=\"quality\""),
-            "未设置时请求体不应带 quality"
-        );
+        for f in ["aspect_ratio", "size", "output_format"] {
+            assert!(
+                !body.contains(&format!("name=\"{f}\"")),
+                "未设置时请求体不应带 {f}"
+            );
+        }
+        // 一个任务恒为一张图（抽卡 k 次 = k 个任务，不是 n=k）。
+        assert!(body.contains("name=\"n\""), "应恒带 n=1");
     }
 
-    // E16 / D1：显式设置的参数须透传到请求体。
+    // E16 / D1：显式设置的参数须逐个透传到请求体，字段名与端点文档一致。
+    // 「我设了却没生效」这类怀疑只能靠这条断言消除。
     #[tokio::test]
     async fn params_passed_through_when_set() {
         let server = ok_server().await;
         let (_d, rp) = ref_file().await;
         let mut r = req(rp);
         r.params = crate::provider::GenParams {
+            aspect_ratio: Some("9:16".into()),
             size: Some("1024x1024".into()),
-            quality: Some("high".into()),
+            output_format: Some("png".into()),
             ..Default::default()
         };
         provider(&server.uri()).generate(r, None).await.unwrap();
         let reqs = server.received_requests().await.unwrap();
         let body = String::from_utf8_lossy(&reqs[0].body);
-        assert!(body.contains("name=\"size\""), "设置后应带 size 字段");
-        assert!(body.contains("1024x1024"), "应透传 size 值");
-        assert!(body.contains("name=\"quality\""), "设置后应带 quality 字段");
-        assert!(body.contains("high"), "应透传 quality 值");
+        for (f, v) in [
+            ("aspect_ratio", "9:16"),
+            ("size", "1024x1024"),
+            ("output_format", "png"),
+        ] {
+            assert!(
+                body.contains(&format!("name=\"{f}\"")),
+                "设置后应带 {f} 字段"
+            );
+            assert!(body.contains(v), "应透传 {f} 的值 {v}");
+        }
+    }
+
+    // 「选了 PNG 拿到 JPG」是纯粹的失信：默认那条「全清 → 统一重编码 JPEG」的规则
+    // 必须让位于用户显式选择。远端给的不是 PNG 时（这里 mock 就返回 PNG 与 JPEG 各一次）
+    // 也要交付 PNG。
+    #[tokio::test]
+    async fn explicit_png_is_delivered_as_png_even_with_full_sanitize() {
+        for raw in [tiny_png(), tiny_jpeg()] {
+            let server = MockServer::start().await;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+            Mock::given(method("POST"))
+                .and(path("/images/edits"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{ "b64_json": b64 }]
+                })))
+                .mount(&server)
+                .await;
+            let (_d, rp) = ref_file().await;
+            let mut r = req(rp);
+            r.params = crate::provider::GenParams {
+                output_format: Some("png".into()),
+                // 输出处理全开（默认值）——旧规则会在这里把结果重编码成 JPEG。
+                ..Default::default()
+            };
+            let out = provider(&server.uri()).generate(r, None).await.unwrap();
+            assert_eq!(out.ext, "png", "选了 PNG 就必须交付 PNG");
+            assert_eq!(
+                image::guess_format(&out.bytes).unwrap(),
+                image::ImageFormat::Png,
+                "扩展名与实际容器须一致"
+            );
+        }
+    }
+
+    // 未选格式 = 沿用既有默认（全清 → 干净 JPEG），这条是防回归。
+    #[tokio::test]
+    async fn unset_format_keeps_default_clean_jpeg() {
+        let server = ok_server().await; // 远端返回 PNG
+        let (_d, rp) = ref_file().await;
+        let out = provider(&server.uri())
+            .generate(req(rp), None)
+            .await
+            .unwrap();
+        assert_eq!(out.ext, "jpg");
+        assert_eq!(
+            image::guess_format(&out.bytes).unwrap(),
+            image::ImageFormat::Jpeg
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.15.1"
+version = "0.15.2"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"

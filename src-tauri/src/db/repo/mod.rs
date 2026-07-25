@@ -13,6 +13,7 @@ pub mod skus;
 pub mod tasks;
 pub mod texts;
 pub mod trash;
+pub mod v2v;
 pub mod works;
 
 #[cfg(test)]

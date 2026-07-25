@@ -22,6 +22,11 @@
 //! 组是用途的天然单元（一份 txt = 一个组），也是成片的单元：同组的分镜图最后要剪在
 //! 一起，运镜语言与时长必须统一，跨组混一个包改写风格会飘。
 
+pub mod dreamina;
+pub mod events;
+pub mod handoff;
+pub mod runner;
+
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};

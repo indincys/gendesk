@@ -426,6 +426,24 @@ async listPurposes() : Promise<Result<PurposeView[], AppError>> {
 }
 },
 /**
+ * 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
+ * 
+ * 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
+ * `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
+ * `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
+ * 而不补就等于「验收自动入队」对全部历史资产失效。
+ * 
+ * **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
+ */
+async backfillGroupPurposes(apply: boolean) : Promise<Result<PurposeBackfill, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("backfill_group_purposes", { apply }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
  * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
  */
@@ -2521,6 +2539,22 @@ schedulePaused?: boolean }
  * 设置补丁（部分更新）。
  */
 export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
+/**
+ * 批量补标结果。`apply=false` 时只预览（applied=0）。
+ */
+export type PurposeBackfill = { hits: PurposeHit[]; applied: number; 
+/**
+ * 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
+ */
+scanned: number }
+/**
+ * 按组名批量补标用途的一条命中。
+ */
+export type PurposeHit = { groupId: number; name: string; 
+/**
+ * 该组下已验收通过的作品数（让人判断这一条值不值得标）。
+ */
+workCount: number; purposes: string[] }
 /**
  * 一个用途选项（前端选择器渲染源）。
  */

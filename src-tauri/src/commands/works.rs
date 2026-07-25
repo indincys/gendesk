@@ -139,7 +139,11 @@ pub async fn list_works(
         q = q.bind(b);
     }
     if let Some(pat) = &query {
-        q = q.bind(pat.clone()).bind(pat.clone()).bind(pat.clone()).bind(pat.clone());
+        q = q
+            .bind(pat.clone())
+            .bind(pat.clone())
+            .bind(pat.clone())
+            .bind(pat.clone());
     }
     Ok(q.bind(limit).bind(offset).fetch_all(&state.db).await?)
 }

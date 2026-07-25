@@ -70,7 +70,7 @@ jobs:
         run: |
           cargo install cargo-llvm-cov --locked
           cargo llvm-cov --lib \
-            --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/|publish/(mod|exporter|reconcile|ticker|events)\.rs|publish/inbox/(mod|watcher|ingest)\.rs|publish/planner/mod\.rs|publish/xlsx/mod\.rs)' \
+            --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/|publish/(mod|exporter|reconcile|ticker|events)\.rs|publish/inbox/(mod|watcher|ingest)\.rs|publish/planner/mod\.rs|publish/xlsx/mod\.rs|v2v/watcher\.rs)' \
             --fail-under-lines 85
       - name: cargo check
         working-directory: src-tauri

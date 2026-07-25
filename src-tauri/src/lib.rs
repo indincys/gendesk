@@ -75,6 +75,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::prompts::set_prompt_group_archived,
             commands::prompts::set_prompt_group_purposes,
             commands::prompts::list_purposes,
+            commands::prompts::backfill_group_purposes,
             commands::prompts::delete_prompt_group,
             commands::prompts::merge_prompt_groups,
             commands::prompts::move_prompts_to_group,

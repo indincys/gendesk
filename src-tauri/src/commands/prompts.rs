@@ -287,6 +287,89 @@ pub async fn set_prompt_group_purposes(
     Ok(repo::group_tags(&state.db, id).await?)
 }
 
+/// 按组名批量补标用途的一条命中。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PurposeHit {
+    pub group_id: i64,
+    pub name: String,
+    /// 该组下已验收通过的作品数（让人判断这一条值不值得标）。
+    pub work_count: i64,
+    pub purposes: Vec<String>,
+}
+
+/// 批量补标结果。`apply=false` 时只预览（applied=0）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PurposeBackfill {
+    pub hits: Vec<PurposeHit>,
+    pub applied: i64,
+    /// 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
+    pub scanned: i64,
+}
+
+/// 一个存量分组该补哪些用途（纯规则，便于测试）。空 = 跳过它。
+///
+/// **已标过用途的组一律跳过**：人可能刚刚手动取消过，下一轮重扫又给它加回去是最气人的
+/// 那种「软件比我懂」。补标只解决「从来没标过」这一种情况。
+fn backfill_candidates(existing: &[String], name: &str, scene: &str) -> Vec<String> {
+    if existing.iter().any(|t| crate::purpose::is_purpose(t)) {
+        return Vec::new();
+    }
+    crate::purpose::infer_purposes(name, scene, existing)
+}
+
+/// 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
+///
+/// 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
+/// `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
+/// `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
+/// 而不补就等于「验收自动入队」对全部历史资产失效。
+///
+/// **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
+#[tauri::command]
+#[specta::specta]
+pub async fn backfill_group_purposes(
+    state: State<'_, AppState>,
+    apply: bool,
+) -> AppResult<PurposeBackfill> {
+    let groups = repo::list_groups(&state.db).await?;
+    let scanned = groups.len() as i64;
+    let mut hits: Vec<PurposeHit> = Vec::new();
+    let mut applied = 0i64;
+
+    for g in groups {
+        let existing = repo::group_tags(&state.db, g.id).await?;
+        let guessed = backfill_candidates(&existing, &g.name, &g.scene);
+        if guessed.is_empty() {
+            continue;
+        }
+        let work_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works WHERE group_id = ?1")
+                .bind(g.id)
+                .fetch_one(&state.db)
+                .await?;
+        if apply {
+            let merged = crate::purpose::merge_purposes(&existing, &guessed);
+            let mut tx = state.db.begin().await?;
+            repo::set_group_tags(&mut tx, g.id, &merged).await?;
+            tx.commit().await?;
+            applied += 1;
+        }
+        hits.push(PurposeHit {
+            group_id: g.id,
+            name: g.name,
+            work_count,
+            purposes: guessed,
+        });
+    }
+    Ok(PurposeBackfill {
+        hits,
+        applied,
+        scanned,
+    })
+}
+
 /// 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
 #[tauri::command]
 #[specta::specta]
@@ -813,6 +896,45 @@ mod tests {
         assert_eq!(sanitize_prefix("ABCDEFGHIJ").as_deref(), Some("ABCDEF")); // 截 6 位
         assert_eq!(sanitize_prefix("纯中文"), None);
         assert_eq!(sanitize_prefix(""), None);
+    }
+
+    // 补标只解决「从来没标过」：已标过用途的组必须跳过，否则人手动取消掉的用途
+    // 会在下一轮补标里复活。
+    #[test]
+    fn backfill_skips_groups_that_already_have_a_purpose() {
+        let tagged = vec![crate::purpose::PURPOSE_I2V.to_string()];
+        assert!(
+            backfill_candidates(&tagged, "鹿晗-B-Roll素材分镜图", "").is_empty(),
+            "已标过的组不得重复补标"
+        );
+        // 只有自由标签的组照常补（自由标签与用途是两套东西）。
+        let free = vec!["白底".to_string()];
+        assert_eq!(
+            backfill_candidates(&free, "鹿晗-B-Roll素材分镜图", ""),
+            vec![crate::purpose::PURPOSE_I2V.to_string()]
+        );
+    }
+
+    // 真实组名（用户库里 187 组中的 33 个长这样）必须命中；普通组名不得被误标。
+    #[test]
+    fn backfill_matches_real_group_names_only() {
+        for name in [
+            "梓渝——b-roll图片素材",
+            "鹿晗-B-Roll素材分镜图",
+            "G-Dragon-B-Roll素材分镜图",
+        ] {
+            assert_eq!(
+                backfill_candidates(&[], name, ""),
+                vec![crate::purpose::PURPOSE_I2V.to_string()],
+                "{name} 应命中"
+            );
+        }
+        for name in ["电商主图", "白底商品", "详情页"] {
+            assert!(
+                backfill_candidates(&[], name, "").is_empty(),
+                "{name} 不应命中"
+            );
+        }
     }
 
     #[test]

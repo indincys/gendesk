@@ -107,6 +107,8 @@ export type {
   SubmitSummary,
   MaterializeSummary,
   IngestSummary,
+  PurposeBackfill,
+  PurposeHit,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */

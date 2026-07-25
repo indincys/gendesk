@@ -165,7 +165,10 @@ pub async fn apply_rewrite(
     Ok(res.rows_affected() > 0)
 }
 
-/// 人工编辑待提交列的提示词/参数（不改阶段）。
+/// 人工编辑视频提示词/参数，并**置为待提交**。
+///
+/// 置 ready 不是顺手：人在「待改写」列手写完提示词，那一步本身就是改写完成了。若只改文字
+/// 不动阶段，这条会留在待改写队列里 → 下一次物化仍把它写进工单 → skill 把人写的覆盖掉。
 pub async fn update_ready(
     pool: &SqlitePool,
     id: i64,
@@ -177,7 +180,8 @@ pub async fn update_ready(
 ) -> Result<bool, sqlx::Error> {
     let res = sqlx::query(
         "UPDATE v2v_clips
-            SET video_prompt=?2, model_version=?3, duration=?4, video_resolution=?5, updated_at=?6
+            SET stage='ready', video_prompt=?2, model_version=?3, duration=?4,
+                video_resolution=?5, rewrote_at=COALESCE(rewrote_at, ?6), updated_at=?6
           WHERE id=?1 AND stage IN ('ready','rewrite')",
     )
     .bind(id)
@@ -553,6 +557,52 @@ mod tests {
             !requeue_for_rewrite(&pool, b, 600).await.unwrap(),
             "已通过的成片不得被退回（它可能已入资产库/已发布）"
         );
+    }
+
+    // 人在「待改写」列手写提示词 = 改写完成 → 必须离开待改写队列。
+    // 若只改文字不动阶段，下一次物化仍把它写进工单，skill 会把人写的覆盖掉。
+    #[tokio::test]
+    async fn hand_written_prompt_leaves_the_rewrite_queue() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+
+        assert!(update_ready(&pool, id, "我自己写的", None, None, None, 200)
+            .await
+            .unwrap());
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "ready", "手写完须进待提交，不能留在待改写");
+        assert_eq!(row.video_prompt.as_deref(), Some("我自己写的"));
+        assert!(
+            list_by_stages(&pool, &["rewrite"])
+                .await
+                .unwrap()
+                .is_empty(),
+            "待改写队列须已清空（否则工单会再把它写出去）"
+        );
+    }
+
+    // 已提交/已出片的条目不得被编辑命令改动（额度已花，参数改了也没用，只会误导人）。
+    #[tokio::test]
+    async fn update_ready_does_not_touch_submitted_clips() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "第一版", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+
+        assert!(!update_ready(&pool, id, "想改", None, None, None, 400)
+            .await
+            .unwrap());
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "run");
+        assert_eq!(row.video_prompt.as_deref(), Some("第一版"));
     }
 
     // 验收只对 rev 生效：连点「通过」不得把已定态的条目再改一次。

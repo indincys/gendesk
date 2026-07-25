@@ -403,7 +403,9 @@ pub async fn update_v2v_clip(
         now_unix(),
     )
     .await?;
-    emit_changed(&state.db, &app, Some(id)).await;
+    // 手写完提示词即离开待改写队列 → 必须重写工单，否则下一次物化又把它写进去，
+    // skill 会把人写的那份覆盖掉。
+    refresh_handoff(&state.db, &app).await;
     Ok(ok)
 }
 

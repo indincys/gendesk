@@ -103,7 +103,14 @@ export type {
   V2vSettings,
   V2vChanged,
   V2vProgress,
+  V2vActivity,
+  V2vTick,
+  ActivityEntry,
   ModelInfo,
+  SessionInfo,
+  CreditInfo,
+  CreditStats,
+  EffectiveParams,
   SubmitSummary,
   MaterializeSummary,
   IngestSummary,
@@ -213,11 +220,15 @@ export async function subscribeExportProgress(
 export async function subscribeV2v(handlers: {
   onChanged?: (e: import("./bindings").V2vChanged) => void;
   onProgress?: (e: import("./bindings").V2vProgress) => void;
+  onActivity?: (e: import("./bindings").V2vActivity) => void;
+  onTick?: (e: import("./bindings").V2vTick) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const unlisteners = await Promise.all([
     events.v2vChanged.listen((e) => handlers.onChanged?.(e.payload)),
     events.v2vProgress.listen((e) => handlers.onProgress?.(e.payload)),
+    events.v2vActivity.listen((e) => handlers.onActivity?.(e.payload)),
+    events.v2vTick.listen((e) => handlers.onTick?.(e.payload)),
   ]);
   return () => {
     for (const un of unlisteners) un();

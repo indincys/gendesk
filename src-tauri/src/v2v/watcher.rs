@@ -25,7 +25,12 @@ pub struct HandoffWatcher {
 }
 
 /// 在交接根上启动监听。目录不存在时先建（含 `v2v/待改写`、`v2v/已改写`）。
-pub fn start(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<HandoffWatcher> {
+pub fn start(
+    pool: SqlitePool,
+    root: PathBuf,
+    app: AppHandle,
+    log: super::activity::Activity,
+) -> AppResult<HandoffWatcher> {
     let v2v_dir = root.join(super::handoff::V2V);
     std::fs::create_dir_all(v2v_dir.join(super::handoff::PENDING))?;
     std::fs::create_dir_all(v2v_dir.join(super::handoff::DONE))?;
@@ -56,16 +61,22 @@ pub fn start(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<Hando
             }
             match super::handoff::ingest(&pool, &root).await {
                 Ok(sum) if sum.applied > 0 || sum.stale > 0 || sum.unmatched > 0 => {
-                    tracing::info!(
-                        applied = sum.applied,
-                        stale = sum.stale,
-                        unmatched = sum.unmatched,
-                        "收录改写结果"
+                    // 收录是**自动发生**的（skill 写完文件即触发），所以它尤其需要留痕：
+                    // 没有这一条，用户只会看到卡片自己从「待改写」跳到「待提交」，
+                    // 而「认不出 N 条」这种部分失败连一点声音都没有。
+                    log.info(
+                        "handoff",
+                        None,
+                        format!(
+                            "收录改写结果：应用 {} · 认不出 {} · 已越过待提交 {}",
+                            sum.applied, sum.unmatched, sum.stale
+                        ),
+                        None,
                     );
                     crate::commands::v2v::refresh_handoff(&pool, &app).await;
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "收录改写结果失败"),
+                Err(e) => log.error("handoff", None, format!("收录改写结果失败：{e}"), None),
             }
         }
     });

@@ -132,6 +132,11 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::resolve_v2v_bin,
             commands::v2v::v2v_models,
             commands::v2v::v2v_credit,
+            commands::v2v::v2v_credit_stats,
+            commands::v2v::v2v_sessions,
+            commands::v2v::v2v_effective_params,
+            commands::v2v::v2v_activity,
+            commands::v2v::clear_v2v_activity,
             commands::v2v::list_v2v_clips,
             commands::v2v::v2v_counts,
             commands::v2v::enqueue_works_v2v,
@@ -139,6 +144,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::ingest_v2v_rewrites,
             commands::v2v::open_handoff_dir,
             commands::v2v::update_v2v_clip,
+            commands::v2v::set_v2v_clip_params,
             commands::v2v::preview_v2v_commands,
             commands::v2v::submit_v2v_clips,
             commands::v2v::poll_v2v_now,
@@ -249,6 +255,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // 视频流水线事件
             v2v::events::V2vChanged,
             v2v::events::V2vProgress,
+            v2v::events::V2vActivity,
+            v2v::events::V2vTick,
         ])
 }
 
@@ -368,11 +376,15 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let dirs_for_v2v = dirs.clone();
+    // 视频流水线执行日志：轮询器 / 提交 / 交接监听共用同一份环形缓冲，
+    // 命令层从 AppState 读它。在 manage 之前建好，好让后台任务拿到同一个句柄。
+    let v2v_log = v2v::activity::Activity::new(app.handle().clone());
     app.manage(state::AppState::new(
         pool.clone(),
         secrets,
         dirs,
         Arc::new(engine),
+        v2v_log.clone(),
     ));
 
     // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
@@ -404,7 +416,12 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 都要在这一刻把磁盘上的工单对齐成库里的真相，否则 skill 会对着旧内容干活。
     if let Ok(vset) = tauri::async_runtime::block_on(commands::v2v::load_settings(&pool)) {
         let root = vset.root();
-        match v2v::watcher::start(pool.clone(), root.clone(), app.handle().clone()) {
+        match v2v::watcher::start(
+            pool.clone(),
+            root.clone(),
+            app.handle().clone(),
+            v2v_log.clone(),
+        ) {
             Ok(w) => {
                 app.manage(w);
             }
@@ -419,7 +436,12 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             commands::v2v::refresh_handoff(&pool_bg, &app_bg).await;
         });
-        v2v::runner::spawn(pool.clone(), dirs_for_v2v, app.handle().clone());
+        v2v::runner::spawn(
+            pool.clone(),
+            dirs_for_v2v,
+            app.handle().clone(),
+            v2v_log.clone(),
+        );
     }
 
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。

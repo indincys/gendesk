@@ -1,11 +1,14 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
+import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
 import { assetSrc } from "@/lib/img";
 import {
   type ClipView,
   type ModelInfo,
   type SkuView,
   type StageCounts,
+  type V2vTick,
   commands,
   subscribeV2v,
   unwrap,
@@ -15,10 +18,13 @@ import {
   Check,
   Clapperboard,
   FolderOpen,
+  Hourglass,
   Layers,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   Send,
+  SlidersHorizontal,
   Terminal,
   Trash2,
   X,
@@ -62,6 +68,12 @@ export function V2vPage() {
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [handoffDir, setHandoffDir] = useState("");
+  const [showLog, setShowLog] = useState(false);
+  const [showParams, setShowParams] = useState(false);
+  /** 轮询器心跳。null = 还没收到过（应用刚起来的头 6 秒）。 */
+  const [tick, setTick] = useState<V2vTick | null>(null);
+  /** 「几秒前」要自己走字，否则一个静止的「12 秒前」比没有还误导。 */
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   /** 已提交条目的即梦状态原文（事件推送，不翻译成自造中文态）。 */
   const [progress, setProgress] = useState<Record<number, string>>({});
   // 重入锁用 ref 而非 state：useState 要等下一次渲染才生效，挡不住同一帧内的连点
@@ -97,11 +109,19 @@ export function V2vPage() {
     void subscribeV2v({
       onChanged: () => void load(),
       onProgress: (e) => setProgress((cur) => ({ ...cur, [e.clipId]: e.genStatus })),
+      onTick: setTick,
     }).then((f) => {
       un = f;
     });
     return () => un?.();
   }, [load]);
+
+  // 这个秒表只驱动「x 秒前」这一处文案，不去后端要任何数据 ——
+  // 它不是轮询（铁律 4 说的是别用轮询代替事件），而是让已经收到的时间戳继续走字。
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const byStage = useMemo(() => {
     const m: Record<string, ClipView[]> = {};
@@ -188,7 +208,7 @@ export function V2vPage() {
       void load();
     });
 
-  const requeue = (mode: "run" | "rewrite") =>
+  const requeue = (mode: "run" | "rewrite" | "wait") =>
     guard(async () => {
       const ids = selected.map((c) => c.id);
       if (ids.length === 0) return;
@@ -196,10 +216,22 @@ export function V2vPage() {
         toast.error(String(e));
         return 0;
       });
-      toast(mode === "run" ? `已重排 ${n} 条待提交` : `已退回改写 ${n} 条`);
+      toast(
+        mode === "run"
+          ? `已重排 ${n} 条待提交`
+          : mode === "wait"
+            ? `${n} 条放回轮询（沿用原提交单，不再扣额度）`
+            : `已退回改写 ${n} 条`,
+      );
       clearSel();
       void load();
     });
+
+  /** 判了超时但提交单还在的条目 —— 它们能「继续等待」而不必再花一份额度。 */
+  const resumable = useMemo(
+    () => selected.filter((c) => c.stage === "fail" && c.errorType === "timeout" && c.submitId),
+    [selected],
+  );
 
   const remove = () =>
     guard(async () => {
@@ -298,13 +330,27 @@ export function V2vPage() {
                 入资产库
               </button>
             )}
+            {/* 超时条目优先给「继续等待」：超时只是我们这边不等了，即梦那边任务还在跑、
+                额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。 */}
+            {resumable.length > 0 && (
+              <button
+                type="button"
+                className="btn sm pri"
+                disabled={busy}
+                onClick={() => requeue("wait")}
+                title="沿用原来的提交单放回轮询，不重新提交、不再扣额度"
+              >
+                <Hourglass className="ic12" />
+                继续等待 {resumable.length} 条
+              </button>
+            )}
             {/* 重跑放在最显眼处：视频不通过多半是没抽中，不是提示词不对。 */}
             <button
               type="button"
               className="btn sm"
               disabled={busy}
               onClick={() => requeue("run")}
-              title="用同一条视频提示词再抽一次（视频不通过多半是没抽中）"
+              title="用同一条视频提示词再抽一次（会重新提交，重新扣额度）"
             >
               <RotateCcw className="ic12" />
               重跑
@@ -344,6 +390,24 @@ export function V2vPage() {
             <button
               type="button"
               className="btn sm gho"
+              onClick={() => setShowParams(true)}
+              title="模型 / 时长 / 分辨率 / 通道 / 额度，以及实际发往即梦的命令"
+            >
+              <SlidersHorizontal className="ic12" />
+              生成参数
+            </button>
+            <button
+              type="button"
+              className="btn sm gho"
+              onClick={() => setShowLog(true)}
+              title="提交、轮询、落盘、收录的每一步，以及出错时 CLI 的原文"
+            >
+              <ScrollText className="ic12" />
+              执行日志
+            </button>
+            <button
+              type="button"
+              className="btn sm gho"
               onClick={() =>
                 void unwrap(commands.openHandoffDir()).catch((e) => toast.error(String(e)))
               }
@@ -353,6 +417,7 @@ export function V2vPage() {
               打开交接目录
             </button>
             <div className="f1" />
+            <PollPill tick={tick} now={now} />
             <span className="fs11 t3 nowrap">共 {total} 条在流水线</span>
           </>
         )}
@@ -399,7 +464,8 @@ export function V2vPage() {
                       key={c.id}
                       c={c}
                       selected={sel.has(c.id)}
-                      status={progress[c.id] ?? ""}
+                      status={progress[c.id] ?? c.genStatus ?? ""}
+                      now={now}
                       onToggle={() => toggle(c.id)}
                       onOpen={() => setDetail(c)}
                     />
@@ -480,6 +546,25 @@ export function V2vPage() {
         />
       )}
 
+      {showLog && <V2vLogPanel onClose={() => setShowLog(false)} />}
+
+      {showParams && (
+        <V2vParamsPanel
+          models={models}
+          // 只把还没花钱的两列交给批量覆盖：已提交的条目改参数不会重新生效，
+          // 却会让详情页显示的参数与那条视频实际用的对不上。
+          selectedReady={selected
+            .filter((c) => c.stage === "ready" || c.stage === "rewrite")
+            .map((c) => c.id)}
+          onClose={() => setShowParams(false)}
+          onApplied={() => {
+            setShowParams(false);
+            clearSel();
+            void load();
+          }}
+        />
+      )}
+
       {confirmRemove && (
         <ConfirmModal
           title={`从流水线移除 ${sel.size} 条`}
@@ -494,16 +579,52 @@ export function V2vPage() {
   );
 }
 
+/**
+ * 轮询心跳。回答的是「轮询器还活着吗」——在什么都没发生时也必须答得出，
+ * 因为一个静默的界面和一个卡死的轮询器长得一模一样。
+ */
+function PollPill({ tick, now }: { tick: V2vTick | null; now: number }) {
+  if (!tick) return <span className="pollpill off">轮询 · 等待首轮</span>;
+  const ago = Math.max(0, now - tick.at);
+  // 心跳每 6 秒一次；超过 30 秒没心跳说明循环卡住或应用被挂起了。
+  const bad = tick.error != null || ago > 30;
+  return (
+    <span
+      className={cn("pollpill", !tick.enabled && "off", bad && "bad")}
+      title={
+        tick.error
+          ? `上一轮出错：${tick.error}`
+          : tick.enabled
+            ? "后台每 6 秒查一次已提交条目；关掉应用不影响已扣额度的任务"
+            : "后台轮询已在设置里关掉，已提交的条目不会自动取回"
+      }
+    >
+      <span className="dot" />
+      {tick.enabled ? "轮询中" : "轮询已关"} · {tick.running} 在跑 · {fmtAgo(ago)}
+      {tick.error && " · 出错"}
+    </span>
+  );
+}
+
+/** 秒数 → 「12 秒前 / 3 分钟前 / 2 小时前」。 */
+function fmtAgo(sec: number): string {
+  if (sec < 60) return `${sec} 秒前`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  return `${Math.floor(sec / 3600)} 小时前`;
+}
+
 function ClipCard({
   c,
   selected,
   status,
+  now,
   onToggle,
   onOpen,
 }: {
   c: ClipView;
   selected: boolean;
   status: string;
+  now: number;
   onToggle: () => void;
   onOpen: () => void;
 }) {
@@ -533,7 +654,17 @@ function ClipCard({
         <div className="vptxt" data-open>
           {c.videoPrompt ?? c.variablePart ?? c.sourcePrompt}
         </div>
-        {status && <div className="fs10 t3">即梦：{status}</div>}
+        {/* 即梦状态原文 + 队列位次 + 上次问到答案的时刻。
+            三者缺一不可：只有状态时，「还在排队」与「我们已经问不出话了」长得一样。 */}
+        {c.stage === "run" && (
+          <div className="vstat">
+            <span className="spn" style={{ width: 8, height: 8 }} />
+            <span>{status || "等待首次查询"}</span>
+            {c.queueIdx != null && c.queueIdx > 0 && <span>· 队列 {c.queueIdx}</span>}
+            {c.polledAt != null && <span>· {fmtAgo(Math.max(0, now - c.polledAt))}</span>}
+          </div>
+        )}
+        {c.stage !== "run" && status && <div className="fs10 t3">即梦：{status}</div>}
         {c.errorMessage && (
           <div className="fs10" style={{ color: "var(--er)", lineHeight: 1.5 }}>
             {c.errorMessage.slice(0, 120)}
@@ -607,6 +738,9 @@ function ClipDetail({
           <span className="chip">{clip.groupName}</span>
           {clip.batchId != null && <span className="chip">批次 {clip.batchId}</span>}
           {clip.creditCount != null && <span className="chip">{clip.creditCount} 额度</span>}
+          {clip.stage === "run" && clip.genStatus && (
+            <span className="bdg b-amber">即梦 {clip.genStatus}</span>
+          )}
         </>
       }
       footer={

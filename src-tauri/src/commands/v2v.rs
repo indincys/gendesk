@@ -14,7 +14,8 @@ use crate::db::now_unix;
 use crate::db::repo::{settings as settings_repo, trash as trash_repo, v2v as repo};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::v2v::dreamina::{self, GenOpts, ModelInfo};
+use crate::v2v::activity::ActivityEntry;
+use crate::v2v::dreamina::{self, CreditInfo, GenOpts, ModelInfo, SessionInfo};
 use crate::v2v::events::{StageCounts, V2vChanged};
 use crate::v2v::handoff::{self, IngestSummary, MaterializeSummary};
 use crate::v2v::runner::{self, SubmitSummary};
@@ -167,12 +168,167 @@ pub async fn v2v_models() -> AppResult<Vec<ModelInfo>> {
     Ok(dreamina::models())
 }
 
-/// 查即梦余额（设置页显示 + 批量提交前预检）。
+/// 查即梦余额与账号（设置页 / 参数面板显示 + 批量提交前预检）。
 #[tauri::command]
 #[specta::specta]
-pub async fn v2v_credit(state: State<'_, AppState>) -> AppResult<i64> {
+pub async fn v2v_credit(state: State<'_, AppState>) -> AppResult<CreditInfo> {
     let s = load_settings(&state.db).await?;
-    dreamina::user_credit(&s.bin).await
+    let info = dreamina::user_credit(&s.bin, &state.v2v_log).await?;
+    state.v2v_log.info(
+        "cli",
+        None,
+        format!(
+            "账号余额 {} 额度（等级 {}）",
+            info.total_credit,
+            if info.vip_level.is_empty() {
+                "—"
+            } else {
+                &info.vip_level
+            }
+        ),
+        None,
+    );
+    Ok(info)
+}
+
+/// 列出即梦会话（用户口中的「通道」）。
+///
+/// 原先设置里只有一个裸数字输入框 —— 那个数字对应哪条会话，在应用里根本无从得知。
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_sessions(state: State<'_, AppState>) -> AppResult<Vec<SessionInfo>> {
+    let s = load_settings(&state.db).await?;
+    dreamina::sessions(&s.bin, &state.v2v_log).await
+}
+
+/// 额度台账：余额（远端）+ 已消耗（本地库）。
+///
+/// **两个数字来自两个地方，故不合并成一个「已用/总额」百分比**：余额是即梦那边的账户
+/// 真相（别处也可能在花它），消耗是本机这条流水线出片时收到的扣费回执。
+/// 编一个百分比出来会让两者的差异变得无法解释。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditStats {
+    /// 远端余额；查不到时为 None，原因在 `balanceError`（未登录 / 找不到 CLI）。
+    pub balance: Option<i64>,
+    pub balance_error: Option<String>,
+    pub user_id: Option<i64>,
+    pub vip_level: String,
+    /// 本机流水线累计消耗（只算收到扣费回执的条目）。
+    pub spent_total: i64,
+    pub spent_7d: i64,
+    pub spent_24h: i64,
+    /// 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
+    pub spent_pass: i64,
+    pub spent_rej: i64,
+    pub spent_pending: i64,
+    /// 计入统计的条数（有 credit_count 的）。
+    pub counted_clips: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_credit_stats(state: State<'_, AppState>) -> AppResult<CreditStats> {
+    let s = load_settings(&state.db).await?;
+    let mut out = CreditStats::default();
+    // 余额查不到不该让整个面板打不开：没装 CLI / 没登录是常态，而本地消耗照样算得出。
+    match dreamina::user_credit(&s.bin, &state.v2v_log).await {
+        Ok(info) => {
+            out.balance = Some(info.total_credit);
+            out.user_id = info.user_id;
+            out.vip_level = info.vip_level;
+        }
+        Err(e) => out.balance_error = Some(format!("{e}")),
+    }
+    for row in repo::credit_by_stage(&state.db).await? {
+        out.spent_total += row.spent;
+        out.counted_clips += row.clips;
+        match row.stage.as_str() {
+            "pass" => out.spent_pass += row.spent,
+            "rej" => out.spent_rej += row.spent,
+            // rev（待验收）与重跑后仍留着回执的条目都算「还没定论」。
+            _ => out.spent_pending += row.spent,
+        }
+    }
+    let now = now_unix();
+    out.spent_24h = repo::credit_since(&state.db, now - 24 * 3600).await?;
+    out.spent_7d = repo::credit_since(&state.db, now - 7 * 24 * 3600).await?;
+    Ok(out)
+}
+
+/// 执行日志快照（打开日志面板时取一次，之后靠 `v2v://activity` 事件增量追加）。
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_activity(state: State<'_, AppState>) -> AppResult<Vec<ActivityEntry>> {
+    Ok(state.v2v_log.snapshot())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_v2v_activity(state: State<'_, AppState>) -> AppResult<()> {
+    state.v2v_log.clear();
+    Ok(())
+}
+
+/// 当前**实际生效**的生成参数（参数面板的唯一数据源）。
+///
+/// 「走哪个模型、什么分辨率」这个问题，设置页那几个下拉框其实回答不了：留空意味着
+/// 「跟随 CLI 默认」，而那个默认值是什么、发出去的到底是哪几个 flag，界面上都看不出来。
+/// 故这里直接给出**归一化之后**的三件套，外加一条示例命令行 —— 与真正 exec 的
+/// `command_line` 同源，只把图片与提示词换成占位符。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveParams {
+    /// 设置里填的原文（可能是空串 = 自动探测）。
+    pub bin: String,
+    /// 解析出来的绝对路径；None = 没探测到。
+    pub resolved_bin: Option<String>,
+    /// 归一化后的三件套。None 表示「不发这个 flag，由 CLI 自己决定」。
+    pub model_version: Option<String>,
+    pub duration: Option<i64>,
+    pub video_resolution: Option<String>,
+    pub session: Option<i64>,
+    /// 是否一个高级 flag 都不发（三者全空）。
+    pub uses_cli_defaults: bool,
+    /// 与真正 exec 同源的示例命令行。
+    pub sample_command: String,
+    /// 参数组合非法时的原因（设置里存了坏组合 → 每次提交都在花钱之后才报错）。
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_effective_params(state: State<'_, AppState>) -> AppResult<EffectiveParams> {
+    let s = load_settings(&state.db).await?;
+    let resolved_bin = dreamina::detect_bin(&s.bin);
+    let mut out = EffectiveParams {
+        bin: s.bin.clone(),
+        resolved_bin: resolved_bin.clone(),
+        model_version: None,
+        duration: None,
+        video_resolution: None,
+        session: s.session,
+        uses_cli_defaults: true,
+        sample_command: String::new(),
+        error: None,
+    };
+    match dreamina::normalize_opts(&s.defaults()) {
+        Ok(opts) => {
+            out.uses_cli_defaults = opts.model_version.is_none();
+            out.model_version = opts.model_version.clone();
+            out.duration = opts.duration;
+            out.video_resolution = opts.video_resolution.clone();
+            let argv = dreamina::command_line(
+                resolved_bin.as_deref().unwrap_or(dreamina::DEFAULT_BIN),
+                "<首帧图>",
+                "<改写后的视频提示词>",
+                &opts,
+            );
+            out.sample_command = dreamina::display_command(&argv);
+        }
+        Err(e) => out.error = Some(format!("{e}")),
+    }
+    Ok(out)
 }
 
 /// 看板条目视图。
@@ -206,6 +362,11 @@ pub struct ClipView {
     pub attempt: i64,
     pub error_type: Option<String>,
     pub error_message: Option<String>,
+    /// 即梦状态原文 + 队列位次 + 我们最后一次问到答案的时刻（0021）。
+    /// 落库而非只走事件：切页/重启后「这条在排队还是在跑」仍要答得出。
+    pub gen_status: Option<String>,
+    pub queue_idx: Option<i64>,
+    pub polled_at: Option<i64>,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -239,6 +400,9 @@ impl From<repo::ClipRow> for ClipView {
             attempt: r.attempt,
             error_type: r.error_type,
             error_message: r.error_message,
+            gen_status: r.gen_status,
+            queue_idx: r.queue_idx,
+            polled_at: r.polled_at,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }
@@ -381,6 +545,15 @@ pub async fn ingest_v2v_rewrites(
 ) -> AppResult<IngestSummary> {
     let s = load_settings(&state.db).await?;
     let sum = handoff::ingest(&state.db, &s.root()).await?;
+    state.v2v_log.info(
+        "handoff",
+        None,
+        format!(
+            "手动收录：应用 {} · 认不出 {} · 已越过待提交 {}",
+            sum.applied, sum.unmatched, sum.stale
+        ),
+        Some(s.root().to_string_lossy().to_string()),
+    );
     refresh_handoff(&state.db, &app).await;
     Ok(sum)
 }
@@ -436,6 +609,56 @@ pub async fn update_v2v_clip(
     Ok(ok)
 }
 
+/// 批量覆盖选中条目的生成参数（不动提示词、不动阶段）。
+///
+/// 「有效编辑参数」在原来的界面里只能一条一条开详情弹窗改 —— 19 条就是 19 次。
+/// 而参数恰恰是最常整批改的东西（「这一组都换成 vip 1080p」）。
+///
+/// 三项一起传：`None` 表示清掉该项（回落到设置里的默认值），不是「保持不变」。
+/// 半套组合在这里就拦住，理由同 `normalize_opts` —— 报错必须发生在花钱之前。
+#[tauri::command]
+#[specta::specta]
+pub async fn set_v2v_clip_params(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+    model_version: Option<String>,
+    duration: Option<i64>,
+    video_resolution: Option<String>,
+) -> AppResult<i64> {
+    let opts = GenOpts {
+        model_version: model_version.clone(),
+        duration,
+        video_resolution: video_resolution.clone(),
+        session: None,
+    };
+    // 归一化后再写：只给了模型时把时长/分辨率补成该模型的合法值，
+    // 免得库里躺着一份「看起来只设了模型」而提交时才补出来的参数。
+    let norm = dreamina::normalize_opts(&opts)?;
+    let n = repo::set_params(
+        &state.db,
+        &ids,
+        norm.model_version.as_deref(),
+        norm.duration,
+        norm.video_resolution.as_deref(),
+        now_unix(),
+    )
+    .await?;
+    state.v2v_log.info(
+        "submit",
+        None,
+        format!(
+            "批量设置参数：{n} 条 → 模型 {} · 时长 {} · 分辨率 {}",
+            norm.model_version.as_deref().unwrap_or("CLI 默认"),
+            norm.duration.map_or("CLI 默认".into(), |d| format!("{d}s")),
+            norm.video_resolution.as_deref().unwrap_or("CLI 默认"),
+        ),
+        None,
+    );
+    emit_changed(&state.db, &app, None).await;
+    Ok(n)
+}
+
 /// 提交前给人看的**真实命令行**（每条一行）。
 ///
 /// 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
@@ -474,7 +697,7 @@ pub async fn submit_v2v_clips(
     ids: Vec<i64>,
 ) -> AppResult<SubmitSummary> {
     let s = load_settings(&state.db).await?;
-    let sum = runner::submit_batch(&state.db, &s.bin, &ids, &s.defaults()).await?;
+    let sum = runner::submit_batch(&state.db, &s.bin, &ids, &s.defaults(), &state.v2v_log).await?;
     emit_changed(&state.db, &app, None).await;
     Ok(sum)
 }
@@ -484,7 +707,8 @@ pub async fn submit_v2v_clips(
 #[specta::specta]
 pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResult<i64> {
     let s = load_settings(&state.db).await?;
-    let sum = runner::poll_once(&state.db, &state.dirs, &s.bin).await?;
+    state.v2v_log.info("poll", None, "手动查一次进度", None);
+    let sum = runner::poll_once(&state.db, &state.dirs, &s.bin, &state.v2v_log).await?;
     emit_changed(&state.db, &app, None).await;
     Ok(sum.finished)
 }
@@ -542,9 +766,11 @@ pub async fn review_v2v_clips(
     Ok(n)
 }
 
-/// 重跑（同提示词）/ 退回改写。
+/// 重跑（同提示词）/ 退回改写 / 继续等待。
 ///
 /// 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
+/// 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
+/// 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
 #[tauri::command]
 #[specta::specta]
 pub async fn requeue_v2v_clips(
@@ -559,15 +785,24 @@ pub async fn requeue_v2v_clips(
         let ok = match mode.as_str() {
             "run" => repo::requeue_for_run(&state.db, id, now).await?,
             "rewrite" => repo::requeue_for_rewrite(&state.db, id, now).await?,
+            "wait" => repo::resume_timed_out(&state.db, id, now).await?,
             other => {
                 return Err(AppError::InvalidInput(format!(
-                    "未知重排模式：{other}（只接受 run / rewrite）"
+                    "未知重排模式：{other}（只接受 run / rewrite / wait）"
                 )))
             }
         };
         if ok {
             n += 1;
         }
+    }
+    if mode == "wait" && n > 0 {
+        state.v2v_log.info(
+            "poll",
+            None,
+            format!("{n} 条超时条目放回轮询（沿用原提交单，不重复扣额度）"),
+            None,
+        );
     }
     refresh_handoff(&state.db, &app).await;
     Ok(n)

@@ -66,6 +66,35 @@ pub struct V2vProgress {
     /// 显示成「未知」。原文加一行 hint 比一个翻译错的标签有用。
     pub gen_status: String,
     pub queue_idx: Option<i64>,
+    /// 我们问到这个答案的时刻。前端据此显示「12 秒前」，从而能把「它在排队」
+    /// 与「我们已经问不出话来了」区分开。
+    pub polled_at: i64,
+}
+
+/// `v2v://activity` —— 执行日志新增一条。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vActivity {
+    pub entry: super::activity::ActivityEntry,
+}
+
+/// `v2v://tick` —— 轮询器心跳（每轮一发，无论有没有变化）。
+///
+/// **心跳与日志是两件事**：日志只在有事发生时才该增长（否则 6 秒一条会把真正的错误
+/// 冲出缓冲），而「轮询器还活着吗」恰恰要在**什么都没发生**时也能回答。
+/// 一个没有心跳的静默界面，跟一个卡死的轮询器长得一模一样。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vTick {
+    pub at: i64,
+    /// 本轮开始时在跑的条数。
+    pub running: i64,
+    /// 轮询开关（设置里关掉时仍发心跳，否则界面分不清「关了」和「挂了」）。
+    pub enabled: bool,
+    pub finished: i64,
+    pub failed: i64,
+    /// 整轮失败的原因（读设置失败、CLI 不可用……）。
+    pub error: Option<String>,
 }
 
 #[cfg(test)]

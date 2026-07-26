@@ -975,11 +975,59 @@ async v2vModels() : Promise<Result<ModelInfo[], AppError>> {
 }
 },
 /**
- * 查即梦余额（设置页显示 + 批量提交前预检）。
+ * 查即梦余额与账号（设置页 / 参数面板显示 + 批量提交前预检）。
  */
-async v2vCredit() : Promise<Result<number, AppError>> {
+async v2vCredit() : Promise<Result<CreditInfo, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_credit") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vCreditStats() : Promise<Result<CreditStats, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 列出即梦会话（用户口中的「通道」）。
+ * 
+ * 原先设置里只有一个裸数字输入框 —— 那个数字对应哪条会话，在应用里根本无从得知。
+ */
+async v2vSessions() : Promise<Result<SessionInfo[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vEffectiveParams() : Promise<Result<EffectiveParams, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_effective_params") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 执行日志快照（打开日志面板时取一次，之后靠 `v2v://activity` 事件增量追加）。
+ */
+async v2vActivity() : Promise<Result<ActivityEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_activity") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clearV2vActivity() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_v2v_activity") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1057,6 +1105,23 @@ async updateV2vClip(id: number, videoPrompt: string, modelVersion: string | null
 }
 },
 /**
+ * 批量覆盖选中条目的生成参数（不动提示词、不动阶段）。
+ * 
+ * 「有效编辑参数」在原来的界面里只能一条一条开详情弹窗改 —— 19 条就是 19 次。
+ * 而参数恰恰是最常整批改的东西（「这一组都换成 vip 1080p」）。
+ * 
+ * 三项一起传：`None` 表示清掉该项（回落到设置里的默认值），不是「保持不变」。
+ * 半套组合在这里就拦住，理由同 `normalize_opts` —— 报错必须发生在花钱之前。
+ */
+async setV2vClipParams(ids: number[], modelVersion: string | null, duration: number | null, videoResolution: string | null) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_v2v_clip_params", { ids, modelVersion, duration, videoResolution }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 提交前给人看的**真实命令行**（每条一行）。
  * 
  * 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
@@ -1104,9 +1169,11 @@ async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<number, AppE
 }
 },
 /**
- * 重跑（同提示词）/ 退回改写。
+ * 重跑（同提示词）/ 退回改写 / 继续等待。
  * 
  * 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
+ * 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
+ * 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
  */
 async requeueV2vClips(ids: number[], mode: string) : Promise<Result<number, AppError>> {
     try {
@@ -1888,8 +1955,10 @@ sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged,
+v2vActivity: V2vActivity,
 v2vChanged: V2vChanged,
-v2vProgress: V2vProgress
+v2vProgress: V2vProgress,
+v2vTick: V2vTick
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
@@ -1902,8 +1971,10 @@ sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
 updateStateChanged: "update-state-changed",
+v2vActivity: "v2v-activity",
 v2vChanged: "v2v-changed",
-v2vProgress: "v2v-progress"
+v2vProgress: "v2v-progress",
+v2vTick: "v2v-tick"
 })
 
 /** user-defined constants **/
@@ -1938,6 +2009,30 @@ export type AccountStat = { id: number; platformZh: string; name: string; used: 
  */
 health: string }
 export type AccountView = { id: number; platform: string; platformZh: string; name: string; dailyLimit: number; slots: string[] | null; status: string; createdAt: number }
+/**
+ * 一条执行日志。
+ */
+export type ActivityEntry = { 
+/**
+ * 单调递增序号。前端据此去重与增量追加（事件可能与快照重叠）。
+ */
+seq: number; at: number; 
+/**
+ * `info` / `warn` / `error`。
+ */
+level: string; 
+/**
+ * `cli` 调用 · `submit` 提交 · `poll` 轮询 · `media` 落盘 · `handoff` 交接目录。
+ */
+phase: string; clipId: number | null; 
+/**
+ * 条目编号（如 `BR46-0003`），让日志能和看板上的卡片对上。
+ */
+code: string; message: string; 
+/**
+ * 命令行原文 / CLI 输出片段等「想细看才看」的内容。
+ */
+detail: string | null }
 export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; model: string; concurrencyLimit: number; 
 /**
  * 每分钟请求上限（E18）；None/<=0 = 不限速。
@@ -2081,7 +2176,12 @@ export type ClipView = { id: number; workId: number; groupId: number | null; gro
 /**
  * 首帧图（父作品）原图与缩略图。
  */
-imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string; videoPrompt: string | null; modelVersion: string | null; duration: number | null; videoResolution: string | null; submitId: string | null; creditCount: number | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; attempt: number; errorType: string | null; errorMessage: string | null; acceptedAt: number; updatedAt: number }
+imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string; videoPrompt: string | null; modelVersion: string | null; duration: number | null; videoResolution: string | null; submitId: string | null; creditCount: number | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; attempt: number; errorType: string | null; errorMessage: string | null; 
+/**
+ * 即梦状态原文 + 队列位次 + 我们最后一次问到答案的时刻（0021）。
+ * 落库而非只走事件：切页/重启后「这条在排队还是在跑」仍要答得出。
+ */
+genStatus: string | null; queueIdx: number | null; polledAt: number | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -2096,6 +2196,37 @@ export type CreateSkuInput = { code: string; styleName: string; productName: str
  * 收件箱文件夹别名（可选，中文亦可）。
  */
 folderAlias: string | null }
+/**
+ * 账号与余额（`user_credit` 的完整回体）。
+ * 
+ * 不只取 `total_credit`：「走的是哪个账号、什么等级」与「还剩多少」是同一个问题的两半，
+ * 而余额对不上时，第一个要排除的正是「登录的不是我以为的那个号」。
+ */
+export type CreditInfo = { totalCredit: number; userId: number | null; userName: string; vipLevel: string }
+/**
+ * 额度台账：余额（远端）+ 已消耗（本地库）。
+ * 
+ * **两个数字来自两个地方，故不合并成一个「已用/总额」百分比**：余额是即梦那边的账户
+ * 真相（别处也可能在花它），消耗是本机这条流水线出片时收到的扣费回执。
+ * 编一个百分比出来会让两者的差异变得无法解释。
+ */
+export type CreditStats = { 
+/**
+ * 远端余额；查不到时为 None，原因在 `balanceError`（未登录 / 找不到 CLI）。
+ */
+balance: number | null; balanceError: string | null; userId: number | null; vipLevel: string; 
+/**
+ * 本机流水线累计消耗（只算收到扣费回执的条目）。
+ */
+spentTotal: number; spent7D: number; spent24H: number; 
+/**
+ * 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
+ */
+spentPass: number; spentRej: number; spentPending: number; 
+/**
+ * 计入统计的条数（有 credit_count 的）。
+ */
+countedClips: number }
 export type DashboardView = { date: string; sheetId: number | null; status: string | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean; 
 /**
  * 同步链路（F9）：导出时刻 / 执行器首次回写 / 最近一次回写（Unix 秒）。
@@ -2113,6 +2244,39 @@ yesterdaySuccessRate: number | null }
  * 数据目录信息（E19：暴露落盘位置）。
  */
 export type DataDirInfo = { root: string; dbPath: string }
+/**
+ * 当前**实际生效**的生成参数（参数面板的唯一数据源）。
+ * 
+ * 「走哪个模型、什么分辨率」这个问题，设置页那几个下拉框其实回答不了：留空意味着
+ * 「跟随 CLI 默认」，而那个默认值是什么、发出去的到底是哪几个 flag，界面上都看不出来。
+ * 故这里直接给出**归一化之后**的三件套，外加一条示例命令行 —— 与真正 exec 的
+ * `command_line` 同源，只把图片与提示词换成占位符。
+ */
+export type EffectiveParams = { 
+/**
+ * 设置里填的原文（可能是空串 = 自动探测）。
+ */
+bin: string; 
+/**
+ * 解析出来的绝对路径；None = 没探测到。
+ */
+resolvedBin: string | null; 
+/**
+ * 归一化后的三件套。None 表示「不发这个 flag，由 CLI 自己决定」。
+ */
+modelVersion: string | null; duration: number | null; videoResolution: string | null; session: number | null; 
+/**
+ * 是否一个高级 flag 都不发（三者全空）。
+ */
+usesCliDefaults: boolean; 
+/**
+ * 与真正 exec 同源的示例命令行。
+ */
+sampleCommand: string; 
+/**
+ * 参数组合非法时的原因（设置里存了坏组合 → 每次提交都在花钱之后才报错）。
+ */
+error: string | null }
 /**
  * 六类错误（落 `tasks.error_type` / `task_attempts.error_type`）。
  */
@@ -2699,6 +2863,10 @@ export type ReviewItemView = { id: number; batchId: number; refName: string; pro
  */
 refThumbPath: string | null; refImagePath: string | null }
 /**
+ * 即梦会话（`--session` 的可选值）。
+ */
+export type SessionInfo = { id: number; name: string; pinned: boolean; updatedAt: string }
+/**
  * 应用设置（单行 JSON 持久化）。
  */
 export type Settings = { 
@@ -2993,6 +3161,10 @@ export type UpdateStateChanged = {
  */
 state: string; version: string | null }
 /**
+ * `v2v://activity` —— 执行日志新增一条。
+ */
+export type V2vActivity = { entry: ActivityEntry }
+/**
  * `v2v://changed` —— 流水线任何阶段变动即推送。
  */
 export type V2vChanged = { counts: StageCounts; 
@@ -3010,7 +3182,12 @@ export type V2vProgress = { clipId: number;
  * 不映射成自造的中文态：轮询状态是**别人系统的**真相，翻译一层只会在它加了新态时
  * 显示成「未知」。原文加一行 hint 比一个翻译错的标签有用。
  */
-genStatus: string; queueIdx: number | null }
+genStatus: string; queueIdx: number | null; 
+/**
+ * 我们问到这个答案的时刻。前端据此显示「12 秒前」，从而能把「它在排队」
+ * 与「我们已经问不出话来了」区分开。
+ */
+polledAt: number }
 /**
  * 图生视频设置（`settings` 表 key='v2v' 单行 JSON）。
  */
@@ -3035,6 +3212,26 @@ session?: number | null;
  * 后台轮询开关。关掉后已提交的条目不再自动取回（排查问题时用）。
  */
 pollEnabled?: boolean }
+/**
+ * `v2v://tick` —— 轮询器心跳（每轮一发，无论有没有变化）。
+ * 
+ * **心跳与日志是两件事**：日志只在有事发生时才该增长（否则 6 秒一条会把真正的错误
+ * 冲出缓冲），而「轮询器还活着吗」恰恰要在**什么都没发生**时也能回答。
+ * 一个没有心跳的静默界面，跟一个卡死的轮询器长得一模一样。
+ */
+export type V2vTick = { at: number; 
+/**
+ * 本轮开始时在跑的条数。
+ */
+running: number; 
+/**
+ * 轮询开关（设置里关掉时仍发心跳，否则界面分不清「关了」和「挂了」）。
+ */
+enabled: boolean; finished: number; failed: number; 
+/**
+ * 整轮失败的原因（读设置失败、CLI 不可用……）。
+ */
+error: string | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean; 
 /**
  * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。

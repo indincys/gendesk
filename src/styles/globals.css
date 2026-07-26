@@ -3306,6 +3306,99 @@ a:hover {
   background: #000;
   display: block;
 }
+/* 轮询心跳 pill：在什么都没发生时也要能回答「轮询器还活着吗」——
+   一个静默的界面和一个卡死的轮询器长得一模一样。 */
+.pollpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t3);
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.pollpill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--ok);
+  flex: none;
+}
+.pollpill.off .dot {
+  background: var(--t3);
+}
+.pollpill.bad .dot {
+  background: var(--er);
+}
+
+/* 卡片上的即梦状态行（状态原文 + 队列位次 + 上次问到答案的时刻）。 */
+.vstat {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 400 10px var(--mono);
+  color: var(--t3);
+}
+
+/* 执行日志：一行一条，时间与阶段定宽，正文自适应换行。 */
+.lgrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--t2);
+  padding: 5px 7px;
+  border-radius: 7px;
+  border-bottom: 1px solid var(--line);
+}
+.lgrow.warn {
+  background: var(--wrbg);
+}
+.lgrow.error {
+  background: var(--erbg);
+}
+.lgt {
+  font: 400 10px var(--mono);
+  color: var(--t3);
+  flex: none;
+  padding-top: 1px;
+}
+.lgp {
+  font-size: 10px;
+  color: var(--t3);
+  flex: none;
+  min-width: 26px;
+}
+.lglink {
+  color: var(--acc);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lglink:hover {
+  text-decoration: underline;
+}
+
+/* 额度小格：四列一行，窄了自动折。 */
+.statgrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.statcell {
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.spin {
+  animation: rot 0.8s linear infinite;
+}
+
 /* 命令行预览：等宽 + 可横向滚动，不换行折断参数。 */
 .cmdwell {
   font: 400 10.5px var(--mono);

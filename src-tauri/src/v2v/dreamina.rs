@@ -22,6 +22,7 @@ use serde::Serialize;
 use specta::Type;
 
 use crate::error::{AppError, AppResult};
+use crate::v2v::activity::{Activity, Who};
 
 /// 默认可执行名。设置里留空即用它，并走 [`resolve_bin`] 自动探测。
 pub const DEFAULT_BIN: &str = "dreamina";
@@ -430,8 +431,16 @@ pub fn parse_query(v: &serde_json::Value) -> QueryResult {
 ///
 /// 在 `spawn_blocking` 里同步 exec：CLI 一次调用要走网络，秒级到十几秒，
 /// 占着异步执行器会把别的 IPC 命令一起卡住（v0.14.0 的上传静默就是这么来的）。
-async fn run(argv: Vec<String>) -> AppResult<String> {
+///
+/// **失败一律记进执行日志**（含退出码、耗时与 CLI 打出来的原文）：这是「有没有报错」
+/// 在 GUI 里唯一的答案来源 —— 打包后的应用没有终端，`tracing` 写进的那个文件用户不会去看。
+///
+/// 成功只在 `loud` 时记。轮询每 6 秒问 19 条，成功也记就是每分钟 190 条，
+/// 500 条的缓冲两分半钟就被冲干净 —— 那等于用「一切正常」把真正的报错挤出了窗口。
+/// 付费动作（提交）与人按下的按钮才配 `loud`。
+async fn run(argv: Vec<String>, log: &Activity, who: Who<'_>, loud: bool) -> AppResult<String> {
     let pretty = display_command(&argv);
+    let started = std::time::Instant::now();
     let out = tokio::task::spawn_blocking(move || {
         let (bin, args) = argv.split_first().ok_or_else(|| {
             AppError::Internal("命令行为空（不应发生：command_line 至少给出 bin）".into())
@@ -447,35 +456,160 @@ async fn run(argv: Vec<String>) -> AppResult<String> {
             })
     })
     .await
-    .map_err(|e| AppError::Internal(format!("即梦 CLI 任务panic：{e}")))??;
+    .map_err(|e| AppError::Internal(format!("即梦 CLI 任务panic：{e}")));
+
+    let ms = started.elapsed().as_millis();
+    let out = match out {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) | Err(e) => {
+            log.error(
+                "cli",
+                who,
+                format!("即梦 CLI 无法启动（{ms}ms）：{e}"),
+                Some(pretty),
+            );
+            return Err(e);
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         // stdout 也带进去：CLI 的业务错误（额度不足、需网页授权）常打在 stdout。
         let detail: String = format!("{stderr}{stdout}").chars().take(400).collect();
+        let code = out
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |c| c.to_string());
+        log.error(
+            "cli",
+            who,
+            format!(
+                "即梦 CLI 返回失败（退出码 {code}，{ms}ms）：{}",
+                detail.trim()
+            ),
+            Some(pretty.clone()),
+        );
         return Err(AppError::Internal(format!(
-            "即梦 CLI 返回失败（{}）：{}\n命令：{pretty}",
-            out.status
-                .code()
-                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            "即梦 CLI 返回失败（{code}）：{}\n命令：{pretty}",
             detail.trim()
         )));
+    }
+    if loud {
+        log.info("cli", who, format!("即梦 CLI 完成（{ms}ms）"), Some(pretty));
     }
     Ok(stdout)
 }
 
+/// 账号与余额（`user_credit` 的完整回体）。
+///
+/// 不只取 `total_credit`：「走的是哪个账号、什么等级」与「还剩多少」是同一个问题的两半，
+/// 而余额对不上时，第一个要排除的正是「登录的不是我以为的那个号」。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditInfo {
+    pub total_credit: i64,
+    pub user_id: Option<i64>,
+    pub user_name: String,
+    pub vip_level: String,
+}
+
 /// 查余额（提交前预检 + 设置页显示）。
-pub async fn user_credit(bin: &str) -> AppResult<i64> {
+pub async fn user_credit(bin: &str, log: &Activity) -> AppResult<CreditInfo> {
     let bin = resolve_bin(bin)?;
-    let v = extract_json(&run(vec![bin, "user_credit".to_string()]).await?)?;
-    v.get("total_credit")
+    let v = extract_json(&run(vec![bin, "user_credit".to_string()], log, None, false).await?)?;
+    let total_credit = v
+        .get("total_credit")
         .and_then(|x| x.as_i64())
-        .ok_or_else(|| AppError::Internal("即梦 CLI 未返回 total_credit（可能未登录）".into()))
+        .ok_or_else(|| AppError::Internal("即梦 CLI 未返回 total_credit（可能未登录）".into()))?;
+    Ok(CreditInfo {
+        total_credit,
+        user_id: v.get("user_id").and_then(|x| x.as_i64()),
+        user_name: v
+            .get("user_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        vip_level: v
+            .get("vip_level")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// 即梦会话（`--session` 的可选值）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub id: i64,
+    pub name: String,
+    pub pinned: bool,
+    pub updated_at: String,
+}
+
+/// 列出会话。
+///
+/// 会话是即梦那边组织生成历史的容器 —— 也就是用户说的「哪个通道」。原先设置页只给一个
+/// 裸数字输入框，而「这个数字是哪条会话」在应用里根本无从得知。
+pub async fn sessions(bin: &str, log: &Activity) -> AppResult<Vec<SessionInfo>> {
+    let bin = resolve_bin(bin)?;
+    let out = run(
+        vec![
+            bin,
+            "session".into(),
+            "list".into(),
+            "-n".into(),
+            "100".into(),
+        ],
+        log,
+        None,
+        false,
+    )
+    .await?;
+    Ok(parse_sessions(&out))
+}
+
+/// 解析 `dreamina session list` 的表格输出。
+///
+/// 这个子命令打的是**给人看的表**而不是 JSON，所以只能按行拆。按列宽切是错的：
+/// 会话名可以是中文，而表格是按**显示宽度**对齐的，按字节偏移切必然错位。
+/// 故从两端认：首个 token 是 id，末两个 token 是日期与时间，倒数第三个是 PINNED，
+/// 中间剩下的全是名字（名字里有空格也不会被拆散）。
+pub fn parse_sessions(stdout: &str) -> Vec<SessionInfo> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        // 表头与分隔线：首列不是数字，天然被下面这个 parse 挡掉。
+        if t.len() < 4 {
+            continue;
+        }
+        let Ok(id) = t[0].parse::<i64>() else {
+            continue;
+        };
+        let n = t.len();
+        let updated_at = format!("{} {}", t[n - 2], t[n - 1]);
+        let pinned = t[n - 3].eq_ignore_ascii_case("yes");
+        let name = t[1..n - 3].join(" ");
+        out.push(SessionInfo {
+            id,
+            name,
+            pinned,
+            updated_at,
+        });
+    }
+    out
 }
 
 /// 提交一条图生视频任务，返回 submit_id。
-pub async fn submit(bin: &str, image: &Path, prompt: &str, opts: &GenOpts) -> AppResult<String> {
+pub async fn submit(
+    bin: &str,
+    image: &Path,
+    prompt: &str,
+    opts: &GenOpts,
+    log: &Activity,
+    who: Who<'_>,
+) -> AppResult<String> {
     if !image.is_file() {
         return Err(AppError::InvalidInput(format!(
             "首帧图不存在：{}",
@@ -485,7 +619,7 @@ pub async fn submit(bin: &str, image: &Path, prompt: &str, opts: &GenOpts) -> Ap
     let opts = normalize_opts(opts)?;
     let bin = resolve_bin(bin)?;
     let argv = command_line(&bin, &image.to_string_lossy(), prompt, &opts);
-    let stdout = run(argv.clone()).await?;
+    let stdout = run(argv.clone(), log, who, true).await?;
     extract_submit_id(&extract_json(&stdout)?).ok_or_else(|| {
         AppError::Internal(format!(
             "提交成功但未能从返回里取到 submit_id。命令：{}",
@@ -499,6 +633,8 @@ pub async fn query(
     bin: &str,
     submit_id: &str,
     download_dir: Option<&Path>,
+    log: &Activity,
+    who: Who<'_>,
 ) -> AppResult<QueryResult> {
     let mut argv = vec![
         resolve_bin(bin)?,
@@ -508,7 +644,9 @@ pub async fn query(
     if let Some(d) = download_dir {
         argv.push(format!("--download_dir={}", d.to_string_lossy()));
     }
-    Ok(parse_query(&extract_json(&run(argv).await?)?))
+    Ok(parse_query(&extract_json(
+        &run(argv, log, who, false).await?,
+    )?))
 }
 
 #[cfg(test)]
@@ -726,6 +864,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v.get("total_credit").unwrap().as_i64(), Some(13779));
+    }
+
+    // `session list` 打的是给人看的表，不是 JSON。真实输出（本机 CLI 抓的）。
+    #[test]
+    fn parses_real_session_table() {
+        let raw = "ID  NAME     PINNED  UPDATED_AT\n\
+                   --  -------  ------  ----------------\n\
+                   0   default  Yes     2026-03-03 10:28\n";
+        let s = parse_sessions(raw);
+        assert_eq!(s.len(), 1, "表头与分隔线不得被当成数据行");
+        assert_eq!(s[0].id, 0);
+        assert_eq!(s[0].name, "default");
+        assert!(s[0].pinned);
+        assert_eq!(s[0].updated_at, "2026-03-03 10:28");
+    }
+
+    // 会话名可以带空格、也可以是中文。**不能按列宽切**：表格是按显示宽度对齐的，
+    // 中文占两格而只有一个 char，按偏移切必然错位。故从两端认，中间全是名字。
+    #[test]
+    fn session_names_with_spaces_and_cjk_survive_parsing() {
+        let raw = "ID   NAME              PINNED  UPDATED_AT\n\
+                   ---  ----------------  ------  ----------------\n\
+                   12   My Video Project  No      2026-07-01 09:05\n\
+                   7    卡套 B-Roll 项目    Yes     2026-06-30 18:44\n";
+        let s = parse_sessions(raw);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].name, "My Video Project");
+        assert!(!s[0].pinned);
+        assert_eq!(s[1].id, 7);
+        assert_eq!(s[1].name, "卡套 B-Roll 项目");
+        assert_eq!(s[1].updated_at, "2026-06-30 18:44");
+    }
+
+    // 认不出的行整行跳过，绝不 panic：这个子命令的输出格式随时可能变，
+    // 而「会话列表读不出来」最坏只该是选择器空着，不该把设置页整页拖垮。
+    #[test]
+    fn unparsable_session_output_yields_empty_not_panic() {
+        assert!(parse_sessions("").is_empty());
+        assert!(parse_sessions("Error: not logged in\n").is_empty());
+        assert!(parse_sessions("ID NAME\n").is_empty());
     }
 
     // 真实 query_result 输出（已下载）：只认落盘 path，不认会过期的签名 URL。

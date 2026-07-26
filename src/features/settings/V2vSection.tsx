@@ -1,4 +1,11 @@
-import { type ModelInfo, type V2vSettings, commands, unwrap } from "@/lib/ipc";
+import {
+  type CreditInfo,
+  type ModelInfo,
+  type SessionInfo,
+  type V2vSettings,
+  commands,
+  unwrap,
+} from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, Check, FolderOpen, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -14,7 +21,8 @@ import { toast } from "sonner";
 export function V2vSection() {
   const [s, setS] = useState<V2vSettings | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [credit, setCredit] = useState<number | null>(null);
+  const [credit, setCredit] = useState<CreditInfo | null>(null);
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [checking, setChecking] = useState(false);
   /** 当前设置实际会执行哪个文件（后端探测结果）；null = 没找到。 */
   const [resolved, setResolved] = useState<string | null>(null);
@@ -50,6 +58,9 @@ export function V2vSection() {
     setChecking(true);
     try {
       setCredit(await unwrap(commands.v2vCredit()));
+      // 顺带把会话列表取回来：这两件事都要跑一次 CLI，而人点「查余额」的时机
+      // 恰好就是「CLI 现在是通的」那一刻。
+      setSessions(await unwrap(commands.v2vSessions()).catch(() => []));
     } catch (e) {
       setCredit(null);
       toast.error(String(e));
@@ -57,6 +68,13 @@ export function V2vSection() {
       setChecking(false);
     }
   };
+
+  useEffect(() => {
+    // 会话列表不阻塞渲染；读不到就退化成手填数字（下面那个 input 仍在）。
+    void unwrap(commands.v2vSessions())
+      .then(setSessions)
+      .catch(() => setSessions([]));
+  }, []);
 
   if (!s) return null;
   const picked = models.find((m) => m.modelVersion === s.modelVersion);
@@ -120,7 +138,12 @@ export function V2vSection() {
           <RefreshCw className="ic12" />
           查余额
         </button>
-        {credit != null && <span className="bdg b-green">{credit} 额度</span>}
+        {credit != null && (
+          <>
+            <span className="bdg b-green">{credit.totalCredit} 额度</span>
+            {credit.vipLevel && <span className="chip">{credit.vipLevel}</span>}
+          </>
+        )}
       </div>
       {/* 「路径填什么」不该由人回答：直接把解析结果摆出来，说清实际会执行哪个文件。 */}
       <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
@@ -212,22 +235,44 @@ export function V2vSection() {
             </select>
           </>
         )}
-        <input
-          className="inp"
-          style={{ width: 130 }}
-          type="number"
-          min={0}
-          placeholder="会话 id（可空）"
-          value={s.session ?? ""}
-          onChange={(e) =>
-            setS({ ...s, session: e.target.value === "" ? null : Number(e.target.value) })
-          }
-          onBlur={() => void save({ session: s.session ?? null })}
-        />
+        {/* 通道 = 即梦会话。原先这里只是个裸数字输入框 ——「这个数字是哪条会话」
+            在应用里根本无从得知，于是它等于不可用。读不到列表时才退回手填。 */}
+        {sessions && sessions.length > 0 ? (
+          <select
+            className="inp"
+            style={{ minWidth: 200 }}
+            value={s.session ?? ""}
+            onChange={(e) =>
+              void save({ session: e.target.value === "" ? null : Number(e.target.value) })
+            }
+          >
+            <option value="">默认会话（0）</option>
+            {sessions.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.id} · {x.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            className="inp"
+            style={{ width: 130 }}
+            type="number"
+            min={0}
+            placeholder="会话 id（可空）"
+            value={s.session ?? ""}
+            onChange={(e) =>
+              setS({ ...s, session: e.target.value === "" ? null : Number(e.target.value) })
+            }
+            onBlur={() => void save({ session: s.session ?? null })}
+          />
+        )}
       </div>
       <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
         改写 skill 若对某一条给了具体建议（这条动势大就给 8 秒），
         <b>以它为准</b>——那是看过图之后的判断，这里的值只作兜底。
+        <br />
+        视频流水线页顶部的「生成参数」按同一份设置显示<b>实际会发出去的命令行</b>与额度用量。
       </div>
     </section>
   );

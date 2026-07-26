@@ -104,7 +104,15 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 ```
 
 **进 multipart 的生成参数只有三个**（`provider::GenParams`，v0.15.2）：`aspect_ratio` /
-`size` / `output_format`，外加恒定的 `n=1`。**画幅走 `aspect_ratio` 而非 `size`**；
+`size` / `output_format`，外加恒定的 `n=1`。**画幅两个都要发**——v0.15.2 那句「走
+`aspect_ratio` 而非 `size`」是照文档写的，**线上实测把它推翻了**（key `aixoras` ·
+模型 `gpt-image-2-1k`，批次 24–27 共 56 张）：单发 `aspectRatio: "9:16"` 回来的整批是
+**1024×1024 正方形**；补上 `size` 才是竖幅；单发 `size: "1080x1920"` 则整批 400
+（边长非 16 倍数）。回来的像素也不由我们定——要 1088×1920，上游给 941×1672（≈9:16，
+约 1.57MP），即它只认比例、分辨率自己挑。故**默认应同时发两个且让二者自洽**：
+`1:1`→1024x1024 · `3:4`→1536x2048 · `9:16`→1152x2048 · `2:3`→1024x1536（均为精确
+比例且两边 16 的倍数）。结论只对这把 key/模型成立，但代价不对等：多发一个字段是零成本，
+少发一个是一整批正方形。
 端点文档里的 quality / response_format / background / output_compression / extra_fields
 **一律不做**（用户明确不需要——参数摆在界面上却没人用，只会让「到底哪个在起作用」更难回答）。
 批次的 `params_json` 比它宽（还有 `draws`/本地去水印档位 `watermark`/输出处理开关等纯 UI 键，

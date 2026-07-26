@@ -33,7 +33,7 @@ cp <参考图原路径> "$JOB/images/"        # 拷贝，别移动别软链
 
 ```bash
 printf ok > "$JOB/READY.txt"
-pgrep -x GenDesk >/dev/null || open -a GenDesk
+pgrep -x gendesk >/dev/null || open -a GenDesk
 sleep 3; cat "$JOB"/{结果,待确认,错误}.txt 2>/dev/null || true
 ```
 

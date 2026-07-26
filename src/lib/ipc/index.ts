@@ -117,6 +117,10 @@ export type {
   IngestSummary,
   PurposeBackfill,
   PurposeHit,
+  // 生图工单收件（Claude Code / Codex 投单）
+  IntakeSettings,
+  IntakeChanged,
+  JobView,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -211,6 +215,21 @@ export async function subscribeExportProgress(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const un = await events.exportProgressEvent.listen((e) => handler(e.payload));
+  return () => un();
+}
+
+/**
+ * 订阅生图工单收件事件。
+ *
+ * 收录是**自动**发生的（skill 投单 → watcher 收录 → 建批开跑），用户没有按任何按钮，
+ * 所以这条订阅挂在应用外壳上而不是设置页：一个批次凭空出现在任务页，
+ * 和一份工单静默失败，都需要一句解释——而人当时未必正好停在设置页。
+ */
+export async function subscribeIntake(
+  handler: (e: import("./bindings").IntakeChanged) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.intakeChanged.listen((e) => handler(e.payload));
   return () => un();
 }
 

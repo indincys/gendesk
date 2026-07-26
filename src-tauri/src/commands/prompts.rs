@@ -568,15 +568,49 @@ pub async fn parse_prompt_txt(
     let stem = std::path::Path::new(&path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string());
-    let parsed = importer::parse_named(&bytes, stem.as_deref());
+    build_preview(&state.db, &bytes, stem.as_deref()).await
+}
+
+/// txt 字节 → 导入预览（不落库）。
+///
+/// 从命令里提出来只为一件事：**工单收件（`intake`）与手动导入必须是同一条解析路径**。
+/// 分成两份实现的话，形态推断、前缀分配、用途预猜三件事迟早各走各的，
+/// 而「同一份 txt 手动导入是 3 组、经工单进来是 1 组」这种分歧没人能解释。
+pub(crate) async fn build_preview(
+    pool: &sqlx::SqlitePool,
+    bytes: &[u8],
+    stem: Option<&str>,
+) -> AppResult<ImportPreview> {
+    let parsed = importer::parse_named(bytes, stem);
     if parsed.groups.is_empty() {
         return Err(AppError::InvalidInput("未从文件解析出任何提示词".into()));
     }
+    let warnings = parsed
+        .warnings
+        .into_iter()
+        .map(|w| ImportWarning {
+            line: w.line as i64,
+            message: w.message,
+        })
+        .collect();
+    build_preview_from_parsed(pool, &parsed.groups, parsed.encoding, warnings).await
+}
 
+/// 已解析的分组 → 预览（分配前缀、算编号区间、定用途）。
+///
+/// 工单收件的**内联提示词**从这里进来：它不经 txt 解析器（组名与条目切分由 skill
+/// 直接给定），但前缀分配与用途判定必须与 txt 导入完全一致，否则同一个组名经两条
+/// 入口会拿到两个前缀。
+pub(crate) async fn build_preview_from_parsed(
+    pool: &sqlx::SqlitePool,
+    parsed_groups: &[ParsedGroup],
+    encoding: String,
+    warnings: Vec<ImportWarning>,
+) -> AppResult<ImportPreview> {
     let mut used_prefixes: HashSet<String> = HashSet::new();
-    let mut groups = Vec::with_capacity(parsed.groups.len());
-    for g in &parsed.groups {
-        let (prefix, is_new) = resolve_prefix(&state, g, &mut used_prefixes).await?;
+    let mut groups = Vec::with_capacity(parsed_groups.len());
+    for g in parsed_groups {
+        let (prefix, is_new) = resolve_prefix(pool, g, &mut used_prefixes).await?;
         let count = g.prompts.len() as i64;
         // txt 里显式写了 `标签: 图生视频` 时它已在 tags 里，此时不算「预猜」。
         let explicit: Vec<String> = g
@@ -594,7 +628,7 @@ pub async fn parse_prompt_txt(
         };
         groups.push(ImportPreviewGroup {
             name: g.name.clone(),
-            code_range: code_range(&state, &prefix, count).await,
+            code_range: code_range(pool, &prefix, count).await,
             prefix_explicit: g.prefix.is_some(),
             prefix,
             scene: g.scene.clone(),
@@ -615,17 +649,9 @@ pub async fn parse_prompt_txt(
         });
     }
 
-    let total = parsed.total_prompts() as i64;
-    let warnings = parsed
-        .warnings
-        .into_iter()
-        .map(|w| ImportWarning {
-            line: w.line as i64,
-            message: w.message,
-        })
-        .collect();
+    let total = groups.iter().map(|g| g.count).sum();
     Ok(ImportPreview {
-        encoding: parsed.encoding,
+        encoding,
         total,
         groups,
         warnings,
@@ -633,11 +659,11 @@ pub async fn parse_prompt_txt(
 }
 
 /// 编号区间预览字符串（忽略回收池，仅供参考）。空组返回空串。
-async fn code_range(state: &AppState, prefix: &str, count: i64) -> String {
+async fn code_range(pool: &sqlx::SqlitePool, prefix: &str, count: i64) -> String {
     if count <= 0 {
         return String::new();
     }
-    let start = ids::peek_next(&state.db, prefix).await.unwrap_or(1);
+    let start = ids::peek_next(pool, prefix).await.unwrap_or(1);
     format!(
         "{} ~ {}",
         ids::format_code(prefix, start),
@@ -676,8 +702,9 @@ pub async fn repreview_import(
             tags: g.tags.clone(),
             prompts: Vec::new(),
             origin: importer::GroupOrigin::Explicit,
+            ..Default::default()
         };
-        let (prefix, is_new) = resolve_prefix(&state, &parsed, &mut used_prefixes).await?;
+        let (prefix, is_new) = resolve_prefix(&state.db, &parsed, &mut used_prefixes).await?;
         let count = g.prompts.len() as i64;
         // 用途仍是预猜（用户没表态）→ 按**当前**组名重新推断：改名/拆组后猜测要跟着更新，
         // 否则把 `B-Roll分镜` 改成 `电商主图` 之后那个视频用途还赖着不走。
@@ -689,7 +716,7 @@ pub async fn repreview_import(
         };
         groups.push(ImportPreviewGroup {
             name: name.to_string(),
-            code_range: code_range(&state, &prefix, count).await,
+            code_range: code_range(&state.db, &prefix, count).await,
             prefix,
             prefix_explicit: g.prefix_explicit,
             scene: g.scene.clone(),
@@ -771,13 +798,13 @@ fn validate_purposes(input: &[String]) -> AppResult<Vec<String>> {
 
 /// 解析前缀：显式前缀优先；否则由名字生成并保证（本次导入 + DB）唯一。
 async fn resolve_prefix(
-    state: &AppState,
+    pool: &sqlx::SqlitePool,
     g: &ParsedGroup,
     used: &mut HashSet<String>,
 ) -> AppResult<(String, bool)> {
     // 显式前缀：若 DB 已有同前缀分组 → 复用（追加），否则新建。
     if let Some(p) = &g.prefix {
-        let exists = repo::find_group_by_prefix(&state.db, p).await?.is_some();
+        let exists = repo::find_group_by_prefix(pool, p).await?.is_some();
         used.insert(p.clone());
         return Ok((p.clone(), !exists));
     }
@@ -786,7 +813,7 @@ async fn resolve_prefix(
     let mut candidate = base.clone();
     let mut n = 1;
     loop {
-        let db_taken = repo::find_group_by_prefix(&state.db, &candidate)
+        let db_taken = repo::find_group_by_prefix(pool, &candidate)
             .await?
             .is_some();
         if !used.contains(&candidate) && !db_taken {
@@ -806,6 +833,18 @@ pub async fn commit_prompt_import(
     preview: ImportPreview,
     ctx: String,
 ) -> AppResult<ImportResult> {
+    commit_preview(&state.db, &preview, &ctx).await
+}
+
+/// 预览 → 落库（号池发放与写入同事务）。
+///
+/// 与 `build_preview` 同样的理由提出来：工单收件走这里，于是「同前缀复用已有组」
+/// 「用途只增不减」「空组不落库」这些规则对两条入口天然一致。
+pub(crate) async fn commit_preview(
+    pool: &sqlx::SqlitePool,
+    preview: &ImportPreview,
+    ctx: &str,
+) -> AppResult<ImportResult> {
     let is_temp = ctx == "generate";
     let source = if is_temp { "temp_import" } else { "library" };
 
@@ -814,7 +853,7 @@ pub async fn commit_prompt_import(
         return Err(AppError::InvalidInput("没有可导入的提示词".into()));
     }
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = pool.begin().await?;
     let mut group_ids = Vec::new();
     let mut inserted = 0i64;
 
@@ -835,7 +874,7 @@ pub async fn commit_prompt_import(
         };
         let prefix = sanitize_prefix(&pg.prefix).unwrap_or_else(|| gen_prefix_from_name(name));
         // 复用已有同前缀分组，或新建。
-        let group_id = match repo::find_group_by_prefix(&state.db, &prefix).await? {
+        let group_id = match repo::find_group_by_prefix(pool, &prefix).await? {
             Some(existing) => existing.id,
             None => repo::create_group(&mut tx, name, &prefix, &pg.scene, is_temp).await?,
         };
@@ -865,7 +904,7 @@ pub async fn commit_prompt_import(
         // 不带关键词就把上次标好的用途抹掉。取消用途是提示词库那个选择器的职责
         // （`set_prompt_group_purposes`），那里用户是明确冲着「改用途」去的。
         let purposes = validate_purposes(&pg.purposes)?;
-        let mut merged = repo::group_tags(&state.db, group_id).await?;
+        let mut merged = repo::group_tags(pool, group_id).await?;
         for t in pg.tags.iter().chain(purposes.iter()) {
             if !merged.contains(t) {
                 merged.push(t.clone());

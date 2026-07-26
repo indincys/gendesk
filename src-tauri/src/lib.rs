@@ -10,6 +10,7 @@ mod error;
 mod files;
 mod ids;
 mod importer;
+mod intake;
 mod logging;
 mod provider;
 mod publish;
@@ -124,6 +125,16 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::trash_works,
             commands::works::export_works,
             commands::works::export_works_v2v,
+            // intake 域（Claude Code / Codex 投单 → 自动建批）
+            commands::intake::get_intake_settings,
+            commands::intake::update_intake_settings,
+            commands::intake::intake_pending_dir,
+            commands::intake::list_intake_jobs,
+            commands::intake::scan_intake_now,
+            commands::intake::retry_intake_job,
+            commands::intake::confirm_intake_job,
+            commands::intake::open_intake_dir,
+            commands::intake::pick_intake_root,
             // v2v 域（图生视频流水线）
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,
@@ -253,6 +264,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             publish::events::InboxIngestEvent,
             publish::events::SheetChangedEvent,
             publish::events::ExportProgressEvent,
+            // 生图工单收件事件
+            commands::intake::IntakeChanged,
             // 视频流水线事件
             v2v::events::V2vChanged,
             v2v::events::V2vProgress,
@@ -377,6 +390,10 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let dirs_for_v2v = dirs.clone();
+    let dirs_for_intake = dirs.clone();
+    // 引擎句柄要分给工单收件（建批后唤醒调度器），故先 Arc 起来再交给 AppState。
+    let engine = Arc::new(engine);
+    let engine_for_intake = engine.clone();
     // 视频流水线执行日志：轮询器 / 提交 / 交接监听共用同一份环形缓冲，
     // 命令层从 AppState 读它。在 manage 之前建好，好让后台任务拿到同一个句柄。
     let v2v_log = v2v::activity::Activity::new(app.handle().clone());
@@ -384,7 +401,7 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         pool.clone(),
         secrets,
         dirs,
-        Arc::new(engine),
+        engine,
         v2v_log.clone(),
     ));
 
@@ -410,6 +427,32 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     app.manage(publish_state);
+
+    // 生图工单收件：监听收件目录（skill 投单）+ 启动补跑一次。
+    //
+    // **启动补跑是这条链路的关键**：应用没开的时候投的单，磁盘上一直等着；
+    // 这一刻把它们收进来，「GenDesk 得开着才能投单」这个限制就不存在了。
+    if let Ok(iset) = tauri::async_runtime::block_on(commands::intake::load_settings(&pool)) {
+        if iset.enabled {
+            let root = iset.root_path();
+            let ctx = intake::ingest::Ctx {
+                pool: pool.clone(),
+                dirs: dirs_for_intake,
+                engine: engine_for_intake,
+                threshold: iset.task_threshold,
+            };
+            match intake::watcher::start(ctx.clone(), root.clone(), app.handle().clone()) {
+                Ok(w) => {
+                    app.manage(w);
+                }
+                Err(err) => tracing::warn!(error = %err, "启动生图收件目录监听失败"),
+            }
+            let app_bg = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::intake::scan_and_emit(&ctx, &root, &app_bg).await;
+            });
+        }
+    }
 
     // 视频流水线：监听交接目录（skill 写回改写结果）+ 后台轮询已提交条目。
     //

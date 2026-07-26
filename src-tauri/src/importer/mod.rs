@@ -31,18 +31,19 @@ pub struct ParsedPrompt {
 }
 
 /// 分组名的来源，决定 UI 的确信度呈现。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GroupOrigin {
     /// 文档里有明确的分组标记（`分组: X` / 独立括号行）。
     Explicit,
     /// 由行的形态推断（短标题行 + 其下多条正文）——UI 标「疑似」。
     Inferred,
     /// 文档里没有任何线索，用文件名或默认名兜底。
+    #[default]
     Fallback,
 }
 
 /// 单个解析出的分组。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedGroup {
     pub name: String,
     pub prefix: Option<String>,
@@ -51,6 +52,17 @@ pub struct ParsedGroup {
     pub prompts: Vec<ParsedPrompt>,
     /// 分组名从哪来（Explicit / Inferred / Fallback）。
     pub origin: GroupOrigin,
+    /// 挂靠到本组的参考图（工单目录内相对路径，来自组头 `参考图:`）。
+    ///
+    /// **位置绑定，不引用组名**：它属于紧跟其后的那个组。相比「按组名引用」的写法，
+    /// 改组名不会让挂靠悄悄断掉——而挂靠断掉的后果（整批图配错提示词）要到验收时才看得出来。
+    pub refs: Vec<String>,
+    /// 组头 `比例:` / `尺寸:` / `格式:` / `抽卡:`。批次参数是**批次级**的，故收件侧会把
+    /// 参数相同的组并进同一个批次、不同的拆成多个批次（见 `intake`）。
+    pub ratio: Option<String>,
+    pub size: Option<String>,
+    pub format: Option<String>,
+    pub draws: Option<i64>,
 }
 
 /// 解析诊断（E37：行号级报错/提示，非致命）。
@@ -72,6 +84,11 @@ pub struct ParsedImport {
 }
 
 impl ParsedImport {
+    /// 解析出的提示词总条数。
+    ///
+    /// `allow(dead_code)`：生产侧的总数改由预览按最终分组累加（工单收件的内联提示词
+    /// 不经解析器，两条入口要同一个口径）；这里保留给解析器自己的测试断言用。
+    #[allow(dead_code)]
     pub fn total_prompts(&self) -> usize {
         self.groups.iter().map(|g| g.prompts.len()).sum()
     }
@@ -244,21 +261,15 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
     fn ensure(cur: &mut Option<ParsedGroup>) -> &mut ParsedGroup {
         cur.get_or_insert_with(|| ParsedGroup {
             name: DEFAULT_GROUP.to_string(),
-            prefix: None,
-            scene: String::new(),
-            tags: Vec::new(),
-            prompts: Vec::new(),
             origin: GroupOrigin::Fallback,
+            ..Default::default()
         })
     }
     fn new_group(name: String, origin: GroupOrigin) -> ParsedGroup {
         ParsedGroup {
             name,
-            prefix: None,
-            scene: String::new(),
-            tags: Vec::new(),
-            prompts: Vec::new(),
             origin,
+            ..Default::default()
         }
     }
     fn warn_dangling(warnings: &mut Vec<ParseWarning>, pending: Option<(String, usize)>) {
@@ -293,6 +304,36 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
                 Header::Tags => ensure(&mut cur).tags = split_tags(value),
             }
             continue;
+        }
+
+        // 投单组头（`参考图:` / `比例:` / `抽卡:` / `用途:` / `尺寸:` / `格式:`）。
+        //
+        // **只在组头区生效**——即该组还没有任何正文时。老键（前缀/场景/标签）为了不改动
+        // 既有行为仍是全文任意位置认，但新键不能这样：这些文档的正文是长叙事，
+        // 万一某条以「比例：3:4 的竖构图」开头，整行会被当元信息吃掉，那条提示词
+        // 当场少一句还不报错。限定在组头区之后，这个风险基本归零。
+        // `map_or` 而非 `is_none_or`：后者要 Rust 1.82，本 crate 的 MSRV 是 1.77。
+        if cur.as_ref().map_or(true, |g| g.prompts.is_empty()) {
+            if let Some((key, value)) = parse_intake_header(trimmed) {
+                let g = ensure(&mut cur);
+                match key {
+                    IntakeHeader::Refs => g.refs = split_list(value),
+                    IntakeHeader::Ratio => g.ratio = Some(value.to_string()),
+                    IntakeHeader::Size => g.size = Some(value.to_string()),
+                    IntakeHeader::Format => g.format = Some(value.to_string()),
+                    IntakeHeader::Draws => g.draws = value.trim().parse::<i64>().ok(),
+                    // 用途与自由标签共用 tags：并进去即被判为**显式**用途而非关键词预猜，
+                    // 下游一处也不用改（受控取值的校验在命令边界，这里只负责收下）。
+                    IntakeHeader::Purpose => {
+                        for t in split_list(value) {
+                            if !g.tags.contains(&t) {
+                                g.tags.push(t);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
         }
 
         // 独占一行的裸括号块 → 依「下一条非空行」判层：
@@ -423,11 +464,9 @@ fn salvage_empty_inferred(groups: &mut Vec<ParsedGroup>) {
             // 全文只推断出空组：退回单个默认组，内容一条不落。
             None => kept.push(ParsedGroup {
                 name: DEFAULT_GROUP.to_string(),
-                prefix: None,
-                scene: String::new(),
-                tags: Vec::new(),
                 prompts: orphans,
                 origin: GroupOrigin::Fallback,
+                ..Default::default()
             }),
         }
     }
@@ -603,6 +642,51 @@ fn parse_header(line: &str) -> Option<(Header, &str)> {
         _ => return None,
     };
     Some((header, value))
+}
+
+/// 投单组头键（只在组头区识别，见解析主循环里的说明）。
+enum IntakeHeader {
+    Refs,
+    Ratio,
+    Size,
+    Format,
+    Draws,
+    Purpose,
+}
+
+/// 识别投单组头行 `键: 值`。与 [`parse_header`] 分开，因为两者的**作用域不同**。
+fn parse_intake_header(line: &str) -> Option<(IntakeHeader, &str)> {
+    let idx = line.find([':', '：'])?;
+    let key = line[..idx].trim();
+    let value = line[idx..]
+        .char_indices()
+        .nth(1)
+        .map(|(off, _)| &line[idx + off..])
+        .unwrap_or("")
+        .trim();
+    let header = match key {
+        "参考图" | "参考图片" | "refs" | "ref" | "images" => IntakeHeader::Refs,
+        "比例" | "画幅" | "ratio" | "aspect" => IntakeHeader::Ratio,
+        "尺寸" | "size" => IntakeHeader::Size,
+        "格式" | "输出格式" | "format" => IntakeHeader::Format,
+        "抽卡" | "抽卡次数" | "draws" => IntakeHeader::Draws,
+        "用途" | "purpose" | "purposes" => IntakeHeader::Purpose,
+        _ => return None,
+    };
+    Some((header, value))
+}
+
+/// 列表分隔：只按 `, ，、; ；` 切，**不按空白**。
+///
+/// 与 [`split_tags`] 的区别就在这里：参考图是路径，`images/黄 A.jpg` 里的空格是文件名的一部分，
+/// 按空白切会把一个路径切成两个都不存在的路径。
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split([',', '，', '、', ';', '；'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// 标签分隔：`, ，、; ；` 与空白。
@@ -1149,5 +1233,118 @@ mod tests {
                 .collect();
             let _ = parse(&bytes);
         }
+    }
+
+    // ───────── 投单组头（参考图 / 比例 / 抽卡 / 用途 / 尺寸 / 格式） ─────────
+
+    // 标准产出格式：组头带挂靠与参数，正文照旧一段一条。
+    #[test]
+    fn intake_headers_are_parsed_on_the_group() {
+        let doc = "\
+分组: 黄色系卡套
+前缀: KT
+参考图: images/黄A.jpg, images/黄B.jpg
+比例: 3:4
+抽卡: 2
+用途: 图生视频
+
+第一条完整提示词正文
+
+第二条完整提示词正文
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 1);
+        let g = &out.groups[0];
+        assert_eq!(g.name, "黄色系卡套");
+        assert_eq!(g.prefix.as_deref(), Some("KT"));
+        assert_eq!(g.refs, vec!["images/黄A.jpg", "images/黄B.jpg"]);
+        assert_eq!(g.ratio.as_deref(), Some("3:4"));
+        assert_eq!(g.draws, Some(2));
+        // 用途并进 tags → 下游按「显式用途」处理，不必再猜。
+        assert!(g.tags.contains(&"图生视频".to_string()));
+        // 组头一行都不该被当成提示词。
+        assert_eq!(
+            texts(g),
+            vec!["第一条完整提示词正文", "第二条完整提示词正文"]
+        );
+    }
+
+    // 每组各自的挂靠与比例（收件侧据此拆多个批次）。
+    #[test]
+    fn intake_headers_are_per_group() {
+        let doc = "\
+分组: 黄
+参考图: images/黄.jpg
+比例: 3:4
+
+黄组正文
+
+分组: 蓝
+参考图: images/蓝.jpg
+比例: 9:16
+
+蓝组正文
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.groups[0].refs, vec!["images/黄.jpg"]);
+        assert_eq!(out.groups[0].ratio.as_deref(), Some("3:4"));
+        assert_eq!(out.groups[1].refs, vec!["images/蓝.jpg"]);
+        assert_eq!(out.groups[1].ratio.as_deref(), Some("9:16"));
+    }
+
+    // **本次最要紧的一条**：正文里以「比例：」开头的一句，不得被当成组头吃掉。
+    // 这些文档是长叙事提示词，被吃掉的那条会静悄悄少一句话。
+    #[test]
+    fn intake_header_shaped_body_line_is_not_swallowed() {
+        let doc = "\
+分组: A
+比例: 3:4
+
+第一条正文
+
+比例：3:4 的竖构图，主体居中，这其实是一整条提示词
+
+第三条正文
+";
+        let out = parse(doc.as_bytes());
+        let g = &out.groups[0];
+        assert_eq!(g.ratio.as_deref(), Some("3:4"), "组头区那行仍是参数");
+        assert_eq!(
+            texts(g),
+            vec![
+                "第一条正文",
+                "比例：3:4 的竖构图，主体居中，这其实是一整条提示词",
+                "第三条正文"
+            ],
+            "正文区里长得像组头的行必须原样留在正文里"
+        );
+    }
+
+    // 路径含空格：只按逗号切，不按空白切（按空白切会切出两个都不存在的路径）。
+    #[test]
+    fn ref_paths_may_contain_spaces() {
+        let doc = "分组: A\n参考图: images/黄 A.jpg, images/蓝 B.jpg\n\n正文";
+        let out = parse(doc.as_bytes());
+        assert_eq!(
+            out.groups[0].refs,
+            vec!["images/黄 A.jpg", "images/蓝 B.jpg"]
+        );
+    }
+
+    // 抽卡写了非数字不该让整份文档失败：当作没写（后续按默认 1 走）。
+    #[test]
+    fn bad_draws_value_degrades_to_none() {
+        let doc = "分组: A\n抽卡: 两次\n\n正文";
+        assert_eq!(parse(doc.as_bytes()).groups[0].draws, None);
+    }
+
+    // 没有任何投单组头的老文档：新字段全空，行为与从前一致。
+    #[test]
+    fn legacy_docs_get_empty_intake_fields() {
+        let doc = "分组: A\n前缀: AA\n\n正文一\n\n正文二";
+        let g = &parse(doc.as_bytes()).groups[0];
+        assert!(g.refs.is_empty() && g.ratio.is_none() && g.draws.is_none());
+        assert_eq!(texts(g), vec!["正文一", "正文二"]);
     }
 }

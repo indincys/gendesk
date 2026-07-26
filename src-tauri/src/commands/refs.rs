@@ -87,19 +87,23 @@ fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 }
 
 /// 单张落盘产物（拷贝 + 缩略图 + hash + 上传副本），入库前的纯文件侧结果。
-struct Ingested {
-    name: String,
-    file_path: String,
-    thumb_path: String,
-    width: i64,
-    height: i64,
-    file_size: i64,
-    content_hash: Option<String>,
-    upload_path: Option<String>,
+///
+/// `pub(crate)`：工单收件（`intake`）要走**同一条**落盘路径。参考图入库这件事必须
+/// 只有一份实现——缩略图尺寸、hash 口径、上传压缩副本的阈值一旦分叉，
+/// 「手动传的图能用、工单送来的图不能用」这类问题就没有统一答案。
+pub(crate) struct Ingested {
+    pub name: String,
+    pub file_path: String,
+    pub thumb_path: String,
+    pub width: i64,
+    pub height: i64,
+    pub file_size: i64,
+    pub content_hash: Option<String>,
+    pub upload_path: Option<String>,
 }
 
 /// 把一张源图落进库目录（同步、CPU/IO 密集，调用方须放在阻塞线程）。
-fn ingest_one(path: &str, refs_dir: &Path, thumbs_dir: &Path) -> AppResult<Ingested> {
+pub(crate) fn ingest_one(path: &str, refs_dir: &Path, thumbs_dir: &Path) -> AppResult<Ingested> {
     let src = PathBuf::from(path);
     let stem = src
         .file_stem()

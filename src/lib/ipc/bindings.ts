@@ -911,6 +911,104 @@ async exportWorksV2v(ids: number[], destDir: string) : Promise<Result<PackSummar
     else return { status: "error", error: e  as any };
 }
 },
+async getIntakeSettings() : Promise<Result<IntakeSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_intake_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateIntakeSettings(settings: IntakeSettings) : Promise<Result<IntakeSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_intake_settings", { settings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 收件目录的绝对路径（设置页直接显示「skill 该往这里投单」）。
+ */
+async intakePendingDir() : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("intake_pending_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listIntakeJobs(limit: number) : Promise<Result<JobView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_intake_jobs", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 手动扫一次（刚投完单不想等 watcher，或 watcher 没起来时的兜底）。
+ */
+async scanIntakeNow() : Promise<Result<JobView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scan_intake_now") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重试：删掉台账那行，让下一次扫描重新收录它。
+ * 
+ * **只对失败的工单开放**：成功的工单目录已经移走了，删掉记录不会让它重跑，
+ * 只会让台账少一行历史。
+ */
+async retryIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_intake_job", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 确认开跑一份超阈值的工单。
+ * 
+ * 做的事就两件：**在工单目录里写下 `确认.txt`**，然后删掉台账那行让它重新收录。
+ * 之所以走文件而不是在库里加一个「已确认」标志位——`确认.txt` 是确认的**唯一表达**，
+ * 你在 Claude Code 里 `touch` 一下和在这里点一下走的是同一段代码，
+ * 不可能出现「一条路对、另一条路错」。
+ */
+async confirmIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("confirm_intake_job", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器打开收件目录。
+ */
+async openIntakeDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_intake_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 选交接根目录（与图生视频那个是同一个根，故此处复用它的选择器语义）。
+ */
+async pickIntakeRoot() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_intake_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getV2vSettings() : Promise<Result<V2vSettings, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_v2v_settings") };
@@ -1956,6 +2054,7 @@ backupProgress: BackupProgress,
 batchSummary: BatchSummary,
 exportProgressEvent: ExportProgressEvent,
 inboxIngestEvent: InboxIngestEvent,
+intakeChanged: IntakeChanged,
 keyHealth: KeyHealth,
 publishBadgesEvent: PublishBadgesEvent,
 refImportProgress: RefImportProgress,
@@ -1972,6 +2071,7 @@ backupProgress: "backup-progress",
 batchSummary: "batch-summary",
 exportProgressEvent: "export-progress-event",
 inboxIngestEvent: "inbox-ingest-event",
+intakeChanged: "intake-changed",
 keyHealth: "key-health",
 publishBadgesEvent: "publish-badges-event",
 refImportProgress: "ref-import-progress",
@@ -2479,6 +2579,48 @@ unmatched: number;
  * 目标已越过待提交阶段（已提交/已出片）而被拒绝的行数。
  */
 stale: number }
+/**
+ * `intake://changed` —— 一轮扫描处理掉了工单（跳过的不发）。
+ * 
+ * 收录是自动发生的，用户没有按任何按钮，所以它**尤其**需要出声：
+ * 一个批次凭空出现在任务页，和一份工单静默失败，都需要一句解释。
+ */
+export type IntakeChanged = { jobs: JobView[] }
+/**
+ * 收件设置（`settings` 表 key='intake' 单行 JSON）。
+ */
+export type IntakeSettings = { 
+/**
+ * 关掉后不再监听、不再自动收录（排查问题或暂时不想让它自己跑时用）。
+ */
+enabled?: boolean; 
+/**
+ * 交接根目录。skill 侧把它写死才能做到「什么都不用输入」，故默认值必须可预测。
+ */
+root?: string; 
+/**
+ * 自动开跑阈值：任务数（= 出图张数）超过它就转「待确认」。`0` = 不限。
+ * 
+ * 判定放在 Rust 而不是投单那一侧：投单的是另一个模型，它可以忘记检查、也可以
+ * 被绕过；而「超过多少张就得问一句」是花钱的闸门，必须是机制而不是自觉。
+ */
+taskThreshold?: number }
+/**
+ * 工单收录结果（事件与设置页列表共用）。
+ */
+export type JobView = { id: number; jobId: string; dirName: string; 
+/**
+ * running / done / error / hold
+ */
+status: string; batchIds: number[]; taskCount: number; groupCount: number; refCount: number; 
+/**
+ * 各批次的参数快照（与 `batch_ids` 同序）。
+ */
+paramsJson: string[]; 
+/**
+ * 各批次实际发往接口的字段（与 `batch_ids` 同序）。
+ */
+wireJson: string[]; message: string; createdAt: number }
 /**
  * `keys://health`
  */

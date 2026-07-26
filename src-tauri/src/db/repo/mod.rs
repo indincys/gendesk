@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod api_keys;
 pub mod assets;
 pub mod inbox;
+pub mod intake;
 pub mod ledger;
 pub mod planning;
 pub mod prompts;

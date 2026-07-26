@@ -6,6 +6,7 @@
 pub mod api_keys;
 pub mod backup;
 pub mod batches;
+pub mod intake;
 pub mod misc;
 pub mod prompts;
 pub mod publish_accounts;

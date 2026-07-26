@@ -1,6 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { IntakeSection } from "@/features/settings/IntakeSection";
 import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
 import { V2vSection } from "@/features/settings/V2vSection";
 import {
@@ -451,6 +452,9 @@ export function SettingsPage() {
           </div>
         </section>
 
+        {/* ---------------- 与 Claude Code / Codex 的两条链路 ---------------- */}
+        <IntakeSection />
+
         {/* ---------------- 发布与同步（发布模块 P1） ---------------- */}
         <V2vSection />
 
@@ -529,7 +533,8 @@ export function SettingsPage() {
               通知
             </span>
             <span className="fs11 t3">
-              批次完成、失败达阈值、Key 熔断时发系统通知；Dock/任务栏角标显示待验收任务数
+              批次完成、失败达阈值、Key 熔断、工单收录（开跑/待确认/失败）时发系统通知；
+              Dock/任务栏角标显示待验收任务数
             </span>
           </div>
           <div className="fx ac gap10 mt14">

@@ -36,10 +36,14 @@ pub struct ClipRow {
     /// 即梦返回的 `gen_status` 原文（0021）。不翻译成自造中文态：它加新态时翻译层只会
     /// 显示「未知」，而原文至少还能被搜索、被拿去问客服。
     pub gen_status: Option<String>,
-    /// 排队位次（即梦只在排队阶段给）。
+    /// 排队位次。即梦当前**不回传**（见 `dreamina::QueryResult::queue_idx`），恒为 None；
+    /// 留着是因为字段在它的数据形状里，哪天开始给就自动生效。
     pub queue_idx: Option<i64>,
-    /// **我们**最后一次问到答案的时刻。有它才能区分「它还在排队」与「我们十分钟没问出话」。
+    /// 最后一次**发起查询**的时刻（成功与否都记）。退避轮询据此决定这一条到点没有。
     pub polled_at: Option<i64>,
+    /// 实际计费型号（0022，来自回执）。回答「到底走的哪个模型」——
+    /// 用我们自己发出去的 `model_version` 回答等于自问自答。
+    pub benefit_type: Option<String>,
     pub updated_at: i64,
     /// 父图编号（`accepted_works` → `prompts.code`）。
     pub prompt_code: String,
@@ -54,7 +58,7 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.source_prompt, c.variable_part, c.video_prompt, c.model_version, c.duration,
         c.video_resolution, c.submit_id, c.credit_count, c.video_path, c.poster_path,
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
-        c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.updated_at,
+        c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type, c.updated_at,
         COALESCE(p.code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
         COALESCE(w.thumb_path,'') AS thumb_path,
@@ -252,10 +256,10 @@ pub async fn set_params(
     Ok(q.execute(pool).await?.rows_affected() as i64)
 }
 
-/// 记一次轮询结果（0021）：即梦的状态原文 + 队列位次 + 我们问到答案的时刻。
+/// 记一次轮询结果（0021）：即梦的状态原文 + 队列位次 + 本次查询时刻。
 ///
 /// **不动 `updated_at`**：它是业务变更时间，看板按它排序也按它显示「几分钟前」。
-/// 每 6 秒把 19 条全刷一遍会让整块看板永远显示「刚刚」，那等于把这个信息删掉。
+/// 每轮把在跑的条目全刷一遍会让整块看板永远显示「刚刚」，那等于把这个信息删掉。
 pub async fn mark_polled(
     pool: &SqlitePool,
     id: i64,
@@ -267,6 +271,19 @@ pub async fn mark_polled(
         .bind(id)
         .bind(gen_status)
         .bind(queue_idx)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 只记「问过了」，不动状态（查询失败时用）。
+///
+/// 失败也要落 `polled_at`，否则退避完全失效：CLI 一旦不可用，19 条会在每个 tick 上
+/// 各起一个必然失败的进程 —— 正是最该省着点的那种时候反而最费。
+pub async fn mark_poll_attempt(pool: &SqlitePool, id: i64, now: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE v2v_clips SET polled_at=?2 WHERE id=?1")
+        .bind(id)
         .bind(now)
         .execute(pool)
         .await?;
@@ -312,12 +329,13 @@ pub async fn mark_ready_for_review(
     fps: Option<f64>,
     duration_sec: Option<f64>,
     credit_count: Option<i64>,
+    benefit_type: Option<&str>,
     now: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE v2v_clips SET stage='rev', video_path=?2, poster_path=?3, width=?4, height=?5,
-             fps=?6, duration_sec=?7, credit_count=?8, finished_at=?9, updated_at=?9,
-             error_type=NULL, error_message=NULL
+             fps=?6, duration_sec=?7, credit_count=?8, benefit_type=?10, finished_at=?9,
+             updated_at=?9, error_type=NULL, error_message=NULL
          WHERE id=?1",
     )
     .bind(id)
@@ -329,6 +347,7 @@ pub async fn mark_ready_for_review(
     .bind(duration_sec)
     .bind(credit_count)
     .bind(now)
+    .bind(benefit_type)
     .execute(pool)
     .await?;
     Ok(())
@@ -434,6 +453,65 @@ pub async fn requeue_for_rewrite(
     .execute(pool)
     .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// 在跑条目的等待时长分布（最久 / 最新 / 条数）。
+///
+/// 「最久那条等了多久」是过夜跑批时唯一真正要看的数字之一：即梦不回传排队位次，
+/// 所以「前面还有几个人」问不出来；但「我这条已经等了多久」我们自己就知道。
+pub async fn running_waits(
+    pool: &SqlitePool,
+) -> Result<(i64, Option<i64>, Option<i64>), sqlx::Error> {
+    let row: (i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(submitted_at), MAX(submitted_at)
+           FROM v2v_clips WHERE stage='run'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 最近一次**出片**的时刻。
+///
+/// 判「还在动还是卡住了」的主信号：睡前提交 19 条，早上起来看到「上次出片 20 分钟前」
+/// 就知道队列在推进，看到「上次出片 9 小时前」就知道该去查了。
+/// 只认真出了片的（rev/pass/rej 都经过了 rev），fail 的 `finished_at` 不算 —— 那是判死的时刻。
+pub async fn last_finished_at(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+    let (t,): (Option<i64>,) = sqlx::query_as(
+        "SELECT MAX(finished_at) FROM v2v_clips
+          WHERE finished_at IS NOT NULL AND stage IN ('rev','pass','rej')",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(t)
+}
+
+/// 最近 `hours` 小时内**逐小时**的出片条数（`[0]` = 最近一小时，越往后越旧）。
+///
+/// 趋势比总数有用：总数只说「一共出了多少」，逐小时才说得出「速度在涨还是在停」。
+pub async fn finish_histogram(
+    pool: &SqlitePool,
+    now: i64,
+    hours: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT (?1 - finished_at) / 3600 AS bucket, COUNT(*)
+           FROM v2v_clips
+          WHERE finished_at IS NOT NULL AND stage IN ('rev','pass','rej')
+            AND finished_at > ?1 - ?2 * 3600
+          GROUP BY bucket",
+    )
+    .bind(now)
+    .bind(hours)
+    .fetch_all(pool)
+    .await?;
+    let mut out = vec![0i64; hours.max(1) as usize];
+    for (bucket, n) in rows {
+        // 边界：finished_at 恰等于 now 时 bucket=0；未来时间戳（时钟回拨）夹到 0。
+        let idx = bucket.clamp(0, hours - 1) as usize;
+        out[idx] += n;
+    }
+    Ok(out)
 }
 
 /// 额度消耗台账（一行一阶段）。
@@ -623,6 +701,7 @@ mod tests {
             Some(24.0),
             Some(4.0),
             Some(44),
+            None,
             400,
         )
         .await
@@ -662,9 +741,11 @@ mod tests {
                 .unwrap();
             tx.commit().await.unwrap();
             mark_submitted(&pool, id, "s", 300).await.unwrap();
-            mark_ready_for_review(&pool, id, "/v.mp4", None, None, None, None, None, None, 400)
-                .await
-                .unwrap();
+            mark_ready_for_review(
+                &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
+            )
+            .await
+            .unwrap();
         }
         set_reviewed(&pool, a, "rej", 500).await.unwrap();
         set_reviewed(&pool, b, "pass", 500).await.unwrap();
@@ -743,9 +824,11 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
         mark_submitted(&pool, id, "s", 300).await.unwrap();
-        mark_ready_for_review(&pool, id, "/v.mp4", None, None, None, None, None, None, 400)
-            .await
-            .unwrap();
+        mark_ready_for_review(
+            &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
+        )
+        .await
+        .unwrap();
         assert!(set_reviewed(&pool, id, "pass", 500).await.unwrap());
         assert!(
             !set_reviewed(&pool, id, "rej", 600).await.unwrap(),
@@ -878,6 +961,94 @@ mod tests {
         assert!(b.model_version.is_none(), "已提交的条目参数不得被改写");
     }
 
+    // 队列观测：即梦不回传排队位次，所以「还在动吗」只能靠我们自己测得准的两件事 ——
+    // 最久那条等了多久，以及**上次出片距今多久**。后者是过夜跑批第二天早上的主判据。
+    #[tokio::test]
+    async fn queue_observability_answers_is_it_still_moving() {
+        let (pool, _d) = test_pool().await;
+        for w in 1..=3 {
+            seed_work(&pool, w).await;
+            enqueue_one(&pool, w).await;
+        }
+        let ids: Vec<i64> = list_by_stages(&pool, &["rewrite"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let now = 100_000i64;
+        // 两条还在跑（一条等了 3 小时、一条等了 10 分钟），第三条已出片。
+        mark_submitted(&pool, ids[0], "s0", now - 3 * 3600)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[1], "s1", now - 600)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[2], "s2", now - 4 * 3600)
+            .await
+            .unwrap();
+        mark_ready_for_review(
+            &pool,
+            ids[2],
+            "/v.mp4",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(44),
+            Some("dreamina_seedance_20_fast_5s"),
+            now - 5400, // 一个半小时前出的片
+        )
+        .await
+        .unwrap();
+
+        let (running, oldest, newest) = running_waits(&pool).await.unwrap();
+        assert_eq!(running, 2);
+        assert_eq!(now - oldest.unwrap(), 3 * 3600, "最久那条等了 3 小时");
+        assert_eq!(now - newest.unwrap(), 600);
+
+        let last = last_finished_at(&pool).await.unwrap().unwrap();
+        assert_eq!(now - last, 5400, "上次出片距今 1.5 小时");
+
+        // 逐小时直方图：1.5 小时前那条落在「1 小时前」这一格。
+        let h = finish_histogram(&pool, now, 12).await.unwrap();
+        assert_eq!(h.len(), 12);
+        assert_eq!(h[1], 1, "1.5 小时前 → bucket 1");
+        assert_eq!(h[0], 0, "最近一小时没出片");
+        assert_eq!(h.iter().sum::<i64>(), 1);
+
+        // 计费型号来自回执，回答「到底走的哪个模型」。
+        let done = get(&pool, ids[2]).await.unwrap().unwrap();
+        assert_eq!(
+            done.benefit_type.as_deref(),
+            Some("dreamina_seedance_20_fast_5s")
+        );
+    }
+
+    // 判死的条目（fail）**不算出片**：它的 finished_at 是被判死的时刻，
+    // 混进来会让「上次出片 20 分钟前」变成一句假话，而人正是拿它决定要不要去查。
+    #[tokio::test]
+    async fn timeout_failures_do_not_count_as_deliveries() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted(&pool, id, "s", 1_000).await.unwrap();
+        mark_failed(&pool, id, "timeout", "45 分钟仍未出片", 99_000)
+            .await
+            .unwrap();
+        assert!(last_finished_at(&pool).await.unwrap().is_none());
+        assert_eq!(
+            finish_histogram(&pool, 100_000, 12)
+                .await
+                .unwrap()
+                .iter()
+                .sum::<i64>(),
+            0
+        );
+    }
+
     // 超时判死的条目**提交单还在**，所以能原样放回轮询 —— 那 19 条被判超时时，
     // `dreamina list_task` 里它们全都还是 querying。走重跑就是再花一份钱买同一条视频。
     #[tokio::test]
@@ -951,6 +1122,7 @@ mod tests {
                 Some(24.0),
                 Some(4.0),
                 Some(credit),
+                None,
                 at,
             )
             .await

@@ -314,8 +314,8 @@ export function V2vParamsPanel({
         <div className="statgrid">
           <Stat label="账户余额" value={stats?.balance == null ? "—" : String(stats.balance)} />
           <Stat label="累计已用" value={String(stats?.spentTotal ?? 0)} />
-          <Stat label="近 7 天" value={String(stats?.spent7D ?? 0)} />
-          <Stat label="近 24 小时" value={String(stats?.spent24H ?? 0)} />
+          <Stat label="近 7 天" value={String(stats?.spentWeek ?? 0)} />
+          <Stat label="近 24 小时" value={String(stats?.spentDay ?? 0)} />
         </div>
         <div className="statgrid mt8">
           <Stat label="成片（值回票价）" value={String(stats?.spentPass ?? 0)} tone="ok" />

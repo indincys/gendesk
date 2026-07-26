@@ -187,6 +187,30 @@ export function V2vSection() {
         </span>
       </div>
 
+      {/* 超时上限。默认不限 —— 判死一条还在跑的任务代价是钱（额度已扣、即梦那边照跑），
+          而多等的代价只是看板上多几条「已提交」。两边不对等。 */}
+      <div className="fx ac gap10 mt10 wrap">
+        <span className="fs12 fw5">判超时</span>
+        <select
+          className="inp"
+          style={{ width: 150 }}
+          value={s.timeoutHours ?? ""}
+          onChange={(e) =>
+            void save({ timeoutHours: e.target.value === "" ? null : Number(e.target.value) })
+          }
+        >
+          <option value="">不限（推荐）</option>
+          <option value={3}>3 小时</option>
+          <option value={12}>12 小时</option>
+          <option value={24}>24 小时</option>
+        </select>
+        <span className="fs11 t3" style={{ lineHeight: 1.7 }}>
+          即梦排队可能很久（实测提交 72 分钟后仍在 <span className="chip">querying</span>）。
+          <b>不限</b>意味着睡前提交、第二天醒来收片；轮询会自动退避（等满一小时后每 10
+          分钟才问一次），挂着不费什么。
+        </span>
+      </div>
+
       <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
         默认生成参数
       </div>

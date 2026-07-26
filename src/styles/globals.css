@@ -3344,6 +3344,36 @@ a:hover {
   color: var(--t3);
 }
 
+/* 队列观测条：横跨看板顶部，回答「还在动吗」。 */
+.qbar {
+  margin: 10px 18px 0;
+  padding: 10px 12px;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.qwarn {
+  color: var(--wr);
+}
+/* 逐小时出片趋势的小柱图。用 flex 而非 canvas：12 根柱子不值得引一套绘图。 */
+.spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 22px;
+  flex: 1;
+  min-width: 0;
+}
+.sparkb {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: var(--line);
+  border-radius: 2px 2px 0 0;
+}
+.sparkb.on {
+  background: var(--acc);
+}
+
 /* 执行日志：一行一条，时间与阶段定宽，正文自适应换行。 */
 .lgrow {
   display: flex;

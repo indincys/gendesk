@@ -45,6 +45,14 @@ pub struct V2vSettings {
     /// 后台轮询开关。关掉后已提交的条目不再自动取回（排查问题时用）。
     #[serde(default = "d_true")]
     pub poll_enabled: bool,
+    /// 判超时的小时数。`None` = **不限**（默认），永远等下去。
+    ///
+    /// 之所以默认不限：判死一条还在跑的任务代价是实打实的钱（额度已扣、即梦那边照跑），
+    /// 而多等的代价只是看板上多几条「已提交」。实测原来那个 45 分钟硬编码把 19 条
+    /// 还在 `querying` 的任务全判死了。退避轮询让「永远等」的开销低到可以接受
+    /// （等满一小时后每 10 分钟才问一次）。
+    #[serde(default)]
+    pub timeout_hours: Option<i64>,
 }
 
 fn d_root() -> String {
@@ -67,6 +75,7 @@ impl Default for V2vSettings {
             video_resolution: String::new(),
             session: None,
             poll_enabled: true,
+            timeout_hours: runner::DEFAULT_TIMEOUT_HOURS,
         }
     }
 }
@@ -82,6 +91,11 @@ impl V2vSettings {
             video_resolution: blank(&self.video_resolution),
             session: self.session,
         }
+    }
+    /// 超时上限（秒）。`None` = 不限。0 或负数也当作不限 —— 前端把输入框清空时
+    /// 传 0 比传 null 常见，两种都该是「不限」而不是「立刻超时」。
+    pub fn timeout_secs(&self) -> Option<i64> {
+        self.timeout_hours.filter(|h| *h > 0).map(|h| h * 3600)
     }
     pub fn root(&self) -> std::path::PathBuf {
         if self.handoff_root.trim().is_empty() {
@@ -216,8 +230,9 @@ pub struct CreditStats {
     pub vip_level: String,
     /// 本机流水线累计消耗（只算收到扣费回执的条目）。
     pub spent_total: i64,
-    pub spent_7d: i64,
-    pub spent_24h: i64,
+    /// 近 7 天 / 近 24 小时（按出片时刻切窗）。
+    pub spent_week: i64,
+    pub spent_day: i64,
     /// 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
     pub spent_pass: i64,
     pub spent_rej: i64,
@@ -251,9 +266,79 @@ pub async fn v2v_credit_stats(state: State<'_, AppState>) -> AppResult<CreditSta
         }
     }
     let now = now_unix();
-    out.spent_24h = repo::credit_since(&state.db, now - 24 * 3600).await?;
-    out.spent_7d = repo::credit_since(&state.db, now - 7 * 24 * 3600).await?;
+    out.spent_day = repo::credit_since(&state.db, now - 24 * 3600).await?;
+    out.spent_week = repo::credit_since(&state.db, now - 7 * 24 * 3600).await?;
     Ok(out)
+}
+
+/// 队列观测。
+///
+/// ## 为什么这里**没有**「前面还有多少人在排队」
+///
+/// 因为即梦不给。实测排队中的 `query_result` 只回 submit_id / prompt / logid /
+/// gen_status 四个字段，`list_task` 也只有状态；`queue_info.queue_idx` 只在**已完成**
+/// 的回体里出现过（值 0、Finish）。解析代码留着，它哪天开始回传就自动显示，
+/// 但界面上不能凭空造一个「第 N 位」——编出来的排队位次比没有更糟。
+///
+/// ## 那么「第二天醒来判断还在排队还是卡住了」靠什么
+///
+/// 靠**我们自己就能测准**的两件事：
+/// - 最久那条已经等了多久（`oldest_wait`）——绝对进度。
+/// - 这批的出片速度（`since_last_finish` + 逐小时直方图）——**相对进度**，
+///   也是真正的判据：「上次出片 20 分钟前」说明队列在动，「上次出片 9 小时前」说明该查了。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueStats {
+    pub running: i64,
+    /// 在跑条目里等得最久 / 最短的那条，已等待秒数。
+    pub oldest_wait: i64,
+    pub newest_wait: i64,
+    /// 上次出片距今秒数；None = 这条流水线还没出过任何片。
+    pub since_last_finish: Option<i64>,
+    /// 最近 12 小时逐小时出片数，`[0]` 是最近一小时。趋势比总数有用。
+    pub hourly: Vec<i64>,
+    /// 按最近 6 小时的实测速度估算：把当前在跑的全部收完还要多久（秒）。
+    /// 速度为 0 时是 None —— **不编数字**，「还需 ∞」不如老实说估不出来。
+    pub eta_secs: Option<i64>,
+    /// 下一条到点查询还有多少秒（让人知道界面不是死的，只是在省着问）。
+    pub next_poll_in: Option<i64>,
+    /// 超时上限小时数；None = 不限。
+    pub timeout_hours: Option<i64>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats> {
+    let now = now_unix();
+    let s = load_settings(&state.db).await?;
+    let (running, oldest, newest) = repo::running_waits(&state.db).await?;
+    let hourly = repo::finish_histogram(&state.db, now, 12).await?;
+    // 速度取最近 6 小时：太短会被一条零星出片带偏，太长会把几小时前那波算进来。
+    let recent: i64 = hourly.iter().take(6).sum();
+    let eta_secs = (recent > 0 && running > 0).then(|| running * 6 * 3600 / recent);
+    let next_poll_in = repo::list_running(&state.db)
+        .await?
+        .iter()
+        .map(|c| {
+            let age = c.submitted_at.map_or(0, |t| (now - t).max(0));
+            let due = c
+                .polled_at
+                .map_or(now, |p| p + runner::poll_interval_for(age));
+            (due - now).max(0)
+        })
+        .min();
+    Ok(QueueStats {
+        running,
+        oldest_wait: oldest.map_or(0, |t| (now - t).max(0)),
+        newest_wait: newest.map_or(0, |t| (now - t).max(0)),
+        since_last_finish: repo::last_finished_at(&state.db)
+            .await?
+            .map(|t| (now - t).max(0)),
+        hourly,
+        eta_secs,
+        next_poll_in,
+        timeout_hours: s.timeout_hours,
+    })
 }
 
 /// 执行日志快照（打开日志面板时取一次，之后靠 `v2v://activity` 事件增量追加）。
@@ -367,6 +452,11 @@ pub struct ClipView {
     pub gen_status: Option<String>,
     pub queue_idx: Option<i64>,
     pub polled_at: Option<i64>,
+    /// 即梦实际计费的型号（回执，非我们的输入）。
+    pub benefit_type: Option<String>,
+    /// 提交时刻。卡片上的「已等 3 小时 12 分」由它算 —— 即梦不回传排队位次，
+    /// 「我这条等了多久」是我们唯一测得准的进度。
+    pub submitted_at: Option<i64>,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -403,6 +493,8 @@ impl From<repo::ClipRow> for ClipView {
             gen_status: r.gen_status,
             queue_idx: r.queue_idx,
             polled_at: r.polled_at,
+            benefit_type: r.benefit_type,
+            submitted_at: r.submitted_at,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }
@@ -708,7 +800,21 @@ pub async fn submit_v2v_clips(
 pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResult<i64> {
     let s = load_settings(&state.db).await?;
     state.v2v_log.info("poll", None, "手动查一次进度", None);
-    let sum = runner::poll_once(&state.db, &state.dirs, &s.bin, &state.v2v_log).await?;
+    // 手动点「查一次进度」要绕开退避（`force`）：人按下按钮就是要现在就问，
+    // 而退避是给后台循环省成本的，不该反过来让人点了没反应。
+    //
+    // 用参数而不是把 `polled_at` 改成 0 去骗过退避判定：那样一旦这次查询失败，
+    // 库里就留下一个 1970 年的时间戳 —— 卡片显示「55 年前查过」，而且此后每个 tick
+    // 都判它到点，退避对这条彻底失效。
+    let sum = runner::poll_once(
+        &state.db,
+        &state.dirs,
+        &s.bin,
+        s.timeout_secs(),
+        true,
+        &state.v2v_log,
+    )
+    .await?;
     emit_changed(&state.db, &app, None).await;
     Ok(sum.finished)
 }

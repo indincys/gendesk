@@ -993,6 +993,14 @@ async v2vCreditStats() : Promise<Result<CreditStats, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async v2vQueueStats() : Promise<Result<QueueStats, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_queue_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 列出即梦会话（用户口中的「通道」）。
  * 
@@ -2181,7 +2189,16 @@ imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string
  * 即梦状态原文 + 队列位次 + 我们最后一次问到答案的时刻（0021）。
  * 落库而非只走事件：切页/重启后「这条在排队还是在跑」仍要答得出。
  */
-genStatus: string | null; queueIdx: number | null; polledAt: number | null; acceptedAt: number; updatedAt: number }
+genStatus: string | null; queueIdx: number | null; polledAt: number | null; 
+/**
+ * 即梦实际计费的型号（回执，非我们的输入）。
+ */
+benefitType: string | null; 
+/**
+ * 提交时刻。卡片上的「已等 3 小时 12 分」由它算 —— 即梦不回传排队位次，
+ * 「我这条等了多久」是我们唯一测得准的进度。
+ */
+submittedAt: number | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -2218,7 +2235,11 @@ balance: number | null; balanceError: string | null; userId: number | null; vipL
 /**
  * 本机流水线累计消耗（只算收到扣费回执的条目）。
  */
-spentTotal: number; spent7D: number; spent24H: number; 
+spentTotal: number; 
+/**
+ * 近 7 天 / 近 24 小时（按出片时刻切窗）。
+ */
+spentWeek: number; spentDay: number; 
 /**
  * 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
  */
@@ -2760,6 +2781,49 @@ tag: string;
  */
 hint: string }
 /**
+ * 队列观测。
+ * 
+ * ## 为什么这里**没有**「前面还有多少人在排队」
+ * 
+ * 因为即梦不给。实测排队中的 `query_result` 只回 submit_id / prompt / logid /
+ * gen_status 四个字段，`list_task` 也只有状态；`queue_info.queue_idx` 只在**已完成**
+ * 的回体里出现过（值 0、Finish）。解析代码留着，它哪天开始回传就自动显示，
+ * 但界面上不能凭空造一个「第 N 位」——编出来的排队位次比没有更糟。
+ * 
+ * ## 那么「第二天醒来判断还在排队还是卡住了」靠什么
+ * 
+ * 靠**我们自己就能测准**的两件事：
+ * - 最久那条已经等了多久（`oldest_wait`）——绝对进度。
+ * - 这批的出片速度（`since_last_finish` + 逐小时直方图）——**相对进度**，
+ * 也是真正的判据：「上次出片 20 分钟前」说明队列在动，「上次出片 9 小时前」说明该查了。
+ */
+export type QueueStats = { running: number; 
+/**
+ * 在跑条目里等得最久 / 最短的那条，已等待秒数。
+ */
+oldestWait: number; newestWait: number; 
+/**
+ * 上次出片距今秒数；None = 这条流水线还没出过任何片。
+ */
+sinceLastFinish: number | null; 
+/**
+ * 最近 12 小时逐小时出片数，`[0]` 是最近一小时。趋势比总数有用。
+ */
+hourly: number[]; 
+/**
+ * 按最近 6 小时的实测速度估算：把当前在跑的全部收完还要多久（秒）。
+ * 速度为 0 时是 None —— **不编数字**，「还需 ∞」不如老实说估不出来。
+ */
+etaSecs: number | null; 
+/**
+ * 下一条到点查询还有多少秒（让人知道界面不是死的，只是在省着问）。
+ */
+nextPollIn: number | null; 
+/**
+ * 超时上限小时数；None = 不限。
+ */
+timeoutHours: number | null }
+/**
  * 对账结果汇总。
  */
 export type ReconcileResult = { published: number; failed: number; 
@@ -3211,7 +3275,16 @@ session?: number | null;
 /**
  * 后台轮询开关。关掉后已提交的条目不再自动取回（排查问题时用）。
  */
-pollEnabled?: boolean }
+pollEnabled?: boolean; 
+/**
+ * 判超时的小时数。`None` = **不限**（默认），永远等下去。
+ * 
+ * 之所以默认不限：判死一条还在跑的任务代价是实打实的钱（额度已扣、即梦那边照跑），
+ * 而多等的代价只是看板上多几条「已提交」。实测原来那个 45 分钟硬编码把 19 条
+ * 还在 `querying` 的任务全判死了。退避轮询让「永远等」的开销低到可以接受
+ * （等满一小时后每 10 分钟才问一次）。
+ */
+timeoutHours?: number | null }
 /**
  * `v2v://tick` —— 轮询器心跳（每轮一发，无论有没有变化）。
  * 

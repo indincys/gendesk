@@ -383,8 +383,17 @@ pub struct QueryResult {
     pub fps: Option<f64>,
     pub duration_sec: Option<f64>,
     pub credit_count: Option<i64>,
-    /// 队列位次（伪进度用）。
+    /// 队列位次。
+    ///
+    /// **即梦当前不回传它**：实测排队中的 `query_result` 只有 submit_id / prompt /
+    /// logid / gen_status 四个字段，`queue_info` 只在**已完成**的回体里出现过
+    /// （`{queue_idx: 0, queue_status: "Finish"}`）。解析留着是因为字段本来就在它的
+    /// 数据形状里，哪天开始回传就自动生效；但界面上不能把它当成「一定有」的东西。
     pub queue_idx: Option<i64>,
+    /// 实际计费型号（`commerce_info.triplets[].benefit_type`），形如
+    /// `dreamina_seedance_20_fast_5s`。这是**回执**，不是我们的输入 ——
+    /// 「到底走的哪个模型」只有它答得准。
+    pub benefit_type: Option<String>,
 }
 
 /// 解析 `query_result` 的 JSON。
@@ -419,11 +428,31 @@ pub fn parse_query(v: &serde_json::Value) -> QueryResult {
         duration_sec: video
             .and_then(|x| x.get("duration"))
             .and_then(|x| x.as_f64()),
-        credit_count: v.get("credit_count").and_then(|x| x.as_i64()),
+        // 扣费额度两处都认：`query_result` 打在顶层，`list_task` 塞在 commerce_info 里。
+        // 同一个数字换了个位置就读不到，是最不值得的那种失败。
+        credit_count: v.get("credit_count").and_then(|x| x.as_i64()).or_else(|| {
+            v.get("commerce_info")
+                .and_then(|c| c.get("credit_count"))
+                .and_then(|x| x.as_i64())
+        }),
         queue_idx: v
             .get("queue_info")
             .and_then(|q| q.get("queue_idx"))
             .and_then(|x| x.as_i64()),
+        benefit_type: v
+            .get("commerce_info")
+            .and_then(|c| {
+                // 复数 `triplets` 是实际用到的那条；单数 `triplet` 实测是空壳，
+                // 只在复数缺席时才退回去看它。
+                c.get("triplets")
+                    .and_then(|t| t.as_array())
+                    .and_then(|a| a.first())
+                    .or_else(|| c.get("triplet"))
+            })
+            .and_then(|t| t.get("benefit_type"))
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -929,6 +958,57 @@ mod tests {
         assert_eq!(q.fps, Some(24.0));
         assert_eq!(q.duration_sec, Some(4.042));
         assert_eq!(q.credit_count, Some(44));
+    }
+
+    // **排队中的真实回体**（本机 CLI 抓的）：只有四个字段，没有 queue_info。
+    // 这条测的是一个否定事实：即梦不回传排队位次，所以界面上不能凭空造一个「第 N 位」。
+    #[test]
+    fn queued_payload_has_no_queue_position() {
+        let raw = r#"{
+          "submit_id": "027e202c-7b5f-4fa0-99ef-dea5c6ab556f",
+          "prompt": "首帧自然延续：窗台另一头趴着的那只猫极缓地呼吸……",
+          "logid": "202607262322321921680310396825E37",
+          "gen_status": "querying"
+        }"#;
+        let q = parse_query(&extract_json(raw).unwrap());
+        assert_eq!(classify_status(&q.gen_status), Outcome::Running);
+        assert!(
+            q.queue_idx.is_none(),
+            "即梦排队期不回传位次，不得凭空造一个"
+        );
+        assert!(q.video_path.is_none());
+        assert!(q.credit_count.is_none(), "还没出片就还没有扣费回执");
+    }
+
+    // 计费型号来自**回执**而不是我们的输入：`--model_version` 被上游忽略或降级时，
+    // 输入侧一个字都不会变，只有 benefit_type 能证伪。真实 `list_task` 形状。
+    #[test]
+    fn billed_model_and_credit_come_from_the_receipt() {
+        let raw = r#"{
+          "submit_id": "02c1cafe",
+          "gen_status": "success",
+          "result_json": { "videos": [{ "fps": 24, "width": 960, "height": 960 }] },
+          "commerce_info": {
+            "credit_count": 44,
+            "triplet": { "resource_type": "", "resource_id": "", "benefit_type": "" },
+            "triplets": [{ "resource_type": "aigc", "resource_id": "generate_video",
+                           "benefit_type": "dreamina_seedance_20_fast_5s" }]
+          }
+        }"#;
+        let q = parse_query(&extract_json(raw).unwrap());
+        assert_eq!(
+            q.benefit_type.as_deref(),
+            Some("dreamina_seedance_20_fast_5s")
+        );
+        assert_eq!(q.credit_count, Some(44), "commerce_info 里的扣费也要认");
+    }
+
+    // 单数 `triplet` 实测是空壳。空 benefit_type 不该被当成「型号是空字符串」显示出来。
+    #[test]
+    fn empty_receipt_fields_are_none_not_empty_strings() {
+        let raw = r#"{"gen_status":"success","commerce_info":{"triplet":{"benefit_type":""}}}"#;
+        let q = parse_query(&extract_json(raw).unwrap());
+        assert!(q.benefit_type.is_none());
     }
 
     // 未下载时（没传 --download_dir）只有 video_url → video_path 必须为 None，

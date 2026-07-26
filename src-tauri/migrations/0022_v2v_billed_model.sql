@@ -1,0 +1,11 @@
+-- 记下即梦**实际计费**的型号。forward-only。
+--
+-- 我们已经存了 `model_version`（我们要求的那个），但那是**输入**。回执里的
+-- `commerce_info.triplets[].benefit_type` 才是即梦那边真正按什么型号收的钱，
+-- 实测形如 `dreamina_seedance_20_fast_5s` —— 型号与时长都在里面。
+--
+-- 为什么值得单独存一列：「走的到底是哪个模型」这个问题，用我们自己的输入去回答等于
+-- 自问自答。CLI 的 flags 会随版本变（skill 文档自己写着「不要硬编码模型支持」），
+-- 我们发的 `--model_version` 被上游忽略或降级时，输入侧一个字都不会变。
+-- 只有回执能证伪。
+ALTER TABLE v2v_clips ADD COLUMN benefit_type TEXT;

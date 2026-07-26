@@ -2,6 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
 import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
+import { V2vQueuePanel } from "@/features/v2v/V2vQueuePanel";
 import { assetSrc } from "@/lib/img";
 import {
   type ClipView,
@@ -435,6 +436,8 @@ export function V2vPage() {
         </div>
       ) : (
         <div className="pbody">
+          {/* 队列观测条：过夜跑批时，第二天醒来第一眼要看的就是它。 */}
+          <V2vQueuePanel tick={tick} now={now} />
           <div className="vkb">
             {COLUMNS.map((col) => {
               const rows = byStage[col.stage] ?? [];
@@ -660,8 +663,11 @@ function ClipCard({
           <div className="vstat">
             <span className="spn" style={{ width: 8, height: 8 }} />
             <span>{status || "等待首次查询"}</span>
+            {/* 已等待时长是这条卡片上最有信息量的数字：即梦不回传排队位次，
+                「我这条等了多久」是我们唯一测得准的进度。 */}
+            {c.submittedAt != null && <span>· 等 {fmtAgo(Math.max(0, now - c.submittedAt))}</span>}
+            {c.polledAt != null && <span>· {fmtAgo(Math.max(0, now - c.polledAt))}查过</span>}
             {c.queueIdx != null && c.queueIdx > 0 && <span>· 队列 {c.queueIdx}</span>}
-            {c.polledAt != null && <span>· {fmtAgo(Math.max(0, now - c.polledAt))}</span>}
           </div>
         )}
         {c.stage !== "run" && status && <div className="fs10 t3">即梦：{status}</div>}

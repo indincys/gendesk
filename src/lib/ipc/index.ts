@@ -111,6 +111,7 @@ export type {
   CreditInfo,
   CreditStats,
   EffectiveParams,
+  QueueStats,
   SubmitSummary,
   MaterializeSummary,
   IngestSummary,

@@ -241,7 +241,15 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String, i64), String> {
             .filter(|v| !v.is_empty())
     };
     let aspect_ratio = norm(&p.aspect_ratio);
-    let size = norm(&p.size).map(|s| s.to_lowercase());
+    // 只写了「比例:」没写「尺寸:」时补上配套尺寸：实测单发 aspect_ratio 会回整批正方形
+    // （见 `provider::RATIO_SIZES`）。这是**补一个缺失字段**，不是改用户写下的取值——
+    // 他若自己写了尺寸，哪怕与比例不符也照发，归一化只管拼法不管取值。
+    let size = norm(&p.size).map(|s| s.to_lowercase()).or_else(|| {
+        aspect_ratio
+            .as_deref()
+            .and_then(crate::provider::companion_size)
+            .map(str::to_string)
+    });
     // `jpg` 是人（和模型）最常写的拼法，端点只认 `jpeg`。归一化拼法不改变取值。
     let output_format = norm(&p.output_format).map(|f| match f.to_lowercase().as_str() {
         "jpg" => "jpeg".to_string(),
@@ -698,6 +706,45 @@ mod tests {
         let err = build_params(&params_from(r#"{"size":"1080x1920"}"#)).unwrap_err();
         assert!(err.contains("16 的倍数"), "{err}");
         assert!(err.contains("1088"), "还要给出可用值：{err}");
+    }
+
+    // 只写「比例:」时补上配套尺寸：单发 aspect_ratio 实测回整批 1024×1024 正方形
+    // （批次 25）。取样必须用竖比例——若换成 1:1，补与不补的结果长得一样，测不出东西。
+    #[test]
+    fn lone_ratio_gets_its_companion_size() {
+        let (snap, wire, _) = build_params(&params_from(r#"{"ratio":"9:16"}"#)).unwrap();
+        let p = GenParams::from_json(&snap);
+        assert_eq!(p.size.as_deref(), Some("1152x2048"));
+        let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(w["aspect_ratio"], "9:16");
+        assert_eq!(w["size"], "1152x2048", "两个字段必须一起发");
+    }
+
+    // 用户自己写的尺寸不被配套值覆盖 —— 归一化只管拼法不管取值。
+    #[test]
+    fn explicit_size_wins_over_companion() {
+        let (snap, _, _) =
+            build_params(&params_from(r#"{"ratio":"9:16","size":"1008x1792"}"#)).unwrap();
+        assert_eq!(
+            GenParams::from_json(&snap).size.as_deref(),
+            Some("1008x1792")
+        );
+    }
+
+    // 每个配套值都得自己过端点预检（边长 16 的倍数），否则等于埋了个必炸的默认值。
+    #[test]
+    fn every_companion_size_passes_validation() {
+        for (ratio, size) in crate::provider::RATIO_SIZES {
+            let built = build_params(&params_from(&format!(r#"{{"ratio":"{ratio}"}}"#)));
+            assert!(
+                built.is_ok(),
+                "{ratio} 的配套尺寸没过端点预检：{:?}",
+                built.as_ref().err()
+            );
+            if let Ok((snap, _, _)) = built {
+                assert_eq!(GenParams::from_json(&snap).size.as_deref(), Some(*size));
+            }
+        }
     }
 
     #[test]

@@ -312,8 +312,20 @@ export function GeneratePage() {
   const paramErr = sizeIssue(size);
 
   const fmtLabel = outputFormat === "png" ? "PNG" : outputFormat === "jpeg" ? "JPG" : "跟随";
+  /**
+   * 选比例即带上配套精确尺寸（见 `RATIO_SIZE` 的注释：单发 aspect_ratio 实测回正方形）。
+   *
+   * 只在尺寸「是自动填的」时才覆盖——空着，或正好等于上一个比例的配套值。用户手打过
+   * 别的尺寸就不动它：那是他明确的意思，被下拉框静默改掉正是「我明明设了却不生效」的成因。
+   */
+  const pickRatio = (v: string | null) => {
+    const wasAuto = size === null || (aspectRatio !== null && size === RATIO_SIZE[aspectRatio]);
+    setAspectRatio(v);
+    if (wasAuto) setSize(v === null ? null : (RATIO_SIZE[v] ?? null));
+  };
+
   const paramShort = `${aspectRatio ?? size ?? "跟随"} · ${fmtLabel} · ×${draws}`;
-  const paramSum = `比例 ${aspectRatio ?? "跟随提示词"} · 输出 ${fmtLabel} · 抽卡 ×${draws}`;
+  const paramSum = `比例 ${aspectRatio ?? "跟随提示词"}${size ? ` · 尺寸 ${size}` : ""} · 输出 ${fmtLabel} · 抽卡 ×${draws}`;
 
   return (
     <div className="col f1 ohide">
@@ -675,11 +687,12 @@ export function GeneratePage() {
               <span className="plabel" style={{ marginTop: 3 }}>
                 比例
               </span>
-              <Seg value={aspectRatio} options={RATIO_OPTS} onChange={setAspectRatio} wrap />
+              <Seg value={aspectRatio} options={RATIO_OPTS} onChange={pickRatio} wrap />
             </div>
             <div className="fs11 t3 mt6" style={{ lineHeight: 1.7, paddingLeft: 80 }}>
-              画幅由 <span className="mono">aspect_ratio</span> 决定，实际像素由上游定。
-              <b>提示词里写「9:16」对模型不构成约束</b>——不显式选，多数会回 1:1。
+              选比例会自动带上配套的精确尺寸，<b>两个字段一起发</b>——实测只发{" "}
+              <span className="mono">aspect_ratio</span> 时整批回的是 1024×1024 正方形。
+              <b>提示词里写「9:16」对模型不构成约束</b>，那是描述不是参数。
             </div>
             <div className="prow2 mt8">
               <span className="plabel">精确尺寸</span>
@@ -690,8 +703,16 @@ export function GeneratePage() {
                 value={size ?? ""}
                 onChange={(e) => setSize(e.target.value.trim() || null)}
               />
-              <span className="fs11 t3">选填，仅部分模型认；边长须为 16 的倍数</span>
+              <span className="fs11 t3">
+                选比例已自动填；改了就以你填的为准，边长须为 16 的倍数
+              </span>
             </div>
+            {size !== null && aspectRatio !== null && size !== RATIO_SIZE[aspectRatio] && (
+              <div className="fs11 t3 mt6" style={{ paddingLeft: 80 }}>
+                你填的尺寸与「{aspectRatio}」的配套值（{RATIO_SIZE[aspectRatio]}）不同，
+                两个字段都会照发；上游按哪个出图取决于模型。
+              </div>
+            )}
             {paramErr && (
               <div className="fs11 mt6" style={{ color: "var(--wr)", paddingLeft: 80 }}>
                 {paramErr}
@@ -894,6 +915,31 @@ const RATIO_OPTS: ParamOpt[] = [
   { v: "3:2", label: "3:2 横" },
   { v: "21:9", label: "21:9" },
 ];
+
+/**
+ * 每个比例的**配套精确尺寸**：选比例即带上它。
+ *
+ * 为什么必须带：线上实测（key `aixoras` · 模型 `gpt-image-2-1k`，批次 24–27 共 56 张）
+ * 单发 `aspect_ratio: "9:16"` 回来的整批是 **1024×1024 正方形** —— 那个参数在这条链路上
+ * 没起作用；补上 `size` 之后才是竖幅（941×1672）。v0.15.2 写的「画幅走 aspect_ratio
+ * 而非 size」是照端点文档来的，被实测推翻。两个都发且让二者自洽是代价最低的做法：
+ * 多一个字段是零成本，少一个是一整批废图。
+ *
+ * 取值同时满足两条：**正好是该比例** + **两边都是 16 的倍数**（端点硬性要求）。
+ * 所以取不到 1080×1920 那类「手机分辨率」——1080÷16=67.5，端点会整批拒；精确 9:16 的
+ * 合法值是 …/1008×1792/1152×2048/1296×2304…，1152×2048 是跨过 1080×1920 的那一档。
+ * 上游只保证比例、实际像素自己定，这里给的是**比例的载体**而不是交付分辨率。
+ */
+const RATIO_SIZE: Record<string, string> = {
+  "1:1": "1024x1024",
+  "9:16": "1152x2048",
+  "16:9": "2048x1152",
+  "3:4": "1536x2048",
+  "4:3": "2048x1536",
+  "2:3": "1024x1536",
+  "3:2": "1536x1024",
+  "21:9": "2016x864",
+};
 /** 输出格式：须与 Rust `provider::OUTPUT_FORMATS` 一致（那边是真相）。 */
 const OUT_FMT_OPTS: ParamOpt[] = [
   { v: null, label: "跟随" },

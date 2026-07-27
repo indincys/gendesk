@@ -121,9 +121,10 @@ async fn ingest_dir(
     // 4. 记账在动手之前。
     let row_id = repo::insert_running(&ctx.pool, &plan.job_id, &plan.dir_name).await?;
 
-    // 5. 干活。
-    match apply(ctx, &plan).await {
-        Ok(done) => {
+    // 5. 干活。进度直接写进 `done`，失败时它就是「做到哪了」的如实交代。
+    let mut done = Applied::default();
+    match apply(ctx, &plan, &mut done).await {
+        Ok(()) => {
             repo::mark_done(&ctx.pool, row_id, &done).await?;
             write_receipt(&plan.dir, super::RESULT_FILE, &result_text(&plan, &done));
             // 移档留证（同 v0.9.0 / v2v）：成功的工单从收件目录消失，人一眼看得出还剩什么。
@@ -134,8 +135,8 @@ async fn ingest_dir(
         }
         Err(e) => {
             let msg = e.to_string();
-            repo::mark_error(&ctx.pool, row_id, &msg).await?;
-            write_receipt(&plan.dir, super::ERROR_FILE, &error_text(&msg));
+            repo::mark_error(&ctx.pool, row_id, &msg, &done).await?;
+            write_receipt(&plan.dir, super::ERROR_FILE, &error_text(&msg, &done));
             Ok(Some(repo::get(&ctx.pool, row_id).await?))
         }
     }
@@ -153,8 +154,10 @@ async fn record_failure(
         return Ok(None);
     }
     let row_id = repo::insert_running(&ctx.pool, job_id, dir_name).await?;
-    repo::mark_error(&ctx.pool, row_id, &msg).await?;
-    write_receipt(dir, super::ERROR_FILE, &error_text(&msg));
+    // 校验阶段就失败 —— 库里确实一个字节都没变，这里的「没有导入任何东西」是真话。
+    let nothing = Applied::default();
+    repo::mark_error(&ctx.pool, row_id, &msg, &nothing).await?;
+    write_receipt(dir, super::ERROR_FILE, &error_text(&msg, &nothing));
     Ok(Some(repo::get(&ctx.pool, row_id).await?))
 }
 
@@ -192,11 +195,17 @@ pub struct Applied {
 }
 
 /// 导入提示词 → 导入参考图 → 按参数分桶建批开跑。
-async fn apply(ctx: &Ctx, plan: &Plan) -> AppResult<Applied> {
+///
+/// **进度写进 `out` 而不是只在成功时返回**：这一串动作里没有一步是能整体回滚的
+/// （参考图要拷文件建缩略图，建批要发编号，第一个批次建完就已经在跑了）。中途失败时
+/// 「已经导入了多少」必须留下痕迹，否则台账那行只剩一句错误原文，而回执还在说
+/// 「没有导入任何东西」—— 人照着那句话重投，就会得到第二份提示词和第二个批次。
+async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     // ── 提示词：全部组合成一份预览，一个事务落库（同手动导入的写路径）。
     let parsed: Vec<ParsedGroup> = plan.groups.iter().map(|g| g.parsed.clone()).collect();
     let preview = build_preview_from_parsed(&ctx.pool, &parsed, "UTF-8".into(), Vec::new()).await?;
     let result = commit_preview(&ctx.pool, &preview, "library").await?;
+    out.group_count = result.group_ids.len() as i64;
     if result.group_ids.len() != plan.groups.len() {
         // 理论上不会发生（空组已在校验里排除）；真发生了宁可整单失败也不要错配挂靠。
         return Err(AppError::Internal(
@@ -220,7 +229,6 @@ async fn apply(ctx: &Ctx, plan: &Plan) -> AppResult<Applied> {
 
     // ── 按 (参数快照, 抽卡) 分桶。参数是**批次级**的，各组比例不同就必须拆批次。
     let mut buckets: Vec<Bucket> = Vec::new();
-    let mut ref_count = 0i64;
 
     for (g, group_id) in plan.groups.iter().zip(result.group_ids.iter().copied()) {
         let key = g.bucket();
@@ -262,7 +270,7 @@ async fn apply(ctx: &Ctx, plan: &Plan) -> AppResult<Applied> {
                 },
             )
             .await?;
-            ref_count += 1;
+            out.ref_count += 1;
             buckets[slot].mappings.push(RefMapping {
                 ref_image_id: id,
                 prompt_group_id: group_id,
@@ -272,11 +280,6 @@ async fn apply(ctx: &Ctx, plan: &Plan) -> AppResult<Applied> {
 
     // ── 建批（花钱的那一步，放在最后）。一桶一个批次。
     let output_dir = ctx.dirs.outputs().to_string_lossy().to_string();
-    let mut out = Applied {
-        group_count: plan.groups.len() as i64,
-        ref_count,
-        ..Default::default()
-    };
     let multi = buckets.len() > 1;
     for (i, b) in buckets.iter().enumerate() {
         let (batch_id, task_count) =
@@ -296,7 +299,7 @@ async fn apply(ctx: &Ctx, plan: &Plan) -> AppResult<Applied> {
         out.wire_json.push(b.wire.clone());
         out.task_count += task_count;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// 一个批次桶：参数相同的组共用它。
@@ -368,11 +371,36 @@ fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
     )
 }
 
-fn error_text(msg: &str) -> String {
-    format!(
-        "GenDesk 收录这份工单时失败了，**没有导入任何东西**：\n\n{msg}\n\n\
-         改好之后，在 GenDesk 设置页「Claude Code 收件」里点「重试」。\n"
-    )
+/// 失败回执。**如实交代已经导入了多少** —— 这不是措辞问题，是重投安全的前提。
+///
+/// 收录这一串动作没有一步能整体回滚：参考图要拷文件建缩略图，建批要发编号，
+/// 第一个批次建完那一刻就已经在花钱跑了。原来这里无条件写「没有导入任何东西」，
+/// 而人照着它去点「重试」，得到的是第二份提示词和第二个批次 —— 花两份钱。
+fn error_text(msg: &str, done: &Applied) -> String {
+    let mut s = format!("GenDesk 收录这份工单时失败了：\n\n{msg}\n\n");
+    if done.group_count == 0 && done.ref_count == 0 && done.batch_ids.is_empty() {
+        s.push_str("库里**没有导入任何东西**，改好之后直接重投即可。\n\n");
+    } else {
+        s.push_str(&format!(
+            "但**已经导入了一部分**，重投前必须先处理它们，否则会得到第二份：\n\
+             · 提示词组：{} 组\n· 参考图：{} 张\n",
+            done.group_count, done.ref_count
+        ));
+        if done.batch_ids.is_empty() {
+            s.push_str("· 批次：未建（这一单还没开始花钱）\n\n");
+        } else {
+            s.push_str(&format!(
+                "· 批次：{}（**已经在跑，正在花钱**）—— 不想要就去任务页中止并删除\n\n",
+                done.batch_ids
+                    .iter()
+                    .map(|b| format!("#{b}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+    }
+    s.push_str("处理完之后，在 GenDesk 设置页「Claude Code 收件」里点「重试」。\n");
+    s
 }
 
 #[cfg(test)]

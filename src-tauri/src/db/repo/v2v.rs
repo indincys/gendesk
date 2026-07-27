@@ -762,6 +762,34 @@ pub async fn count_pass_undelivered(pool: &SqlitePool) -> Result<i64, sqlx::Erro
     Ok(n)
 }
 
+/// 这些 clip **此刻**指着的成片与封面路径（去空）。
+///
+/// 废纸篓物理删之前拿它当闸门：视频重跑是就地的，路径锚在 clip id 上，于是
+/// 「判过不通过 → 重跑 → 新片子落在同一个路径」是常态。一条陈旧的废纸篓记录若还
+/// 指着那两个文件，清空废纸篓就会删掉还活着的成片。
+pub async fn current_media_paths(
+    pool: &SqlitePool,
+    ids: &[i64],
+) -> Result<std::collections::HashSet<String>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql =
+        format!("SELECT video_path, poster_path, export_path FROM v2v_clips WHERE id IN ({holes})");
+    let mut q = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(&sql);
+    for i in ids {
+        q = q.bind(*i);
+    }
+    let rows = q.fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .flat_map(|(v, p, e)| [v, p, e])
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .collect())
+}
+
 /// 幽灵疑单的条数：在跑、任何一处计费证据都没有、且过了宽限期。
 ///
 /// 徽章要计入它，因为它是**唯一一类阻在人身上却不在四个待办阶段里**的条目 ——

@@ -211,6 +211,18 @@ export function IntakeSection() {
                   <span className="fs11" style={{ color: "var(--er)" }}>
                     {j.message || "收录中断（重试可再来一次）"}
                   </span>
+                  {/* 失败的工单可能已经导入了一半：收录没有一步能整体回滚（参考图要拷
+                      文件，建批要发编号，第一个批次建完就已经在花钱跑了）。「重试」
+                      会从头再来一遍，所以已经落地的那部分必须摆在按钮**旁边**，
+                      否则点下去得到的是第二份提示词和第二个批次。 */}
+                  {(j.groupCount > 0 || j.refCount > 0 || j.batchIds.length > 0) && (
+                    <span className="fs11" style={{ color: "var(--wr)" }}>
+                      已导入 {j.groupCount} 组 · {j.refCount} 图
+                      {j.batchIds.length > 0 &&
+                        ` · 批次 ${j.batchIds.map((b) => `#${b}`).join(" ")} 已在跑`}
+                      ，重试前先处理掉
+                    </span>
+                  )}
                   <button type="button" className="btn sm gho" onClick={() => void retry(j.id)}>
                     <RotateCcw className="ic12" />
                     重试

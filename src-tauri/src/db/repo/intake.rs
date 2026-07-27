@@ -63,12 +63,33 @@ pub async fn mark_done(pool: &SqlitePool, id: i64, done: &Applied) -> Result<(),
     Ok(())
 }
 
-pub async fn mark_error(pool: &SqlitePool, id: i64, message: &str) -> Result<(), sqlx::Error> {
+/// 失败：连**已经导入了多少**一起记下来。
+///
+/// 收录不是一个能整体回滚的事务：参考图要拷文件、建缩略图，建批要发编号，
+/// 而中途失败时前面那些已经落库、批次可能已经在跑。原来这一行只存一句错误原文，
+/// 于是「这份工单到底做到哪了」在库里没有任何痕迹，回执还写着「没有导入任何东西」
+/// —— 人照着那句话删掉台账行重投，就会得到第二份提示词和第二个批次。
+pub async fn mark_error(
+    pool: &SqlitePool,
+    id: i64,
+    message: &str,
+    partial: &Applied,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE intake_jobs SET status = 'error', message = ?2, updated_at = ?3 WHERE id = ?1",
+        "UPDATE intake_jobs
+            SET status = 'error', message = ?2, batch_ids = ?3, task_count = ?4,
+                group_count = ?5, ref_count = ?6, params_json = ?7, wire_json = ?8,
+                updated_at = ?9
+          WHERE id = ?1",
     )
     .bind(id)
     .bind(message)
+    .bind(to_json(&partial.batch_ids))
+    .bind(partial.task_count)
+    .bind(partial.group_count)
+    .bind(partial.ref_count)
+    .bind(to_json(&partial.params_json))
+    .bind(to_json(&partial.wire_json))
     .bind(now_unix())
     .execute(pool)
     .await?;

@@ -1593,6 +1593,24 @@ pub async fn requeue_v2v_clips(
         if ok {
             n += 1;
             last_code = code;
+            // **收回这条 clip 的废纸篓行**。重跑是就地的：`v2v_clips` 只有一行，
+            // 成片路径锚在 clip id 上（`clips/clip{id}.mp4`）。判过「不通过」的条目
+            // 重跑之后，新片子会落到与旧片子完全相同的路径，而废纸篓里那行还指着它
+            // —— 下一次清空废纸篓就会物理删掉一条还活着的成片。
+            //
+            // 代价是撤销这次重排后，那个文件不再有废纸篓行去回收它（最坏留下一个
+            // 孤儿文件）。与「删掉正在用的成片」不对等，选这一边。
+            let mut tx = state.db.begin().await?;
+            let dropped = trash_repo::delete_by_clip(&mut tx, id).await?;
+            tx.commit().await?;
+            if dropped > 0 {
+                state.v2v_log.info(
+                    "review",
+                    None,
+                    format!("{last_code} 重排，同时收回它在废纸篓里的 {dropped} 条记录"),
+                    None,
+                );
+            }
             if let Some(s) = snap {
                 undo.push(V2vUndoEntry::from_snapshot(s, None));
             }

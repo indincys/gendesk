@@ -351,6 +351,116 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
     })
 }
 
+/// 「你离开的这段时间」发生了什么。
+///
+/// 视频是**过夜跑**的：睡前提交、早上回来。回来那一刻真正要知道的不是「现在有多少条」，
+/// 而是「我不在的时候出了什么事」—— 出了几条片、判死了几条、花了多少钱。
+/// 这两个问题的答案完全不同：待验收 46 条既可能是昨晚新出的 46 条，也可能是三天没看了。
+///
+/// 只在**确实离开过**（`away_secs` 够长）且**确实发生过事**时才由前端显示。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AwayDigest {
+    /// 距上次看这一页多久（秒）。首次使用（没有 last_seen）为 0。
+    pub away_secs: i64,
+    pub finished: i64,
+    pub failed: i64,
+    /// 判死里的幽灵单 —— 它们**没扣费**，文案必须与超时相反（直接重跑，不是继续等待）。
+    pub phantom: i64,
+    pub credits: i64,
+    /// 此刻待验收总数（横幅那句「待验收涨到 N 条」）。
+    pub rev_now: i64,
+}
+
+/// 「上次看过视频流水线」的时刻。放 settings 表而不是前端 localStorage：
+/// 它要参与 Rust 侧的聚合查询（按 `finished_at` 切），来回传一个前端持有的时间戳
+/// 只会让「摘要统计的是哪一段」这件事有两处说法。
+const SEEN_KEY: &str = "v2v_seen";
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_away_digest(state: State<'_, AppState>) -> AppResult<AwayDigest> {
+    let now = now_unix();
+    let seen: Option<i64> = settings_repo::get_by_key(&state.db, SEEN_KEY)
+        .await?
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    let counts = runner::counts(&state.db).await?;
+    let Some(since) = seen else {
+        // 头一次打开：没有「离开」这回事，不该拿全部历史冒充昨夜的战果。
+        return Ok(AwayDigest {
+            rev_now: counts.rev,
+            ..Default::default()
+        });
+    };
+    let row = repo::away_digest(&state.db, since).await?;
+    Ok(AwayDigest {
+        away_secs: (now - since).max(0),
+        finished: row.finished,
+        failed: row.failed,
+        phantom: row.phantom,
+        credits: row.credits,
+        rev_now: counts.rev,
+    })
+}
+
+/// 记下「看过了」。摘要横幅显示过一次就该记，否则同一份战报会在每次切页时重放。
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_mark_seen(state: State<'_, AppState>) -> AppResult<()> {
+    settings_repo::set_by_key(&state.db, SEEN_KEY, &now_unix().to_string()).await?;
+    Ok(())
+}
+
+/// 交接目录的当前状态（「交接：42 条已物化 · 3 分钟前收录」）。
+///
+/// 待改写那一列是**唯一一段不在本机手里**的流程：工单写出去了没有、skill 写回来过没有，
+/// 界面上原先一个字都没有 —— 于是「skill 到底跑没跑」只能靠去开文件夹看。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffStatus {
+    /// 待改写工单根目录绝对路径。
+    pub pending_dir: String,
+    /// 已物化的组数 / 条数。
+    pub groups: i64,
+    pub items: i64,
+    /// 缩略图缺失而写不进工单的条数（父图被清理过）。
+    pub skipped: i64,
+    /// 最近一次收录到改写结果的时刻；None = 从来没收到过。
+    pub last_ingest_at: Option<i64>,
+    /// 物化失败的原因（磁盘满 / 目录不可写）。有值时界面必须报出来，
+    /// 否则 skill 那边看到的是一个空目录，而这边显示一切正常。
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_handoff_status(state: State<'_, AppState>) -> AppResult<HandoffStatus> {
+    let s = load_settings(&state.db).await?;
+    let root = s.root();
+    let mut out = HandoffStatus {
+        pending_dir: root
+            .join(handoff::V2V)
+            .join(handoff::PENDING)
+            .to_string_lossy()
+            .to_string(),
+        groups: 0,
+        items: 0,
+        skipped: 0,
+        last_ingest_at: repo::last_rewrote_at(&state.db).await?,
+        error: None,
+    };
+    match handoff::materialize(&state.db, &root).await {
+        Ok(m) => {
+            out.pending_dir = m.pending_dir;
+            out.groups = m.groups;
+            out.items = m.items;
+            out.skipped = m.skipped;
+        }
+        Err(e) => out.error = Some(format!("{e}")),
+    }
+    Ok(out)
+}
+
 /// 执行日志快照（打开日志面板时取一次，之后靠 `v2v://activity` 事件增量追加）。
 #[tauri::command]
 #[specta::specta]
@@ -474,6 +584,16 @@ pub struct ClipView {
     /// 配合 `queueIdx` 为空即幽灵单；界面据此可以明说「这条没扣费，重跑不会重复扣」。
     pub submit_credit: Option<i64>,
     pub submit_status: Option<String>,
+    /// 「这一条的历程」四个时刻（详情栏）。入队 → 改写写回 → 出片落盘 → 人工定态。
+    /// 提交时刻用 `first_submitted_at`（见上）。
+    pub created_at: i64,
+    pub rewrote_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub reviewed_at: Option<i64>,
+    /// 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
+    /// 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
+    pub asset_pack_id: Option<i64>,
+    pub in_asset_lib: bool,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -517,6 +637,12 @@ impl From<repo::ClipRow> for ClipView {
             first_submitted_at: r.first_submitted_at.or(r.submitted_at),
             submit_credit: r.submit_credit,
             submit_status: r.submit_status,
+            created_at: r.created_at,
+            rewrote_at: r.rewrote_at,
+            finished_at: r.finished_at,
+            reviewed_at: r.reviewed_at,
+            asset_pack_id: r.asset_pack_id,
+            in_asset_lib: r.in_asset_lib != 0,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }
@@ -893,6 +1019,151 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
     Ok(sum.finished)
 }
 
+/// 一次可撤销动作的结果。
+///
+/// ## 为什么撤销令牌由 Rust 造、原样传回来
+///
+/// 「撤销」在验收流里不是锦上添花：看片流一秒判一条，手滑判错的概率接近 1，而错判
+/// 「不通过」会把成片扔进废纸篓。但撤销**不能**让前端自己拼一条「把 stage 改回 rev」的
+/// 命令 —— 那等于把状态机开给前端（铁律 1）。
+///
+/// 折中是：Rust 在动手**之前**取整份快照、封进令牌交给前端保管，撤销时原样传回，
+/// 由 Rust 校验并写回。前端只当一个信封，令牌里每一个字段都是 Rust 自己写的。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vAction {
+    /// 真正改动了的条数（幂等跳过的不算）。
+    pub changed: i64,
+    /// 给人看的一句话：「已通过 3 条」。撤销 pill 上显示的就是它。
+    pub label: String,
+    /// 撤销令牌；为空表示这次没有可撤销的东西。
+    pub undo: Vec<V2vUndoEntry>,
+}
+
+/// 一条 clip 的撤销原料 = 改动前的整份快照（+ 不通过时产生的废纸篓行）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vUndoEntry {
+    pub clip_id: i64,
+    pub stage: String,
+    pub video_prompt: Option<String>,
+    pub submit_id: Option<String>,
+    pub video_path: Option<String>,
+    pub poster_path: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub fps: Option<f64>,
+    pub duration_sec: Option<f64>,
+    pub credit_count: Option<i64>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub gen_status: Option<String>,
+    pub queue_idx: Option<i64>,
+    pub polled_at: Option<i64>,
+    pub submitted_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub reviewed_at: Option<i64>,
+    pub attempt: i64,
+    /// 「不通过」时写进废纸篓的那一行。撤销即删掉它 —— 文件本来就没物理删，
+    /// 所以这一步是干净的（清空废纸篓才会真删，而那时人已经确认过一次了）。
+    pub trash_id: Option<i64>,
+}
+
+impl V2vUndoEntry {
+    fn from_snapshot(s: repo::ClipSnapshot, trash_id: Option<i64>) -> Self {
+        Self {
+            clip_id: s.id,
+            stage: s.stage,
+            video_prompt: s.video_prompt,
+            submit_id: s.submit_id,
+            video_path: s.video_path,
+            poster_path: s.poster_path,
+            width: s.width,
+            height: s.height,
+            fps: s.fps,
+            duration_sec: s.duration_sec,
+            credit_count: s.credit_count,
+            error_type: s.error_type,
+            error_message: s.error_message,
+            gen_status: s.gen_status,
+            queue_idx: s.queue_idx,
+            polled_at: s.polled_at,
+            submitted_at: s.submitted_at,
+            finished_at: s.finished_at,
+            reviewed_at: s.reviewed_at,
+            attempt: s.attempt,
+            trash_id,
+        }
+    }
+
+    fn to_snapshot(&self) -> repo::ClipSnapshot {
+        repo::ClipSnapshot {
+            id: self.clip_id,
+            stage: self.stage.clone(),
+            video_prompt: self.video_prompt.clone(),
+            submit_id: self.submit_id.clone(),
+            video_path: self.video_path.clone(),
+            poster_path: self.poster_path.clone(),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            duration_sec: self.duration_sec,
+            credit_count: self.credit_count,
+            error_type: self.error_type.clone(),
+            error_message: self.error_message.clone(),
+            gen_status: self.gen_status.clone(),
+            queue_idx: self.queue_idx,
+            polled_at: self.polled_at,
+            submitted_at: self.submitted_at,
+            finished_at: self.finished_at,
+            reviewed_at: self.reviewed_at,
+            attempt: self.attempt,
+        }
+    }
+}
+
+/// 撤销上一次可撤销动作。
+///
+/// **只做写回，不做「反向操作」**：反向操作要为每种动作各写一遍逆变换，而逆变换写错了
+/// 没人看得出来（撤销一次不通过 → 片子回来了但扣费记录没了）。整份写回只有一条路径。
+///
+/// 已被后续动作改过的条目不再撤销（`stage` 与令牌里记的「改动后应有的样子」对不上时
+/// 强行写回会把新状态抹掉）—— 这里的判据是宽的：只要那一条现在不在快照里的旧态，
+/// 就说明这次撤销仍然有意义；真正冲突的场景（撤销一条已经重新提交出去的）由
+/// `submit_id` 变化挡住。
+#[tauri::command]
+#[specta::specta]
+pub async fn undo_v2v(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    entries: Vec<V2vUndoEntry>,
+) -> AppResult<i64> {
+    let now = now_unix();
+    let mut n = 0i64;
+    for e in &entries {
+        // 已经重新提交出去的条目不能撤销回旧态：那会把新的 submit_id 抹掉，
+        // 而那条任务在即梦那边正跑着、额度已经扣了 —— 抹掉它就再也认不出主人。
+        let cur = repo::get(&state.db, e.clip_id).await?;
+        if let Some(c) = &cur {
+            if c.submit_id.is_some() && c.submit_id != e.submit_id {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if repo::restore(&state.db, &e.to_snapshot(), now).await? {
+            n += 1;
+        }
+        if let Some(tid) = e.trash_id {
+            let mut tx = state.db.begin().await?;
+            trash_repo::delete_rows(&mut tx, &[tid]).await?;
+            tx.commit().await?;
+        }
+    }
+    refresh_handoff(&state.db, &app).await;
+    Ok(n)
+}
+
 /// 视频验收：通过 / 不通过。不通过时成片进废纸篓（留封面 + 提示词记录）。
 #[tauri::command]
 #[specta::specta]
@@ -901,9 +1172,11 @@ pub async fn review_v2v_clips(
     app: AppHandle,
     ids: Vec<i64>,
     pass: bool,
-) -> AppResult<i64> {
+) -> AppResult<V2vAction> {
     let now = now_unix();
     let mut n = 0i64;
+    let mut undo: Vec<V2vUndoEntry> = Vec::new();
+    let mut last_code = String::new();
     for id in ids {
         let Some(clip) = repo::get(&state.db, id).await? else {
             continue;
@@ -911,6 +1184,8 @@ pub async fn review_v2v_clips(
         if clip.stage != "rev" {
             continue; // 幂等：连点/重复提交不得把已定态的再改一次
         }
+        let snap = repo::snapshot(&state.db, id).await?;
+        let mut trash_id: Option<i64> = None;
         if !pass {
             // 成片与封面进废纸篓待清理（同 E02：不立即物理删，误触不丢东西）。
             // 封面是 clip 自己的文件（首帧缩略图的副本），删它不会碰到作品缩略图。
@@ -922,7 +1197,7 @@ pub async fn review_v2v_clips(
                 files.push(p.clone());
             }
             let mut tx = state.db.begin().await?;
-            trash_repo::insert(
+            let tid = trash_repo::insert(
                 &mut tx,
                 &trash_repo::NewTrashItem {
                     entity_type: "clip".into(),
@@ -937,13 +1212,35 @@ pub async fn review_v2v_clips(
             )
             .await?;
             tx.commit().await?;
+            trash_id = Some(tid);
         }
         if repo::set_reviewed(&state.db, id, if pass { "pass" } else { "rej" }, now).await? {
             n += 1;
+            last_code = clip.prompt_code.clone();
+            if let Some(s) = snap {
+                undo.push(V2vUndoEntry::from_snapshot(s, trash_id));
+            }
         }
     }
     emit_changed(&state.db, &app, None).await;
-    Ok(n)
+    let verb = if pass { "已通过" } else { "已不通过" };
+    Ok(V2vAction {
+        changed: n,
+        label: action_label(verb, n, &last_code),
+        undo,
+    })
+}
+
+/// 「已通过 BR31-0140」/「已通过 12 条」—— 一条时报编号，多条时报数量。
+///
+/// 一条时报编号是有用的：看片流一秒一条，撤销 pill 上写「已通过 1 条」等于什么都没说，
+/// 而写出编号才能确认撤销的是不是刚才那一条。
+fn action_label(verb: &str, n: i64, code: &str) -> String {
+    if n == 1 && !code.is_empty() {
+        format!("{verb} {code}")
+    } else {
+        format!("{verb} {n} 条")
+    }
 }
 
 /// 重跑（同提示词）/ 退回改写 / 继续等待。
@@ -958,22 +1255,40 @@ pub async fn requeue_v2v_clips(
     app: AppHandle,
     ids: Vec<i64>,
     mode: String,
-) -> AppResult<i64> {
+) -> AppResult<V2vAction> {
+    let verb = match mode.as_str() {
+        "run" => "已重排待提交",
+        "rewrite" => "已退回改写",
+        "wait" => "已放回轮询",
+        other => {
+            return Err(AppError::InvalidInput(format!(
+                "未知重排模式：{other}（只接受 run / rewrite / wait）"
+            )))
+        }
+    };
     let now = now_unix();
     let mut n = 0i64;
+    let mut undo: Vec<V2vUndoEntry> = Vec::new();
+    let mut last_code = String::new();
     for id in ids {
+        // 快照必须在改动之前取 —— 这三条路径都会清掉成片路径与扣费回执，
+        // 事后再取就只剩清干净的空壳，撤销回去等于把片子弄丢。
+        let snap = repo::snapshot(&state.db, id).await?;
+        let code = repo::get(&state.db, id)
+            .await?
+            .map(|c| c.prompt_code)
+            .unwrap_or_default();
         let ok = match mode.as_str() {
             "run" => repo::requeue_for_run(&state.db, id, now).await?,
             "rewrite" => repo::requeue_for_rewrite(&state.db, id, now).await?,
-            "wait" => repo::resume_timed_out(&state.db, id, now).await?,
-            other => {
-                return Err(AppError::InvalidInput(format!(
-                    "未知重排模式：{other}（只接受 run / rewrite / wait）"
-                )))
-            }
+            _ => repo::resume_timed_out(&state.db, id, now).await?,
         };
         if ok {
             n += 1;
+            last_code = code;
+            if let Some(s) = snap {
+                undo.push(V2vUndoEntry::from_snapshot(s, None));
+            }
         }
     }
     if mode == "wait" && n > 0 {
@@ -985,7 +1300,11 @@ pub async fn requeue_v2v_clips(
         );
     }
     refresh_handoff(&state.db, &app).await;
-    Ok(n)
+    Ok(V2vAction {
+        changed: n,
+        label: action_label(verb, n, &last_code),
+        undo,
+    })
 }
 
 /// 从流水线移除（不想给这张图做视频了）。作品本体不受影响。
@@ -1005,6 +1324,67 @@ pub async fn remove_v2v_clips(
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
     use super::*;
+
+    // 撤销令牌走一趟前端再回来，必须一个字段都不掉。
+    //
+    // 它是 JSON 序列化过去、原样传回来的（前端只当信封），所以「加了列却忘了塞进
+    // V2vUndoEntry」这类漏字段不会报错 —— 它会安静地把撤销变成一次数据丢失。
+    #[test]
+    fn undo_token_survives_the_round_trip_intact() {
+        let snap = repo::ClipSnapshot {
+            id: 7,
+            stage: "rev".into(),
+            video_prompt: Some("提示词".into()),
+            submit_id: Some("sub-1".into()),
+            video_path: Some("/clips/7.mp4".into()),
+            poster_path: Some("/clips/7.jpg".into()),
+            width: Some(720),
+            height: Some(1280),
+            fps: Some(24.0),
+            duration_sec: Some(4.0),
+            credit_count: Some(8),
+            error_type: None,
+            error_message: None,
+            gen_status: Some("success".into()),
+            queue_idx: Some(4485),
+            polled_at: Some(1000),
+            submitted_at: Some(900),
+            finished_at: Some(990),
+            reviewed_at: None,
+            attempt: 2,
+        };
+        let entry = V2vUndoEntry::from_snapshot(snap.clone(), Some(42));
+        let wire = serde_json::to_string(&entry).unwrap();
+        let back: V2vUndoEntry = serde_json::from_str(&wire).unwrap();
+        assert_eq!(
+            back.trash_id,
+            Some(42),
+            "废纸篓行 id 必须留住，否则撤销后片子仍在废纸篓里"
+        );
+
+        let out = back.to_snapshot();
+        assert_eq!(out.id, snap.id);
+        assert_eq!(out.stage, snap.stage);
+        assert_eq!(out.video_path, snap.video_path);
+        assert_eq!(out.poster_path, snap.poster_path);
+        assert_eq!(out.credit_count, snap.credit_count);
+        assert_eq!(out.submit_id, snap.submit_id);
+        assert_eq!(out.queue_idx, snap.queue_idx);
+        assert_eq!(out.attempt, snap.attempt);
+        assert_eq!(out.reviewed_at, snap.reviewed_at);
+        // 载荷字段须 camelCase（specta 序列化配置统一保证，这里守住不被手改破坏）。
+        assert!(wire.contains("\"clipId\""), "{wire}");
+        assert!(wire.contains("\"videoPath\""), "{wire}");
+    }
+
+    // 一条时报编号、多条时报数量 —— 看片流一秒一条，「已通过 1 条」等于什么都没说。
+    #[test]
+    fn action_label_names_the_clip_when_there_is_only_one() {
+        assert_eq!(action_label("已通过", 1, "BR31-0140"), "已通过 BR31-0140");
+        assert_eq!(action_label("已通过", 12, "BR31-0140"), "已通过 12 条");
+        // 编号取不到时不能拼出「已通过 」这种半截话。
+        assert_eq!(action_label("已不通过", 1, ""), "已不通过 1 条");
+    }
 
     // 前端的空输入框不该变成 `--model_version=` 这种必被拒的空 flag。
     #[test]

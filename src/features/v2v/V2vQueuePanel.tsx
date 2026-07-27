@@ -22,7 +22,16 @@ import { useCallback, useEffect, useState } from "react";
  *
  * 外加「最久那条等了多久」（绝对进度）与按实测速度算的粗略 ETA。
  */
-export function V2vQueuePanel({ tick, now }: { tick: V2vTick | null; now: number }) {
+export function V2vQueuePanel({
+  tick,
+  now,
+  always,
+}: {
+  tick: V2vTick | null;
+  now: number;
+  /** 观测面板里要**始终**显示：人是特意点开来看的，「队列空」本身就是答案。 */
+  always?: boolean;
+}) {
   const [q, setQ] = useState<QueueStats | null>(null);
   /** 这份统计是什么时候取的。用它把秒数补齐到「此刻」，界面才不会一卡一卡地跳。 */
   const [at, setAt] = useState(0);
@@ -41,7 +50,8 @@ export function V2vQueuePanel({ tick, now }: { tick: V2vTick | null; now: number
   // biome-ignore lint/correctness/useExhaustiveDependencies: 依赖的是心跳时刻这个信号
   useEffect(load, [tick?.at, load]);
 
-  if (!q || q.running === 0) return null;
+  if (!q) return null;
+  if (q.running === 0 && !always) return null;
 
   // 统计取回后每过一秒，各项时长就该多一秒 —— 否则等待时长每 6 秒才跳一次，
   // 看着像卡住了，而「是不是卡住了」正是这块面板要回答的问题。
@@ -51,13 +61,17 @@ export function V2vQueuePanel({ tick, now }: { tick: V2vTick | null; now: number
   const nextPoll = q.nextPollIn == null ? null : Math.max(0, q.nextPollIn - drift);
 
   return (
-    <div className="qbar">
+    <div className={cn("qbar", always && "flat")}>
       <div className="fx ac gap10 wrap">
-        <span className="fs12 fw6">{q.running} 条在队列里</span>
-        <span className="fs11 t3">
-          最久已等 <b>{fmtDur(q.oldestWait + drift)}</b>
-          {q.newestWait !== q.oldestWait && ` · 最新 ${fmtDur(q.newestWait + drift)}`}
+        <span className="fs12 fw6">
+          {q.running === 0 ? "队列是空的" : `${q.running} 条在队列里`}
         </span>
+        {q.running > 0 && (
+          <span className="fs11 t3">
+            最久已等 <b>{fmtDur(q.oldestWait + drift)}</b>
+            {q.newestWait !== q.oldestWait && ` · 最新 ${fmtDur(q.newestWait + drift)}`}
+          </span>
+        )}
         <span className={cn("fs11", stale ? "qwarn" : "t3")}>
           {q.sinceLastFinish == null
             ? "这批还没有出过片"

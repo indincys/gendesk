@@ -1099,6 +1099,33 @@ async v2vQueueStats() : Promise<Result<QueueStats, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async v2vAwayDigest() : Promise<Result<AwayDigest, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_away_digest") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 记下「看过了」。摘要横幅显示过一次就该记，否则同一份战报会在每次切页时重放。
+ */
+async v2vMarkSeen() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_mark_seen") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vHandoffStatus() : Promise<Result<HandoffStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_handoff_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 列出即梦会话（用户口中的「通道」）。
  * 
@@ -1270,7 +1297,7 @@ async pollV2vNow() : Promise<Result<number, AppError>> {
 /**
  * 视频验收：通过 / 不通过。不通过时成片进废纸篓（留封面 + 提示词记录）。
  */
-async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<number, AppError>> {
+async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<V2vAction, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("review_v2v_clips", { ids, pass }) };
 } catch (e) {
@@ -1285,9 +1312,28 @@ async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<number, AppE
  * 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
  * 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
  */
-async requeueV2vClips(ids: number[], mode: string) : Promise<Result<number, AppError>> {
+async requeueV2vClips(ids: number[], mode: string) : Promise<Result<V2vAction, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("requeue_v2v_clips", { ids, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 撤销上一次可撤销动作。
+ * 
+ * **只做写回，不做「反向操作」**：反向操作要为每种动作各写一遍逆变换，而逆变换写错了
+ * 没人看得出来（撤销一次不通过 → 片子回来了但扣费记录没了）。整份写回只有一条路径。
+ * 
+ * 已被后续动作改过的条目不再撤销（`stage` 与令牌里记的「改动后应有的样子」对不上时
+ * 强行写回会把新状态抹掉）—— 这里的判据是宽的：只要那一条现在不在快照里的旧态，
+ * 就说明这次撤销仍然有意义；真正冲突的场景（撤销一条已经重新提交出去的）由
+ * `submit_id` 变化挡住。
+ */
+async undoV2v(entries: V2vUndoEntry[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("undo_v2v", { entries }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2211,6 +2257,28 @@ export type AppError =
  */
 { type: "Internal"; message: string }
 /**
+ * 「你离开的这段时间」发生了什么。
+ * 
+ * 视频是**过夜跑**的：睡前提交、早上回来。回来那一刻真正要知道的不是「现在有多少条」，
+ * 而是「我不在的时候出了什么事」—— 出了几条片、判死了几条、花了多少钱。
+ * 这两个问题的答案完全不同：待验收 46 条既可能是昨晚新出的 46 条，也可能是三天没看了。
+ * 
+ * 只在**确实离开过**（`away_secs` 够长）且**确实发生过事**时才由前端显示。
+ */
+export type AwayDigest = { 
+/**
+ * 距上次看这一页多久（秒）。首次使用（没有 last_seen）为 0。
+ */
+awaySecs: number; finished: number; failed: number; 
+/**
+ * 判死里的幽灵单 —— 它们**没扣费**，文案必须与超时相反（直接重跑，不是继续等待）。
+ */
+phantom: number; credits: number; 
+/**
+ * 此刻待验收总数（横幅那句「待验收涨到 N 条」）。
+ */
+revNow: number }
+/**
  * `backup://progress`：导出进度（前端进度条）。
  */
 export type BackupProgress = { done: number; total: number; 
@@ -2312,7 +2380,17 @@ firstSubmittedAt: number | null;
  * 提交回执里的计费额度与状态（0024）。`submitCredit` 为空 = 即梦没给计费回执，
  * 配合 `queueIdx` 为空即幽灵单；界面据此可以明说「这条没扣费，重跑不会重复扣」。
  */
-submitCredit: number | null; submitStatus: string | null; acceptedAt: number; updatedAt: number }
+submitCredit: number | null; submitStatus: string | null; 
+/**
+ * 「这一条的历程」四个时刻（详情栏）。入队 → 改写写回 → 出片落盘 → 人工定态。
+ * 提交时刻用 `first_submitted_at`（见上）。
+ */
+createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewedAt: number | null; 
+/**
+ * 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
+ * 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
+ */
+assetPackId: number | null; inAssetLib: boolean; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -2484,6 +2562,34 @@ tags: string[];
  * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
  */
 archived: boolean }
+/**
+ * 交接目录的当前状态（「交接：42 条已物化 · 3 分钟前收录」）。
+ * 
+ * 待改写那一列是**唯一一段不在本机手里**的流程：工单写出去了没有、skill 写回来过没有，
+ * 界面上原先一个字都没有 —— 于是「skill 到底跑没跑」只能靠去开文件夹看。
+ */
+export type HandoffStatus = { 
+/**
+ * 待改写工单根目录绝对路径。
+ */
+pendingDir: string; 
+/**
+ * 已物化的组数 / 条数。
+ */
+groups: number; items: number; 
+/**
+ * 缩略图缺失而写不进工单的条数（父图被清理过）。
+ */
+skipped: number; 
+/**
+ * 最近一次收录到改写结果的时刻；None = 从来没收到过。
+ */
+lastIngestAt: number | null; 
+/**
+ * 物化失败的原因（磁盘满 / 目录不可写）。有值时界面必须报出来，
+ * 否则 skill 那边看到的是一个空目录，而这边显示一切正常。
+ */
+error: string | null }
 /**
  * 一条发布历史（读台账）。
  */
@@ -2707,7 +2813,17 @@ export type ModelInfo = { modelVersion: string; minDuration: number; maxDuration
  * 最短时长 + 首个分辨率下的预估额度 —— 选择器里那行「≈N 额度/条」。
  * 选模型这一刻才是价格该出现的地方：44 与 8 差 5.5 倍，选完再告知就晚了。
  */
-creditAtMin: number | null }
+creditAtMin: number | null; 
+/**
+ * 单价表切片。看板要在**分节头**上算「确认提交 18 条 · 预估 144 额度」，
+ * 那是每次筛选/勾选都会变的数，不能每渲染一次就往后端跑一趟；而把价格表抄一份
+ * 到前端又必然与 `PRICES` 分叉。故把这一小片真相随模型清单一起发过去。
+ */
+resPrices: ResPrice[]; 
+/**
+ * 是否是 vip 通道 —— 界面上要把它标出来（同规格贵 5.5 倍，只买到不排队）。
+ */
+vip: boolean }
 export type PackFileView = { name: string; origName: string; bytes: number }
 /**
  * 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
@@ -3076,6 +3192,15 @@ export type ReportView = { date: string; plan: number; published: number; failed
  */
 successRate: number; fails: ReportFail[]; shortage: string[]; tips: string }
 /**
+ * 某分辨率下的每秒单价（前端算「这一批预估多少额度」用）。
+ */
+export type ResPrice = { resolution: string; 
+/**
+ * 额度/秒。查不到实测值的组合**不出现在这个列表里** —— 缺席即「未实测」，
+ * 前端据此标「≥」，不会把一个编出来的数字摆到「确认提交」旁边。
+ */
+creditPerSec: number }
+/**
  * 手动全量扫描收件箱。返回本次收录/待认领/失败计数。
  */
 export type RescanResult = { ingested: number; unclaimed: number; failed: number }
@@ -3406,6 +3531,31 @@ export type UpdateStateChanged = {
  */
 state: string; version: string | null }
 /**
+ * 一次可撤销动作的结果。
+ * 
+ * ## 为什么撤销令牌由 Rust 造、原样传回来
+ * 
+ * 「撤销」在验收流里不是锦上添花：看片流一秒判一条，手滑判错的概率接近 1，而错判
+ * 「不通过」会把成片扔进废纸篓。但撤销**不能**让前端自己拼一条「把 stage 改回 rev」的
+ * 命令 —— 那等于把状态机开给前端（铁律 1）。
+ * 
+ * 折中是：Rust 在动手**之前**取整份快照、封进令牌交给前端保管，撤销时原样传回，
+ * 由 Rust 校验并写回。前端只当一个信封，令牌里每一个字段都是 Rust 自己写的。
+ */
+export type V2vAction = { 
+/**
+ * 真正改动了的条数（幂等跳过的不算）。
+ */
+changed: number; 
+/**
+ * 给人看的一句话：「已通过 3 条」。撤销 pill 上显示的就是它。
+ */
+label: string; 
+/**
+ * 撤销令牌；为空表示这次没有可撤销的东西。
+ */
+undo: V2vUndoEntry[] }
+/**
  * `v2v://activity` —— 执行日志新增一条。
  */
 export type V2vActivity = { entry: ActivityEntry }
@@ -3492,6 +3642,15 @@ enabled: boolean; finished: number; failed: number;
  * 整轮失败的原因（读设置失败、CLI 不可用……）。
  */
 error: string | null }
+/**
+ * 一条 clip 的撤销原料 = 改动前的整份快照（+ 不通过时产生的废纸篓行）。
+ */
+export type V2vUndoEntry = { clipId: number; stage: string; videoPrompt: string | null; submitId: string | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; creditCount: number | null; errorType: string | null; errorMessage: string | null; genStatus: string | null; queueIdx: number | null; polledAt: number | null; submittedAt: number | null; finishedAt: number | null; reviewedAt: number | null; attempt: number; 
+/**
+ * 「不通过」时写进废纸篓的那一行。撤销即删掉它 —— 文件本来就没物理删，
+ * 所以这一步是干净的（清空废纸篓才会真删，而那时人已经确认过一次了）。
+ */
+trashId: number | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean; 
 /**
  * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。

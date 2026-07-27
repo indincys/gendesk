@@ -53,6 +53,19 @@ pub struct ClipRow {
     pub submit_credit: Option<i64>,
     /// 提交回执里的 `gen_status`（0024）。
     pub submit_status: Option<String>,
+    /// 入队时刻 —— 详情栏「这一条的历程」第一格（图片验收通过 · 自动入队）。
+    pub created_at: i64,
+    /// 改写结果收录时刻（skill 写回 / 人手写完）。
+    pub rewrote_at: Option<i64>,
+    /// 出片落盘（或判死）时刻。
+    pub finished_at: Option<i64>,
+    /// 人工定态（通过/不通过）时刻。
+    pub reviewed_at: Option<i64>,
+    /// 打包进资产库时留下的素材包 id（0025）。
+    pub asset_pack_id: Option<i64>,
+    /// 那个素材包**现在还在不在**（包被退役删除后应回落成「尚未入库」）。
+    /// SQLite 的 EXISTS 回 0/1，故用 i64 承接。
+    pub in_asset_lib: i64,
     pub updated_at: i64,
     /// 父图编号（`accepted_works` → `prompts.code`）。
     pub prompt_code: String,
@@ -68,7 +81,10 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.video_resolution, c.submit_id, c.credit_count, c.video_path, c.poster_path,
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
         c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type,
-        c.first_submitted_at, c.submit_credit, c.submit_status, c.updated_at,
+        c.first_submitted_at, c.submit_credit, c.submit_status,
+        c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at, c.asset_pack_id,
+        EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id) AS in_asset_lib,
+        c.updated_at,
         COALESCE(p.code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
         COALESCE(w.thumb_path,'') AS thumb_path,
@@ -571,6 +587,150 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     Ok(n)
 }
 
+/// 记下这条成片打进了哪个素材包（0025）。
+///
+/// 只认 `pass`：未验收的片子入库会被排期直接发出去（`pack_from_clip` 已挡过一道，
+/// 这里是数据层的同一条规则，两处都写是因为将来会有别的调用方）。
+pub async fn set_asset_pack(
+    pool: &SqlitePool,
+    clip_id: i64,
+    pack_id: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE v2v_clips SET asset_pack_id=?2, updated_at=?3 WHERE id=?1 AND stage='pass'",
+    )
+    .bind(clip_id)
+    .bind(pack_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// 一条 clip 的**可撤销列**快照。
+///
+/// 撤销之所以要整份快照而不是「把 stage 改回去」：`requeue_for_run` / `requeue_for_rewrite`
+/// 会连带清掉 submit_id、成片路径、尺寸、扣费回执 —— 只把 stage 拨回 `rev` 会留下一条
+/// 「待验收但没有片子」的行，比不给撤销更糟。快照在改动**之前**取，撤销即整份写回。
+#[derive(Debug, Clone, FromRow)]
+pub struct ClipSnapshot {
+    pub id: i64,
+    pub stage: String,
+    pub video_prompt: Option<String>,
+    pub submit_id: Option<String>,
+    pub video_path: Option<String>,
+    pub poster_path: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub fps: Option<f64>,
+    pub duration_sec: Option<f64>,
+    pub credit_count: Option<i64>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub gen_status: Option<String>,
+    pub queue_idx: Option<i64>,
+    pub polled_at: Option<i64>,
+    pub submitted_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub reviewed_at: Option<i64>,
+    pub attempt: i64,
+}
+
+/// 取快照（撤销令牌的原料）。
+pub async fn snapshot(pool: &SqlitePool, id: i64) -> Result<Option<ClipSnapshot>, sqlx::Error> {
+    sqlx::query_as::<_, ClipSnapshot>(
+        "SELECT id, stage, video_prompt, submit_id, video_path, poster_path, width, height,
+                fps, duration_sec, credit_count, error_type, error_message, gen_status,
+                queue_idx, polled_at, submitted_at, finished_at, reviewed_at, attempt
+           FROM v2v_clips WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// 整份写回快照（撤销）。
+pub async fn restore(pool: &SqlitePool, s: &ClipSnapshot, now: i64) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE v2v_clips
+            SET stage=?2, video_prompt=?3, submit_id=?4, video_path=?5, poster_path=?6,
+                width=?7, height=?8, fps=?9, duration_sec=?10, credit_count=?11,
+                error_type=?12, error_message=?13, gen_status=?14, queue_idx=?15,
+                polled_at=?16, submitted_at=?17, finished_at=?18, reviewed_at=?19,
+                attempt=?20, updated_at=?21
+          WHERE id=?1",
+    )
+    .bind(s.id)
+    .bind(&s.stage)
+    .bind(&s.video_prompt)
+    .bind(&s.submit_id)
+    .bind(&s.video_path)
+    .bind(&s.poster_path)
+    .bind(s.width)
+    .bind(s.height)
+    .bind(s.fps)
+    .bind(s.duration_sec)
+    .bind(s.credit_count)
+    .bind(&s.error_type)
+    .bind(&s.error_message)
+    .bind(&s.gen_status)
+    .bind(s.queue_idx)
+    .bind(s.polled_at)
+    .bind(s.submitted_at)
+    .bind(s.finished_at)
+    .bind(s.reviewed_at)
+    .bind(s.attempt)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// 最近一次收录改写结果的时刻（交接状态那句「N 分钟前收录」）。
+///
+/// 不另存一个「上次收录时间」设置项：`rewrote_at` 的最大值**就是**这件事，
+/// 而多一处真相来源就多一处会与库里对不上的地方。
+pub async fn last_rewrote_at(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+    let (t,): (Option<i64>,) = sqlx::query_as("SELECT MAX(rewrote_at) FROM v2v_clips")
+        .fetch_one(pool)
+        .await?;
+    Ok(t)
+}
+
+/// 「你离开的这段时间」发生了什么（开屏横幅）。
+#[derive(Debug, Clone, Default, FromRow)]
+pub struct AwayRow {
+    /// 出片条数（真出了片的，fail 不算）。
+    pub finished: i64,
+    /// 判死条数。
+    pub failed: i64,
+    /// 其中的幽灵单（没入队、没计费，重跑不花钱）。
+    pub phantom: i64,
+    /// 这段时间内实际扣掉的额度（出片回执之和）。
+    pub credits: i64,
+}
+
+/// `since` 之后的出片/判死/扣费统计。
+///
+/// 全部按 `finished_at` 切：那是「这件事发生」的时刻。用 `updated_at` 会把用户自己刚做的
+/// 验收动作也算进「离开期间发生的事」，横幅就会开始复述人自己刚点过的操作。
+pub async fn away_digest(pool: &SqlitePool, since: i64) -> Result<AwayRow, sqlx::Error> {
+    sqlx::query_as::<_, AwayRow>(
+        "SELECT
+           COALESCE(SUM(CASE WHEN stage IN ('rev','pass','rej') THEN 1 ELSE 0 END),0) AS finished,
+           COALESCE(SUM(CASE WHEN stage='fail' THEN 1 ELSE 0 END),0) AS failed,
+           COALESCE(SUM(CASE WHEN stage='fail' AND error_type='phantom' THEN 1 ELSE 0 END),0)
+             AS phantom,
+           COALESCE(SUM(CASE WHEN stage IN ('rev','pass','rej') THEN credit_count ELSE 0 END),0)
+             AS credits
+         FROM v2v_clips WHERE finished_at IS NOT NULL AND finished_at >= ?1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await
+}
+
 /// 从流水线移除（不想给这张图做视频了）。
 pub async fn remove(pool: &SqlitePool, ids: &[i64]) -> Result<i64, sqlx::Error> {
     if ids.is_empty() {
@@ -627,6 +787,178 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
         ok
+    }
+
+    /// 建一条走到 rev（待验收）的 clip，返回它的 id。撤销/入库那几条测试的共同起点。
+    async fn seed_reviewable(pool: &SqlitePool, work_id: i64) -> i64 {
+        seed_work(pool, work_id).await;
+        enqueue_one(pool, work_id).await;
+        let id = list_by_stages(pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submitted(pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
+        mark_ready_for_review(
+            pool,
+            id,
+            "/clips/1.mp4",
+            Some("/clips/1.jpg"),
+            Some(720),
+            Some(1280),
+            Some(24.0),
+            Some(4.0),
+            Some(8),
+            Some("dreamina_seedance_20_fast"),
+            400,
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    // 撤销的核心不变量：整份写回，成片路径与扣费回执一并复原。
+    //
+    // 「把 stage 拨回 rev」是不够的 —— `requeue_for_run` 会连带清掉 video_path / credit_count，
+    // 只改阶段会留下一条「待验收但没有片子」的行，比不给撤销更糟。
+    #[tokio::test]
+    async fn snapshot_then_restore_brings_back_media_and_receipt() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+        let snap = snapshot(&pool, id).await.unwrap().unwrap();
+        assert_eq!(snap.stage, "rev");
+        assert_eq!(snap.video_path.as_deref(), Some("/clips/1.mp4"));
+        assert_eq!(snap.credit_count, Some(8));
+
+        // 误按了「重跑」：成片引用与扣费回执被清空。
+        assert!(requeue_for_run(&pool, id, 500).await.unwrap());
+        let after = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(after.stage, "ready");
+        assert!(after.video_path.is_none());
+        assert!(after.credit_count.is_none());
+
+        assert!(restore(&pool, &snap, 600).await.unwrap());
+        let back = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(back.stage, "rev", "撤销须回到待验收");
+        assert_eq!(
+            back.video_path.as_deref(),
+            Some("/clips/1.mp4"),
+            "成片路径必须一并回来，否则撤销出来的是个空壳"
+        );
+        assert_eq!(back.credit_count, Some(8), "扣费回执必须一并回来");
+        assert_eq!(back.submit_id.as_deref(), Some("sub-1"));
+        assert_eq!(back.attempt, snap.attempt);
+    }
+
+    // 撤销一次「不通过」要回到待验收，且 reviewed_at 复原为空 —— 否则历程条上会留下
+    // 一个「已判定」的时刻，而那一条其实还等着判。
+    #[tokio::test]
+    async fn restore_clears_reviewed_at_after_undoing_a_rejection() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+        let snap = snapshot(&pool, id).await.unwrap().unwrap();
+        assert!(snap.reviewed_at.is_none());
+        assert!(set_reviewed(&pool, id, "rej", 500).await.unwrap());
+        assert_eq!(
+            get(&pool, id).await.unwrap().unwrap().reviewed_at,
+            Some(500)
+        );
+
+        assert!(restore(&pool, &snap, 600).await.unwrap());
+        let back = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(back.stage, "rev");
+        assert!(back.reviewed_at.is_none(), "撤销后不得留下已判定的时刻");
+    }
+
+    // 入资产库的回指：只认 pass，且**包没了要自动回落成未入库**
+    // ——「入库与否」问的是「现在库里有没有」，不是「历史上打过包没有」。
+    #[tokio::test]
+    async fn asset_link_follows_pack_lifetime() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+
+        // 还没验收通过：不得回指（未验收的片子入库会被排期直接发出去）。
+        assert!(!set_asset_pack(&pool, id, 1, 500).await.unwrap());
+        assert!(set_reviewed(&pool, id, "pass", 500).await.unwrap());
+
+        // id 1 是 0010 内置的「通用」分组，另起一个。
+        sqlx::query(
+            "INSERT INTO skus (id,code,style_name,tier,status,created_at,updated_at)
+             VALUES (77,'SKU1','款式','A','active',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO asset_packs (id,sku_id,kind,dir_rel,files_json,lifecycle,source,created_at,updated_at)
+             VALUES (9,77,'video','素材库/SKU1/video','[]','active','v2v',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(set_asset_pack(&pool, id, 9, 600).await.unwrap());
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.asset_pack_id, Some(9));
+        assert_eq!(row.in_asset_lib, 1, "包在，应显示已入资产库");
+
+        sqlx::query("DELETE FROM asset_packs WHERE id = 9")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(
+            row.in_asset_lib, 0,
+            "包被删掉后必须回落成未入库 —— 否则这条成片从待办里永久消失"
+        );
+    }
+
+    // 「你离开的这段时间」按 finished_at 切，且只把真出了片的算进出片数。
+    // 用 updated_at 会把用户自己刚做的验收动作也算进「离开期间发生的事」。
+    #[tokio::test]
+    async fn away_digest_counts_by_finish_time_and_separates_phantoms() {
+        let (pool, _d) = test_pool().await;
+        let a = seed_reviewable(&pool, 1).await; // finished_at = 400，credit 8
+        seed_work(&pool, 2).await;
+        enqueue_one(&pool, 2).await;
+        let b = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_failed(&pool, b, "phantom", "无位次、无计费", 450)
+            .await
+            .unwrap();
+
+        let all = away_digest(&pool, 0).await.unwrap();
+        assert_eq!(all.finished, 1, "只有真出了片的算出片");
+        assert_eq!(all.failed, 1);
+        assert_eq!(all.phantom, 1, "幽灵单要单列 —— 它没扣费，处置与超时相反");
+        assert_eq!(all.credits, 8);
+
+        // 切在两者之间：只该看见后发生的那件事。
+        let later = away_digest(&pool, 420).await.unwrap();
+        assert_eq!(later.finished, 0);
+        assert_eq!(later.failed, 1);
+        assert_eq!(later.credits, 0);
+        assert_ne!(a, b);
+    }
+
+    // 「N 分钟前收录」直接取 rewrote_at 的最大值，不另存一份「上次收录时间」。
+    #[tokio::test]
+    async fn last_rewrote_at_tracks_the_newest_ingest() {
+        let (pool, _d) = test_pool().await;
+        assert!(
+            last_rewrote_at(&pool).await.unwrap().is_none(),
+            "从没收录过"
+        );
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "p", None, None, None, 1234)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(last_rewrote_at(&pool).await.unwrap(), Some(1234));
     }
 
     // 入队幂等：连点验收/重复验收不得产生同一张图的多条重影，

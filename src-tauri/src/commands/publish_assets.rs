@@ -370,6 +370,11 @@ pub async fn pack_from_clip(
     .await?;
     match id {
         Some(id) => {
+            // 回指素材包：看板的「未入资产库」筛选与成片列那句「可入资产库 · 尚未入库」
+            // 都靠它。包在前、回指在后 —— 反过来会留下「记了却没建成」的假记录，
+            // 而那正是会让一条成片从待办里永久消失的方向（同 0018 台账的顺序理由）。
+            crate::db::repo::v2v::set_asset_pack(&state.db, clip_id, id, crate::db::now_unix())
+                .await?;
             let s = publish_settings::load(&state.db).await?;
             let r = repo::get(&state.db, id)
                 .await?

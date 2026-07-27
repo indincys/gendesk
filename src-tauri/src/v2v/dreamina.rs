@@ -217,6 +217,16 @@ pub fn estimate_credits(model_version: &str, video_resolution: &str, duration: i
         .map(|(_, _, per_sec)| per_sec * duration)
 }
 
+/// 某分辨率下的每秒单价（前端算「这一批预估多少额度」用）。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResPrice {
+    pub resolution: String,
+    /// 额度/秒。查不到实测值的组合**不出现在这个列表里** —— 缺席即「未实测」，
+    /// 前端据此标「≥」，不会把一个编出来的数字摆到「确认提交」旁边。
+    pub credit_per_sec: i64,
+}
+
 /// 受控模型清单（前端选择器渲染源）。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +238,12 @@ pub struct ModelInfo {
     /// 最短时长 + 首个分辨率下的预估额度 —— 选择器里那行「≈N 额度/条」。
     /// 选模型这一刻才是价格该出现的地方：44 与 8 差 5.5 倍，选完再告知就晚了。
     pub credit_at_min: Option<i64>,
+    /// 单价表切片。看板要在**分节头**上算「确认提交 18 条 · 预估 144 额度」，
+    /// 那是每次筛选/勾选都会变的数，不能每渲染一次就往后端跑一趟；而把价格表抄一份
+    /// 到前端又必然与 `PRICES` 分叉。故把这一小片真相随模型清单一起发过去。
+    pub res_prices: Vec<ResPrice>,
+    /// 是否是 vip 通道 —— 界面上要把它标出来（同规格贵 5.5 倍，只买到不排队）。
+    pub vip: bool,
 }
 
 pub fn models() -> Vec<ModelInfo> {
@@ -239,6 +255,19 @@ pub fn models() -> Vec<ModelInfo> {
             max_duration: *hi,
             resolutions: res.iter().map(|r| (*r).to_string()).collect(),
             credit_at_min: estimate_credits(m, res[0], *lo),
+            res_prices: res
+                .iter()
+                .filter_map(|r| {
+                    PRICES
+                        .iter()
+                        .find(|(pm, pr, _)| pm == m && pr == r)
+                        .map(|(_, _, per_sec)| ResPrice {
+                            resolution: (*r).to_string(),
+                            credit_per_sec: *per_sec,
+                        })
+                })
+                .collect(),
+            vip: m.ends_with("_vip"),
         })
         .collect()
 }
@@ -1321,5 +1350,47 @@ mod tests {
                 m.model_version
             );
         }
+    }
+
+    // 发给前端的单价切片必须与 `estimate_credits` 同源 —— 看板要在分节头上算
+    // 「确认提交 18 条 · 预估 144 额度」，那个数一旦与确认卡上的对不上，两边都不可信了。
+    #[test]
+    fn res_prices_agree_with_estimate_credits() {
+        for m in models() {
+            for p in &m.res_prices {
+                assert_eq!(
+                    Some(p.credit_per_sec * m.min_duration),
+                    estimate_credits(&m.model_version, &p.resolution, m.min_duration),
+                    "{}/{} 的前端单价与后端预估必须同源",
+                    m.model_version,
+                    p.resolution
+                );
+            }
+            // 未实测的组合**缺席**而不是给 0：界面据此标「≥」。
+            for r in &m.resolutions {
+                let listed = m.res_prices.iter().any(|p| &p.resolution == r);
+                let priced = estimate_credits(&m.model_version, r, m.min_duration).is_some();
+                assert_eq!(
+                    listed, priced,
+                    "{}/{r} 的「有没有价」两边须一致",
+                    m.model_version
+                );
+            }
+        }
+    }
+
+    // vip 标记是界面上那块琥珀色的依据（同规格贵 5.5 倍，买到的只是不排队）。
+    #[test]
+    fn vip_flag_matches_the_channel_suffix() {
+        for m in models() {
+            assert_eq!(
+                m.vip,
+                m.model_version.ends_with("_vip"),
+                "{}",
+                m.model_version
+            );
+        }
+        assert!(models().iter().any(|m| m.vip), "清单里应当有 vip 通道");
+        assert!(models().iter().any(|m| !m.vip), "清单里应当有非 vip 通道");
     }
 }

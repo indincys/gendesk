@@ -145,6 +145,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::v2v_credit,
             commands::v2v::v2v_credit_stats,
             commands::v2v::v2v_queue_stats,
+            commands::v2v::v2v_away_digest,
+            commands::v2v::v2v_mark_seen,
+            commands::v2v::v2v_handoff_status,
             commands::v2v::v2v_sessions,
             commands::v2v::v2v_effective_params,
             commands::v2v::v2v_activity,
@@ -162,6 +165,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::poll_v2v_now,
             commands::v2v::review_v2v_clips,
             commands::v2v::requeue_v2v_clips,
+            commands::v2v::undo_v2v,
             commands::v2v::remove_v2v_clips,
             // stats 域（E25）
             commands::stats::list_group_stats,

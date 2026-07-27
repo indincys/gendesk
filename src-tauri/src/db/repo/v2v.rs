@@ -234,8 +234,11 @@ pub async fn update_ready(
     Ok(res.rows_affected() > 0)
 }
 
-/// 取待提交（ready）条目，供提交命令批量处理。
-pub async fn take_ready(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, sqlx::Error> {
+/// 只读地列出待提交（ready）条目 —— 给「提交前预览命令行与预估额度」用。
+///
+/// 预览不能认领：人打开确认卡后可能直接关掉，而认领会把这一批推进 `run`。
+/// 真正要提交时走 [`claim_ready`]。
+pub async fn list_ready(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, sqlx::Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -246,6 +249,70 @@ pub async fn take_ready(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, 
         q = q.bind(*i);
     }
     q.fetch_all(pool).await
+}
+
+/// **认领**待提交（ready）条目：`ready` → `run`（此刻还没有 submit_id）。
+///
+/// 只读不写地「取一批 ready」是不够的：两处入口会同时来拿同一条 —— 人点「确认提交」
+/// 与常驻队列补单器（`v2v::autofill`）跑在不同任务里，而两者之间隔着整个 CLI 提交的
+/// 网络往返。两个都读到同一条 `ready`，就会为同一张图向即梦下**两次**单、扣两份钱，
+/// 而 `UNIQUE(work_id)` 拦不住它（自始至终只有一行，第二次提交只是覆盖 submit_id，
+/// 第一张片子当场变成认不出主人的孤儿）。
+///
+/// 认领必须发生在**提交之前**。这与「额度不可撤回」不冲突：这一步还没花钱，
+/// 而进程若恰好被杀在认领与写 submit_id 之间，`recover_orphan_submits` 会把
+/// 「run 但没有 submit_id」的条目退回 ready —— 那条恢复路径本来就是为这个窗口写的。
+///
+/// 认领不成功的条目静静跳过：它要么被别人抢走了，要么已经不是 ready（被退回改写/
+/// 被删）。返回的行是**认领到的那些**，调用方对它们负责到底。
+pub async fn claim_ready(
+    pool: &SqlitePool,
+    ids: &[i64],
+    now: i64,
+) -> Result<Vec<ClipRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut claimed: Vec<i64> = Vec::new();
+    for id in ids {
+        let res = sqlx::query(
+            "UPDATE v2v_clips SET stage='run', updated_at=?2 WHERE id=?1 AND stage='ready'",
+        )
+        .bind(*id)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        if res.rows_affected() > 0 {
+            claimed.push(*id);
+        }
+    }
+    if claimed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holes = vec!["?"; claimed.len()].join(",");
+    let sql = format!("{SELECT} WHERE c.id IN ({holes}) ORDER BY c.id");
+    let mut q = sqlx::query_as::<_, ClipRow>(&sql);
+    for i in &claimed {
+        q = q.bind(*i);
+    }
+    q.fetch_all(pool).await
+}
+
+/// 放回认领：`run`（无 submit_id）→ `ready`。
+///
+/// 只在**确定没花钱**的分支上调用（比如这一条根本没有视频提示词，压根没提交）。
+/// `submit_id IS NULL` 这个谓词是硬闸门：有 submit_id 就意味着钱已经扣了，
+/// 放回 ready 等于让它被重新提交一次 —— 花两份钱买同一条视频。
+pub async fn release_claim(pool: &SqlitePool, id: i64, now: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE v2v_clips SET stage='ready', updated_at=?2
+          WHERE id=?1 AND stage='run' AND submit_id IS NULL",
+    )
+    .bind(id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// 只改生成参数（批量覆盖用），不动提示词也不动阶段。
@@ -305,12 +372,12 @@ pub async fn mark_polled(
             SET gen_status=?2, queue_idx=COALESCE(?3, queue_idx), polled_at=?4
           WHERE id=?1",
     )
-        .bind(id)
-        .bind(gen_status)
-        .bind(queue_idx)
-        .bind(now)
-        .execute(pool)
-        .await?;
+    .bind(id)
+    .bind(gen_status)
+    .bind(queue_idx)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1491,6 +1558,87 @@ mod tests {
         assert_eq!(paid_row.submit_id.as_deref(), Some("sub-paid"));
     }
 
+    /// **同一条 ready 只能被认领一次**。
+    ///
+    /// 人点「确认提交」与常驻队列补单器跑在不同任务里，中间隔着整个 CLI 网络往返。
+    /// 两边都读到同一条 `ready` 就会为同一张图下两次单、扣两份钱，而 `UNIQUE(work_id)`
+    /// 拦不住它：自始至终只有一行，第二次提交只是覆盖 submit_id，
+    /// 第一张片子当场变成认不出主人的孤儿。
+    #[tokio::test]
+    async fn a_ready_clip_can_only_be_claimed_once() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "p", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let first = claim_ready(&pool, &[id], 300).await.unwrap();
+        assert_eq!(first.len(), 1, "第一个认领者拿到它");
+        assert_eq!(first[0].stage, "run", "认领即迁移，且发生在提交之前");
+        let second = claim_ready(&pool, &[id], 301).await.unwrap();
+        assert!(second.is_empty(), "第二个认领者必须空手而归");
+
+        // 只读列表照旧看不到它（它已经不是 ready 了），预览也就不会把它算进去。
+        assert!(list_ready(&pool, &[id]).await.unwrap().is_empty());
+    }
+
+    /// 认领到一半被杀 → 启动恢复认得出来（run 且无 submit_id）。
+    /// 这正是「认领可以放在提交之前」的全部依据。
+    #[tokio::test]
+    async fn a_claim_without_a_submit_id_is_recovered_on_startup() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "p", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        claim_ready(&pool, &[id], 300).await.unwrap();
+
+        assert_eq!(recover_orphan_submits(&pool, 400).await.unwrap(), 1);
+        assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "ready");
+    }
+
+    /// 放回认领只对「确定没花钱」的条目生效。
+    ///
+    /// 有 submit_id 就意味着额度已经扣了，把它放回 ready 等于让它被重新提交一次 ——
+    /// 花两份钱买同一条视频，正是这套顺序要防的那件事。
+    #[tokio::test]
+    async fn releasing_a_claim_never_touches_a_paid_submission() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "p", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        claim_ready(&pool, &[id], 300).await.unwrap();
+        release_claim(&pool, id, 310).await.unwrap();
+        assert_eq!(
+            get(&pool, id).await.unwrap().unwrap().stage,
+            "ready",
+            "没提交出去的认领要放回去，不能卡在 run 里等下次启动恢复"
+        );
+
+        claim_ready(&pool, &[id], 320).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-paid", 8), 330)
+            .await
+            .unwrap();
+        release_claim(&pool, id, 340).await.unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "run", "已经扣过费的条目不得被放回待提交");
+        assert_eq!(row.submit_id.as_deref(), Some("sub-paid"));
+    }
+
     // 阶段计数驱动看板列头与侧栏徽章。
     #[tokio::test]
     async fn stage_counts_groups_by_stage() {
@@ -1548,14 +1696,20 @@ mod tests {
             .await
             .unwrap();
 
-        mark_polled(&pool, id, "queue", Some(4485), 900).await.unwrap();
+        mark_polled(&pool, id, "queue", Some(4485), 900)
+            .await
+            .unwrap();
         // 开始生成了 —— 这一份回体不再带 queue_info。
         mark_polled(&pool, id, "generating", None, 1000)
             .await
             .unwrap();
         let row = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(row.queue_idx, Some(4485), "已问到的位次不得被抹成空");
-        assert_eq!(row.gen_status.as_deref(), Some("generating"), "状态照常更新");
+        assert_eq!(
+            row.gen_status.as_deref(),
+            Some("generating"),
+            "状态照常更新"
+        );
         assert_eq!(row.polled_at, Some(1000));
     }
 
@@ -1623,9 +1777,14 @@ mod tests {
         mark_submitted(&pool, ids[0], &SubmitReceipt::bare("sub-1"), submitted)
             .await
             .unwrap();
-        mark_submitted(&pool, ids[1], &SubmitReceipt::healthy("sub-2", 8), submitted)
-            .await
-            .unwrap();
+        mark_submitted(
+            &pool,
+            ids[1],
+            &SubmitReceipt::healthy("sub-2", 8),
+            submitted,
+        )
+        .await
+        .unwrap();
         mark_submitted(&pool, ids[2], &SubmitReceipt::bare("sub-3"), submitted)
             .await
             .unwrap();

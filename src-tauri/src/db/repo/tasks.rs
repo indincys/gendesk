@@ -220,16 +220,31 @@ pub async fn set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), 
     Ok(())
 }
 
-pub async fn mark_running(pool: &SqlitePool, id: i64, api_key_id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE tasks SET status = 'run', api_key_id = ?2, error_type = NULL, error_message = NULL, updated_at = ?3 WHERE id = ?1",
+/// 认领一个任务：`from` → `run`。**返回是否认领成功**。
+///
+/// `AND status = ?4` 不是多余的防御，它是这条路径唯一的并发闸门：调度器先
+/// `fetch_queued` 读一批，再逐个派发，两步之间是异步的 —— 用户在这段窗口里点
+/// 「批量中止」把行删了或改成别的态，无谓词的 UPDATE 会把一个已经不该跑的任务
+/// 重新写成 `run`，然后 spawn 一个 worker **发一次付费请求**，而结果无处可写。
+///
+/// 谓词用调用方刚读到的那个状态原文（`q` 或 `retry`），而不是写死 `'q'`：
+/// 冷却结束的重试任务也走这条路（`Retry → Run` 是合法迁移），写死会让它们永不派发。
+pub async fn mark_running(
+    pool: &SqlitePool,
+    id: i64,
+    api_key_id: i64,
+    from: &str,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE tasks SET status = 'run', api_key_id = ?2, error_type = NULL, error_message = NULL, updated_at = ?3 WHERE id = ?1 AND status = ?4",
     )
     .bind(id)
     .bind(api_key_id)
     .bind(now_unix())
+    .bind(from)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 /// 落盘完成 → 待验收。`size` 是结果图的真实像素（0027）：验收页按真实比例排版，
@@ -678,6 +693,54 @@ mod tests {
         }
         tx.commit().await.unwrap();
         (bid, ids)
+    }
+
+    /// 认领任务是有闸门的：只有仍停在调用方刚读到的那个状态时才认领得到。
+    ///
+    /// 调度器先 `fetch_queued` 读一批，再逐个派发，两步之间隔着若干次 await。用户在
+    /// 这段窗口里点「批量中止」把行删了或改成别的态 —— 无谓词的 UPDATE 会把它重新
+    /// 写成 `run`，然后 spawn 一个 worker 去发一次**付费请求**，而结果无处可写。
+    #[tokio::test]
+    async fn claiming_a_task_requires_it_to_still_be_where_we_left_it() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 2).await;
+        sqlx::query(
+            "INSERT INTO api_keys (id,name,keyring_account,base_url,model,concurrency_limit,enabled,created_at)
+             VALUES (1,'k','acct','http://x','m',1,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 正常：状态没变 → 认领成功。
+        assert!(mark_running(&pool, ids[0], 1, "q").await.unwrap());
+        assert_eq!(
+            get_task(&pool, ids[0]).await.unwrap().unwrap().status,
+            "run"
+        );
+
+        // 中止：用户在读队列与派发之间把它掐了。
+        set_status(&pool, ids[1], "fail").await.unwrap();
+        assert!(
+            !mark_running(&pool, ids[1], 1, "q").await.unwrap(),
+            "状态已经变了 → 不得认领，调度器据此不 spawn worker"
+        );
+        assert_eq!(
+            get_task(&pool, ids[1]).await.unwrap().unwrap().status,
+            "fail",
+            "认领失败不得把它改回 run"
+        );
+
+        // 删除：行都没了。
+        delete_tasks_where(&pool, &[ids[1]], &["fail"])
+            .await
+            .unwrap();
+        assert!(!mark_running(&pool, ids[1], 1, "q").await.unwrap());
+
+        // 重试任务走的是 `retry → run`，谓词用调用方读到的状态原文而不是写死 'q' ——
+        // 写死会让冷却结束的重试任务永远派发不出去。
+        set_status(&pool, ids[0], "retry").await.unwrap();
+        assert!(mark_running(&pool, ids[0], 1, "retry").await.unwrap());
     }
 
     // E22 / D3：归档满 N 天的批次启动时删除（级联任务），作品（accepted_works）不受影响。

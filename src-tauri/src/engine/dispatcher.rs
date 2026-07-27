@@ -338,10 +338,14 @@ impl Scheduler {
             if !super::status::can_transition(from, TaskStatus::Run) {
                 continue; // 守卫：非法迁移不派发
             }
-            if task_repo::mark_running(&self.pool, task.id, key_id)
-                .await
-                .is_err()
-            {
+            // 认领：只有把 `from → run` 这一步真正写进去的那个循环才继续往下走。
+            // 读队列与派发之间隔着若干次 await，用户在那段窗口里中止/删除任务是常态；
+            // 不检查的话这里会把一个已经不该跑的任务重新写成 run，
+            // 再 spawn 一个 worker 去发一次**付费请求**，而结果无处可写。
+            if !matches!(
+                task_repo::mark_running(&self.pool, task.id, key_id, &task.status).await,
+                Ok(true)
+            ) {
                 continue;
             }
             // 派发成功后才从就绪重试集移除。

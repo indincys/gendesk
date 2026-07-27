@@ -1078,7 +1078,7 @@ pub async fn preview_v2v_commands(
     let mut commands = Vec::new();
     let mut estimated_credits = 0;
     let mut unpriced: Vec<String> = Vec::new();
-    for clip in repo::take_ready(&state.db, &ids).await? {
+    for clip in repo::list_ready(&state.db, &ids).await? {
         let opts = dreamina::normalize_opts(&runner::opts_for(&clip, &defaults))?;
         let argv = dreamina::command_line(
             &bin,

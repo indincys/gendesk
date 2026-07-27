@@ -177,6 +177,9 @@ mod tests {
         assert_eq!(c.actionable, 1, "没有幽灵时 run 一条都不算待办");
         let c = c.with_phantom(18);
         assert_eq!(c.actionable, 19, "rev(1) + 藏在 run 里的幽灵疑单(18)");
-        assert_eq!(c.run, 19, "run 的口径不变 —— 幽灵是它的子集，不是另一个阶段");
+        assert_eq!(
+            c.run, 19,
+            "run 的口径不变 —— 幽灵是它的子集，不是另一个阶段"
+        );
     }
 }

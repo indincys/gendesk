@@ -197,7 +197,10 @@ pub async fn submit_batch(
     defaults: &GenOpts,
     log: &Activity,
 ) -> AppResult<SubmitSummary> {
-    let rows = repo::take_ready(pool, ids).await?;
+    // **先认领再提交**。人点「确认提交」与常驻队列补单器跑在不同任务里，中间隔着整个
+    // CLI 网络往返；两边都读到同一条 `ready`，就会为同一张图下两次单、扣两份钱，
+    // 而 `UNIQUE(work_id)` 拦不住（第二次只是覆盖 submit_id，第一张片子当场变成孤儿）。
+    let rows = repo::claim_ready(pool, ids, now_unix()).await?;
     let total = rows.len();
     let mut sum = SubmitSummary::default();
     if total > 0 {
@@ -212,6 +215,9 @@ pub async fn submit_batch(
             .filter(|s| !s.is_empty())
         else {
             log.error("submit", who, "没有视频提示词，跳过", None);
+            // 这一条根本没提交、一分钱没花 → 放回待提交，不让认领把它卡在 run 里
+            // （那要等下次启动的孤儿恢复才回得来）。
+            let _ = repo::release_claim(pool, clip.id, now_unix()).await;
             sum.failed += 1;
             if sum.first_error.is_none() {
                 sum.first_error = Some(format!("{} 没有视频提示词", clip.prompt_code));
@@ -235,7 +241,28 @@ pub async fn submit_batch(
         );
         match dreamina::submit(bin, Path::new(&clip.image_path), prompt, &opts, log, who).await {
             Ok(receipt) => {
-                repo::mark_submitted(pool, clip.id, &receipt, now_unix()).await?;
+                if let Err(e) = persist_submit(pool, clip.id, &receipt, log, who).await {
+                    // 落库彻底失败：钱已经扣了，而 submit_id 只剩日志这一处凭证。
+                    // 绝不 `?` 冒泡 —— 那会连带中止整批（后面每条都还没提交，
+                    // 白白挡住），而这一条的 submit_id 会随内存一起消失。
+                    log.error(
+                        "submit",
+                        who,
+                        format!(
+                            "已提交但落库失败 · submit_id {} · {e}。\
+                             这一单的额度已经扣了，凭证只剩这条日志 —— \
+                             重跑会再花一份钱，先用这个 id 去即梦查一次。",
+                            receipt.submit_id
+                        ),
+                        None,
+                    );
+                    sum.failed += 1;
+                    if sum.first_error.is_none() {
+                        sum.first_error =
+                            Some(format!("{} 提交回执落库失败：{e}", clip.prompt_code));
+                    }
+                    continue;
+                }
                 if receipt.looks_healthy() {
                     let billed = receipt.credit_count.unwrap_or(0);
                     log.info(
@@ -293,7 +320,9 @@ pub async fn submit_batch(
                 }
             }
             Err(e) => {
-                // 提交失败**不置 run**：没有 submit_id 就没花钱，留在 ready 让人改完重提。
+                // 明确拿到失败、且没有 submit_id → 没花钱。判 fail 而不是悄悄放回
+                // ready：错误原文得有地方落，而「处理异常」那一档就是给人看它的。
+                // 认领因此不会留下孤儿（run 且无 submit_id 只可能是进程被杀）。
                 let msg = format!("{e}");
                 log.error("submit", who, format!("提交失败：{msg}"), None);
                 repo::mark_failed(pool, clip.id, "submit", &msg, now_unix()).await?;
@@ -313,6 +342,52 @@ pub async fn submit_batch(
         );
     }
     Ok(sum)
+}
+
+/// 落库提交回执，失败带退避重试。
+///
+/// ## 为什么这一句不能用 `?`
+///
+/// 拿到回执那一刻钱就已经扣了，而 `submit_id` 是这笔钱**唯一**的凭证：没有它，
+/// 那条片子在即梦那边跑完也认不出主人，重跑就是再花一份钱。原来这里是
+/// `mark_submitted(...).await?` —— 一次写库失败（盘满、库被锁住）会同时做两件坏事：
+/// 把整批剩下的条目全挡住（它们连提交都还没提交），以及让这一条的 submit_id
+/// 随着内存一起消失。
+///
+/// 所以：**先把 submit_id 以 error 级喊出来**（`Activity::error` 同时进环形缓冲与
+/// tracing 日志文件，那是失败之后仅剩的凭证），再退避重试几次，仍失败就交给调用方
+/// 记账并**继续下一条**。
+async fn persist_submit(
+    pool: &SqlitePool,
+    id: i64,
+    receipt: &dreamina::SubmitReceipt,
+    log: &Activity,
+    who: Option<(i64, &str)>,
+) -> Result<(), String> {
+    const TRIES: u32 = 3;
+    let mut last = String::new();
+    for attempt in 1..=TRIES {
+        match repo::mark_submitted(pool, id, receipt, now_unix()).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = format!("{e}");
+                // 第一次就喊，不等重试跑完 —— 进程若在重试途中被杀，这句话就是全部。
+                log.error(
+                    "submit",
+                    who,
+                    format!(
+                        "提交回执落库失败（第 {attempt}/{TRIES} 次）· submit_id {} · {last}",
+                        receipt.submit_id
+                    ),
+                    None,
+                );
+                if attempt < TRIES {
+                    tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// 一轮轮询的结果（供事件与测试观察）。
@@ -458,8 +533,7 @@ pub fn phantom_suspect(
 pub fn clip_looks_phantom(c: &repo::ClipRow, now: i64) -> bool {
     c.stage == "run"
         && !Evidence::from_clip(c).any()
-        && c.submitted_at
-            .is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
+        && c.submitted_at.is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
 }
 
 /// 整表扫描一轮 —— **主路径**。
@@ -856,8 +930,7 @@ pub fn fmt_dur(secs: i64) -> String {
 
 /// 当前七态计数（事件载荷）。
 pub async fn counts(pool: &SqlitePool) -> AppResult<StageCounts> {
-    let phantom =
-        repo::count_phantom_suspects(pool, now_unix() - PHANTOM_GRACE_SECS).await?;
+    let phantom = repo::count_phantom_suspects(pool, now_unix() - PHANTOM_GRACE_SECS).await?;
     let mut c = StageCounts::from_rows(&repo::stage_counts(pool).await?).with_phantom(phantom);
     c.undelivered = repo::count_pass_undelivered(pool).await?;
     Ok(c)
@@ -1398,7 +1471,12 @@ mod tests {
     fn a_suspect_is_not_yet_a_verdict() {
         let late = PHANTOM_GRACE_SECS + 1;
         // 嫌疑成立：过了宽限期还没有计费回执。
-        assert!(phantom_suspect("querying", &fresh(None, None), Some(0), late));
+        assert!(phantom_suspect(
+            "querying",
+            &fresh(None, None),
+            Some(0),
+            late
+        ));
         // 但只有同时拿到「队列位次也缺席」这一条，才是判决。
         assert!(is_phantom("querying", &fresh(None, None), Some(0), late));
         assert!(
@@ -1443,6 +1521,36 @@ mod tests {
             Some(two_h - SWEEP_PLAIN_SECS - 1),
             two_h
         ));
+    }
+
+    /// 落库失败绝不能把 submit_id 吞掉：钱已经扣了，那串 id 是唯一的凭证。
+    ///
+    /// 用「表没了」来制造一次必然失败的写入 —— 重点不是错误长什么样，而是失败之后
+    /// 日志里**还找不找得到那个 submit_id**，以及它有没有把整批一起带走
+    /// （返回 `Err` 而不是 `?` 冒泡，调用方据此记账并继续下一条）。
+    #[tokio::test]
+    async fn a_failed_receipt_write_still_shouts_the_submit_id() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        sqlx::query("DROP TABLE v2v_clips")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let log = Activity::silent();
+        let receipt = dreamina::SubmitReceipt::healthy("sub-evidence-only", 8);
+        let err = persist_submit(&pool, 1, &receipt, &log, Some((1, "GG-0001")))
+            .await
+            .unwrap_err();
+        assert!(!err.is_empty());
+        let shouted: Vec<_> = log
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.level == "error" && e.message.contains("sub-evidence-only"))
+            .collect();
+        assert!(
+            !shouted.is_empty(),
+            "落库失败后 submit_id 必须留在 error 级日志里 —— 那是最后的凭证"
+        );
+        assert_eq!(shouted.len(), 3, "退避重试三次，每次都留一条凭证");
     }
 
     // 等待时长要一眼能读，不该逼人心算 11520 秒是多久。

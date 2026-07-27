@@ -17,10 +17,10 @@ export function Sidebar() {
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
   const pubBadges = usePublishStore((s) => s.badges);
-  // 视频流水线徽章只数「人能立刻处理的」（待提交 + 待验收），规则在 Rust 侧算。
+  // 视频流水线徽章数「阻在人身上的」（待改写 + 待提交 + 待验收 + 失败），规则在 Rust 侧算。
   const v2vN = useV2vStore((s) => s.counts.actionable);
-  // 成片库徽章数「做完却没入资产库」的 —— 发布链上唯一一处会无声断掉的地方。
-  const clipsN = useV2vStore((s) => s.counts.noAsset);
+  // 成片徽章数「验收通过了却没交付到输出目录」的 —— 成片这条链上唯一一处会无声断掉的地方。
+  const clipsN = useV2vStore((s) => s.counts.undelivered);
   const version = useAppVersion();
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);

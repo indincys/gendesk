@@ -435,6 +435,22 @@ a:hover {
   font-size: 12px;
   color: var(--t3);
 }
+/* 居中内容栏（原型 prototype.dc.html:55）。窄一些的页面另传 maxWidth 覆盖。 */
+.cwrap {
+  max-width: 1020px;
+  margin: 0 auto;
+  padding: 18px 24px 26px;
+}
+/* 页底动作条（原型 prototype.dc.html:74）。 */
+.genbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--sub);
+  flex: none;
+}
 .pbody {
   flex: 1;
   overflow: auto;
@@ -1598,6 +1614,16 @@ a:hover {
   background: var(--acc);
   border-color: var(--acc);
 }
+/* 标签上的移除 ×（原型 publish.dc.html:182）。 */
+.tagchip .rmx {
+  cursor: pointer;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1;
+}
+.tagchip .rmx:hover {
+  color: var(--er);
+}
 /* E25 生成页生产总览条 */
 .ovbar {
   display: flex;
@@ -2316,8 +2342,14 @@ a:hover {
 .fs13 {
   font-size: 13px;
 }
+.fs14 {
+  font-size: 14px;
+}
 .w100 {
   width: 100%;
+}
+.gap2 {
+  gap: 2px;
 }
 .gap4 {
   gap: 4px;
@@ -2337,8 +2369,14 @@ a:hover {
 .gap10 {
   gap: 10px;
 }
+.gap12 {
+  gap: 12px;
+}
 .gap14 {
   gap: 14px;
+}
+.pa8 {
+  padding: 8px;
 }
 .mt4 {
   margin-top: 4px;
@@ -3290,14 +3328,20 @@ a:hover {
   min-width: 220px;
 }
 
-/* ==================== 视频流水线（v0.19.0 重构：看板 → 分节表格） ====================
+/* ==================== 视频流水线（v0.22.0：按「下一步动作」组织） ====================
  *
- * 五列看板换成按批次分节的表格，理由见 `V2vPage.tsx` 顶部：阶段是最不缺的信息，
- * 缺的是「这一批做到哪了」「有没有出事」「这一条花没花钱」这三个跨阶段的问题。
+ * 表格按批次分节，筛选轴是「下一步该干什么」而不是阶段 —— 阶段名就写在每一条脸上，
+ * 是最不缺的信息；缺的是「所以我现在该干嘛」。
  *
- * 九列定宽 —— 每列宽度由**内容的最坏情况**定，不是平均值：
- * 编号 82（BR31-0140 ·2）· 阶段 72 · 模型 86（2.0fast_vip）· 即梦 74（Generating）·
- * 已等 112（2h31m · 12m前）· 额度 38 · 情况自适应且最先被截断。
+ * **七列定宽**（v0.22.0 从九列收窄）。宽度预算是硬约束而不是审美：1140px 最小窗
+ * 减去侧栏 212、shell padding 20、边框、268px 详情栏、10px 滚动条、24px 行内边距，
+ * 只剩约 601px 给轨道与间隙。原来九列最小要 716px —— 于是「情况」列**一直**被裁掉
+ * 且无处可滚。删掉的两列都是重复信息：「阶段」由情况那句话与色点代替，
+ * 「即梦」对非 run 行恒为 —，对 run 行的同一事实已在情况里。
+ *
+ * 每列宽度由**内容的最坏情况**定，不是平均值：
+ * 编号 82（BR31-0140 ·2）· 模型 72（2.0fast_vip）· 已等 62（2h31m）· 额度 44（三位数）·
+ * 情况自适应且最先被截断（故例外必须排在常态前面）。
  */
 
 /* 页头：标题 + 心跳 + 余额/通过率 + 三个面板入口。 */
@@ -3433,44 +3477,70 @@ a:hover {
   opacity: 0.5;
 }
 
-/* 表头 */
-.vrowh {
+/**
+ * 表体滚动容器。
+ *
+ * v0.19.0–v0.21.0 这里写的是 `className="sc"`，而 `.sc` **从来没有定义过**（它只存在于
+ * `docs/prototype/prototype.dc.html`）—— 于是这个 div 只有 flex:1、没有 overflow，
+ * 内容溢出后被上游 `.ohide` / `.main{overflow:hidden}` 裁掉：没有滚动条、没有滚轮目标，
+ * 第一屏之后的行物理上够不着。`src/styles/classnames.test.ts` 现在守住这一类。
+ *
+ * 表头与分节头都 sticky 在**容器内部**。表头留在容器外面时，那条 10px 的经典滚动条
+ * （`::-webkit-scrollbar`）只吃表体的宽度，同一套 grid 模板于是算出两组列位 ——
+ * 那正是「列的数据都对不齐」。
+ */
+.vtbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* 表头高度的**单一来源**：`.vgrid.th` 的 height 与 `.vsect` 的 top 都读它。
+     两处各写一个 27px 的话，改一处就错位，而错位只在滚到一半时才看得见。 */
+  --vhdh: 27px;
+  scrollbar-gutter: stable;
+}
+
+/**
+ * 表格。模板只写一次 —— 表头与数据行分开写模板时，改一列要改两处，
+ * 而漏改的那一处只在最后一列错位时才被发现（`.vrowh`/`.vrow` 曾经就是这样）。
+ * 同 `.tgrid`（任务页）/`.sgrid`（资产页）的形制。
+ */
+.vgrid {
   display: grid;
-  grid-template-columns: 22px 26px 82px 72px 86px 74px 112px 38px minmax(140px, 1fr);
+  grid-template-columns: 22px 26px 82px 72px 62px 44px minmax(150px, 1fr);
   align-items: center;
   column-gap: 8px;
   padding: 0 12px;
-  height: 27px;
-  flex: none;
+  /* 低于此宽由 `.vtbody` 横向滚动接手，而不是把「情况」列裁掉
+     （同 `.klist`/`.kline` 在 v0.11.0 的处置）。 */
+  min-width: 530px;
+}
+.vgrid.th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: var(--vhdh);
   font-size: 10.5px;
   font-weight: 600;
   color: var(--t3);
   border-bottom: 1px solid var(--line);
   background: #fff;
 }
-
-/* 数据行 */
-.vrow {
-  display: grid;
-  grid-template-columns: 22px 26px 82px 72px 86px 74px 112px 38px minmax(140px, 1fr);
-  align-items: center;
-  column-gap: 8px;
-  padding: 0 12px;
+.vgrid.tr {
   height: 32px;
   font-size: 12px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
   text-align: left;
 }
-.vrow:hover {
+.vgrid.tr:hover {
   background: var(--sub);
 }
-.vrow.sel {
+.vgrid.tr.sel {
   background: oklch(58% 0.18 257 / 0.05);
 }
 /* 光标行左侧那道 2px 竖条：一次 46 条判定时，「我在哪一条」必须一眼可见，
    而单靠背景色在快速移动时看不清。 */
-.vrow.cur {
+.vgrid.tr.cur {
   background: var(--accbg);
   box-shadow: inset 2px 0 0 var(--acc);
 }
@@ -3500,14 +3570,16 @@ a:hover {
   background: var(--inset);
   display: block;
 }
-.vstagec {
-  display: inline-flex;
+/* 「情况 · 下一步」单元格：动作色点 + 那句话。色点吸进这一格而不是独占一列 ——
+   独占要 72px，恰恰是这一列被裁掉的那部分宽度。 */
+.vsit {
+  display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   font-size: 11px;
-  white-space: nowrap;
+  min-width: 0;
 }
-.vstagec .d {
+.vsit .d {
   width: 6px;
   height: 6px;
   border-radius: 99px;
@@ -3531,7 +3603,8 @@ a:hover {
   background: var(--wrbg);
 }
 
-/* 分节头（一个批次一节）。sticky 让滚到一半时仍答得出「这是哪一批」。 */
+/* 分节头（一个批次一节）。sticky 让滚到一半时仍答得出「这是哪一批」。
+   停在**表头下方**（top = 表头高度）而不是 top:0，否则两者会重叠在同一条线上。 */
 .vsect {
   display: flex;
   align-items: center;
@@ -3542,11 +3615,11 @@ a:hover {
   border-bottom: 1px solid var(--line);
   cursor: pointer;
   position: sticky;
-  top: 0;
-  z-index: 1;
+  top: var(--vhdh);
+  z-index: 2;
+  min-width: 530px;
 }
-.vsect .cr,
-.vdone .cr {
+.vsect .cr {
   color: var(--t3);
   font-size: 9px;
   width: 8px;
@@ -3560,16 +3633,13 @@ a:hover {
   text-overflow: ellipsis;
   max-width: 200px;
 }
-/* 阶段混合分段条：这一批的全貌，一眼扫过去就知道是「刚开跑」还是「等你验收」。 */
-.vsect .seg {
-  display: flex;
-  height: 6px;
-  width: 104px;
-  flex: none;
-  border-radius: 99px;
-  overflow: hidden;
-  background: var(--inset);
-}
+/**
+ * 节头摘要，一句人话。
+ *
+ * 取代 v0.19.0 那条 104px 的阶段混合分段条 —— 它唯一的图例是 `title=` tooltip，
+ * 于是「每个分组这些进度条是什么意思」成了一个没人答得上来的问题。
+ * 一句话既自带图例，又能直接说出数字。
+ */
 .vsect .tl {
   font-size: 11px;
   color: var(--t3);
@@ -3577,6 +3647,13 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+}
+.vsect .tl.er {
+  color: var(--er);
+  font-weight: 500;
+}
+.vsect .tl.acc {
+  color: var(--acc2);
 }
 
 /* 连续毙掉三条以上的提醒 —— 那时该退回改写整组，而不是一条条重跑（每次都要再花钱）。 */
@@ -3591,11 +3668,46 @@ a:hover {
   color: var(--wr2);
   line-height: 1.5;
 }
-.vsempty {
+/**
+ * 「去改写」召唤 —— 全流水线最大的一处阻塞。
+ *
+ * 待改写只可能由人推动（去 Claude Code / Codex 跑 v2v-rewrite），而 GenDesk 这边
+ * 工单已经物化好、什么都不缺。**不可关闭**：一个可关掉的 CTA 会立刻退化回
+ * 「21 条躺在那里没人知道该干嘛」那个状态。
+ */
+.vcall {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--accbg);
+  border-bottom: 1px solid var(--accln);
+  flex-wrap: wrap;
+}
+.vcall.er {
+  background: var(--erbg);
+  border-bottom-color: var(--erln);
+}
+.vcall .ttl {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--acc2);
+  white-space: nowrap;
+}
+.vcall.er .ttl {
+  color: var(--er);
+}
+.vcall .ds {
   font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+  min-width: 0;
+}
+.vcall .pth {
+  font: 500 10.5px var(--mono);
   color: var(--t3);
-  padding: 9px 12px 9px 28px;
-  border-bottom: 1px solid var(--line);
+  user-select: text;
 }
 
 /* 工作台清空 —— 已定案的批次整节消失，这里是它留下的那句话。 */
@@ -4188,6 +4300,12 @@ a:hover {
   color: var(--rd-t3);
   flex: none;
   padding-bottom: 14px;
+}
+/* 胶片格的滚动区：只可能**横向**溢出（一行缩略图），纵向溢出要裁掉，
+   否则 46 格的高度会把播放器顶上去。 */
+.vstrip {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .vrevcell {
   width: 46px;

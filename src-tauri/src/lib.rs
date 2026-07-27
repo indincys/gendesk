@@ -124,6 +124,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,
             commands::v2v::pick_handoff_root,
+            commands::v2v::pick_clips_output_dir,
+            commands::v2v::v2v_clips_dir,
             commands::v2v::pick_dreamina_bin,
             commands::v2v::resolve_v2v_bin,
             commands::v2v::v2v_models,
@@ -154,6 +156,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::undo_v2v,
             commands::v2v::remove_v2v_clips,
             commands::v2v::open_clips_output_dir,
+            commands::v2v::redeliver_v2v_clips,
             // stats 域（E25）
             commands::stats::production_overview,
             // trash 域
@@ -195,7 +198,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_assets::list_asset_packs,
             commands::publish_assets::import_media_files,
             commands::publish_assets::pack_from_works,
-            commands::publish_assets::pack_from_clip,
             commands::publish_assets::retire_pack,
             commands::publish_assets::restore_pack,
             commands::publish_assets::delete_pack,

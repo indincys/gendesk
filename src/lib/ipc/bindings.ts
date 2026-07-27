@@ -872,6 +872,29 @@ async pickHandoffRoot() : Promise<Result<string | null, AppError>> {
 }
 },
 /**
+ * 选成片交付目录。
+ */
+async pickClipsOutputDir() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_clips_output_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 当前生效的成片交付目录（绝对路径）。设置里留空时回落到默认，界面直接摆出来 ——
+ * 「片子交付到哪儿了」不该靠猜。
+ */
+async v2vClipsDir() : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_clips_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 选即梦 CLI 可执行文件。
  * 
  * 「怎么知道路径填什么」不该由用户回答：给个文件选择器，再不济也有 [`resolve_v2v_bin`]
@@ -1197,11 +1220,31 @@ async removeV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
 }
 },
 /**
- * 在系统文件管理器打开成片交付目录 `outputs/视频/`。
+ * 在系统文件管理器打开成片交付目录。
  */
 async openClipsOutputDir() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_clips_output_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 重新交付：把成片再拷一次到当前交付目录。
+ * 
+ * 三种情况都会走到它，而它们在库里长得一模一样（`stage='pass'` 且 `export_path` 空
+ * 或指向一个已经不存在的文件）：
+ * 1. 验收那一刻拷贝失败了（磁盘满、目标目录不可写）—— 那时**不回滚验收**，
+ * 判定是人做的，文件是可以补的；
+ * 2. 交付目录被改到了别处，旧成片还留在老位置；
+ * 3. 人手动把交付出去的那份删了/移走了。
+ * 
+ * 之所以能补：`clips/clip{id}.mp4` 那份是流水线自己的资产，从来只拷不移。
+ */
+async redeliverV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("redeliver_v2v_clips", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1513,23 +1556,6 @@ async importMediaFiles(skuId: number, paths: string[]) : Promise<Result<PackView
 async packFromWorks(skuId: number, workIds: number[]) : Promise<Result<PackView | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pack_from_works", { skuId, workIds }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 成片 → 视频型素材包（视频流水线闭环的最后一步）。
- * 
- * 这一步是「视频的终点本来就在库内」那句话的落地：做视频的目的就是发布，而发布模块
- * 早已有「视频型素材包 = 1 视频 + 封面」。让成片从另一个门回来纯属浪费。
- * 
- * **只接受已验收通过的成片**：未验收的片子进了资产库就会被排期选中发出去，
- * 而验收正是为了拦住那种事。
- */
-async packFromClip(skuId: number, clipId: number) : Promise<Result<PackView | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pack_from_clip", { skuId, clipId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2298,13 +2324,18 @@ createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewed
  */
 autoSubmitted: boolean; 
 /**
- * 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
- * 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
+ * 历史上打进过哪个素材包（0025）。
+ * 
+ * v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
+ * 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
+ * 但没有任何逻辑再读它，界面上也不再出现。
  */
-assetPackId: number | null; inAssetLib: boolean; 
+assetPackId: number | null; 
 /**
- * 验收通过后交付到 `outputs/视频/{组}/` 的那份拷贝（0027）。
- * 成片页据此回答「这条片子在哪」——clips/clip{id}.mp4 那个名字人在 Finder 里认不出。
+ * 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
+ * 
+ * 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
+ * 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
  */
 exportPath: string | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
@@ -3269,22 +3300,27 @@ materialDays: number | null; titleDays: number | null; bodyDays: number | null }
  */
 export type StageCounts = { rewrite: number; ready: number; run: number; rev: number; pass: number; rej: number; fail: number; 
 /**
- * 侧栏徽章数：需要人动手的两处 —— 待提交与待验收。
+ * 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败。
  * 
- * 刻意**不含**待改写（那一步在 Claude Code 里做，催也没用）与已提交（机器在跑，
- * 人插不上手）。徽章只该催人能立刻处理的事。
+ * **待改写在里面**（v0.22.0 改的）。旧口径把它排除在外，理由是「那一步在
+ * Claude Code 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk
+ * 这边工单早已物化好、什么都不缺。排除它等于让全流水线最大的一处阻塞显示为 0，
+ * 实测 21 条待改写时徽章与「需要我」都是 0，而那 21 条谁也不会自己动。
  * 
- * 在 Rust 侧算好而不是让前端 `ready + rev`：这条「什么算待办」的规则会随流水线
- * 演进（将来 fail 也许该催），留在前端就会与后端的判断悄悄分叉。
+ * 仍**不含**已提交（机器在跑，人插不上手）与已定案的两态。
+ * 
+ * 在 Rust 侧算好而不是让前端加：这条「什么算待办」的规则会随流水线演进，
+ * 留在前端就会与后端的判断悄悄分叉。前端的 `MINE` 与这里同义，两处一起改。
  */
 actionable: number; 
 /**
- * 成片做完却没入资产库的条数 —— 成片库那一页的徽章。
+ * 验收通过了却没交付到输出目录的条数 —— 成片库那一页的徽章。
  * 
- * 它是**发布链上唯一一处会无声断掉的地方**：片子出来了、验收过了，然后就停在
- * 那里，排期永远排不到它，而界面上没有任何东西会提这件事。
+ * 它是成片这条链上**唯一一处会无声断掉的地方**：验收时的拷贝失败不回滚验收
+ * （判定是人做的，文件可以补），于是「片子做出来了却没落地」是个完全合法、
+ * 界面上又完全看不见的状态。
  */
-noAsset: number }
+undelivered: number }
 /**
  * 提交确认卡的全部内容：真实命令行 + 预计额度消耗 + 当前余额。
  */
@@ -3565,7 +3601,19 @@ timeoutHours?: number | null;
 /**
  * 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
  */
-autofill?: AutofillCfg }
+autofill?: AutofillCfg; 
+/**
+ * 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
+ * 
+ * 成片是 B-roll 素材，下游是剪辑而不是发布链，故它必须落在用户自己的工作目录里
+ * （素材库、剪辑工程旁边），而不是应用数据目录深处 —— 那个位置人在 Finder 里
+ * 根本找不到，等于交付了个寂寞。
+ * 
+ * 形制照 `handoff_root`（空串回落到默认）而**不是** `Settings::output_dir`：
+ * 后者有字段、有选择器、有设置页 UI，却没有任何一个消费者读它 ——
+ * 那是「选了目录却不生效」，正是这一版要根治的那类失信。
+ */
+clipsOutputDir?: string }
 /**
  * `v2v://tick` —— 轮询器心跳（每轮一发，无论有没有变化）。
  * 

@@ -29,36 +29,83 @@ use super::events::StageCounts;
 /// 循环的心跳节拍。**不等于查询频率**：心跳快是为了界面上那句「12 秒前」跟得上。
 pub const TICK: Duration = Duration::from_secs(6);
 
-/// 整表扫描的间隔（秒）。**常数，不再随等待时长递增**。
+/// 整表扫描的间隔（秒），**按通道分档**。
 ///
-/// ## 为什么退避轮询被换掉了
+/// ## 为什么只能轮询
 ///
-/// 退避（`poll_interval_for`）解决的是「19 条在跑就要起 19 个 `query_result` 进程」，
-/// 它把频率压下去换成本 —— 代价是**出片延迟**：等满一小时后十分钟才问一次，一条
-/// 早就跑完的片子要躺到十分钟后才被发现。那是拿延迟换成本，两头都不满意。
+/// 实跑 `dreamina -h` 确认过：CLI 没有任何推送机制（无 watch / stream / webhook /
+/// subscribe）。`image2video --poll=N` 只是把 1 秒一次的轮询搬进子进程，进程被杀即丢，
+/// 比自建轮询器更差（`dreamina::command_line` 已显式 `--poll=0` 关掉它）。
+/// 所以「事件驱动不轮询」在这条链路上做不到，能改的只有频率。
 ///
-/// 真正的解法是换掉「问一次」的单位：`dreamina list_task` **一个进程就回一整页**
-/// 全部在跑任务的状态。于是进程数与在跑条数**脱钩**（O(1) 而非 O(n)），频率反而
-/// 可以调高。19 条过夜 8 小时：原始每 6 秒逐条 = 九万次；退避 ≈ 1140 次；
-/// 30 秒整表扫描 = **960 次，且与条数无关**（100 条在跑仍是 960 次），
-/// 同时出片延迟从「最长 10 分钟」降到「最长 30 秒」。成本与延迟同时变好。
+/// ## 单位已经是「一整页」，所以频率是纯粹的成本旋钮
 ///
-/// CLI 侧没有任何推送机制（无 watch / stream / webhook；`--poll=N` 只是把 1 秒一次的
-/// 轮询搬进子进程，进程被杀即丢），所以「事件驱动不轮询」在这条链路上做不到 ——
-/// 能做的就是把轮询的单位从「一条」换成「一整页」。
-pub const SWEEP_SECS: i64 = 30;
+/// `dreamina list_task` 一个进程就回一整页全部在跑任务的状态，故进程数与在跑条数
+/// **脱钩**（O(1) 而非 O(n)）—— 100 条在跑和 1 条在跑花的钱一样。
+///
+/// ## 分档的依据是「这条要等多久」，而那由通道决定
+///
+/// 实测：非 VIP 排在第 4485 位、要等几小时；VIP 直接 `Generating`、1–3 分钟出片。
+/// 拿同一个节拍去问这两种任务，对谁都不合适。故：
+///
+/// | 在跑集合 | 间隔 | 8 小时过夜的进程数 | 相对 30 秒常数 |
+/// |---|---|---|---|
+/// | 含 VIP | 5 分钟 | 96 | 少 10× |
+/// | 全非 VIP | 600 秒 = 10 分钟 | 48 | 少 20× |
+/// | 空 | 不扫 | 0 | —— |
+///
+/// **代价写在这里，免得下次有人以为是 bug**：VIP 1–3 分钟就出片，而 5 分钟一档意味着
+/// 一条早已出片的 VIP 单最多可以在界面上「已提交」着躺 5 分钟。对策是
+/// [`SWEEP_AFTER_SUBMIT_SECS`] 的补扫，不是把档位调回去。
+pub const SWEEP_VIP_SECS: i64 = 300;
+pub const SWEEP_PLAIN_SECS: i64 = 600;
+
+/// 每批提交后多久补扫一次（秒）。
+///
+/// 按**批**不按条：20 条 VIP 一起提交只多这一个进程。它存在的唯一理由是让上面那张表
+/// 里 VIP 那行的代价（最多 5 分钟看不到已出的片）在最常见的场景里不发生 ——
+/// 人刚点完提交，正盯着屏幕。
+pub const SWEEP_AFTER_SUBMIT_SECS: i64 = 60;
+
+/// 在跑集合该用哪个档位。
+///
+/// 「含 VIP 就走快档」而不是按多数派：慢档会让那几条快单白等，而快档对慢单的额外
+/// 代价只是每 8 小时多 48 个进程。判错方向的代价不对等，就往便宜的那边错。
+pub fn sweep_interval(any_vip: bool) -> i64 {
+    if any_vip {
+        SWEEP_VIP_SECS
+    } else {
+        SWEEP_PLAIN_SECS
+    }
+}
 
 /// 上一次整表扫描的时刻（进程内）。
 ///
-/// 队列面板要显示「下次查询还有几秒」，而那个数字现在由扫描节拍决定，不再由每条
-/// 各自的退避决定 —— 与其让命令层照着公式重算一遍（必然与实际跑的循环分叉），
-/// 不如让循环自己记下来。
+/// 队列面板要显示「下次查询还有几秒」，而那个数字由扫描节拍决定 —— 与其让命令层
+/// 照着公式重算一遍（必然与实际跑的循环分叉），不如让循环自己记下来。
 static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 当前生效的扫描间隔（秒）。循环每轮按在跑集合更新它，面板读它。
+static SWEEP_EVERY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(SWEEP_PLAIN_SECS);
+
+/// 请求一次提前扫描：把「上次扫描时刻」往前挪，使下一轮在 N 秒后到点。
+///
+/// 提交成功后调用。**不是立刻扫**：提交那一刻即梦还没来得及给位次，实测健康单
+/// 25 秒内才拿到 `queue_idx`，立刻问只会得到一份什么都没有的回体。
+pub fn request_sweep_soon(now: i64) {
+    let every = SWEEP_EVERY.load(std::sync::atomic::Ordering::Relaxed);
+    LAST_SWEEP.store(
+        now - (every - SWEEP_AFTER_SUBMIT_SECS).max(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 /// 距下一次整表扫描还有多少秒（`None` = 还没跑过第一轮）。
 pub fn next_sweep_in(now: i64) -> Option<i64> {
     let last = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
-    (last > 0).then(|| (last + SWEEP_SECS - now).max(0))
+    let every = SWEEP_EVERY.load(std::sync::atomic::Ordering::Relaxed);
+    (last > 0).then(|| (last + every - now).max(0))
 }
 
 /// 单条 clip 距上次查询要隔多久才再查一次（秒），按它已经等了多久递增。
@@ -66,13 +113,15 @@ pub fn next_sweep_in(now: i64) -> Option<i64> {
 /// **只用于回落路径**：整表扫描里认不出的 submit_id（翻页没覆盖到、CLI 输出变了）
 /// 仍走逐条 `query_result`，那时退避照旧生效。主路径已经不需要它了，
 /// 但这条路必须留着 —— 认不出的条目恰恰是最不该被放弃轮询的那些。
+///
+/// 下限抬到 [`SWEEP_VIP_SECS`]：回落路径是**逐条**起进程的（O(n)），它比整表扫描贵
+/// 得多，绝没有道理比扫描问得还勤。原来那两档 10s/30s 是在 30 秒常数扫描下定的，
+/// 分档之后它们会让「扫描认不出的那几条」反过来成为进程数的大头。
 pub fn poll_interval_for(age_secs: i64) -> i64 {
     match age_secs {
-        a if a < 120 => 10,       // 刚提交：想尽快确认进没进队列
-        a if a < 600 => 30,       // 前 10 分钟：短任务可能已经出片
-        a if a < 3600 => 120,     // 一小时内：两分钟一次
-        a if a < 6 * 3600 => 300, // 数小时：五分钟一次
-        _ => 600,                 // 过夜：十分钟一次足够
+        a if a < 600 => SWEEP_VIP_SECS, // 前 10 分钟：跟快档同步，快单可能已出片
+        a if a < 6 * 3600 => SWEEP_PLAIN_SECS, // 数小时内：十分钟一次
+        _ => 1800,                      // 过夜：半小时一次足够
     }
 }
 
@@ -725,7 +774,7 @@ pub fn fmt_dur(secs: i64) -> String {
 /// 当前七态计数（事件载荷）。
 pub async fn counts(pool: &SqlitePool) -> AppResult<StageCounts> {
     let mut c = StageCounts::from_rows(&repo::stage_counts(pool).await?);
-    c.no_asset = repo::count_pass_without_pack(pool).await?;
+    c.undelivered = repo::count_pass_undelivered(pool).await?;
     Ok(c)
 }
 
@@ -755,9 +804,8 @@ pub fn spawn(
             Err(e) => log.error("poll", None, format!("中断恢复失败：{e}"), None),
             _ => {}
         }
-        // 上一轮整表扫描的时刻。心跳 6 秒一次（界面那句「12 秒前」要跟得上），
-        // 扫描 30 秒一次（那才是真正起进程的动作）—— 两个节拍分开。
-        let mut last_sweep = 0i64;
+        // 「上一轮扫描的时刻」用全局 `LAST_SWEEP` 而不是循环局部变量：提交成功后会调
+        // `request_sweep_soon` 把它往前挪来请求补扫，局部变量收不到那个请求。
         // 上一次「队列告急」通知的时刻。放在循环局部而不是库里：重启应用后重发一次
         // 是可以接受的（那时人本来就在看界面），而每 30 秒弹一次通知不可接受。
         let mut last_refill = super::autofill::Memo::default();
@@ -796,10 +844,26 @@ pub fn spawn(
                 let _ = tick.emit(&app);
                 continue;
             }
-            // 心跳每 6 秒发一次，但真正去问即梦是 30 秒一次。分开的理由是成本结构：
-            // 心跳是一次内存读，扫描是一个进程。
-            if tick.at - last_sweep >= SWEEP_SECS {
-                last_sweep = tick.at;
+            // 档位由**在跑集合里有没有 VIP** 决定，每轮重算：VIP 1–3 分钟出片，
+            // 非 VIP 排队几小时，拿同一个节拍问这两种任务对谁都不合适。
+            // 每 6 秒一次的 SELECT 是内存级开销，与起一个进程不在一个量级。
+            let any_vip = repo::running_models(&pool)
+                .await
+                .map(|ms| {
+                    ms.iter().any(|m| {
+                        m.as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(settings.model_version.as_str())
+                            .ends_with("_vip")
+                    })
+                })
+                .unwrap_or(false);
+            let every = sweep_interval(any_vip);
+            SWEEP_EVERY.store(every, std::sync::atomic::Ordering::Relaxed);
+
+            // 心跳每 6 秒发一次（内存读），真正去问即梦是 5/10 分钟一次（一个进程）。
+            let last_sweep = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
+            if last_sweep == 0 || tick.at - last_sweep >= every {
                 match sweep_once(&pool, &dirs, &settings.bin, settings.timeout_secs(), &log).await {
                     Ok(sum) => {
                         tick.finished = sum.finished;
@@ -882,7 +946,6 @@ mod tests {
             reviewed_at: None,
             auto_submitted: 0,
             asset_pack_id: None,
-            in_asset_lib: 0,
             updated_at: 0,
             prompt_code: "GG-0001".into(),
             image_path: "/img.jpg".into(),
@@ -1033,11 +1096,15 @@ mod tests {
             assert!(cur >= last, "间隔不得回缩：age={age} 时 {cur} < {last}");
             last = cur;
         }
-        assert_eq!(poll_interval_for(0), 10, "刚提交要快，尽快确认进没进队列");
-        assert_eq!(poll_interval_for(86_400), 600, "过夜十分钟一次足够");
+        assert_eq!(
+            poll_interval_for(0),
+            SWEEP_VIP_SECS,
+            "刚提交时跟最密的扫描档同步，不比它更密（回落路径是逐条起进程的）"
+        );
+        assert_eq!(poll_interval_for(86_400), 1800, "过夜半小时一次足够");
     }
 
-    // 退避带来的实际节省：19 条跑 8 小时，从九万次降到两千次量级。
+    // 退避带来的实际节省：19 条跑 8 小时，从九万次降到几百次量级。
     // 这条测的不是某个具体数字，而是「量级确实降下来了」。
     #[test]
     fn backoff_cuts_overnight_polling_by_orders_of_magnitude() {
@@ -1056,15 +1123,14 @@ mod tests {
         );
     }
 
-    /// 整表扫描的进程数与在跑条数**脱钩** —— 这才是它取代退避的理由。
+    /// 整表扫描的进程数与在跑条数**脱钩** —— 这才是它取代逐条轮询的理由。
     ///
-    /// 退避靠「问得少」省钱，代价是出片延迟最长十分钟；扫描靠「一次问全部」省钱，
-    /// 于是频率可以调高，成本与延迟同时变好。条数越多，差距越大。
+    /// 逐条靠「问得少」省钱，代价是出片延迟；扫描靠「一次问全部」省钱，于是频率
+    /// 是纯粹的成本旋钮。条数越多，差距越大。
     #[test]
     fn sweeping_decouples_process_count_from_clip_count() {
         let hours = 8i64;
-        let sweeps = hours * 3600 / SWEEP_SECS;
-        let backoff_calls = |clips: i64| {
+        let per_clip_calls = |clips: i64| {
             let mut n = 0i64;
             let mut t = 0i64;
             while t < hours * 3600 {
@@ -1073,18 +1139,70 @@ mod tests {
             }
             n
         };
-        // 19 条：两者同量级，但扫描的出片延迟只有 30 秒。
-        assert!(sweeps < backoff_calls(19) * 2);
-        // 100 条：退避随条数线性涨，扫描一动不动。
+        for every in [SWEEP_VIP_SECS, SWEEP_PLAIN_SECS] {
+            let sweeps = hours * 3600 / every;
+            assert!(
+                sweeps < per_clip_calls(19),
+                "19 条在跑时扫描就该更省：{sweeps} vs {}",
+                per_clip_calls(19)
+            );
+            // 100 条：逐条随条数线性涨，扫描一动不动 —— 这是「脱钩」的全部意思。
+            assert_eq!(sweeps, hours * 3600 / every);
+            assert!(sweeps * 5 < per_clip_calls(100));
+        }
+    }
+
+    /// 分档：有 VIP 走快档，全非 VIP 走慢档。
+    ///
+    /// 依据是实测的两种等待时长：VIP 直接 Generating、1–3 分钟出片；非 VIP 排在
+    /// 第 4485 位、要等几小时。「含 VIP 就走快档」而不是按多数派 —— 慢档会让那几条
+    /// 快单白等，而快档对慢单的额外代价只是每 8 小时多几十个进程，两边不对等。
+    #[test]
+    fn sweep_tier_follows_the_channel() {
+        assert_eq!(sweep_interval(true), SWEEP_VIP_SECS);
+        assert_eq!(sweep_interval(false), SWEEP_PLAIN_SECS);
         assert!(
-            sweeps * 5 < backoff_calls(100),
-            "100 条在跑时扫描应至少省 5 倍：{sweeps} vs {}",
-            backoff_calls(100)
+            sweep_interval(true) < sweep_interval(false),
+            "VIP 档必须更密"
         );
-        assert!(
-            SWEEP_SECS < poll_interval_for(3600),
-            "扫描节拍必须比退避到达的稳态间隔更密，否则换机制换了个寂寞"
+
+        // 降幅要对得上写在文档里的那张表（8 小时过夜）。
+        let per_night = |every: i64| 8 * 3600 / every;
+        assert_eq!(per_night(SWEEP_VIP_SECS), 96);
+        assert_eq!(per_night(SWEEP_PLAIN_SECS), 48);
+    }
+
+    /// 回落路径（逐条 `query_result`）绝不能比整表扫描问得还勤。
+    ///
+    /// 它是 O(n) 的：扫描认不出的那几条若每 10 秒各起一个进程，反而会成为进程数的
+    /// 大头 —— 那正是把主路径换成扫描之后最容易留下的一处旧参数。
+    #[test]
+    fn per_clip_fallback_is_never_denser_than_the_sweep() {
+        for age in [0, 60, 599, 600, 3600, 6 * 3600, 24 * 3600] {
+            assert!(
+                poll_interval_for(age) >= SWEEP_VIP_SECS,
+                "age={age} 的回落间隔比最密的扫描档还密"
+            );
+        }
+    }
+
+    /// 提交后的补扫：把「上次扫描时刻」往前挪，使下一轮在 60 秒后到点。
+    ///
+    /// 它存在的理由是分档的那处代价：VIP 1–3 分钟出片，而快档 5 分钟一问，
+    /// 于是刚提交完盯着屏幕的那几分钟恰恰是最可能什么都看不到的。
+    #[test]
+    fn submit_requests_a_catch_up_sweep() {
+        SWEEP_EVERY.store(SWEEP_VIP_SECS, std::sync::atomic::Ordering::Relaxed);
+        request_sweep_soon(10_000);
+        assert_eq!(
+            next_sweep_in(10_000),
+            Some(SWEEP_AFTER_SUBMIT_SECS),
+            "补扫应在 60 秒后到点，而不是立刻 —— 提交那一刻即梦还没给位次"
         );
+        // 慢档下同样是 60 秒后，不是「慢档的十分之一」这种随档位漂移的值。
+        SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
+        request_sweep_soon(20_000);
+        assert_eq!(next_sweep_in(20_000), Some(SWEEP_AFTER_SUBMIT_SECS));
     }
 
     // 扫描路径拿不到队列位次，故只凭「没有计费回执」不得判死 ——
@@ -1111,9 +1229,10 @@ mod tests {
         // 还没跑过第一轮 → 不编一个数字出来。
         LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(next_sweep_in(1000), None);
+        SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
         LAST_SWEEP.store(1000, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(next_sweep_in(1000), Some(SWEEP_SECS));
-        assert_eq!(next_sweep_in(1000 + SWEEP_SECS), Some(0));
+        assert_eq!(next_sweep_in(1000), Some(SWEEP_PLAIN_SECS));
+        assert_eq!(next_sweep_in(1000 + SWEEP_PLAIN_SECS), Some(0));
         assert_eq!(next_sweep_in(9999), Some(0), "过点了就是 0，不是负数");
     }
 
@@ -1121,13 +1240,17 @@ mod tests {
     #[test]
     fn due_check_polls_new_clips_immediately_then_waits() {
         assert!(is_due(Some(1000), None, 1000), "没查过的必须立刻查");
-        // 刚提交 30 秒，上次查是 5 秒前 → 10 秒间隔还没到。
+        // 刚提交 30 秒，上次查是 5 秒前 → 300 秒间隔还没到。
         assert!(!is_due(Some(1000), Some(1025), 1030));
-        assert!(is_due(Some(1000), Some(1020), 1030));
-        // 等了两小时的，间隔是 300 秒：60 秒前查过 → 不到点。
+        assert!(is_due(Some(1000), Some(1030 - SWEEP_VIP_SECS), 1030));
+        // 等了两小时的，间隔是 600 秒：60 秒前查过 → 不到点。
         let two_h = 1000 + 7200;
         assert!(!is_due(Some(1000), Some(two_h - 60), two_h));
-        assert!(is_due(Some(1000), Some(two_h - 301), two_h));
+        assert!(is_due(
+            Some(1000),
+            Some(two_h - SWEEP_PLAIN_SECS - 1),
+            two_h
+        ));
     }
 
     // 等待时长要一眼能读，不该逼人心算 11520 秒是多久。

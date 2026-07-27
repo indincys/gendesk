@@ -14,9 +14,12 @@ import { toast } from "sonner";
 /**
  * 设置页「图生视频」区块。
  *
- * 两件事在这里定：**交接目录在哪**（skill 要把它写死）与**默认生成参数**。
- * 参数留空即不发高级 flag，走即梦 CLI 自己的默认路径 —— 那是最稳的默认，
- * 也不把模型名锁死在我们这一侧（CLI 换默认模型时我们跟着走）。
+ * 三件事在这里定：**交接目录在哪**（skill 要把它写死）、**成片交付到哪**、
+ * 与**默认生成参数**。参数留空即不发高级 flag，走即梦 CLI 自己的默认路径。
+ *
+ * 注意「默认」二字：这里的参数只作用于新条目。已经在流水线里的条目要改参数，
+ * 在工作台改（选中后底栏的参数条 / 右侧详情栏改单条）—— 三处作用域各自在自己的
+ * 标签上说清楚，那是 v0.22.0 修的一处歧义。
  */
 export function V2vSection() {
   const [s, setS] = useState<V2vSettings | null>(null);
@@ -26,12 +29,20 @@ export function V2vSection() {
   const [checking, setChecking] = useState(false);
   /** 当前设置实际会执行哪个文件（后端探测结果）；null = 没找到。 */
   const [resolved, setResolved] = useState<string | null>(null);
+  /** 当前生效的成片交付目录（留空时是回落后的默认，故要问后端而不是显示空串）。 */
+  const [clipsDir, setClipsDir] = useState<string>("");
+
+  const refreshClipsDir = () =>
+    void unwrap(commands.v2vClipsDir())
+      .then(setClipsDir)
+      .catch(() => setClipsDir(""));
 
   const refreshResolved = () =>
     void unwrap(commands.resolveV2vBin())
       .then(setResolved)
       .catch(() => setResolved(null));
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 两个 refresh 是稳定的模块级闭包，只在挂载时跑一次
   useEffect(() => {
     void unwrap(commands.getV2vSettings())
       .then(setS)
@@ -40,6 +51,7 @@ export function V2vSection() {
       .then(setModels)
       .catch(() => setModels([]));
     refreshResolved();
+    refreshClipsDir();
   }, []);
 
   const save = async (p: Partial<V2vSettings>) => {
@@ -52,6 +64,7 @@ export function V2vSection() {
       setS(await unwrap(commands.getV2vSettings()));
     }
     if (p.bin !== undefined) refreshResolved();
+    if (p.clipsOutputDir !== undefined) refreshClipsDir();
   };
 
   const checkCredit = async () => {
@@ -110,6 +123,41 @@ export function V2vSection() {
         <br />
         skill 只做一件事：把生图提示词改写成图生视频提示词。
         <b>提交、轮询、下载、重试、验收都在 GenDesk 里</b>——那些不是智能任务。
+      </div>
+
+      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+        成片交付目录 · 验收通过即拷到这里
+      </div>
+      <div className="fx ac gap10">
+        <div className="pathwell f1">{clipsDir || "—"}</div>
+        <button
+          type="button"
+          className="btn sm"
+          onClick={async () => {
+            const dir = await unwrap(commands.pickClipsOutputDir()).catch(() => null);
+            if (dir) await save({ clipsOutputDir: dir });
+          }}
+        >
+          <FolderOpen className="ic12" />
+          更改目录
+        </button>
+        <button
+          type="button"
+          className="btn sm gho"
+          onClick={() =>
+            void unwrap(commands.openClipsOutputDir()).catch((e) => toast.error(String(e)))
+          }
+        >
+          打开
+        </button>
+      </div>
+      <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
+        验收通过的成片按 <span className="chip">&lt;组名&gt;/&lt;编号&gt;_&lt;日期&gt;.mp4</span>{" "}
+        拷到这里。成片是 B-roll 素材，下游是剪辑而不是发布 —— 所以它该落在你自己的工作目录里。
+        {s.clipsOutputDir?.trim() ? "" : "（当前是默认位置）"}
+        <br />
+        流水线内部那份 <span className="chip">clips/</span> 一直保留（封面、重跑、撤销都指着它），
+        这里是<b>拷贝</b>不是搬移；删掉交付出去的那份还能在成片页「重新交付」。
       </div>
 
       <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>

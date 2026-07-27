@@ -1,37 +1,44 @@
-import { Modal } from "@/components/ui/Modal";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
-import { type Row, deriveRows, fmtAgo, shortModel } from "@/features/v2v/model";
+import { type Row, delivered, deriveRows, fmtAgo, shortModel } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
 import {
   type ClipView,
   type EffectiveParams,
   type ModelInfo,
-  type SkuView,
   commands,
   subscribeV2v,
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
-import { Clapperboard, FolderOpen, Layers, Search } from "lucide-react";
+import { Clapperboard, FolderOpen, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 /**
- * 视频成片库 —— 验收通过的视频总览。
+ * 视频成片 —— **交付台账**。
  *
  * ## 为什么它必须是独立的一页
  *
  * 因为验收通过的片子**已经不是流水线的事了**。它们混在工作台里的时候，18 条成片和
  * 3 条待办长得一样重，「这里还剩多少活」这个问题得靠人在心里做减法才答得出。
- * 拆开之后两边各自都变简单：工作台只剩在制的，这一页只回答成片自己的问题 ——
- * **哪些还没进资产库**（发布链在这里断掉且毫无声响）、这条花了多少、片子在哪。
  *
- * 「未通过」也在这里，作为一档筛选：那些条目不该变得无处可寻，
- * 只是它们的片子已经进了废纸篓，这里留的是记录而不是画面。
+ * ## 它现在回答的是交付，不是入库（v0.22.0）
+ *
+ * 成片全是 B-roll 素材，不适合直接发布 —— 「入资产库」那条路径从一开始就不该存在，
+ * 已整个拆掉。这一页现在只回答四个问题：
+ *
+ * 1. **片子在哪**：`exportPath`，可在文件管理器里直接打开那个目录。
+ * 2. **交付成功没有**：验收时的拷贝失败**不回滚验收**（判定是人做的，文件可以补），
+ *    于是「通过了却没落地」是个完全合法、在此之前又完全看不见的状态。
+ *    它是这条链上唯一一处会无声断掉的地方，故也是侧栏徽章，且给「重新交付」。
+ * 3. **花了多少额度**。
+ * 4. **哪些没通过**：作为一档筛选 —— 那些条目不该变得无处可寻，
+ *    只是它们的片子已经进了废纸篓，这里留的是账而不是画面。
  */
 type Tab = "pass" | "rej";
-type Lib = "all" | "in" | "out";
+/** 交付筛选轴（取代原来的「资产库」轴）。 */
+type Deliv = "all" | "missing";
 
 export function V2vClipsPage() {
   const go = useUiStore((s) => s.go);
@@ -39,12 +46,12 @@ export function V2vClipsPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [eff, setEff] = useState<EffectiveParams | null>(null);
   const [tab, setTab] = useState<Tab>("pass");
-  const [lib, setLib] = useState<Lib>("all");
+  const [deliv, setDeliv] = useState<Deliv>("all");
+  const [outDir, setOutDir] = useState<string>("");
   const [group, setGroup] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cur, setCur] = useState<number | null>(null);
-  const [assetPick, setAssetPick] = useState<number[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -63,6 +70,10 @@ export function V2vClipsPage() {
       .catch(() => setModels([]));
     void unwrap(commands.v2vEffectiveParams())
       .then(setEff)
+      .catch(() => {});
+    // 交付目录直接摆在页头：「片子在哪」不该靠猜，而它是用户可改的。
+    void unwrap(commands.v2vClipsDir())
+      .then(setOutDir)
       .catch(() => {});
   }, [load]);
 
@@ -96,8 +107,7 @@ export function V2vClipsPage() {
     return rows.filter((r) => {
       if (r.stage !== tab) return false;
       if (group != null && (r.clip.groupName || "未分组") !== group) return false;
-      if (lib === "in" && !r.clip.inAssetLib) return false;
-      if (lib === "out" && r.clip.inAssetLib) return false;
+      if (deliv === "missing" && delivered(r.clip)) return false;
       if (q === "") return true;
       return (
         r.clip.promptCode.toLowerCase().includes(q) ||
@@ -106,27 +116,30 @@ export function V2vClipsPage() {
         r.clip.sourcePrompt.toLowerCase().includes(q)
       );
     });
-  }, [rows, tab, group, lib, query]);
+  }, [rows, tab, group, deliv, query]);
 
   const passRows = useMemo(() => rows.filter((r) => r.stage === "pass"), [rows]);
-  const notInLib = passRows.filter((r) => !r.clip.inAssetLib).length;
+  const undelivered = passRows.filter((r) => !delivered(r.clip)).length;
   const spent = passRows.reduce((n, r) => n + (r.clip.creditCount ?? 0), 0);
 
   const curRow =
     (cur == null ? null : visible.find((r) => r.clip.id === cur)) ?? visible[0] ?? null;
 
-  const packInto = useCallback(
-    async (ids: number[], skuId: number) => {
+  /**
+   * 重新交付：把成片再拷一次到当前交付目录。
+   *
+   * 之所以补得出来：`clips/clip{id}.mp4` 那份是流水线自己的资产，从来只拷不移。
+   * 三种情况都走它 —— 验收那一刻拷贝失败、交付目录被改到别处、人手动删了那份。
+   */
+  const redeliver = useCallback(
+    async (ids: number[]) => {
+      if (ids.length === 0) return;
       setBusy(true);
       try {
-        let ok = 0;
-        for (const id of ids) {
-          if (await unwrap(commands.packFromClip(skuId, id))) ok += 1;
-        }
-        setAssetPick(null);
+        const n = await unwrap(commands.redeliverV2vClips(ids));
+        if (n > 0) toast.success(`已重新交付 ${n} 条到输出目录`);
+        else toast("没有可交付的条目（这些条目本身就没有成片文件）");
         setSel(new Set());
-        if (ok > 0) toast.success(`已入资产库 ${ok} 个视频素材包`);
-        else toast("没有可打包的条目（只有验收通过且有成片文件的才行）");
         await load();
       } catch (e) {
         toast.error(e instanceof Error ? e.message : String(e));
@@ -137,11 +150,12 @@ export function V2vClipsPage() {
     [load],
   );
 
-  const packable = useMemo(
+  /** 选中项里真正缺交付的那些 —— 已交付的重拷一次没有意义。 */
+  const missing = useMemo(
     () =>
       [...sel].filter((id) => {
         const r = rows.find((x) => x.clip.id === id);
-        return r?.stage === "pass" && !r.clip.inAssetLib;
+        return r?.stage === "pass" && !delivered(r.clip);
       }),
     [sel, rows],
   );
@@ -151,13 +165,28 @@ export function V2vClipsPage() {
       <div className="vhd">
         <span className="ptt">视频成片</span>
         <span className="fs11 t3 nowrap">
-          成片 <b className="mono t1">{passRows.length}</b> · 未入资产库{" "}
-          <b className="mono" style={{ color: notInLib > 0 ? "var(--wr2)" : "var(--t1)" }}>
-            {notInLib}
+          成片 <b className="mono t1">{passRows.length}</b> · 交付失败{" "}
+          <b className="mono" style={{ color: undelivered > 0 ? "var(--er)" : "var(--t1)" }}>
+            {undelivered}
           </b>{" "}
           · 累计扣费 <b className="mono t1">{spent}</b>
         </span>
         <div className="f1" />
+        {/* 交付目录直接摆出来：「片子在哪」是这一页存在的第一个理由。 */}
+        <span className="fs10 t3 nowrap ohide" style={{ maxWidth: 320 }} title={outDir}>
+          交付到 {outDir || "—"}
+        </span>
+        <button
+          type="button"
+          className="btn xs"
+          onClick={() =>
+            void unwrap(commands.openClipsOutputDir()).catch((e) => toast.error(String(e)))
+          }
+          title={outDir}
+        >
+          <FolderOpen className="ic12" />
+          打开
+        </button>
         <button type="button" className="btn xs gho" onClick={() => go("v2v")}>
           <Clapperboard className="ic12" />
           回流水线
@@ -194,29 +223,28 @@ export function V2vClipsPage() {
           onClick={() => {
             setTab("rej");
             setSel(new Set());
-            setLib("all");
+            setDeliv("all");
           }}
           title="验收未通过的记录。成片本体已进废纸篓，这里留的是账与提示词。"
         >
           未通过<span className="n">{rows.filter((r) => r.stage === "rej").length}</span>
         </button>
-        {tab === "pass" && (
+        {tab === "pass" && undelivered > 0 && (
           <>
             <span className="lb" style={{ marginLeft: 6 }}>
-              资产库
+              交付
             </span>
             {(
               [
                 ["all", "全部"],
-                ["out", "未入库"],
-                ["in", "已入库"],
-              ] as [Lib, string][]
+                ["missing", `交付失败 ${undelivered}`],
+              ] as [Deliv, string][]
             ).map(([k, label]) => (
               <button
                 key={k}
                 type="button"
-                className={cn("vchip", lib === k && "on")}
-                onClick={() => setLib(k)}
+                className={cn("vchip", deliv === k && "on")}
+                onClick={() => setDeliv(k)}
               >
                 {label}
               </button>
@@ -240,7 +268,7 @@ export function V2vClipsPage() {
       </div>
 
       <div className="f1 fx" style={{ minHeight: 0 }}>
-        <div className="sc f1" style={{ minWidth: 0, padding: "10px 12px" }}>
+        <div className="pbody" style={{ minWidth: 0, padding: "10px 12px" }}>
           {visible.length === 0 ? (
             <div className="bigempty">
               <Clapperboard className="ic" style={{ width: 26, height: 26, opacity: 0.5 }} />
@@ -276,7 +304,7 @@ export function V2vClipsPage() {
         </div>
 
         {curRow && (
-          <ClipSide row={curRow} busy={busy} onPack={() => setAssetPick([curRow.clip.id])} />
+          <ClipSide row={curRow} busy={busy} onRedeliver={() => void redeliver([curRow.clip.id])} />
         )}
       </div>
 
@@ -289,22 +317,22 @@ export function V2vClipsPage() {
             <button
               type="button"
               className="btn xs pri"
-              disabled={busy || packable.length === 0}
-              onClick={() => setAssetPick(packable)}
-              title="打包成视频型素材包（1 视频 + 封面）接上发布链"
+              disabled={busy || missing.length === 0}
+              onClick={() => void redeliver(missing)}
+              title="把成片再拷一次到交付目录（clips/ 里那份一直都在，从来只拷不移）"
             >
-              <Layers className="ic12" />
-              入资产库 {packable.length} 条
+              <RefreshCw className="ic12" />
+              重新交付 {missing.length} 条
             </button>
-            {packable.length < sel.size && (
-              <span className="fs11 t3">{sel.size - packable.length} 条已在库或无成片</span>
+            {missing.length < sel.size && (
+              <span className="fs11 t3">{sel.size - missing.length} 条已交付</span>
             )}
           </>
         ) : (
           <span className="fs11 t3 nowrap ohide">
             {visible.length} 条 ·{" "}
             {tab === "pass"
-              ? "勾选后可批量入资产库；入库之后发布计划才排得到它"
+              ? "验收通过即自动拷进交付目录；拷贝失败不会回滚验收，可随时重新交付"
               : "未通过的成片已进废纸篓，这里留的是账与提示词"}
           </span>
         )}
@@ -318,14 +346,6 @@ export function V2vClipsPage() {
           打开数据目录
         </button>
       </div>
-
-      {assetPick && (
-        <SkuPick
-          count={assetPick.length}
-          onClose={() => setAssetPick(null)}
-          onPick={(skuId) => void packInto(assetPick, skuId)}
-        />
-      )}
     </div>
   );
 }
@@ -376,8 +396,7 @@ function ClipCard({
         >
           {checked ? "✓" : ""}
         </span>
-        {r.stage === "pass" && !c.inAssetLib && <span className="tag wr">未入库</span>}
-        {c.inAssetLib && <span className="tag ok">已入库</span>}
+        {r.stage === "pass" && !delivered(c) && <span className="tag er">交付失败</span>}
       </div>
       <div className="fx ac gap5" style={{ marginTop: 5 }}>
         <span className="pid">{c.promptCode}</span>
@@ -393,11 +412,15 @@ function ClipCard({
 }
 
 /** 右栏：选中那条的画面与账。与流水线详情栏同形，但只回答成片自己的问题。 */
-function ClipSide({ row, busy, onPack }: { row: Row; busy: boolean; onPack: () => void }) {
+function ClipSide({
+  row,
+  busy,
+  onRedeliver,
+}: { row: Row; busy: boolean; onRedeliver: () => void }) {
   const c = row.clip;
   const video = assetSrc(c.videoPath);
   return (
-    <div className="vinsp sc">
+    <div className="vinsp">
       <div className="fx ac gap6">
         <span className="pid">{c.promptCode}</span>
         <span className="f1" />
@@ -414,17 +437,33 @@ function ClipSide({ row, busy, onPack }: { row: Row; busy: boolean; onPack: () =
           </span>
         </div>
       )}
+      {/* 交付路径是这一栏最要紧的一件事：clips/clip{id}.mp4 那个内部名字人在 Finder
+          里认不出谁是谁，而这里给的是真正交付出去的那份。 */}
       {row.stage === "pass" && (
-        <button
-          type="button"
-          className="btn sm pri mt8"
-          style={{ width: "100%" }}
-          disabled={busy || c.inAssetLib}
-          onClick={onPack}
-        >
-          <Layers className="ic12" />
-          {c.inAssetLib ? "已入资产库" : "入资产库"}
-        </button>
+        <>
+          <div className="vsec">这一条交付到哪了</div>
+          {delivered(c) ? (
+            <div className="pathwell mt5" style={{ wordBreak: "break-all" }}>
+              {c.exportPath}
+            </div>
+          ) : (
+            <div className="vhint er mt5">
+              验收通过了，但成片没能拷进交付目录 —— 验收那一刻的拷贝失败**不回滚验收**
+              （判定是人做的，文件可以补）。原片还在，点下面重新交付。
+            </div>
+          )}
+          <button
+            type="button"
+            className={cn("btn sm mt5", !delivered(c) && "pri")}
+            style={{ width: "100%" }}
+            disabled={busy || c.videoPath == null}
+            onClick={onRedeliver}
+            title="把成片再拷一次到当前交付目录"
+          >
+            <RefreshCw className="ic12" />
+            {delivered(c) ? "重新交付一份" : "重新交付"}
+          </button>
+        </>
       )}
 
       <div className="vsec">这一条的账</div>
@@ -461,61 +500,5 @@ function Fact({ k, v }: { k: string; v: string }) {
         {v}
       </div>
     </div>
-  );
-}
-
-function SkuPick({
-  count,
-  onClose,
-  onPick,
-}: {
-  count: number;
-  onClose: () => void;
-  onPick: (skuId: number) => void;
-}) {
-  const [skus, setSkus] = useState<SkuView[]>([]);
-  useEffect(() => {
-    void unwrap(commands.listSkus({ tier: null, warnOnly: null, status: null, query: null }))
-      .then(setSkus)
-      .catch(() => setSkus([]));
-  }, []);
-  return (
-    <Modal
-      title="入资产库 · 选择目标 SKU"
-      onClose={onClose}
-      headerExtra={<span className="chip">{count} 条成片</span>}
-      footer={
-        <>
-          <span className="fs11 t3">每条成片建一个视频型素材包（视频 + 封面），原成片保留</span>
-          <div className="f1" />
-          <button type="button" className="btn sm" onClick={onClose}>
-            取消
-          </button>
-        </>
-      }
-    >
-      <div style={{ padding: 8 }}>
-        {skus
-          .filter((s) => !s.isGeneral)
-          .map((s) => (
-            <div
-              key={s.id}
-              className="pickrow"
-              onClick={() => onPick(s.id)}
-              onKeyDown={(e) => e.key === "Enter" && onPick(s.id)}
-              role="button"
-              tabIndex={0}
-            >
-              <span className="pid">{s.code}</span>
-              <span className="fw5 fs12 f1 nowrap ohide">{s.styleName}</span>
-            </div>
-          ))}
-        {skus.length === 0 && (
-          <div className="fs12 t3" style={{ padding: 12 }}>
-            尚无 SKU，请先在资产库创建
-          </div>
-        )}
-      </div>
-    </Modal>
   );
 }

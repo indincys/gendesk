@@ -64,6 +64,17 @@ pub struct V2vSettings {
     /// 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
     #[serde(default)]
     pub autofill: AutofillCfg,
+    /// 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
+    ///
+    /// 成片是 B-roll 素材，下游是剪辑而不是发布链，故它必须落在用户自己的工作目录里
+    /// （素材库、剪辑工程旁边），而不是应用数据目录深处 —— 那个位置人在 Finder 里
+    /// 根本找不到，等于交付了个寂寞。
+    ///
+    /// 形制照 `handoff_root`（空串回落到默认）而**不是** `Settings::output_dir`：
+    /// 后者有字段、有选择器、有设置页 UI，却没有任何一个消费者读它 ——
+    /// 那是「选了目录却不生效」，正是这一版要根治的那类失信。
+    #[serde(default)]
+    pub clips_output_dir: String,
 }
 
 fn d_root() -> String {
@@ -92,6 +103,7 @@ impl Default for V2vSettings {
             poll_enabled: true,
             timeout_hours: runner::DEFAULT_TIMEOUT_HOURS,
             autofill: AutofillCfg::default(),
+            clips_output_dir: String::new(),
         }
     }
 }
@@ -120,7 +132,18 @@ impl V2vSettings {
             std::path::PathBuf::from(self.handoff_root.trim())
         }
     }
+    /// 成片交付目录。空/仅空白 → 默认 `{app_data}/outputs/视频`。
+    pub fn clips_dir(&self, dirs: &crate::files::DataDirs) -> std::path::PathBuf {
+        if self.clips_output_dir.trim().is_empty() {
+            dirs.outputs().join(DEFAULT_CLIPS_SUBDIR)
+        } else {
+            std::path::PathBuf::from(self.clips_output_dir.trim())
+        }
+    }
 }
+
+/// 默认交付目录在 `outputs/` 下的子目录名。与图片输出同级，一眼看得出是视频。
+pub const DEFAULT_CLIPS_SUBDIR: &str = "视频";
 
 /// 读设置（缺失/损坏都回默认值，绝不让整页打不开）。
 pub async fn load_settings(pool: &SqlitePool) -> AppResult<V2vSettings> {
@@ -164,6 +187,31 @@ pub async fn pick_handoff_root(app: AppHandle) -> AppResult<Option<String>> {
         .blocking_pick_folder()
         .and_then(|p| p.into_path().ok())
         .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 选成片交付目录。
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_clips_output_dir(app: AppHandle) -> AppResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 当前生效的成片交付目录（绝对路径）。设置里留空时回落到默认，界面直接摆出来 ——
+/// 「片子交付到哪儿了」不该靠猜。
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_clips_dir(state: State<'_, AppState>) -> AppResult<String> {
+    let settings = load_settings(&state.db).await?;
+    Ok(settings
+        .clips_dir(&state.dirs)
+        .to_string_lossy()
+        .to_string())
 }
 
 /// 选即梦 CLI 可执行文件。
@@ -666,12 +714,16 @@ pub struct ClipView {
     pub reviewed_at: Option<i64>,
     /// 是不是常驻队列（自动补单）替人放行的（0026）。
     pub auto_submitted: bool,
-    /// 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
-    /// 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
+    /// 历史上打进过哪个素材包（0025）。
+    ///
+    /// v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
+    /// 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
+    /// 但没有任何逻辑再读它，界面上也不再出现。
     pub asset_pack_id: Option<i64>,
-    pub in_asset_lib: bool,
-    /// 验收通过后交付到 `outputs/视频/{组}/` 的那份拷贝（0027）。
-    /// 成片页据此回答「这条片子在哪」——clips/clip{id}.mp4 那个名字人在 Finder 里认不出。
+    /// 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
+    ///
+    /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
+    /// 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
     pub export_path: Option<String>,
     pub accepted_at: i64,
     pub updated_at: i64,
@@ -722,7 +774,6 @@ impl From<repo::ClipRow> for ClipView {
             reviewed_at: r.reviewed_at,
             auto_submitted: r.auto_submitted != 0,
             asset_pack_id: r.asset_pack_id,
-            in_asset_lib: r.in_asset_lib != 0,
             export_path: r.export_path,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
@@ -1071,6 +1122,11 @@ pub async fn submit_v2v_clips(
 ) -> AppResult<SubmitSummary> {
     let s = load_settings(&state.db).await?;
     let sum = runner::submit_batch(&state.db, &s.bin, &ids, &s.defaults(), &state.v2v_log).await?;
+    // 刚提交完人正盯着屏幕，而常规档位是 5/10 分钟 —— 请求一次 60 秒后的补扫。
+    // 按批不按条：20 条一起提交也只多这一个进程。
+    if sum.submitted > 0 {
+        runner::request_sweep_soon(now_unix());
+    }
     emit_changed(&state.db, &app, None).await;
     Ok(sum)
 }
@@ -1264,6 +1320,8 @@ pub async fn review_v2v_clips(
     pass: bool,
 ) -> AppResult<V2vAction> {
     let now = now_unix();
+    // 交付目录读一次即可：一轮验收里它不会变，而每条读一次要多几十次 DB 往返。
+    let settings = load_settings(&state.db).await?;
     let mut n = 0i64;
     let mut exported = 0i64;
     let mut undo: Vec<V2vUndoEntry> = Vec::new();
@@ -1313,7 +1371,7 @@ pub async fn review_v2v_clips(
                 // 通过即交付：把成片从内部暂存区 clips/clip{id}.mp4 拷进
                 // outputs/视频/{组}/{编号}_{日期}.mp4。图片验收通过时做的就是这件事，
                 // 视频此前却只留在那个人在 Finder 里认不出谁是谁的内部目录里。
-                match export_clip(&state, &clip) {
+                match export_clip(&settings, &state, &clip) {
                     Ok(Some(p)) => {
                         exported += 1;
                         let _ = repo::set_export_path(&state.db, id, Some(&p)).await;
@@ -1347,14 +1405,22 @@ pub async fn review_v2v_clips(
     })
 }
 
-/// `outputs/视频/{组名}/{编号}_{日期}.mp4` —— 通过验收即交付的那份拷贝。
+/// `{交付目录}/{组名}/{编号}_{日期}.mp4` —— 通过验收即交付的那份拷贝。
+///
+/// 交付目录默认 `{app_data}/outputs/视频`，用户可改（`V2vSettings::clips_output_dir`）。
+/// 成片是 B-roll 素材，下游是剪辑而不是发布链 —— 它得落在人自己的工作目录里，
+/// 而不是应用数据目录深处那个在 Finder 里找不到的位置。
 ///
 /// **拷贝而不是移动**：clips/ 下那份是流水线自己的资产（封面、重跑、撤销都指着它），
 /// 移走会让「撤销通过」变成一次搬回来的操作，而搬运是会失败的。
 /// 磁盘代价是每条成片多占一份——几十 MB，换来的是撤销永远只改库不动文件。
 ///
 /// 返回 `Ok(None)` = 这条根本没有成片文件（不该发生，但也不是错误）。
-fn export_clip(state: &State<'_, AppState>, clip: &repo::ClipRow) -> AppResult<Option<String>> {
+fn export_clip(
+    settings: &V2vSettings,
+    state: &State<'_, AppState>,
+    clip: &repo::ClipRow,
+) -> AppResult<Option<String>> {
     let Some(src) = clip.video_path.as_deref().filter(|p| !p.is_empty()) else {
         return Ok(None);
     };
@@ -1363,7 +1429,7 @@ fn export_clip(state: &State<'_, AppState>, clip: &repo::ClipRow) -> AppResult<O
     } else {
         files::sanitize_filename(&clip.group_name)
     };
-    let dir = state.dirs.outputs().join("视频").join(group);
+    let dir = settings.clips_dir(&state.dirs).join(group);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
 
     // 编号去连字符，与图片输出命名同口径（files::output_filename）。
@@ -1392,12 +1458,69 @@ fn export_clip(state: &State<'_, AppState>, clip: &repo::ClipRow) -> AppResult<O
     Ok(Some(dest.to_string_lossy().to_string()))
 }
 
-/// 在系统文件管理器打开成片交付目录 `outputs/视频/`。
+/// 重新交付：把成片再拷一次到当前交付目录。
+///
+/// 三种情况都会走到它，而它们在库里长得一模一样（`stage='pass'` 且 `export_path` 空
+/// 或指向一个已经不存在的文件）：
+/// 1. 验收那一刻拷贝失败了（磁盘满、目标目录不可写）—— 那时**不回滚验收**，
+///    判定是人做的，文件是可以补的；
+/// 2. 交付目录被改到了别处，旧成片还留在老位置；
+/// 3. 人手动把交付出去的那份删了/移走了。
+///
+/// 之所以能补：`clips/clip{id}.mp4` 那份是流水线自己的资产，从来只拷不移。
+#[tauri::command]
+#[specta::specta]
+pub async fn redeliver_v2v_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<i64> {
+    let settings = load_settings(&state.db).await?;
+    let mut n = 0i64;
+    let mut first_err: Option<String> = None;
+    for id in ids {
+        let Some(clip) = repo::get(&state.db, id).await? else {
+            continue;
+        };
+        if clip.stage != "pass" {
+            continue;
+        }
+        match export_clip(&settings, &state, &clip) {
+            Ok(Some(p)) => {
+                repo::set_export_path(&state.db, id, Some(&p)).await?;
+                n += 1;
+            }
+            // 没有成片文件就补不出来 —— 那不是交付失败，是这条根本没出片。
+            Ok(None) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                state.v2v_log.warn(
+                    "review",
+                    Some((clip.id, clip.prompt_code.as_str())),
+                    format!("重新交付失败：{msg}"),
+                    None,
+                );
+                first_err.get_or_insert(msg);
+            }
+        }
+    }
+    // 一条都没成且确实有错 → 报出来。逐条静默会让「点了没反应」再次发生。
+    if n == 0 {
+        if let Some(e) = first_err {
+            return Err(AppError::Io(e));
+        }
+    }
+    emit_changed(&state.db, &app, None).await;
+    Ok(n)
+}
+
+/// 在系统文件管理器打开成片交付目录。
 #[tauri::command]
 #[specta::specta]
 pub async fn open_clips_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
-    let dir = state.dirs.outputs().join("视频");
+    let settings = load_settings(&state.db).await?;
+    let dir = settings.clips_dir(&state.dirs);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)

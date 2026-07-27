@@ -6,24 +6,25 @@ import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
 import { V2vQueuePanel } from "@/features/v2v/V2vQueuePanel";
 import { V2vReviewFlow } from "@/features/v2v/V2vReviewFlow";
 import {
+  ACTION_CHIPS,
+  ACTION_META,
+  type ActionFilter,
   type Row,
   SIGNAL_CHIPS,
   SORTS,
-  STAGE_CHIPS,
   STAGE_META,
   type Section,
   type SignalKey,
   type SortKey,
   type Stage,
-  type StageFilter,
   buildSections,
   deriveRows,
   fmtAgo,
   fmtDur,
   fmtSpan,
   isLive,
+  matchAction,
   matchQuery,
-  matchStage,
   sortRows,
 } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -36,7 +37,6 @@ import {
   type HandoffStatus,
   type ModelInfo,
   type QueueStats,
-  type SkuView,
   type SubmitPreview,
   type V2vTick,
   type V2vUndoEntry,
@@ -51,6 +51,7 @@ import {
   Clapperboard,
   Film,
   FolderOpen,
+  PenLine,
   RefreshCw,
   ScrollText,
   Send,
@@ -60,23 +61,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
- * 视频流水线。
+ * 视频流水线工作台。
  *
- * ## 为什么不是看板（五列卡片）了
+ * ## 主轴是「下一步动作」，不是阶段（v0.22.0）
  *
- * 五列看板把「阶段」当成了唯一的轴，而实测下来阶段恰恰是**最不缺**的信息 —— 它就写在
- * 那条的脸上。真正答不上来的三个问题都是跨阶段的：
+ * v0.19.0 把看板换成分节表格是对的，但轴选错了：它按**阶段**组织，而阶段恰恰是
+ * 最不缺的信息 —— 它就写在每一条脸上。于是 21 条待改写会同时显示
+ * 「需要我 0」「待改写 21」「无待办」「等 skill 写回 · 交接已物化」四句互相矛盾的话，
+ * 而真相是那 21 条**正卡在人身上**：工单早已物化好，在等人去 Claude Code 跑改写。
+ * 全流水线最大的一处阻塞，界面上说的是「无待办」。
  *
- * 1. **这一批做到哪了。** 卡片按阶段散落在五列里，一批 30 条要横着扫五遍才拼得出来。
- *    故改成按**批次**分节的表格，一行一条，分段条一眼给出这一批的阶段混合。
- * 2. **有没有出事。** 18 条幽灵单和 18 条正常排队在「已提交」列里长得一模一样，
- *    而处置完全相反（一个免费重跑，一个必须继续等）。故加「信号」这条正交的筛选轴，
- *    并让每行都说出**判断依据**而不只是状态。
- * 3. **这一条花没花钱。** 卡片放不下，只能开弹窗一条一条看。故常驻详情栏。
+ * 现在筛选片直接就是动作：处理异常 / 去改写 / 待放行 / 待验收 / 等即梦。派生在
+ * `model.ts` 的 `nextAction`，故筛选、节头摘要、行内色点三者同源。顺带修掉一个真 bug：
+ * 幽灵单只存在于 `run`，而旧的「需要我」不含 `run` —— 唯一该**免费**重跑的那一类
+ * 被默认筛选整个藏了起来。
+ *
+ * ## 另外两条仍然成立的判断
+ *
+ * - **信号是与动作正交的例外轴**：18 条幽灵单和 18 条正常排队长得一模一样，
+ *   而处置完全相反（一个免费重跑，一个必须继续等否则重复扣费）。
+ * - **详情栏常驻**：「这一条花没花钱」放不进一行，而开弹窗一条条看太慢。
  *
  * ## 键盘
  *
- * J/K 移动 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 · A 入资产库 ·
+ * J/K 移动 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
  * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 详情栏 · ⌥1/2/3 观测/日志/参数。
  */
 export function V2vPage() {
@@ -95,7 +103,7 @@ export function V2vPage() {
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   // ── 筛选与选择 ───────────────────────────────────────
-  const [stage, setStage] = useState<StageFilter>("need");
+  const [action, setAction] = useState<ActionFilter>("mine");
   const [signals, setSignals] = useState<SignalKey[]>([]);
   const [sort, setSort] = useState<SortKey>("batch");
   const [query, setQuery] = useState("");
@@ -112,9 +120,7 @@ export function V2vPage() {
   const [showParams, setShowParams] = useState(false);
   const [showObserve, setShowObserve] = useState(false);
   const [cmdPreview, setCmdPreview] = useState<{ ids: number[]; data: SubmitPreview } | null>(null);
-  const [assetPick, setAssetPick] = useState<number[] | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [paramBar, setParamBar] = useState(false);
   const [bulk, setBulk] = useState<Params>({
     modelVersion: "",
     duration: null,
@@ -123,8 +129,6 @@ export function V2vPage() {
   const [busy, setBusy] = useState(false);
   /** 撤销令牌由 Rust 造，前端只当信封（见 `V2vAction` 的注释）。 */
   const [undo, setUndo] = useState<{ label: string; entries: V2vUndoEntry[] } | null>(null);
-  /** 看片流里按 A 直投的目标 SKU：选过一次就记住，否则每条都要弹一次选择器。 */
-  const [lastSku, setLastSku] = useState<number | null>(null);
   /** 本轮（进入看片流后）判了多少 —— 顶部那句「已过 N · 已毙 M」。 */
   const [tally, setTally] = useState({ passed: 0, killed: 0 });
 
@@ -204,18 +208,31 @@ export function V2vPage() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = rows.filter(
-      (r) =>
-        matchStage(r.stage, stage) && signals.every((s) => r.signals.has(s)) && matchQuery(r, q),
+      (r) => matchAction(r, action) && signals.every((s) => r.signals.has(s)) && matchQuery(r, q),
     );
     return sortRows(filtered, sort);
-  }, [rows, stage, signals, sort, query]);
+  }, [rows, action, signals, sort, query]);
 
   const sections = useMemo(() => buildSections(rows, visible), [rows, visible]);
 
-  const stageCount = useCallback(
-    (k: StageFilter) => rows.filter((r) => matchStage(r.stage, k)).length,
+  const actionCount = useCallback(
+    (k: ActionFilter) => rows.filter((r) => matchAction(r, k)).length,
     [rows],
   );
+  /** 待改写条数 —— 「去改写」召唤横幅与交接对账都读它。 */
+  const rewriteN = useMemo(() => rows.filter((r) => r.action === "rewrite").length, [rows]);
+
+  // 交接状态跟着**待改写条数**刷新。
+  //
+  // 它原来只在 mount 与手动「收录改写」之后取一次，而 watcher 会在无人操作时自己收录
+  // —— 于是横幅上那个「21 条」在改写落地之后还挂着，恰好在它最要紧的时候是错的。
+  // 不挂在每个 tick 上：`v2v_handoff_status` 会顺手重写工单，不是只读的。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 依赖的是「待改写条数变了」这个信号
+  useEffect(() => {
+    void unwrap(commands.v2vHandoffStatus())
+      .then(setHandoff)
+      .catch(() => {});
+  }, [rewriteN]);
   // 信号只数**在制**的：成片已经去了成片库，把它们算进「重跑过 12 条」这种数字里，
   // 点下去却一条都筛不出来 —— 一个点了没反应的筛选片比没有更糟。
   const signalCount = useCallback(
@@ -251,11 +268,46 @@ export function V2vPage() {
   const onlyStage: Stage | null = selStages.size === 1 ? ([...selStages][0] ?? null) : null;
   // 只有还没花钱的两列改参数才有意义：已提交的改了不会重新生效，
   // 却会让详情栏显示的参数与那条视频实际用的对不上。
-  const editableParams = useMemo(
-    () =>
-      selected.filter((r) => r.stage === "ready" || r.stage === "rewrite").map((r) => r.clip.id),
+  const editableRows = useMemo(
+    () => selected.filter((r) => r.stage === "ready" || r.stage === "rewrite"),
     [selected],
   );
+  const editableParams = useMemo(() => editableRows.map((r) => r.clip.id), [editableRows]);
+
+  /**
+   * 选中项当前**自己写死**的参数是否一致（读 clip 自己的覆写，不读逐级回落后的结果）。
+   *
+   * 这决定参数条的初值，而初值这件事有代价：`set_v2v_clip_params` 的 `None` 是
+   * **清空**不是**保持**。参数条若一律以空值开场，选中一批已经设过 vip/1080p 的条目、
+   * 只想改个时长，按下「应用」就会把模型和分辨率一起抹掉。
+   */
+  const selParams = useMemo(() => {
+    const key = (r: Row) =>
+      `${r.clip.modelVersion ?? ""}|${r.clip.duration ?? ""}|${r.clip.videoResolution ?? ""}`;
+    const first = editableRows[0];
+    if (!first) return { mixed: false, value: null as Params | null };
+    const uniform = editableRows.every((r) => key(r) === key(first));
+    return {
+      mixed: !uniform,
+      value: uniform
+        ? {
+            modelVersion: first.clip.modelVersion ?? "",
+            duration: first.clip.duration,
+            videoResolution: first.clip.videoResolution ?? "",
+          }
+        : null,
+    };
+  }, [editableRows]);
+  const bulkMixed = selParams.mixed;
+
+  // 选择一变就把参数条重置到选中项的现状（不一致时留空，并在条上标「多条不一致」）。
+  // 用 key 而不是对象引用做依赖：selected 每秒都会因为 `now` 走字而重新构造。
+  const selKey = editableParams.join(",");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 依赖的是「选了哪几条」，见下
+  useEffect(() => {
+    setBulk(selParams.value ?? { modelVersion: "", duration: null, videoResolution: "" });
+    // selParams 每次渲染都是新对象；真正该触发重置的是「选了哪几条」。
+  }, [selKey]);
 
   // ── 动作 ─────────────────────────────────────────────
   const guard = useCallback(async (fn: () => Promise<void>) => {
@@ -407,41 +459,6 @@ export function V2vPage() {
     });
   }, [cmdPreview, guard, load]);
 
-  /** 成片 → 视频型素材包。选过一次 SKU 就记住，看片流里按 A 才不必每条都弹窗。 */
-  const packInto = useCallback(
-    (ids: number[], skuId: number, advanceFrom?: number) =>
-      guard(async () => {
-        let ok = 0;
-        for (const id of ids) {
-          if (await unwrap(commands.packFromClip(skuId, id))) ok += 1;
-        }
-        setLastSku(skuId);
-        setAssetPick(null);
-        if (ok > 0) toast.success(`已入资产库 ${ok} 个视频素材包`);
-        else toast("没有可打包的条目（只有验收通过且有成片文件的才行）");
-        if (advanceFrom != null) advance(advanceFrom);
-        else setSel(new Set());
-        await load();
-      }),
-    [guard, advance, load],
-  );
-
-  const packOrPick = useCallback(
-    (ids: number[], advanceFrom?: number) => {
-      const packable = ids.filter((id) => {
-        const r = byId.get(id);
-        return r?.stage === "pass" && !r.clip.inAssetLib;
-      });
-      if (packable.length === 0) {
-        toast("只有验收通过且尚未入库的成片可以入资产库");
-        return;
-      }
-      if (lastSku != null) void packInto(packable, lastSku, advanceFrom);
-      else setAssetPick(packable);
-    },
-    [byId, lastSku, packInto],
-  );
-
   const remove = useCallback(
     () =>
       guard(async () => {
@@ -480,7 +497,7 @@ export function V2vPage() {
 
   // ── 看片流的单条判定（键盘与按钮共用） ────────────────
   const judgeCurrent = useCallback(
-    (kind: "pass" | "rej" | "rerun" | "rewrite" | "wait" | "pack") => {
+    (kind: "pass" | "rej" | "rerun" | "rewrite" | "wait") => {
       const r = curRow;
       if (!r) return;
       const id = r.clip.id;
@@ -494,36 +511,12 @@ export function V2vPage() {
         void requeue([id], "run", id);
       } else if (kind === "rewrite") {
         void requeue([id], "rewrite", id);
-      } else if (kind === "wait") {
-        void requeue([id], "wait", id);
       } else {
-        packOrPick([id], id);
+        void requeue([id], "wait", id);
       }
     },
-    [curRow, review, requeue, packOrPick],
+    [curRow, review, requeue],
   );
-
-  /** 「通过并入资产库」= 先定案再打包。顺序反了会撞 `pack_from_clip` 的 pass 门禁。 */
-  const passAndPack = useCallback(() => {
-    const r = curRow;
-    if (!r || r.stage !== "rev") return;
-    const id = r.clip.id;
-    void guard(async () => {
-      const res = await unwrap(commands.reviewV2vClips([id], true));
-      if (res.changed === 0) return;
-      setUndo({ label: res.label, entries: res.undo });
-      setTally((t) => ({ ...t, passed: t.passed + 1 }));
-      await load();
-      if (lastSku != null) {
-        if (await unwrap(commands.packFromClip(lastSku, id))) toast.success("已通过并入资产库");
-        advance(id);
-        await load();
-      } else {
-        // 还没选过目标 SKU：先弹一次选择器，选完由 packInto 接着走。
-        setAssetPick([id]);
-      }
-    });
-  }, [curRow, guard, load, lastSku, advance]);
 
   const move = useCallback(
     (d: 1 | -1) => {
@@ -535,13 +528,7 @@ export function V2vPage() {
     [visible, curId],
   );
 
-  const modalOpen =
-    cmdPreview != null ||
-    assetPick != null ||
-    confirmRemove ||
-    showLog ||
-    showParams ||
-    showObserve;
+  const modalOpen = cmdPreview != null || confirmRemove || showLog || showParams || showObserve;
 
   // ── 键盘 ─────────────────────────────────────────────
   useEffect(() => {
@@ -625,11 +612,6 @@ export function V2vPage() {
         judgeCurrent("wait");
         return;
       }
-      if (e.key === "a" || e.key === "A") {
-        if (screen === "review") passAndPack();
-        else judgeCurrent("pack");
-        return;
-      }
       if (e.key === "u" || e.key === "U") {
         doUndo();
         return;
@@ -640,7 +622,7 @@ export function V2vPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [screen, modalOpen, move, judgeCurrent, passAndPack, doUndo, curRow, curId, sel, openSubmit]);
+  }, [screen, modalOpen, move, judgeCurrent, doUndo, curRow, curId, sel, openSubmit]);
 
   // ── 页头统计 ─────────────────────────────────────────
   const passN = rows.filter((r) => r.stage === "pass").length;
@@ -675,14 +657,7 @@ export function V2vPage() {
           </div>
         </div>
         {showLog && <V2vLogPanel onClose={() => setShowLog(false)} />}
-        {showParams && (
-          <V2vParamsPanel
-            models={models}
-            selectedReady={[]}
-            onClose={() => setShowParams(false)}
-            onApplied={() => setShowParams(false)}
-          />
-        )}
+        {showParams && <V2vParamsPanel models={models} onClose={() => setShowParams(false)} />}
         {showObserve && (
           <ObserveModal
             tick={tick}
@@ -736,7 +711,7 @@ export function V2vPage() {
               type="button"
               className="btn xs pri"
               onClick={() => {
-                setStage("rev");
+                setAction("review");
                 setBannerOpen(false);
                 const first = rows.find((r) => r.stage === "rev");
                 if (first) setCur(first.clip.id);
@@ -753,7 +728,20 @@ export function V2vPage() {
         </div>
       )}
 
-      {/* 阶段筛选 */}
+      {/* 「去改写」召唤 —— 全流水线最大的一处阻塞，它只可能由人推动。
+          不可关闭：关得掉的 CTA 会立刻退化回「21 条躺在那儿没人知道该干嘛」。 */}
+      {rewriteN > 0 && (
+        <RewriteCall
+          n={rewriteN}
+          handoff={handoff}
+          now={now}
+          busy={busy}
+          onIngest={ingest}
+          onOnly={() => setAction("rewrite")}
+        />
+      )}
+
+      {/* 主轴：下一步动作 */}
       <div className="vfilt">
         <input
           className="inp sm"
@@ -762,19 +750,23 @@ export function V2vPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        {STAGE_CHIPS.map((c) => {
-          const on = stage === c.key;
-          const dot = c.key === "need" || c.key === "all" ? null : STAGE_META[c.key as Stage].seg;
+        {ACTION_CHIPS.map((c) => {
+          const dot =
+            c.key === "mine" || c.key === "all"
+              ? null
+              : c.key === "rej"
+                ? STAGE_META.rej.seg
+                : ACTION_META[c.key].dot;
           return (
             <button
               key={c.key}
               type="button"
-              className={cn("vchip", on && "on")}
-              onClick={() => setStage(c.key)}
+              className={cn("vchip", action === c.key && "on")}
+              onClick={() => setAction(c.key)}
             >
               {dot && <span className="d" style={{ background: dot }} />}
               {c.label}
-              <span className="n">{stageCount(c.key)}</span>
+              <span className="n">{actionCount(c.key)}</span>
             </button>
           );
         })}
@@ -802,26 +794,9 @@ export function V2vPage() {
             </button>
           );
         })}
+        {/* 交接状态与「收录改写」都搬进了上面那条召唤横幅 —— 它们是同一件事的两半，
+            而摆在这里既没人看见，又把这一行在 1140px 下挤到换行。 */}
         <div className="f1" />
-        <span className="fs10 t3 nowrap" title={handoff?.pendingDir}>
-          交接：{handoff?.items ?? 0} 条已物化
-          {handoff?.lastIngestAt != null && ` · ${fmtAgo(now - handoff.lastIngestAt)}收录`}
-          {handoff?.error && ` · 物化失败：${handoff.error}`}
-        </span>
-        <button type="button" className="btn xs" disabled={busy} onClick={ingest}>
-          <RefreshCw className="ic12" />
-          收录改写
-        </button>
-        <button
-          type="button"
-          className="btn xs gho"
-          onClick={() =>
-            void unwrap(commands.openHandoffDir()).catch((e) => toast.error(String(e)))
-          }
-          title={handoff?.pendingDir}
-        >
-          <FolderOpen className="ic12" />
-        </button>
         <button
           type="button"
           className="btn xs"
@@ -844,19 +819,18 @@ export function V2vPage() {
       {/* 表格 */}
       <div className="f1 fx" style={{ minHeight: 0 }}>
         <div className="col f1" style={{ minWidth: 0 }}>
-          <div className="vrowh">
-            <span />
-            <span />
-            <span>编号</span>
-            <span>阶段</span>
-            <span>模型型号</span>
-            <span>即梦</span>
-            <span>已等 · 上次查询</span>
-            <span style={{ textAlign: "right" }}>额度</span>
-            <span>情况 · 判断依据</span>
-          </div>
-
-          <div className="sc f1" style={{ minHeight: 0 }}>
+          {/* 表头在滚动容器**内部** sticky。留在外面时那条 10px 的经典滚动条只吃
+              表体的宽度，同一套 grid 模板于是算出两组列位 —— 那正是「列对不齐」。 */}
+          <div className="vtbody">
+            <div className="vgrid th">
+              <span />
+              <span />
+              <span>编号</span>
+              <span>模型型号</span>
+              <span>已等</span>
+              <span style={{ textAlign: "right" }}>额度</span>
+              <span>情况 · 下一步</span>
+            </div>
             {sections.map((s) => (
               <SectionBlock
                 key={s.key}
@@ -929,11 +903,19 @@ export function V2vPage() {
             <div style={{ height: 12 }} />
           </div>
 
-          {/* 参数条：选中还没提交的条目时才出现，就地整批改。
-              参数是**每一批不一样**的东西，放进全局设置等于每换一批都去设置页改一次。 */}
-          {paramBar && editableParams.length > 0 && (
+          {/* 参数条：选中还没提交的条目就直接出现，**不再藏在一个「参数 N」开关后面**。
+              参数是每一批不一样的东西（模型之间差 5.5 倍），放进全局设置等于每换一批
+              都去设置页改一次；藏在开关后面则等于没有。 */}
+          {editableParams.length > 0 && (
             <div className="parambar foot">
-              <span className="fs11 fw6 t3 nowrap">改这 {editableParams.length} 条的参数</span>
+              <span className="fs11 fw6 t3 nowrap">
+                改这 {editableParams.length} 条的模型 / 时长 / 分辨率
+              </span>
+              {bulkMixed && (
+                <span className="fs10 t3 nowrap" title="选中的条目当前参数不一致，留空表示不覆盖">
+                  多条不一致
+                </span>
+              )}
               <V2vParamPicker
                 models={models}
                 value={bulk}
@@ -946,15 +928,9 @@ export function V2vPage() {
                 type="button"
                 className="btn xs pri"
                 disabled={busy}
-                onClick={() => {
-                  void applyParams(editableParams, bulk, false);
-                  setParamBar(false);
-                }}
+                onClick={() => void applyParams(editableParams, bulk, false)}
               >
-                应用
-              </button>
-              <button type="button" className="btn xs gho" onClick={() => setParamBar(false)}>
-                收起
+                应用到这 {editableParams.length} 条
               </button>
             </div>
           )}
@@ -1002,16 +978,6 @@ export function V2vPage() {
                     <span className="kh">⌘⏎</span>
                   </button>
                 )}
-                {onlyStage === "pass" && (
-                  <button
-                    type="button"
-                    className="btn xs pri"
-                    disabled={busy}
-                    onClick={() => packOrPick([...sel])}
-                  >
-                    入资产库 <span className="kh">A</span>
-                  </button>
-                )}
                 {selected.some((r) => r.signals.has("timeout")) && (
                   <button
                     type="button"
@@ -1047,17 +1013,6 @@ export function V2vPage() {
                 >
                   退回改写 <span className="kh">E</span>
                 </button>
-                {editableParams.length > 0 && (
-                  <button
-                    type="button"
-                    className={cn("btn xs", paramBar && "pri")}
-                    onClick={() => setParamBar((v) => !v)}
-                    title="改这几条的模型/时长/分辨率（只动还没提交的，已提交的改了也不会重新生效）"
-                  >
-                    <SlidersHorizontal className="ic12" />
-                    参数 {editableParams.length}
-                  </button>
-                )}
                 <button
                   type="button"
                   className="btn xs gho dng"
@@ -1074,7 +1029,7 @@ export function V2vPage() {
                       const s = firstSignal(selected);
                       if (s) {
                         setSignals([s]);
-                        setStage("all");
+                        setAction("all");
                       }
                     }}
                   >
@@ -1120,7 +1075,8 @@ export function V2vPage() {
             onRerun={() => judgeCurrent("rerun")}
             onRewrite={() => judgeCurrent("rewrite")}
             onResume={() => judgeCurrent("wait")}
-            onPack={() => judgeCurrent("pack")}
+            models={models}
+            onApplyParams={(id, p) => void applyParams([id], p, false)}
           />
         )}
       </div>
@@ -1138,7 +1094,6 @@ export function V2vPage() {
           onReject={() => judgeCurrent("rej")}
           onRerun={() => judgeCurrent("rerun")}
           onRewrite={() => judgeCurrent("rewrite")}
-          onPackPass={passAndPack}
           onUndo={doUndo}
           onExit={() => setScreen("list")}
         />
@@ -1156,33 +1111,15 @@ export function V2vPage() {
         />
       )}
 
-      {assetPick && (
-        <SkuPickModal
-          count={assetPick.length}
-          onClose={() => setAssetPick(null)}
-          onPick={(skuId) => void packInto(assetPick, skuId, assetPick[0])}
-        />
-      )}
-
       {showLog && <V2vLogPanel onClose={() => setShowLog(false)} />}
       {showParams && (
         <V2vParamsPanel
           models={models}
-          // 只把还没花钱的两列交给批量覆盖：已提交的条目改参数不会重新生效，
-          // 却会让详情页显示的参数与那条视频实际用的对不上。
-          selectedReady={selected
-            .filter((r) => r.stage === "ready" || r.stage === "rewrite")
-            .map((r) => r.clip.id)}
           onClose={() => {
             setShowParams(false);
             void unwrap(commands.v2vEffectiveParams())
               .then(setEff)
               .catch(() => {});
-          }}
-          onApplied={() => {
-            setShowParams(false);
-            setSel(new Set());
-            void load();
           }}
         />
       )}
@@ -1193,13 +1130,89 @@ export function V2vPage() {
       {confirmRemove && (
         <ConfirmModal
           title={`从流水线移除 ${sel.size} 条`}
-          desc="只移除视频流水线里的条目；对应的作品、成片文件与已入资产库的素材包都不受影响。之后仍可在作品库手动重新加入。"
+          desc="只移除视频流水线里的条目；对应的作品与已交付到输出目录的成片文件都不受影响。之后仍可在作品库手动重新加入。"
           confirmLabel="移除"
           danger
           onConfirm={remove}
           onClose={() => setConfirmRemove(false)}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * 「去改写」召唤。
+ *
+ * 待改写这一步**只可能由人推动** —— 它在 Claude Code / Codex 里做，而 GenDesk 这边
+ * 工单早已物化好、什么都不缺。此前界面上关于它的全部表达是三句黑话
+ * （「无待办」「等 skill 写回」「交接已物化」）散落在三个地方，加起来还是答不出
+ * 「我该去哪儿干什么」。这里把答案摆成一句话加三个按钮。
+ *
+ * **不可关闭**：关得掉的 CTA 会立刻退化回「21 条躺在那儿没人知道该干嘛」。
+ * 它在 `rewriteN` 归零时自己消失，那才是它该消失的时刻。
+ */
+function RewriteCall({
+  n,
+  handoff,
+  now,
+  busy,
+  onIngest,
+  onOnly,
+}: {
+  n: number;
+  handoff: HandoffStatus | null;
+  now: number;
+  busy: boolean;
+  onIngest: () => void;
+  onOnly: () => void;
+}) {
+  const err = handoff?.error ?? null;
+  // 工单条数与待改写条数对不上，是「收了一半」唯一的可见症状 —— 在此之前没有任何
+  // 一处会说这件事，而它的后果是有几条永远不会被改写。
+  const mismatch = err == null && handoff != null && handoff.items !== n;
+  return (
+    <div className={cn("vcall", err && "er")}>
+      <span className="ttl">
+        <PenLine className="ic12" style={{ verticalAlign: "-2px", marginRight: 4 }} />
+        {n} 条等你改写
+      </span>
+      <div className="ds f1">
+        {err ? (
+          <>工单没能写出去：{err} —— 先确认交接目录还在、可写。</>
+        ) : (
+          <>
+            工单已写到交接目录
+            {handoff && `（${handoff.groups} 组 · ${handoff.items} 条）`}， 去 Claude Code 或 Codex
+            里跑 <b>v2v-rewrite</b>，写完回来点「收录改写结果」。
+            {mismatch && (
+              <span style={{ color: "var(--wr2)" }}>
+                {" "}
+                工单里 {handoff?.items} 条、流水线里 {n} 条待改写 —— 点收录对一次账。
+              </span>
+            )}
+            {handoff?.lastIngestAt != null && (
+              <span className="pth"> · 上次收录 {fmtAgo(now - handoff.lastIngestAt)}</span>
+            )}
+          </>
+        )}
+      </div>
+      <button
+        type="button"
+        className="btn xs"
+        onClick={() => void unwrap(commands.openHandoffDir()).catch((e) => toast.error(String(e)))}
+        title={handoff?.pendingDir}
+      >
+        <FolderOpen className="ic12" />
+        打开交接目录
+      </button>
+      <button type="button" className="btn xs pri" disabled={busy} onClick={onIngest}>
+        <RefreshCw className="ic12" />
+        写完了 · 收录改写结果
+      </button>
+      <button type="button" className="btn xs gho" onClick={onOnly}>
+        只看这 {n} 条
+      </button>
     </div>
   );
 }
@@ -1382,13 +1395,7 @@ function SectionBlock({
   const fails = s.rows.filter((r) => r.stage === "fail");
   const phantoms = fails.filter((r) => r.signals.has("phantom"));
   const cost = estimateOf(ready);
-
-  // 例外放最前面 —— 与「情况」列同一条规则：被截断时先没的必须是常态，不是例外。
-  const parts: string[] = [];
-  if (phantoms.length > 0) parts.push(`幽灵 ${phantoms.length}`);
-  else if (fails.length > 0) parts.push(`异常 ${fails.length}`);
-  if (ready.length > 0) parts.push(`待放行 ${ready.length}`);
-  if (rev.length > 0) parts.push(`待验收 ${rev.length}`);
+  const rewrite = s.rows.filter((r) => r.stage === "rewrite");
 
   // 连续毙掉三条以上多半不是「没抽中」，而是这一组的提示词本身有问题 ——
   // 那时该做的是退回改写整组，而不是一条条重跑（每重跑一次都要再花一份钱）。
@@ -1408,17 +1415,22 @@ function SectionBlock({
         <span className="nm" title={s.title}>
           {s.title}
         </span>
-        <div className="seg" title={s.legend}>
-          {s.seg.map((g) => (
-            <div
-              key={g.stage}
-              style={{ width: `${g.pct}%`, background: STAGE_META[g.stage].seg }}
-            />
-          ))}
-        </div>
-        <span className="tl">
-          {parts.length > 0 ? parts.join(" · ") : `${s.all.length} 条 · 无待办`}
-        </span>
+        {/* 一句人话，取代原来那条无图例的分段条。 */}
+        <span className={cn("tl", s.headlineTone !== "t3" && s.headlineTone)}>{s.headline}</span>
+        {rewrite.length > 0 && (
+          <button
+            type="button"
+            className="btn xs gho"
+            onClick={(e) => {
+              e.stopPropagation();
+              void unwrap(commands.openHandoffDir()).catch((err) => toast.error(String(err)));
+            }}
+            title="工单已写好，去 Claude Code / Codex 里跑 v2v-rewrite"
+          >
+            <FolderOpen className="ic12" />
+            改写 {rewrite.length}
+          </button>
+        )}
         {s.rows.length > 0 && (
           <button
             type="button"
@@ -1503,7 +1515,9 @@ function SectionBlock({
             onCheck={() => onCheck(r.clip.id)}
           />
         ))}
-      {open && s.rows.length === 0 && <div className="vsempty">当前筛选下这一批没有条目</div>}
+      {/* 「当前筛选下这一批没有条目」那句提示没了，因为这一节现在根本不会出现 ——
+          `buildSections` 里空节整节消失。留个空壳节头不回答任何问题，只会把真正
+          命中的那一节挤下去（几十批之后就是整屏的空壳）。 */}
     </div>
   );
 }
@@ -1549,18 +1563,14 @@ function ClipRow({
 }) {
   const c = r.clip;
   const meta = STAGE_META[r.stage];
+  const act = ACTION_META[r.action];
   const thumb = assetSrc(c.posterPath ?? c.thumbPath);
-  const jimeng =
-    r.stage === "run"
-      ? status || "等待首次查询"
-      : r.stage === "rev" || r.stage === "pass" || r.stage === "rej"
-        ? status || "Finish"
-        : r.stage === "fail"
-          ? (c.genStatus ?? "—")
-          : "—";
+  // 即梦原文没有自己的列了（对非 run 行恒为 —，对 run 行的同一事实已经在「情况」里），
+  // 但它仍是排障时唯一的一手证据 —— 挂到色点的 title 上，不占轨道宽度。
+  const jimeng = r.stage === "run" ? status || "等待首次查询" : (c.genStatus ?? "");
   return (
     <div
-      className={cn("vrow", cur && "cur", checked && "sel")}
+      className={cn("vgrid tr", cur && "cur", checked && "sel")}
       onClick={onPick}
       onKeyDown={(e) => e.key === "Enter" && onPick()}
       role="button"
@@ -1588,10 +1598,6 @@ function ClipRow({
         {c.promptCode}
         {c.attempt > 1 && <span style={{ color: "var(--wr2)" }}> ·{c.attempt}</span>}
       </span>
-      <span className="vstagec" style={{ color: meta.fg }}>
-        <span className="d" style={{ background: meta.fg }} />
-        {meta.label}
-      </span>
       <span
         className={cn("vmodel", r.vip && "vip")}
         title={
@@ -1602,11 +1608,11 @@ function ClipRow({
       >
         {r.modelShort}
       </span>
-      <span className="mono fs10 t2 nowrap ohide">{jimeng}</span>
-      <span className={cn("mono fs10 nowrap ohide", r.slow || r.stage === "fail" ? "wr2" : "t2")}>
-        {r.waitSecs === 0
-          ? "—"
-          : `${fmtDur(r.waitSecs)}${r.polledAgo != null ? ` · ${fmtDur(r.polledAgo)}前` : ""}`}
+      <span
+        className={cn("mono fs10 nowrap ohide", r.slow || r.stage === "fail" ? "wr2" : "t2")}
+        title={r.polledAgo == null ? undefined : `上次查询 ${fmtDur(r.polledAgo)}前`}
+      >
+        {r.waitSecs === 0 ? "—" : fmtDur(r.waitSecs)}
       </span>
       <span
         className={cn("mono fs10", r.vip ? "wr2" : "t2")}
@@ -1615,7 +1621,15 @@ function ClipRow({
       >
         {r.credit == null ? "—" : r.credit}
       </span>
-      <span className={cn("fs11 nowrap ohide", toneClass(r.situationTone))}>{r.situation}</span>
+      {/* 阶段色点吸进「情况」这一格：它是同一句话的两半，而独占一列要 72px，
+          恰恰是「情况」列被裁掉的那部分宽度。 */}
+      <span
+        className={cn("vsit", toneClass(r.situationTone))}
+        title={`${meta.label} → ${act.label}${jimeng ? ` · 即梦 ${jimeng}` : ""}`}
+      >
+        <span className="d" style={{ background: act.dot }} />
+        <span className="nowrap ohide">{r.situation}</span>
+      </span>
     </div>
   );
 }
@@ -1821,62 +1835,5 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "ok
         {value}
       </div>
     </div>
-  );
-}
-
-/** 成片 → 视频型素材包的 SKU 选择。 */
-function SkuPickModal({
-  count,
-  onClose,
-  onPick,
-}: {
-  count: number;
-  onClose: () => void;
-  onPick: (skuId: number) => void;
-}) {
-  const [skus, setSkus] = useState<SkuView[]>([]);
-  useEffect(() => {
-    void unwrap(commands.listSkus({ tier: null, warnOnly: null, status: null, query: null }))
-      .then(setSkus)
-      .catch(() => setSkus([]));
-  }, []);
-  return (
-    <Modal
-      title="入资产库 · 选择目标 SKU"
-      onClose={onClose}
-      headerExtra={<span className="chip">{count} 条成片</span>}
-      footer={
-        <>
-          <span className="fs11 t3">每条成片建一个视频型素材包（视频 + 封面），原成片保留</span>
-          <div className="f1" />
-          <button type="button" className="btn sm" onClick={onClose}>
-            取消
-          </button>
-        </>
-      }
-    >
-      <div style={{ padding: 8 }}>
-        {skus
-          .filter((s) => !s.isGeneral)
-          .map((s) => (
-            <div
-              key={s.id}
-              className="pickrow"
-              onClick={() => onPick(s.id)}
-              onKeyDown={(e) => e.key === "Enter" && onPick(s.id)}
-              role="button"
-              tabIndex={0}
-            >
-              <span className="pid">{s.code}</span>
-              <span className="fw5 fs12 f1 nowrap ohide">{s.styleName}</span>
-            </div>
-          ))}
-        {skus.length === 0 && (
-          <div className="fs12 t3" style={{ padding: 12 }}>
-            尚无 SKU，请先在资产库创建
-          </div>
-        )}
-      </div>
-    </Modal>
   );
 }

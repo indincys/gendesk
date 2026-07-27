@@ -22,36 +22,71 @@ export const STAGE_META: Record<Stage, { label: string; fg: string; bg: string; 
   fail: { label: "失败", fg: "var(--er)", bg: "var(--erbg)", seg: "var(--sg-fail)" },
 };
 
-export const STAGE_ORDER: Stage[] = ["rewrite", "ready", "run", "rev", "pass", "rej", "fail"];
-
-/**
- * 「还在制」的阶段 —— 工作台只管这些。
- *
- * `pass` 与 `rej` 都已经定案：前者去成片库，后者是一个已经做完的决定。把它们留在
- * 工作台上，「这里还剩多少活」这个问题就再也答不准了 —— 实测 18 条验收通过的片子
- * 一直挂在看板上，人得先在心里把它们减掉才能看出真正的待办。
- *
- * `fail` 算在制：它等着人决定重跑还是继续等，那是活。
- */
-export const LIVE_STAGES: Stage[] = ["rewrite", "ready", "run", "rev", "fail"];
-
 export function isLive(stage: Stage): boolean {
   return stage !== "pass" && stage !== "rej";
 }
 
-/** 阶段筛选片。`need` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
-export type StageFilter = Stage | "need" | "all";
+/**
+ * 下一步该谁动手、动什么手。
+ *
+ * **阶段回答「它在哪」，动作回答「拿它怎么办」** —— 而后者才是这一页存在的理由。
+ * 按阶段组织时，21 条待改写会同时显示「需要我 0」「待改写 21」「无待办」
+ * 「等 skill 写回 · 交接已物化」四句互相矛盾的话：阶段名就写在每一条脸上，
+ * 是最不缺的信息；真正没人回答的是「所以我现在该干嘛」。
+ */
+export type NextAction = "rewrite" | "submit" | "review" | "fix" | "wait" | "done";
+
+export const ACTION_META: Record<NextAction, { label: string; fg: string; dot: string }> = {
+  fix: { label: "处理异常", fg: "var(--er)", dot: "var(--sg-fail)" },
+  rewrite: { label: "去改写", fg: "var(--acc2)", dot: "var(--sg-rewrite)" },
+  submit: { label: "待放行", fg: "var(--acc2)", dot: "var(--sg-ready)" },
+  review: { label: "待验收", fg: "var(--st-rev)", dot: "var(--sg-rev)" },
+  wait: { label: "等即梦", fg: "var(--t3)", dot: "var(--sg-run)" },
+  done: { label: "已定案", fg: "var(--t3)", dot: "var(--sg-pass)" },
+};
+
+/** 五档在制动作 + 已定案。顺序 = 「离人最近的排最前」，节头摘要也照这个序。 */
+export const ACTION_ORDER: NextAction[] = ["fix", "rewrite", "submit", "review", "wait", "done"];
 
 /**
- * 工作台的阶段筛选片。
+ * 阻在**人**身上的四档 —— 「需要我」就是它们的并集。
+ *
+ * 待改写在里面，这是与旧口径最大的分歧：那一步虽然在 Claude Code 里做，但它**只可能**
+ * 由人推动，GenDesk 这边已经把工单物化好、什么都不缺了。把它排除在「需要我」之外，
+ * 等于让全流水线最大的一处阻塞在界面上显示为 0。
+ */
+export const MINE: NextAction[] = ["fix", "rewrite", "submit", "review"];
+
+/**
+ * 阶段 + 幽灵判定 → 下一步动作。
+ *
+ * `run + phantomLive → fix` 是这层派生存在的第二个理由：幽灵单只存在于 `run`，
+ * 而旧的「需要我」= ready|rev|fail 不含 run —— 于是唯一该**免费**重跑的那一类，
+ * 被默认筛选藏了起来。这里结构上不可能再漏。
+ */
+export function nextAction(stage: Stage, phantomLive: boolean): NextAction {
+  if (stage === "pass" || stage === "rej") return "done";
+  if (stage === "fail") return "fix";
+  if (stage === "run") return phantomLive ? "fix" : "wait";
+  if (stage === "rev") return "review";
+  if (stage === "ready") return "submit";
+  return "rewrite";
+}
+
+/** 动作筛选片。`mine` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
+export type ActionFilter = NextAction | "mine" | "all" | "rej";
+
+/**
+ * 工作台的筛选片。
  *
  * **没有「成片」**：验收通过的视频归成片库那一页，它们已经不是流水线的事了。
  * 「未通过」留着当逃生舱 —— 那些条目不该变得无处可寻，只是不该默认占位。
  */
-export const STAGE_CHIPS: { key: StageFilter; label: string }[] = [
-  { key: "need", label: "需要我" },
+export const ACTION_CHIPS: { key: ActionFilter; label: string }[] = [
+  { key: "mine", label: "需要我" },
   { key: "all", label: "全部在制" },
-  ...LIVE_STAGES.map((s) => ({ key: s as StageFilter, label: STAGE_META[s].label })),
+  ...MINE.map((a) => ({ key: a as ActionFilter, label: ACTION_META[a].label })),
+  { key: "wait", label: ACTION_META.wait.label },
   { key: "rej", label: STAGE_META.rej.label },
 ];
 
@@ -61,7 +96,7 @@ export const STAGE_CHIPS: { key: StageFilter; label: string }[] = [
  * 单看阶段回答不了「这批里有没有出事」：18 条幽灵单和 18 条正常排队在「已提交」列里
  * 长得一模一样，而它们的处置完全相反（一个直接重跑不花钱，一个必须继续等否则重复扣费）。
  */
-export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "noasset" | "auto";
+export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "auto";
 
 export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = [
   {
@@ -79,7 +114,6 @@ export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = 
   { key: "vip", label: "vip 通道", title: "同规格贵 5.5 倍，买到的只是不排队。" },
   { key: "auto", label: "常驻队列", title: "由自动补单放行的条目，不是你手动提交的。" },
 ];
-// `noasset` 只对成片有意义，而成片不在工作台 —— 它的筛选片在成片库那一页。
 
 export const SORTS = {
   batch: "批次倒序",
@@ -99,6 +133,8 @@ export const PHANTOM_GRACE_SECS = 15 * 60;
 export interface Row {
   clip: ClipView;
   stage: Stage;
+  /** 下一步该干什么。筛选、节头摘要、行内色点三者同源，不可能各说各话。 */
+  action: NextAction;
   /** 归一化后的模型全名（clip 自己的 → 设置里的默认）；两者都没有时为 null。 */
   modelFull: string | null;
   modelShort: string;
@@ -167,6 +203,17 @@ function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
   return s.length % 2 === 1 ? (s[mid] ?? 0) : ((s[mid - 1] ?? 0) + (s[mid] ?? 0)) / 2;
+}
+
+/**
+ * 这一条有没有交付到输出目录。
+ *
+ * `export_path` 是验收通过那一刻拷进输出目录的那份的路径（0027）。拷贝失败**不会**
+ * 回滚验收（判定是人做的，文件可以补），所以「pass 但 export_path 为空」是一个
+ * 真实会出现、且今天界面上完全不提的状态 —— 片子做出来了，却没人知道它没落地。
+ */
+export function delivered(c: ClipView): boolean {
+  return (c.exportPath ?? "").trim() !== "";
 }
 
 /** 单价查询：查不到返回 null（界面据此显示「≥」，绝不摆一个编出来的数字）。 */
@@ -262,20 +309,22 @@ export function deriveRows(
     if (c.attempt > 1) signals.add("rerun");
     if (modelFull?.endsWith("_vip")) signals.add("vip");
     if (c.autoSubmitted) signals.add("auto");
-    if (stage === "pass" && !c.inAssetLib) signals.add("noasset");
 
+    // 「情况」这一列必须点名**动作**与**代价**，而不是复述阶段（阶段就在旁边的色点上）。
+    // 前四个关键词（疑幽灵单/等待异常/继续等待/免费重跑）保留原词：既有测试断言它们，
+    // 而这四处指错方向的代价是真金白银 —— 幽灵单重跑不花钱，超时重跑要再花一份。
     let situation: string;
     let situationTone: Row["situationTone"] = "t3";
     if (phantomLive) {
-      situation = "疑幽灵单 · 无位次、无计费";
+      situation = "疑幽灵单 · 没入队也没扣费，重跑不花钱";
       situationTone = "er";
     } else if (slow) {
-      situation = `等待异常 · 已超本批中位数 ${SLOW_FACTOR} 倍`;
+      situation = `等待异常 · 已超本批中位数 ${SLOW_FACTOR} 倍，别手动催`;
       situationTone = "wr";
     } else if (stage === "run") {
-      situation = `排队中 · 本批已出 ${batchDone.get(key) ?? 0}/${batchTotal.get(key) ?? 0}`;
+      situation = `即梦在跑 · 本批已出 ${batchDone.get(key) ?? 0}/${batchTotal.get(key) ?? 0}`;
     } else if (isTimeout) {
-      situation = "继续等待 · 额度已扣";
+      situation = "继续等待 · 额度已扣，即梦还在跑";
       situationTone = "er";
     } else if (stage === "fail" && c.errorType === "phantom") {
       situation = "免费重跑 · 从未计费";
@@ -284,21 +333,28 @@ export function deriveRows(
       situation = `失败 · ${c.errorType ?? "原因见执行日志"}`;
       situationTone = "er";
     } else if (stage === "rev") {
-      situation = "等你判定 · 已落盘";
+      situation = "等你判通过还是不通过";
+      situationTone = "wr";
     } else if (stage === "pass") {
-      situation = c.inAssetLib ? "已入资产库" : "可入资产库 · 尚未入库";
+      // 读交付路径而不是资产库 —— 成片的下游现在是本地文件夹，不是发布链。
+      situation = delivered(c) ? "已成片 · 已交付" : "已成片 · 未交付到输出目录";
+      if (!delivered(c)) situationTone = "er";
     } else if (stage === "rej") {
-      situation = "已毙 · 成片进废纸篓";
+      situation = "你判了不通过 · 成片已进废纸篓";
     } else if (stage === "ready") {
-      situation = "等你放行 · 改写完成";
+      situation = "等你点确认提交 · 提交即扣费";
       situationTone = "acc";
     } else {
-      situation = "等 skill 写回 · 交接已物化";
+      // 全流水线最大的一处阻塞。**点名工具**（可直接搜、可直接打字）并说明工单已经
+      // 备好，免得有人回头去找一个并不存在的「生成工单」按钮。
+      situation = "等你跑 v2v-rewrite · 工单已就绪";
+      situationTone = "acc";
     }
 
     return {
       clip: c,
       stage,
+      action: nextAction(stage, phantomLive),
       modelFull,
       modelShort: modelFull ? shortModel(modelFull) : "CLI 默认",
       vip: modelFull?.endsWith("_vip") ?? false,
@@ -319,16 +375,20 @@ export function deriveRows(
 }
 
 /**
- * 阶段筛选是否命中。
+ * 动作筛选是否命中。
  *
- * - `need` = 人能立刻动手的三种（放行 / 判定 / 处置异常）。
+ * - `mine` = 阻在人身上的四档（改写 / 放行 / 判定 / 处置异常）。
  * - `all` = **全部在制**，不含已定案的 pass / rej。工作台回答的是「还剩多少活」，
  *   把做完的算进去，这个数就再也不准了。要看成片去成片库，要看毙掉的选「未通过」。
+ * - `rej` 不是动作，是逃生舱。
+ *
+ * 收 `Row` 而不是 `Stage`：幽灵判定要看队列位次与扣费回执，那是整行的事。
  */
-export function matchStage(stage: Stage, filter: StageFilter): boolean {
-  if (filter === "all") return isLive(stage);
-  if (filter === "need") return stage === "ready" || stage === "rev" || stage === "fail";
-  return stage === filter;
+export function matchAction(r: Row, filter: ActionFilter): boolean {
+  if (filter === "all") return isLive(r.stage);
+  if (filter === "mine") return MINE.includes(r.action);
+  if (filter === "rej") return r.stage === "rej";
+  return r.action === filter;
 }
 
 /** 搜索：编号 / 组名 / 视频提示词 / 生图提示词 / submit_id 一次覆盖。 */
@@ -360,25 +420,55 @@ export interface Section {
   key: string;
   batchId: number | null;
   title: string;
-  /** 本批全部条目（不受筛选影响）—— 分段条与「已定案」判定要看全貌。 */
+  /** 本批全部条目（不受筛选影响）—— 摘要与「已定案」判定要看全貌。 */
   all: Row[];
   /** 当前筛选下这一批还剩哪些行。 */
   rows: Row[];
-  /** 阶段混合分段条。 */
-  seg: { stage: Stage; pct: number }[];
-  legend: string;
+  /** 按下一步动作分桶。节内动作按钮据此显示，组件不必再数一遍。 */
+  counts: Record<NextAction, number>;
+  /** 一句人话的节头摘要。例外在前 —— 被截断时先没的必须是常态。 */
+  headline: string;
+  headlineTone: "er" | "acc" | "t3";
   /** 已定案 = 全部落在 pass/rej，没有任何一条还需要人或机器动。 */
   done: boolean;
   createdAt: number;
 }
 
 /**
+ * 节头摘要。
+ *
+ * 取代原来那条 104px 的阶段混合分段条 —— 它唯一的图例是 `title=` tooltip，
+ * 于是「这些进度条是什么意思」成了一个没人答得上来的问题。一句话既自带图例，
+ * 又能直接说出数字。
+ */
+function headlineOf(all: Row[], counts: Record<NextAction, number>) {
+  const parts: string[] = [];
+  if (counts.fix > 0) parts.push(`${counts.fix} 条出了异常`);
+  if (counts.rewrite > 0) parts.push(`${counts.rewrite} 条等你改写`);
+  if (counts.submit > 0) parts.push(`${counts.submit} 条等你放行`);
+  if (counts.review > 0) parts.push(`${counts.review} 条等你验收`);
+  if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦排队`);
+  const headlineTone: Section["headlineTone"] =
+    counts.fix > 0 ? "er" : counts.rewrite + counts.submit + counts.review > 0 ? "acc" : "t3";
+  const headline =
+    parts.length === 0
+      ? `这一批 ${all.length} 条 · 已全部定案`
+      : `这一批 ${all.length} 条 · ${parts.join("，")}`;
+  return { headline, headlineTone };
+}
+
+/**
  * 按批次分节。批次倒序（最近一批在最上），无批次的历史条目垫底。
  *
- * **全部定案的批次整节消失**，不是折叠成一行 —— 一行也是行，几十批做完之后
- * 那些「已定案」的条目会把真正在跑的那两批挤到屏幕外面去。它们不会丢：
- * 成片在成片库，毙掉的选「未通过」筛选片还能翻出来（那时 `rows` 非空，这一节
- * 就会重新出现）。
+ * **当前筛选下一条都不显示的批次整节消失**，无论它是否还有活。
+ *
+ * 旧规则只砍「已定案」的空节，于是筛「处理异常」时几十个还在跑的批次会留下几十个
+ * 只写着「当前筛选下这一批没有条目」的空壳节头，把真正的三条待办推到屏幕外面 ——
+ * 用户那句「筛选项随便选一个都会保留每一个分组」说的就是这个。旧规则的理由是
+ * 「分段条正是这一批做到哪了的答案，所以空节也该留着」；分段条没了，理由也就没了。
+ *
+ * 条目不会因此变得无处可寻：成片在成片库，毙掉的选「未通过」筛选片还能翻出来
+ * （那时 `rows` 非空，这一节就会重新出现）。
  */
 export function buildSections(all: Row[], visible: Row[]): Section[] {
   const groups = new Map<string, Row[]>();
@@ -399,31 +489,22 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
   const out: Section[] = [];
   for (const [key, rows] of groups) {
     const visRows = visByKey.get(key) ?? [];
-    const done = rows.every((r) => !isLive(r.stage));
-    // 定案了、当前筛选下又一条都不显示 → 整节不出现。
-    // 第二个条件是逃生舱：显式筛「未通过」时这一节会重新出现，条目不会变得无处可寻。
-    if (done && visRows.length === 0) continue;
+    if (visRows.length === 0) continue;
     const batchId = key === "none" ? null : Number(key);
-    const mix = new Map<Stage, number>();
-    for (const r of rows) mix.set(r.stage, (mix.get(r.stage) ?? 0) + 1);
-    const total = rows.length || 1;
-    // 分段条按七态固定顺序画，而不是按 Map 的插入序 —— 否则同一批的色块会
-    // 因为某一条状态变了而整条重排，看着像换了一批。
-    const seg = STAGE_ORDER.filter((s) => mix.has(s)).map((s) => ({
-      stage: s,
-      pct: ((mix.get(s) ?? 0) / total) * 100,
-    }));
+    const counts = Object.fromEntries(ACTION_ORDER.map((a) => [a, 0])) as Record<
+      NextAction,
+      number
+    >;
+    for (const r of rows) counts[r.action] += 1;
     out.push({
       key,
       batchId,
       title: sectionTitle(rows),
       all: rows,
       rows: visRows,
-      seg,
-      legend: STAGE_ORDER.filter((s) => mix.has(s))
-        .map((s) => `${STAGE_META[s].label} ${mix.get(s)}`)
-        .join(" · "),
-      done,
+      counts,
+      ...headlineOf(rows, counts),
+      done: rows.every((r) => !isLive(r.stage)),
       createdAt: Math.max(...rows.map((r) => r.clip.createdAt)),
     });
   }

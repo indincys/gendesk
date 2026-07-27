@@ -1,9 +1,12 @@
 import {
+  type ActionFilter,
   PHANTOM_GRACE_SECS,
+  type Row,
   buildSections,
   deriveRows,
+  matchAction,
   matchQuery,
-  matchStage,
+  nextAction,
 } from "@/features/v2v/model";
 import type { ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
 import { describe, expect, it } from "vitest";
@@ -94,7 +97,6 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     reviewedAt: null,
     autoSubmitted: false,
     assetPackId: null,
-    inAssetLib: false,
     exportPath: null,
     acceptedAt: NOW - 8000,
     updatedAt: NOW - 600,
@@ -123,7 +125,7 @@ describe("幽灵单判定", () => {
   it("宽限期内不判 —— 实测健康单 25 秒内才拿到位次，早判会把正常单说成事故", () => {
     const [r] = derive([clip({ stage: "run", videoPath: null, firstSubmittedAt: NOW - 60 })]);
     expect(r?.phantomLive).toBe(false);
-    expect(r?.situation).toContain("排队中");
+    expect(r?.situation).toContain("即梦在跑");
   });
 
   it("有扣费回执就不是幽灵单 —— 那条是决定性的信号，钱已经扣了", () => {
@@ -270,13 +272,22 @@ describe("信号", () => {
     expect(plain?.modelFull).toBe("seedance2.0fast");
   });
 
-  it("未入资产库只对成片成立，且入库后消失", () => {
-    const [out] = derive([clip({ stage: "pass", inAssetLib: false })]);
-    expect(out?.signals.has("noasset")).toBe(true);
-    expect(out?.situation).toContain("尚未入库");
-    const [inLib] = derive([clip({ stage: "pass", inAssetLib: true })]);
-    expect(inLib?.signals.has("noasset")).toBe(false);
-    expect(inLib?.situation).toBe("已入资产库");
+  // 成片的下游是本地输出目录，不是资产库（v0.22.0）。而拷贝失败**不回滚验收**，
+  // 所以「pass 但 export_path 为空」是真实会出现的状态：片子做出来了却没落地，
+  // 而在此之前界面上没有任何一处会提这件事。
+  it("成片按有没有交付到输出目录说话，未交付要标红", () => {
+    const [ok] = derive([
+      clip({ stage: "pass", exportPath: "/out/视频/甲组/BR310140_260727.mp4" }),
+    ]);
+    expect(ok?.situation).toBe("已成片 · 已交付");
+    expect(ok?.situationTone).toBe("t3");
+
+    const [miss] = derive([clip({ stage: "pass", exportPath: null })]);
+    expect(miss?.situation).toContain("未交付");
+    expect(miss?.situationTone).toBe("er");
+
+    // 空白串等同于没有 —— 交付路径是从文件系统回来的，别指望它只会是 null。
+    expect(derive([clip({ stage: "pass", exportPath: "  " })])[0]?.situation).toContain("未交付");
   });
 
   it("重跑过 = 尝试次数 > 1（同一张图已经花过不止一份额度）", () => {
@@ -285,26 +296,89 @@ describe("信号", () => {
   });
 });
 
+describe("下一步动作", () => {
+  it("七态各归其位", () => {
+    expect(nextAction("rewrite", false)).toBe("rewrite");
+    expect(nextAction("ready", false)).toBe("submit");
+    expect(nextAction("run", false)).toBe("wait");
+    expect(nextAction("rev", false)).toBe("review");
+    expect(nextAction("fail", false)).toBe("fix");
+    expect(nextAction("pass", false)).toBe("done");
+    expect(nextAction("rej", false)).toBe("done");
+  });
+
+  // 幽灵单只存在于 `run`，而旧的「需要我」= ready|rev|fail 不含 run ——
+  // 于是唯一该**免费**重跑的那一类，被默认筛选整个藏了起来。实测一次事故里
+  // 18 条这样的单子挂了十几个小时无人察觉。
+  it("在跑的幽灵单归「处理异常」，不归「等即梦」", () => {
+    const rows = derive([
+      clip({
+        id: 1,
+        stage: "run",
+        videoPath: null,
+        firstSubmittedAt: NOW - PHANTOM_GRACE_SECS - 60,
+      }),
+    ]);
+    const ghost = rows[0];
+    if (!ghost) throw new Error("fixture");
+    expect(ghost.phantomLive).toBe(true);
+    expect(ghost.action).toBe("fix");
+    expect(matchAction(ghost, "mine")).toBe(true);
+    expect(matchAction(ghost, "wait")).toBe(false);
+  });
+});
+
 describe("筛选", () => {
-  it("「需要我」= 待提交 / 待验收 / 失败，不含机器在跑与等 skill 的", () => {
-    expect(matchStage("ready", "need")).toBe(true);
-    expect(matchStage("rev", "need")).toBe(true);
-    expect(matchStage("fail", "need")).toBe(true);
-    expect(matchStage("run", "need")).toBe(false);
-    expect(matchStage("rewrite", "need")).toBe(false);
-    expect(matchStage("pass", "need")).toBe(false);
+  const only = (rows: Row[], f: ActionFilter) => rows.filter((r) => matchAction(r, f));
+
+  /**
+   * 用户报的原症：21 条待改写时，界面同时显示「需要我 0」「待改写 21」「无待办」。
+   *
+   * 那 21 条**恰恰卡在人身上** —— GenDesk 已经把工单物化好，在等人去 Claude Code
+   * 里跑改写。把这一步排除在「需要我」之外，等于让全流水线最大的一处阻塞显示为 0。
+   */
+  it("待改写算「需要我」—— 21 条待改写时这个数是 21，不是 0", () => {
+    const rows = derive(
+      Array.from({ length: 21 }, (_, i) =>
+        clip({ id: i + 1, stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
+      ),
+    );
+    expect(only(rows, "mine")).toHaveLength(21);
+    expect(only(rows, "rewrite")).toHaveLength(21);
+  });
+
+  it("「需要我」= 改写 / 放行 / 验收 / 处理异常，不含机器在跑的", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "ready", videoPath: null, submitId: null }),
+      clip({ id: 2, stage: "rev" }),
+      clip({ id: 3, stage: "fail", errorType: "timeout", videoPath: null }),
+      clip({ id: 4, stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
+      clip({ id: 5, stage: "run", videoPath: null, submitCredit: 8, firstSubmittedAt: NOW - 60 }),
+      clip({ id: 6, stage: "pass" }),
+    ]);
+    expect(only(rows, "mine").map((r) => r.clip.id)).toEqual([1, 2, 3, 4]);
   });
 
   // 工作台回答的是「还剩多少活」。把已经定案的算进去，这个数就再也不准了 ——
   // 实测 18 条验收通过的片子一直挂在看板上，人得先在心里把它们减掉才看得出待办。
-  it("「全部」= 全部在制，不含成片与未通过", () => {
-    expect(matchStage("rewrite", "all")).toBe(true);
-    expect(matchStage("run", "all")).toBe(true);
-    expect(matchStage("fail", "all")).toBe(true);
-    expect(matchStage("pass", "all")).toBe(false);
-    expect(matchStage("rej", "all")).toBe(false);
-    // 但显式点「未通过」还是能看到它们 —— 不是删掉，是不默认占位。
-    expect(matchStage("rej", "rej")).toBe(true);
+  it("「全部」= 全部在制，不含成片与未通过；但显式筛「未通过」仍能翻出来", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
+      clip({ id: 2, stage: "run", videoPath: null, submitCredit: 8, firstSubmittedAt: NOW - 60 }),
+      clip({ id: 3, stage: "fail", errorType: "timeout", videoPath: null }),
+      clip({ id: 4, stage: "pass" }),
+      clip({ id: 5, stage: "rej" }),
+    ]);
+    expect(only(rows, "all").map((r) => r.clip.id)).toEqual([1, 2, 3]);
+    expect(only(rows, "rej").map((r) => r.clip.id)).toEqual([5]);
+  });
+
+  it("待改写那句既点名动作也点名工具 —— 否则没人知道该去哪儿干什么", () => {
+    const [r] = derive([
+      clip({ stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
+    ]);
+    expect(r?.situation).toContain("v2v-rewrite");
+    expect(r?.situation).not.toContain("物化");
   });
 
   it("搜索一次覆盖编号/组名/提示词/submit_id —— 人并不知道自己记住的是哪一处", () => {
@@ -328,26 +402,35 @@ describe("分节", () => {
       clip({ id: 2, batchId: 30, stage: "pass" }),
       clip({ id: 3, batchId: 30, stage: "rej" }),
     ]);
-    // 工作台的可见集不含已定案的两态（`matchStage(_, "all")` 只放行在制）。
-    const visible = rows.filter((r) => matchStage(r.stage, "all"));
+    // 工作台的可见集不含已定案的两态（`matchAction(_, "all")` 只放行在制）。
+    const visible = rows.filter((r) => matchAction(r, "all"));
     const secs = buildSections(rows, visible);
     expect(secs.map((s) => s.batchId)).toEqual([31]);
     expect(secs[0]?.done).toBe(false);
   });
 
-  it("但显式筛「未通过」时那一节要回来 —— 定案的条目不该变得无处可寻", () => {
+  /**
+   * v0.22.0 起这条语义反转了：**当前筛选下一条都不显示的批次整节消失**，
+   * 无论它是否还有活。
+   *
+   * 旧规则只砍已定案的空节，于是筛「处理异常」时几十个还在跑的批次留下几十个
+   * 只写着「当前筛选下这一批没有条目」的空壳节头 —— 用户那句「筛选项随便选一个
+   * 都会保留每一个分组」说的就是它。旧规则的理由是「分段条正是这一批做到哪了的
+   * 答案，空节也该留着」；分段条已经删了，理由也就没了。
+   */
+  it("当前筛选下没有可见行的批次整节消失 —— 哪怕它还有活", () => {
     const rows = derive([
       clip({ id: 1, batchId: 31, stage: "rev" }),
       clip({ id: 2, batchId: 30, stage: "rej" }),
     ]);
-    const visible = rows.filter((r) => matchStage(r.stage, "rej"));
-    const secs = buildSections(rows, visible);
-    // 30 回来了（它有命中的行）；31 仍在（它还有活），只是这一屏里没有它的行。
-    // 「还有活的批次一直在」是刻意的：那条分段条正是「这一批做到哪了」的答案，
-    // 不该因为换了个筛选就消失。
-    expect(secs.map((s) => s.batchId)).toEqual([31, 30]);
-    expect(secs.find((s) => s.batchId === 30)?.done).toBe(true);
-    expect(secs.find((s) => s.batchId === 31)?.rows).toHaveLength(0);
+    const secs = buildSections(
+      rows,
+      rows.filter((r) => matchAction(r, "rej")),
+    );
+    // 只剩 30（它有命中的行）。31 还有活，但这一屏里它一行都没有 —— 留一个空壳
+    // 节头不回答任何问题，只会把真正命中的那一节挤下去。
+    expect(secs.map((s) => s.batchId)).toEqual([30]);
+    expect(secs[0]?.done).toBe(true);
   });
 
   it("无批次的历史条目垫底，不占最新那一节的位置", () => {
@@ -358,17 +441,38 @@ describe("分节", () => {
     expect(buildSections(rows, rows).map((s) => s.batchId)).toEqual([12, null]);
   });
 
-  it("分段条按七态固定顺序，且百分比合计 100", () => {
+  // 节头摘要取代了那条无图例的分段条 —— 用户问「每个分组这些进度条是什么意思」，
+  // 而它唯一的图例是 title tooltip，即：没人答得上来。
+  it("节头摘要例外在前 —— 被截断时先没的必须是常态，不是例外", () => {
+    const rows = derive([
+      clip({
+        id: 1,
+        batchId: 31,
+        stage: "run",
+        videoPath: null,
+        submitCredit: 8,
+        firstSubmittedAt: NOW - 60,
+      }),
+      clip({ id: 2, batchId: 31, stage: "rev" }),
+      clip({ id: 3, batchId: 31, stage: "ready", videoPath: null, submitId: null }),
+      clip({ id: 4, batchId: 31, stage: "fail", errorType: "timeout", videoPath: null }),
+    ]);
+    const sec = buildSections(rows, rows)[0];
+    expect(sec?.headline).toBe(
+      "这一批 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦排队",
+    );
+    expect(sec?.headlineTone).toBe("er");
+  });
+
+  it("全定案的批次摘要直说定案，不假装还有活", () => {
     const rows = derive([
       clip({ id: 1, batchId: 31, stage: "pass" }),
-      clip({ id: 2, batchId: 31, stage: "rewrite" }),
-      clip({ id: 3, batchId: 31, stage: "run", videoPath: null }),
-      clip({ id: 4, batchId: 31, stage: "rewrite" }),
+      clip({ id: 2, batchId: 31, stage: "rej" }),
     ]);
-    const seg = buildSections(rows, rows)[0]?.seg ?? [];
-    // 固定顺序，不随「哪一条先变状态」重排 —— 否则同一批的色块会看着像换了一批。
-    expect(seg.map((g) => g.stage)).toEqual(["rewrite", "run", "pass"]);
-    expect(seg.reduce((a, g) => a + g.pct, 0)).toBeCloseTo(100);
+    const sec = buildSections(rows, rows)[0];
+    expect(sec?.headline).toBe("这一批 2 条 · 已全部定案");
+    expect(sec?.headlineTone).toBe("t3");
+    expect(sec?.counts.done).toBe(2);
   });
 
   it("分节标题取组名；混多组时只列前两个", () => {
@@ -380,7 +484,7 @@ describe("分节", () => {
     expect(buildSections(rows, rows)[0]?.title).toBe("甲组 · 乙组 等 3 组");
   });
 
-  it("筛选只影响列出来的行，分段条仍按全貌算 —— 否则「这一批做到哪了」当场失真", () => {
+  it("筛选只影响列出来的行，节头摘要仍按全貌算 —— 否则「这一批做到哪了」当场失真", () => {
     const rows = derive([
       clip({ id: 1, batchId: 31, stage: "rev" }),
       clip({ id: 2, batchId: 31, stage: "pass" }),
@@ -389,6 +493,8 @@ describe("分节", () => {
     const sec = buildSections(rows, visible)[0];
     expect(sec?.rows).toHaveLength(1);
     expect(sec?.all).toHaveLength(2);
-    expect(sec?.seg).toHaveLength(2);
+    // 摘要说的是这一批的全貌（2 条），不是这一屏筛出来的 1 条。
+    expect(sec?.headline).toBe("这一批 2 条 · 1 条等你验收");
+    expect(sec?.counts.done).toBe(1);
   });
 });

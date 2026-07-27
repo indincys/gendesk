@@ -9,36 +9,38 @@ import {
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, Check, RefreshCw, Wand2 } from "lucide-react";
+import { AlertTriangle, Check, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 /**
- * 生成参数与额度面板。
+ * 默认参数与账户。
  *
- * 用户的原话是「无法在软件内**有效**编辑和查看视频生成的参数」。原来的界面确实有几个
- * 下拉框（在设置页），但它们回答不了实际的问题：
+ * ## 这一层**只管全局默认**（v0.22.0）
  *
+ * 它原来用同一组下拉框做两件事：一边改全局默认，一边「应用到选中的 N 条」——
+ * 一套控件两种作用域，且没有任何视觉区分，于是「我到底改的是哪个」无从判断。
+ * 批量覆盖已经搬去它该在的地方（选中条目后底栏的参数条、提交确认卡），
+ * 这里只剩一种含义：**新条目的默认值**。
+ *
+ * 三处作用域各自在自己的标签上说清楚：
+ * 这里说「默认」· 详情栏说「这一条」· 底栏与提交卡说「这 N 条」。
+ *
+ * 它回答的仍是原来那几个问题：
  * - **走哪个模型**：留空意味着「跟随 CLI 默认」，而那个默认是什么，界面上看不出来。
- *   故这里显示的是**归一化之后**的三件套，外加一条与真正 exec 同源的示例命令行。
+ *   故显示的是**归一化之后**的三件套，外加一条与真正 exec 同源的示例命令行。
  * - **哪个通道**：`--session` 原来只是个裸数字输入框。这里直接列出即梦的会话。
+ *   会话是账号级的，故它**只**在这里 —— 不做成每条可改。
  * - **积分额度 / 用量**：余额来自远端账户，消耗来自本机出片时收到的扣费回执。
  *   **不合并成一个百分比** —— 两个数字来自两个地方，编一个比值出来会让它们的差异
  *   变得无法解释（别处也可能在花同一个账户的额度）。
- * - **改起来要能整批改**：参数恰恰是最常成组调整的东西（「这一组都换成 vip 1080p」），
- *   而原来只能一条一条开详情弹窗。
  */
 export function V2vParamsPanel({
   models,
-  selectedReady,
   onClose,
-  onApplied,
 }: {
   models: ModelInfo[];
-  /** 当前在「待改写/待提交」列勾选中的条目 id（批量覆盖的作用对象）。 */
-  selectedReady: number[];
   onClose: () => void;
-  onApplied: () => void;
 }) {
   const [s, setS] = useState<V2vSettings | null>(null);
   const [eff, setEff] = useState<EffectiveParams | null>(null);
@@ -91,27 +93,6 @@ export function V2vParamsPanel({
     }
   };
 
-  const applyToSelected = async () => {
-    if (!s || selectedReady.length === 0) return;
-    setBusy(true);
-    try {
-      const n = await unwrap(
-        commands.setV2vClipParams(
-          selectedReady,
-          blank(s.modelVersion),
-          s.duration ?? null,
-          blank(s.videoResolution),
-        ),
-      );
-      toast.success(`已覆盖 ${n} 条的生成参数`);
-      onApplied();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (!s) return null;
   const picked = models.find((m) => m.modelVersion === s.modelVersion);
   // `#[serde(default)]` 让 specta 把它标成可选，但 Rust 那边一定会填 —— 取个局部变量
@@ -120,7 +101,7 @@ export function V2vParamsPanel({
 
   return (
     <Modal
-      title="生成参数与额度"
+      title="默认参数与账户"
       width="w700"
       onClose={onClose}
       headerExtra={
@@ -133,21 +114,10 @@ export function V2vParamsPanel({
       footer={
         <>
           <span className="fs11 t3">
-            改写 skill 对单条给出的建议优先于这里的默认值（那是看过图之后的判断）
+            这里改的是**新条目的默认值**。要改已在列表里的条目：选中它们用底栏的参数条，
+            或在右侧详情栏改单条。
           </span>
           <div className="f1" />
-          {selectedReady.length > 0 && (
-            <button
-              type="button"
-              className="btn sm"
-              disabled={busy}
-              onClick={applyToSelected}
-              title="把上面这套参数写进选中的条目，覆盖 skill 给的建议"
-            >
-              <Wand2 className="ic12" />
-              应用到选中的 {selectedReady.length} 条
-            </button>
-          )}
           <button type="button" className="btn sm pri" onClick={onClose}>
             完成
           </button>
@@ -157,7 +127,7 @@ export function V2vParamsPanel({
       <div style={{ padding: 4 }}>
         {/* ── 实际生效的参数 ───────────────────────────── */}
         <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-          实际发往即梦的参数
+          新条目的默认参数 · 实际发往即梦的字段
         </div>
         <div className="fx ac gap8 wrap">
           <select
@@ -437,12 +407,6 @@ export function V2vParamsPanel({
       </div>
     </Modal>
   );
-}
-
-/** 空串折成 null：空输入框不该变成 `--model_version=` 这种必被拒的空 flag。 */
-function blank(v: string | undefined): string | null {
-  const t = (v ?? "").trim();
-  return t === "" ? null : t;
 }
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "er" }) {

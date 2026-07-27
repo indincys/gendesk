@@ -67,7 +67,6 @@ pub struct ClipRow {
     pub asset_pack_id: Option<i64>,
     /// 那个素材包**现在还在不在**（包被退役删除后应回落成「尚未入库」）。
     /// SQLite 的 EXISTS 回 0/1，故用 i64 承接。
-    pub in_asset_lib: i64,
     /// 验收通过后交付到 `outputs/视频/` 的那份拷贝（0027）。有它才答得出「片子在哪」。
     pub export_path: Option<String>,
     pub updated_at: i64,
@@ -88,7 +87,6 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.first_submitted_at, c.submit_credit, c.submit_status,
         c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at,
         c.auto_submitted, c.asset_pack_id,
-        EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id) AS in_asset_lib,
         c.export_path, c.updated_at,
         COALESCE(w.prompt_code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
@@ -390,6 +388,21 @@ pub async fn list_running(pool: &SqlitePool) -> Result<Vec<ClipRow>, sqlx::Error
     sqlx::query_as::<_, ClipRow>(&sql).fetch_all(pool).await
 }
 
+/// 在跑条目各自写死的模型（去重）。轮询档位据此决定走 VIP 档还是非 VIP 档。
+///
+/// 返回 `Option` 而不是折成字符串：`NULL`/空串意味着「跟随设置里的默认」，
+/// 而那个默认只有调用方（读得到设置）才知道。在这里替它填上，等于把回落规则
+/// 抄成第二份。
+pub async fn running_models(pool: &SqlitePool) -> Result<Vec<Option<String>>, sqlx::Error> {
+    let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT DISTINCT model_version FROM v2v_clips
+          WHERE stage='run' AND submit_id IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(m,)| m).collect())
+}
+
 /// 成片落盘：run → rev（待验收）。
 #[allow(clippy::too_many_arguments)] // 视频元数据是一整组，拆结构体只会多一层无信息的包装
 pub async fn mark_ready_for_review(
@@ -648,16 +661,18 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     Ok(n)
 }
 
-/// 成片做完却没入资产库的条数（成片库徽章）。
+/// 验收通过了却没交付到输出目录的条数（成片库徽章）。
 ///
-/// 判据是 `EXISTS`（那个包**现在**还在不在）而不是 `asset_pack_id IS NOT NULL`：
-/// 包被退役删除之后，这条成片应当自动回落成待办 —— 问的是「现在库里有没有」，
-/// 不是「历史上打过包没有」。
-pub async fn count_pass_without_pack(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+/// 这是成片这条链上**唯一一处会无声断掉的地方**：验收通过时的拷贝失败不回滚验收
+/// （判定是人做的，文件可以补），于是「片子做出来了却没落地」在库里是一个完全合法、
+/// 界面上又完全看不见的状态。徽章把它变成待办。
+///
+/// 只看 `export_path` 是否为空，**不去 stat 文件**：这个计数每 6 秒随事件算一次，
+/// 而磁盘上的成片可能在网络卷上。「文件后来被人删了」由「重新交付」那条路径兜底。
+pub async fn count_pass_undelivered(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     let (n,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM v2v_clips c
-          WHERE c.stage='pass'
-            AND NOT EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id)",
+        "SELECT COUNT(*) FROM v2v_clips
+          WHERE stage='pass' AND (export_path IS NULL OR TRIM(export_path)='')",
     )
     .fetch_one(pool)
     .await?;
@@ -742,27 +757,6 @@ pub async fn credit_submitted_since(pool: &SqlitePool, since: i64) -> Result<i64
     .fetch_one(pool)
     .await?;
     Ok(n)
-}
-
-/// 记下这条成片打进了哪个素材包（0025）。
-///
-/// 只认 `pass`：未验收的片子入库会被排期直接发出去（`pack_from_clip` 已挡过一道，
-/// 这里是数据层的同一条规则，两处都写是因为将来会有别的调用方）。
-pub async fn set_asset_pack(
-    pool: &SqlitePool,
-    clip_id: i64,
-    pack_id: i64,
-    now: i64,
-) -> Result<bool, sqlx::Error> {
-    let res = sqlx::query(
-        "UPDATE v2v_clips SET asset_pack_id=?2, updated_at=?3 WHERE id=?1 AND stage='pass'",
-    )
-    .bind(clip_id)
-    .bind(pack_id)
-    .bind(now)
-    .execute(pool)
-    .await?;
-    Ok(res.rows_affected() > 0)
 }
 
 /// 一条 clip 的**可撤销列**快照。
@@ -1108,46 +1102,31 @@ mod tests {
         assert!(back.reviewed_at.is_none(), "撤销后不得留下已判定的时刻");
     }
 
-    // 入资产库的回指：只认 pass，且**包没了要自动回落成未入库**
-    // ——「入库与否」问的是「现在库里有没有」，不是「历史上打过包没有」。
+    // 「验收通过了却没落地」是这条链上唯一一处会无声断掉的地方：验收时的拷贝失败
+    // **不回滚验收**，于是它在库里是个完全合法、界面上又完全看不见的状态。
     #[tokio::test]
-    async fn asset_link_follows_pack_lifetime() {
+    async fn undelivered_counts_passed_clips_without_export_path() {
         let (pool, _d) = test_pool().await;
         let id = seed_reviewable(&pool, 1).await;
 
-        // 还没验收通过：不得回指（未验收的片子入库会被排期直接发出去）。
-        assert!(!set_asset_pack(&pool, id, 1, 500).await.unwrap());
+        // 还没验收：不算 —— 它本来就还没到该交付的时候。
+        assert_eq!(count_pass_undelivered(&pool).await.unwrap(), 0);
+
         assert!(set_reviewed(&pool, id, "pass", 500).await.unwrap());
+        assert_eq!(
+            count_pass_undelivered(&pool).await.unwrap(),
+            1,
+            "通过了却没有交付路径 —— 正是要催的那一条"
+        );
 
-        // id 1 是 0010 内置的「通用」分组，另起一个。
-        sqlx::query(
-            "INSERT INTO skus (id,code,style_name,tier,status,created_at,updated_at)
-             VALUES (77,'SKU1','款式','A','active',0,0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO asset_packs (id,sku_id,kind,dir_rel,files_json,lifecycle,source,created_at,updated_at)
-             VALUES (9,77,'video','素材库/SKU1/video','[]','active','v2v',0,0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert!(set_asset_pack(&pool, id, 9, 600).await.unwrap());
-        let row = get(&pool, id).await.unwrap().unwrap();
-        assert_eq!(row.asset_pack_id, Some(9));
-        assert_eq!(row.in_asset_lib, 1, "包在，应显示已入资产库");
-
-        sqlx::query("DELETE FROM asset_packs WHERE id = 9")
-            .execute(&pool)
+        set_export_path(&pool, id, Some("/out/视频/甲组/BR310140_260727.mp4"))
             .await
             .unwrap();
-        let row = get(&pool, id).await.unwrap().unwrap();
-        assert_eq!(
-            row.in_asset_lib, 0,
-            "包被删掉后必须回落成未入库 —— 否则这条成片从待办里永久消失"
-        );
+        assert_eq!(count_pass_undelivered(&pool).await.unwrap(), 0);
+
+        // 空白串等同于没有：交付路径是从文件系统回来的，别指望它只会是 NULL。
+        set_export_path(&pool, id, Some("   ")).await.unwrap();
+        assert_eq!(count_pass_undelivered(&pool).await.unwrap(), 1);
     }
 
     // 「你离开的这段时间」按 finished_at 切，且只把真出了片的算进出片数。

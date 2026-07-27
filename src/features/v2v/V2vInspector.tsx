@@ -1,8 +1,11 @@
+import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, STAGE_META, fmtClock, fmtDur } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
+import type { ModelInfo } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Check, Image as ImageIcon, Maximize2, RotateCcw, Undo2, X } from "lucide-react";
+import { useState } from "react";
 
 /**
  * 右侧详情栏 —— 「这一条的账」与「这一条的历程」。
@@ -22,7 +25,8 @@ export function V2vInspector({
   onRerun,
   onRewrite,
   onResume,
-  onPack,
+  models,
+  onApplyParams,
   busy,
 }: {
   row: Row | null;
@@ -36,7 +40,8 @@ export function V2vInspector({
   onRerun: () => void;
   onRewrite: () => void;
   onResume: () => void;
-  onPack: () => void;
+  models: ModelInfo[];
+  onApplyParams: (clipId: number, p: Params) => void;
   busy: boolean;
 }) {
   if (!row) {
@@ -135,19 +140,6 @@ export function V2vInspector({
           </button>
         </div>
       )}
-      {row.stage === "pass" && (
-        <div className="fx gap5 mt8">
-          <button
-            type="button"
-            className="btn sm pri f1"
-            disabled={busy || c.inAssetLib}
-            onClick={onPack}
-            title="打包成视频型素材包（1 视频 + 封面）接上发布链"
-          >
-            {c.inAssetLib ? "已入资产库" : "入资产库"} <span className="kh">A</span>
-          </button>
-        </div>
-      )}
       {row.signals.has("timeout") && (
         <div className="fx gap5 mt8">
           <button type="button" className="btn sm pri f1" disabled={busy} onClick={onResume}>
@@ -170,6 +162,24 @@ export function V2vInspector({
       {hint && (
         <div className={cn("vhint", hint.tone)} style={{ marginTop: 7 }}>
           {hint.text}
+        </div>
+      )}
+
+      {/* 参数在**账之前** —— 参数是花钱之前要改的输入，账是花完之后的回执，
+          「改 → 花」这个阅读顺序本身就在说明哪一个还来得及动。 */}
+      <div className="vsec">这一条的参数</div>
+      {row.stage === "rewrite" || row.stage === "ready" ? (
+        <InspectorParams
+          key={c.id}
+          row={row}
+          models={models}
+          busy={busy}
+          onApply={(p) => onApplyParams(c.id, p)}
+        />
+      ) : (
+        <div className="fs10 t3 mt5" style={{ lineHeight: 1.6 }}>
+          已提交之后改参数不会重新生效（那条视频用的是提交那一刻的参数），
+          所以这里只显示，不给编辑。要换参数就重跑。
         </div>
       )}
 
@@ -237,6 +247,66 @@ export function V2vInspector({
         </>
       )}
       <div style={{ height: 8 }} />
+    </div>
+  );
+}
+
+/**
+ * 这一条自己的模型 / 时长 / 分辨率，就地可改。
+ *
+ * 只在 `rewrite`/`ready` 两阶段出现 —— 镜像 `repo::set_params` 的
+ * `WHERE stage IN ('rewrite','ready')`。绝不给一个后端明确 no-op 的控件：
+ * 一个点了没反应的按钮比没有这个按钮更糟。
+ *
+ * 初值取 `clip.modelVersion` 而**不是** `row.modelFull`。后者是「这一条 → 全局默认
+ * → 模型内建」逐级回落之后的结果；拿它当初值，等于一打开详情栏按下「应用」就把当时
+ * 的全局默认焊死进这一条，以后再改全局默认它就不跟了。空串 = 跟随全局默认。
+ *
+ * 由父组件用 `key={c.id}` 结构性重置草稿。用 effect 会与每秒重渲染的 `now` 打架 ——
+ * 那个秒表让这个组件每秒重跑一次，一个 `[c.id]` 的 effect 竞争起来会把正在输入的
+ * 值随机弹回去。
+ */
+function InspectorParams({
+  row,
+  models,
+  busy,
+  onApply,
+}: {
+  row: Row;
+  models: ModelInfo[];
+  busy: boolean;
+  onApply: (p: Params) => void;
+}) {
+  const c = row.clip;
+  const initial: Params = {
+    modelVersion: c.modelVersion ?? "",
+    duration: c.duration,
+    videoResolution: c.videoResolution ?? "",
+  };
+  const [p, setP] = useState<Params>(initial);
+  const dirty =
+    p.modelVersion !== initial.modelVersion ||
+    p.duration !== initial.duration ||
+    p.videoResolution !== initial.videoResolution;
+
+  return (
+    <div className="mt5">
+      <V2vParamPicker models={models} value={p} onChange={setP} disabled={busy} compact />
+      <div className="fx ac gap5 mt5">
+        <span className="fs10 t3 f1 ohide nowrap">
+          {c.modelVersion == null || c.modelVersion === ""
+            ? `未单独设定 · 跟随全局默认（${row.modelFull ?? "CLI 默认"}）`
+            : "已为这一条单独设定"}
+        </span>
+        <button
+          type="button"
+          className={cn("btn xs", dirty && "pri")}
+          disabled={busy || !dirty}
+          onClick={() => onApply(p)}
+        >
+          应用到这一条
+        </button>
+      </div>
     </div>
   );
 }

@@ -25,7 +25,6 @@ export function V2vReviewFlow({
   onReject,
   onRerun,
   onRewrite,
-  onPackPass,
   onUndo,
   onExit,
 }: {
@@ -41,7 +40,6 @@ export function V2vReviewFlow({
   onReject: () => void;
   onRerun: () => void;
   onRewrite: () => void;
-  onPackPass: () => void;
   onUndo: () => void;
   onExit: () => void;
 }) {
@@ -162,7 +160,7 @@ export function V2vReviewFlow({
 
       <div className="vrevstrip" ref={stripRef}>
         {from > 0 && <span className="n">←{from}</span>}
-        <div className="sc fx gap5" style={{ flex: 1, minWidth: 0, alignItems: "flex-end" }}>
+        <div className="vstrip fx gap5" style={{ flex: 1, minWidth: 0, alignItems: "flex-end" }}>
           {strip.map((r) => {
             const t = assetSrc(r.clip.posterPath ?? r.clip.thumbPath);
             const isCur = r.clip.id === c.id;
@@ -197,9 +195,6 @@ export function V2vReviewFlow({
         </button>
         <button type="button" className="btn sm vrevbtn" disabled={busy} onClick={onRewrite}>
           退回改写 <span className="kh">E</span>
-        </button>
-        <button type="button" className="btn sm vrevbtn" disabled={busy} onClick={onPackPass}>
-          通过并入资产库 <span className="kh">A</span>
         </button>
         {undoLabel && (
           <span className="vrevundo">

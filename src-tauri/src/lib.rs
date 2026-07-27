@@ -324,6 +324,7 @@ pub fn run() {
             if let Err(err) = setup_app(app) {
                 tracing::error!(error = %err, "应用初始化失败，退出");
                 eprintln!("[gendesk] 应用初始化失败: {err}");
+                fatal_dialog(&err.to_string());
                 std::process::exit(1);
             }
 
@@ -333,8 +334,34 @@ pub fn run() {
         .unwrap_or_else(|e| {
             // 启动失败无法进入日志系统，退回 stderr 并非零退出。
             eprintln!("[gendesk] 应用启动失败: {e}");
+            fatal_dialog(&e.to_string());
             std::process::exit(1);
         });
+}
+
+/// 启动失败时弹一个原生对话框，然后才退出。
+///
+/// **为什么这是必需的**：从 Finder / 开始菜单启动的 GUI 进程没有 stderr，日志文件也
+/// 不会有人主动去翻。于是「初始化失败 → 干净退出」在用户那里的全部表现，就是
+/// **dock 图标弹一下就没了** —— 一个不指向任何东西的症状，连从哪查起都无从判断
+/// （而同一份代码 `pnpm tauri dev` 跑得好好的，因为开发实例总是最新的）。
+/// 干净退出解决的是「不要弹系统崩溃报告」，它不负责告诉人发生了什么；这一步才是。
+///
+/// 用 rfd 而不是 tauri-plugin-dialog，理由见 Cargo.toml 中该依赖的注释。
+///
+/// 按钮写「退出」而不是默认的 OK：点下去进程就结束了，这是它的实际语义。
+///
+/// **只在打包成 .app 之后才弹得出来**（实测）：rfd 对无父窗口的消息框走
+/// `CFUserNotificationDisplayAlert`，裸二进制（`pnpm tauri dev` 的形态）拿不到显示会话，
+/// 约 3 秒后返回错误、静默略过。这不必修 —— dev 下 stderr 就在眼前，而这个弹窗要救的
+/// 恰恰是从 Finder 双击、什么输出都看不到的那条路径。
+fn fatal_dialog(message: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("GenDesk 无法启动")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::OkCustom("退出".into()))
+        .show();
 }
 
 /// setup 钩子中所有可失败的初始化步骤。抽出为独立函数，使调用方能把失败
@@ -351,7 +378,12 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let guard = logging::init(&dirs.logs());
     app.manage(guard);
 
-    let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
+    // 迁移失败的原文（sqlx 的 `VersionMissing` 等）不指向任何可执行的动作，而它恰恰
+    // 是这条路径上最常见、也最难自查的失败。翻译成人话再上抛，见 `db::explain_connect_error`。
+    let pool = match tauri::async_runtime::block_on(db::connect(&dirs.db())) {
+        Ok(pool) => pool,
+        Err(err) => return Err(db::explain_connect_error(&err).into()),
+    };
 
     // 密钥存本地加密文件（见 secrets.rs 模块头安全水位）。旧版把 Key 放系统钥匙串，
     // 自签名下每次更新都弹授权 → 启动时做一次性迁移（幂等，失败只 warn 不阻断启动，

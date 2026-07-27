@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "gendesk"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1816,6 +1816,7 @@ dependencies = [
  "notify",
  "proptest",
  "reqwest",
+ "rfd",
  "rust_xlsxwriter",
  "serde",
  "serde_json",

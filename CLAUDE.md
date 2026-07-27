@@ -886,3 +886,40 @@ audit.yml）。
     分节保留判据均在真实数据上验证。
   - **未做**：独立上下文 `/code-review`（§1.4 要求）；未在真机启动 GUI 实跑
     （会触发 watcher 收录真实工单 = 可能真花钱建批），建议合并后人工跑一次 `pnpm tauri dev`。
+- [x] **启动失败必须自己说话（v0.20.1）** — 用户报「有时候点了没反应，dock 弹一下就没了，
+  但 `pnpm tauri dev` 能开」。日志里躺着答案：
+  `应用初始化失败，退出 error=migration 25 was previously applied but is missing in the resolved migrations`
+  （当天 09:03 / 11:08 / 12:12–12:14 反复出现，12:12 起那一串密集重试就是人在连点图标）。
+  - **根因是「旧包对新库」**：`sqlx::migrate!` 在**编译期**把 `migrations/` 内嵌进二进制，
+    而 dev 与打包应用**共用同一个 `app_data_dir`**（identifier 相同）。于是
+    `pnpm tauri dev` 跑在最新 main 上把库迁到 0026；装在 `/Applications` 的 **v0.18.0**
+    （内嵌只到 0024）再打开，sqlx 见到库里有它不认识的迁移 25/26 → `VersionMissing` → 拒绝。
+    这是保护不是故障：旧代码不认识新 schema，让它跑才会真损坏数据。二进制级已核实——
+    0.18.0 的可执行文件里有 `intake jobs`(0023) / `v2v submit receipt`(0024) 的字符串，
+    没有 `v2v asset link`(0025) / `v2v autofill`(0026)。
+  - **「有时候」是错觉，这是一扇单向门**：dev 跑过一次之后旧包**再也**开不起来，直到重装。
+    而「dev 能开」恰恰是同一个原因的另一面（它总是最新的）—— 这个巧合让最该被怀疑的
+    东西看起来最健康，也是这个 bug 难查的全部原因。
+  - **真正的缺陷是没有出口信号**。失败处理此前已经做对了一半（不 panic、记日志、干净退出），
+    但漏了最后一步：**告诉人**。GUI 从 Finder 启动没有 stderr，日志文件没人会主动去翻，
+    于是整件事在用户那里的全部表现就是 dock 弹一下 —— 一个不指向任何东西的症状。
+    现在退出前弹原生对话框（`fatal_dialog`），`setup_app` 与 `run()` 两条失败路径都走它。
+  - **弹窗用 rfd 而非 tauri-plugin-dialog**：后者的 blocking API 文档明写不得在主线程调用，
+    而 setup 钩子正在主线程；它的非阻塞 API 又要求事件循环已经跑起来，而失败发生在那之前。
+    rfd 是该插件自己的底层依赖，特性合一后仍是同一份，`Cargo.lock` 只 +1 行。
+    **它只在打包成 .app 后才弹得出来**（实测）：无父窗口的消息框走
+    `CFUserNotificationDisplayAlert`，裸二进制拿不到显示会话，约 3 秒后返回错误并静默略过。
+    不必修 —— dev 下 stderr 就在眼前，这个弹窗要救的正是双击图标那条路径。
+  - **sqlx 的原文不算「告诉人」**：`migration 25 was previously applied but is missing in
+    the resolved migrations` 不指向任何可执行动作。`db::explain_connect_error` 把它译成
+    「库到了第几版 / 我只认到第几版 / 去更新应用」，两个数字都给。
+    `latest_embedded_migration()` 读的是**内嵌迁移表**而不是 `CARGO_PKG_VERSION` ——
+    那才是「这份可执行文件认识到第几版 schema」的准确答案，排查时要看的也是它。
+  - **第二条通往同一症状的路径（排查中撞见）**：`tauri-plugin-single-instance` 在已有实例时
+    **静默 exit(0)，无任何输出**。所以开着 `pnpm tauri dev` 时再点 .app，同样是「弹一下就没了」。
+    两条路径的区分方法：看日志里有没有当次的 `logging initialized` —— 单实例踢出发生在
+    日志初始化**之前**，一个字都不会留下；迁移失败则必留一条 ERROR。
+  - 471 Rust 测试（+3，用真实临时库重现「库里有本应用不认识的迁移」，断言拒绝启动、
+    文案含两个版本号与可执行动作、且不泄漏 sqlx 英文原文）。弹窗已在真机 .app 中实跑验证
+    （栈停在 `CFUserNotificationDisplayAlert`/`ReceiveResponse`，面板截图确认）。
+    无 migration / 无 IPC 改动 / 无前端改动。

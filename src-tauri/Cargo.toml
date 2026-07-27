@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.20.0"
+version = "0.20.1"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -23,6 +23,12 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
+
+# 启动初始化失败时的原生对话框。**不能**用 tauri-plugin-dialog：它的 blocking API
+# 文档明写「不得在主线程调用」，而 setup 钩子正在主线程；它的非阻塞 API 又要求事件
+# 循环已经跑起来，而失败发生在那之前。故直接用该插件底层的 rfd（同版本，特性合一后
+# 仍是同一份，不会多编一遍）。
+rfd = { version = "0.16", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

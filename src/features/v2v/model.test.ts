@@ -95,6 +95,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     finishedAt: NOW - 600,
     reviewedAt: null,
     autoSubmitted: false,
+    submitQueuedAt: null,
     exportPath: null,
     phantomSuspect: false,
     acceptedAt: NOW - 8000,
@@ -103,7 +104,69 @@ function clip(over: Partial<ClipView> = {}): ClipView {
   };
 }
 
-const derive = (cs: ClipView[]) => deriveRows(cs, MODELS, EFF, NOW);
+const derive = (cs: ClipView[], limit = 1) => deriveRows(cs, MODELS, EFF, NOW, limit);
+
+describe("本地待发队列（0028）", () => {
+  /**
+   * 这一组测试守的是这次事故的核心教训：**「等你点确认提交」与「你点过了，在排队」
+   * 必须是两件看得出区别的事**。
+   *
+   * 事故经过：选 9 条点确认 → 9 条一起砸向即梦 → 即梦只跑得下 1 条，其余 8 条回来
+   * `ExceedConcurrencyLimit` 被判死进「处理异常」。而界面从头到尾没有任何一处
+   * 提到过这个上限的存在。
+   */
+  it("已放行的条目不再算「待放行」，而是自成一档「排队中」", () => {
+    const [waiting, released] = derive([
+      clip({ id: 1, stage: "ready", videoPath: null }),
+      clip({ id: 2, stage: "ready", videoPath: null, submitQueuedAt: NOW - 60 }),
+    ]);
+    expect(waiting?.action).toBe("submit");
+    expect(waiting?.situation).toContain("等你点确认提交");
+    expect(released?.action).toBe("queued");
+    expect(released?.situation).toContain("已放行");
+    // 排队中的**不该**进「需要我」：人已经做过决定了，剩下的是机器的事。
+    expect(matchAction(released as Row, "mine")).toBe(false);
+    expect(matchAction(waiting as Row, "mine")).toBe(true);
+  });
+
+  it("本地位次严格照放行时刻算，与后端取用顺序同源", () => {
+    // 放行时刻与 id 顺序故意相反：排的是放行时刻，不是 id。
+    const rows = derive([
+      clip({ id: 5, stage: "ready", videoPath: null, submitQueuedAt: 300 }),
+      clip({ id: 2, stage: "ready", videoPath: null, submitQueuedAt: 100 }),
+      clip({ id: 9, stage: "ready", videoPath: null, submitQueuedAt: 200 }),
+    ]);
+    expect(rows.map((r) => [r.clip.id, r.queuePos])).toEqual([
+      [5, 3],
+      [2, 1],
+      [9, 2],
+    ]);
+    // 队首那条要说「下一个就发它」，后面的才报位次 —— 否则「第 1 位」还要人自己翻译。
+    expect(rows.find((r) => r.clip.id === 2)?.situation).toContain("下一个就发它");
+    expect(rows.find((r) => r.clip.id === 5)?.situation).toContain("本地排第 3");
+  });
+
+  it("在跑上限写进文案里 —— 「为什么只跑 1 条」必须在界面上答得出", () => {
+    const [r] = derive([clip({ stage: "ready", videoPath: null, submitQueuedAt: 1 })], 3);
+    expect(r?.situation).toContain("即梦同时只跑 3 条");
+  });
+
+  it("即梦的排队位次直接说人话：前面还有多少个", () => {
+    const [r] = derive([
+      clip({ stage: "run", videoPath: null, queueIdx: 4485, firstSubmittedAt: NOW - 600 }),
+    ]);
+    expect(r?.queuePos).toBe(4485);
+    expect(r?.situation).toBe("即梦在排队 · 前面还有 4485 个");
+  });
+
+  it("问不到位次就退回本批进度，绝不编一个数字出来", () => {
+    const [r] = derive([
+      clip({ stage: "run", videoPath: null, queueIdx: null, firstSubmittedAt: NOW - 600 }),
+    ]);
+    expect(r?.queuePos).toBeNull();
+    expect(r?.situation).toContain("本批已出");
+  });
+});
 
 describe("幽灵单判定", () => {
   /**
@@ -452,7 +515,7 @@ describe("分节", () => {
     ]);
     const sec = buildSections(rows, rows)[0];
     expect(sec?.headline).toBe(
-      "这一批 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦排队",
+      "这一批 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦跑",
     );
     expect(sec?.headlineTone).toBe("er");
   });

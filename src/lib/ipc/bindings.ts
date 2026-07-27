@@ -1127,11 +1127,30 @@ async previewV2vCommands(ids: number[]) : Promise<Result<SubmitPreview, AppError
 }
 },
 /**
- * 批量提交到即梦。
+ * 放行一批到即梦。
+ * 
+ * **不再是「N 条一起砸过去」**：即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），
+ * 超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里只发得下的那几条，
+ * 其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序自动补上。
  */
 async submitV2vClips(ids: number[]) : Promise<Result<SubmitSummary, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("submit_v2v_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 撤回放行：把还在本地队列里等空位的条目退回「等你点确认提交」。
+ * 
+ * 只动没提交出去的（`stage='ready'`）—— 已经在即梦手上的那条撤不回来，钱已经扣了。
+ * 它存在的理由是「放行」现在是一个**延时生效**的决定：人点完确认之后可能改主意，
+ * 而在此之前唯一的退出方式是把条目整个删掉。
+ */
+async unqueueV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unqueue_v2v_clips", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2143,9 +2162,13 @@ dailyCredits?: number }
  * 「开着」不等于「在跑」——没料了、日限满了、余额不够都会让它安静地停下来，
  * 而一条安静停摆的常驻队列与一条正常运转的在界面上长得一模一样。
  */
-export type AutofillStatus = { enabled: boolean; depth: number; 
+export type AutofillStatus = { enabled: boolean; 
 /**
- * 补单器自己放出去、此刻在跑的条数。
+ * 生效的常驻条数 = 配置深度与即梦并发上限取小。
+ */
+depth: number; 
+/**
+ * 此刻在即梦手上的条数（**全部**提交路径，见 `repo::count_in_flight`）。
  */
 running: number; 
 /**
@@ -2294,6 +2317,14 @@ createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewed
  * 是不是常驻队列（自动补单）替人放行的（0026）。
  */
 autoSubmitted: boolean; 
+/**
+ * 人已放行、正在**本地队列**等即梦空位的时刻（0028）。
+ * 
+ * 只在 `stage='ready'` 时有意义：它把「等你点确认提交」和「你点过了，在排队」
+ * 分成两件事 —— 而这两件事此前在界面上长得一模一样，于是一批放行完的片子
+ * 看起来像是没人管。
+ */
+submitQueuedAt: number | null; 
 /**
  * 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
  * 
@@ -3005,7 +3036,20 @@ nextPollIn: number | null;
 /**
  * 超时上限小时数；None = 不限。
  */
-timeoutHours: number | null }
+timeoutHours: number | null; 
+/**
+ * 生效的在跑上限（配置值与实测值取小）。`running/limit` 就是「即梦这边跑满没有」。
+ */
+inFlightLimit: number; 
+/**
+ * 本次运行实测到的上限；有值即「我们撞过 `ExceedConcurrencyLimit`，
+ * 所以就算你设得更大也只能跑这么多」。
+ */
+observedLimit: number | null; 
+/**
+ * **本地队列**里等空位的条数（0028）—— 人已放行、还没发出去的那些。
+ */
+queued: number }
 /**
  * 对账结果汇总。
  */
@@ -3311,6 +3355,10 @@ balance: number | null }
  */
 export type SubmitSummary = { submitted: number; failed: number; 
 /**
+ * 这一批里被在跑上限挡在本地、排队等空位的条数（0028）。**不是失败**。
+ */
+queued: number; 
+/**
  * 第一条失败的原因（批量提交时逐条上报太吵，给一条代表 + 计数）。
  */
 firstError: string | null }
@@ -3567,6 +3615,14 @@ timeoutHours?: number | null;
  * 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
  */
 autofill?: AutofillCfg; 
+/**
+ * 同时最多有几条在即梦手上（0028）。**所有**提交路径共用它 —— 人点确认提交、
+ * 常驻队列补单、失败重跑，抢的都是即梦那一份账户级并发配额。
+ * 
+ * 默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队，其余 8 条回来
+ * `ExceedConcurrencyLimit`。超出的条目不再往外发，而是留在本地队列排队等空位。
+ */
+maxInFlight?: number; 
 /**
  * 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
  * 

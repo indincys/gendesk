@@ -3,6 +3,7 @@ import {
   type CreditStats,
   type EffectiveParams,
   type ModelInfo,
+  type QueueStats,
   type SessionInfo,
   type V2vSettings,
   commands,
@@ -37,9 +38,12 @@ import { toast } from "sonner";
  */
 export function V2vParamsPanel({
   models,
+  queue,
   onClose,
 }: {
   models: ModelInfo[];
+  /** 在跑上限那一段要说的是**现在**的样子（实测上限、本地排队几条），故取实时快照。 */
+  queue?: QueueStats | null;
   onClose: () => void;
 }) {
   const [s, setS] = useState<V2vSettings | null>(null);
@@ -223,6 +227,45 @@ export function V2vParamsPanel({
           )}
         </div>
 
+        {/* ── 同时在跑上限（即梦的账户级并发闸门） ─────────── */}
+        <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+          同时在跑上限 · 即梦一次跑得下几条
+        </div>
+        <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 8 }}>
+          即梦对<b>整个账户</b>限制同时在跑的条数，超出的会被它以{" "}
+          <code>ExceedConcurrencyLimit</code> 逐条拒掉（一分钱不扣，但任务也不跑）。 所以 GenDesk
+          只发得下的那几条，<b>其余留在本地排队，出一条自动补一条</b> ——
+          你点一次确认就够了，不必守着补单。手动放行与常驻队列<b>共用</b>这个配额。
+        </div>
+        <div className="fx ac gap8 wrap">
+          <span className="fs11 t3">同时最多</span>
+          <input
+            className="inp sm"
+            style={{ width: 64 }}
+            type="number"
+            min={1}
+            max={20}
+            value={s.maxInFlight ?? 1}
+            onChange={(e) => setS({ ...s, maxInFlight: Number(e.target.value) })}
+            onBlur={() => void save({ maxInFlight: s.maxInFlight ?? 1 })}
+            disabled={busy}
+          />
+          <span className="fs11 t3">条在即梦手上</span>
+          {queue?.observedLimit != null && (
+            <span className="bdg b-amber">
+              实测只跑得下 {queue.observedLimit} 条 —— 设得再大也按这个来
+            </span>
+          )}
+          {(queue?.queued ?? 0) > 0 && (
+            <span className="fs11 t3">当前本地排队 {queue?.queued} 条</span>
+          )}
+        </div>
+        <div className="fs11 t3" style={{ lineHeight: 1.8, marginTop: 6 }}>
+          默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队。往小了猜只是让后面那些
+          多等一会儿（非 VIP 通道上「等」本来就免费），往大了猜是一批片子集体躺进「处理异常」。
+          真撞上拒收时这里会自己往下收敛。
+        </div>
+
         {/* ── 常驻队列（自动补单） ───────────────────────── */}
         {af && (
           <>
@@ -234,6 +277,9 @@ export function V2vParamsPanel({
               买到的只是不排队。所以<b>「等」这件事本身是免费的</b>，只要队列不空着，
               过夜就能低成本攒下片子。这条队列保持 N 条在跑，完成一条自动补一条；
               待提交的存量见底时发系统通知，好让你提前安排新的。
+              <br />
+              它与你手动放行的那些<b>共用上面那个在跑上限</b>（配额是即梦按账户算的）， 且
+              <b>不会碰你已经放行、正在本地排队的条目</b>。
             </div>
             <div className="fx ac gap8 wrap">
               <label className="fx ac gap6 fs12">

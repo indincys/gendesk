@@ -180,10 +180,16 @@ impl Blocked {
 /// `unit_cost` 是单条预估额度；查不到单价时为 `None` —— 那时**不做额度裁剪**而不是
 /// 按 0 算：按 0 算等于把日限当作不存在，而这里宁可少限一层也不能编一个单价出来。
 /// （单价查不到只会发生在没实测过的组合上，而默认模型是实测过的。）
+///
+/// `in_flight` 是**所有**在跑条目（不只是补单器自己放出去的），`hard_limit` 是即梦的
+/// 账户级并发上限（`runner::effective_in_flight`）。0028 之前这两处都只算补单器自己的
+/// 那份，理由是「手动提交的一批不该顶掉它的配额」—— 而实测证明配额本来就是共用的：
+/// 人占满了唯一那个位子时，补单器再发出去的单子回来的是 `ExceedConcurrencyLimit`。
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     cfg: &AutofillCfg,
-    running_auto: i64,
+    in_flight: i64,
+    hard_limit: i64,
     stock: i64,
     spent_today: i64,
     balance: Option<i64>,
@@ -195,7 +201,8 @@ pub fn plan(
     }
     // 存量告急与「补不补得动」是两件事：即便这一轮补满了，只要补完之后的存量低于
     // 水位线，就该现在提醒 —— 提醒的价值全在「提前」，等断流了再说毫无意义。
-    let deficit = (cfg.depth - running_auto).max(0);
+    let target = cfg.depth.min(hard_limit.max(1));
+    let deficit = (target - in_flight).max(0);
     let mut take = deficit.min(stock);
     let mut blocked = None;
 
@@ -268,8 +275,9 @@ pub async fn tick(
             return;
         }
     };
-    let (running_auto, stock, spent_today) = match tokio::try_join!(
-        repo::count_auto_running(pool),
+    let hard_limit = crate::v2v::runner::effective_in_flight(settings.max_in_flight);
+    let (in_flight, stock, spent_today) = match tokio::try_join!(
+        repo::count_in_flight(pool),
         repo::count_autofill_pool(pool),
         repo::credit_submitted_since(pool, now - 24 * 3600),
     ) {
@@ -288,7 +296,8 @@ pub async fn tick(
         _ => None,
     };
     // 余额是**尽力而为**：查一次要跑 CLI，而这一步每 30 秒发生一次。只在真要补单时才查。
-    let deficit_now = (cfg.depth - running_auto).max(0);
+    let target = cfg.depth.min(hard_limit.max(1));
+    let deficit_now = (target - in_flight).max(0);
     let balance = if deficit_now > 0 {
         dreamina::user_credit(&settings.bin, log)
             .await
@@ -300,7 +309,8 @@ pub async fn tick(
 
     let p = plan(
         cfg,
-        running_auto,
+        in_flight,
+        hard_limit,
         stock,
         spent_today,
         balance,
@@ -328,9 +338,8 @@ pub async fn tick(
                     "submit",
                     None,
                     format!(
-                        "常驻队列本轮未补单：{}（在跑 {running_auto}/{}）",
-                        b.label(),
-                        cfg.depth
+                        "常驻队列本轮未补单：{}（在跑 {in_flight}/{target}）",
+                        b.label()
                     ),
                     None,
                 );
@@ -374,10 +383,9 @@ pub async fn tick(
         "submit",
         None,
         format!(
-            "常驻队列补单 {} 条 · 模型 {} · 在跑 {running_auto}/{} · 今日已提交 {spent_today} 额度",
+            "常驻队列补单 {} 条 · 模型 {} · 在跑 {in_flight}/{target} · 今日已提交 {spent_today} 额度",
             ids.len(),
             opts.model_version.as_deref().unwrap_or("—"),
-            cfg.depth,
         ),
         None,
     );
@@ -414,7 +422,7 @@ mod tests {
         let mut c = cfg();
         c.enabled = false;
         assert_eq!(
-            plan(&c, 0, 100, 0, Some(9999), Some(8), 99999),
+            plan(&c, 0, 99, 100, 0, Some(9999), Some(8), 99999),
             Plan::default()
         );
         assert!(!AutofillCfg::default().enabled, "默认必须是关的");
@@ -423,9 +431,23 @@ mod tests {
     // 常驻深度：跑满了就不补，缺几条补几条。
     #[test]
     fn refills_exactly_the_deficit() {
-        assert_eq!(plan(&cfg(), 3, 100, 0, Some(9999), Some(8), 0).take, 0);
-        assert_eq!(plan(&cfg(), 1, 100, 0, Some(9999), Some(8), 0).take, 2);
-        assert_eq!(plan(&cfg(), 0, 100, 0, Some(9999), Some(8), 0).take, 3);
+        assert_eq!(plan(&cfg(), 3, 99, 100, 0, Some(9999), Some(8), 0).take, 0);
+        assert_eq!(plan(&cfg(), 1, 99, 100, 0, Some(9999), Some(8), 0).take, 2);
+        assert_eq!(plan(&cfg(), 0, 99, 100, 0, Some(9999), Some(8), 0).take, 3);
+    }
+
+    // 即梦的账户级并发上限压过配置深度：设了 3 而上限是 1 时，只补到 1。
+    //
+    // 这是 0028 的核心修正。旧版只数补单器自己放出去的条目，于是人手动占满了唯一
+    // 那个位子时它照样往外发，而那些单子回来的是 `ExceedConcurrencyLimit`。
+    #[test]
+    fn account_wide_concurrency_limit_wins_over_configured_depth() {
+        assert_eq!(plan(&cfg(), 0, 1, 100, 0, Some(9999), Some(8), 0).take, 1);
+        assert_eq!(
+            plan(&cfg(), 1, 1, 100, 0, Some(9999), Some(8), 0).take,
+            0,
+            "那一个位子已经被占了 —— 无论占它的是谁"
+        );
     }
 
     // VIP 模型必须在**保存设置**那一刻被拒：这条队列的全部前提就是便宜，
@@ -453,11 +475,11 @@ mod tests {
     #[test]
     fn daily_cap_clamps_the_batch() {
         // 日限 200，已提交 184 → 还剩 16 → 单价 8 → 只够 2 条。
-        let p = plan(&cfg(), 0, 100, 184, Some(9999), Some(8), 0);
+        let p = plan(&cfg(), 0, 99, 100, 184, Some(9999), Some(8), 0);
         assert_eq!(p.take, 2);
         assert_eq!(p.blocked, Some(Blocked::DailyCap));
         // 用满了就一条都不补。
-        let p = plan(&cfg(), 0, 100, 200, Some(9999), Some(8), 0);
+        let p = plan(&cfg(), 0, 99, 100, 200, Some(9999), Some(8), 0);
         assert_eq!(p.take, 0);
         assert_eq!(p.blocked, Some(Blocked::DailyCap));
     }
@@ -466,10 +488,10 @@ mod tests {
     // 前面扣掉的退不回来。
     #[test]
     fn low_balance_stops_before_spending_the_last_credits() {
-        let p = plan(&cfg(), 0, 100, 0, Some(9), Some(8), 0);
+        let p = plan(&cfg(), 0, 99, 100, 0, Some(9), Some(8), 0);
         assert_eq!(p.take, 1, "余额 9 单价 8 → 只够一条");
         assert_eq!(p.blocked, Some(Blocked::LowBalance));
-        let p = plan(&cfg(), 0, 100, 0, Some(3), Some(8), 0);
+        let p = plan(&cfg(), 0, 99, 100, 0, Some(3), Some(8), 0);
         assert_eq!(p.take, 0);
     }
 
@@ -477,7 +499,7 @@ mod tests {
     // 这是三种停因里唯一一个需要人动手的。
     #[test]
     fn empty_stock_is_the_only_reason_that_needs_a_human() {
-        let p = plan(&cfg(), 0, 1, 0, Some(9999), Some(8), 0);
+        let p = plan(&cfg(), 0, 99, 1, 0, Some(9999), Some(8), 0);
         assert_eq!(p.take, 1);
         assert_eq!(p.blocked, Some(Blocked::NoStock));
     }
@@ -487,17 +509,29 @@ mod tests {
     #[test]
     fn low_water_warning_fires_early_and_only_after_the_cooldown() {
         // 存量 6，补 3 条之后剩 3 < 水位线 5 → 现在就该提醒。
-        assert!(plan(&cfg(), 0, 6, 0, Some(9999), Some(8), NOTICE_COOLDOWN_SECS).notify_low);
+        assert!(
+            plan(
+                &cfg(),
+                0,
+                99,
+                6,
+                0,
+                Some(9999),
+                Some(8),
+                NOTICE_COOLDOWN_SECS
+            )
+            .notify_low
+        );
         // 刚提醒过 → 冷却期内不再吵。
-        assert!(!plan(&cfg(), 0, 6, 0, Some(9999), Some(8), 60).notify_low);
+        assert!(!plan(&cfg(), 0, 99, 6, 0, Some(9999), Some(8), 60).notify_low);
         // 存量充足 → 不提醒。
-        assert!(!plan(&cfg(), 0, 50, 0, Some(9999), Some(8), 99999).notify_low);
+        assert!(!plan(&cfg(), 0, 99, 50, 0, Some(9999), Some(8), 99999).notify_low);
     }
 
     // 单价查不到时**不做额度裁剪**，而不是按 0 算把日限当作不存在。
     #[test]
     fn unknown_unit_price_skips_clamping_rather_than_treating_it_as_free() {
-        let p = plan(&cfg(), 0, 100, 100_000, Some(0), None, 0);
+        let p = plan(&cfg(), 0, 99, 100, 100_000, Some(0), None, 0);
         assert_eq!(
             p.take, 3,
             "算不出单价就不裁剪，交给下一层（提交时余额不足会报错）"

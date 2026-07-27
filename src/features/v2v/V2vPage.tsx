@@ -208,7 +208,7 @@ export function V2vPage() {
   // 顶部那个心跳 pill 与倒计时仍读未量化的 `now`，那才是真需要每秒走字的地方。
   const coarseNow = Math.floor(now / 30) * 30;
   const rows = useMemo(
-    () => deriveRows(clips, models, eff, coarseNow),
+    () => deriveRows(clips, models, eff, coarseNow, queue?.inFlightLimit ?? 1),
     [clips, models, eff, coarseNow],
   );
   const byId = useMemo(() => new Map(rows.map((r) => [r.clip.id, r])), [rows]);
@@ -417,9 +417,14 @@ export function V2vPage() {
   const openSubmit = useCallback(
     (ids: number[]) =>
       guard(async () => {
-        const ready = ids.filter((id) => byId.get(id)?.stage === "ready");
+        // 已经放行、正在本地队列里等空位的不算 —— 对它们再点一次确认什么也不会发生，
+        // 而确认卡会把它们算进「这一批 N 条 · 预估 M 额度」，两个数字当场就不准了。
+        const ready = ids.filter((id) => {
+          const c = byId.get(id);
+          return c?.clip.stage === "ready" && c.clip.submitQueuedAt == null;
+        });
         if (ready.length === 0) {
-          toast("请先选中「待提交」阶段的条目");
+          toast("请先选中「待放行」的条目（排队中的已经放行过了，不必再点）");
           return;
         }
         setCmdPreview({ ids: ready, data: await unwrap(commands.previewV2vCommands(ready)) });
@@ -459,13 +464,35 @@ export function V2vPage() {
     if (!p) return;
     void guard(async () => {
       const sum = await unwrap(commands.submitV2vClips(p.ids));
-      if (sum.submitted > 0) toast.success(`已提交 ${sum.submitted} 条到即梦`);
+      if (sum.submitted > 0) {
+        toast.success(
+          sum.queued > 0
+            ? `已提交 ${sum.submitted} 条到即梦 · 另 ${sum.queued} 条在本地排队，出一条自动补一条`
+            : `已提交 ${sum.submitted} 条到即梦`,
+        );
+      } else if (sum.queued > 0) {
+        // 即梦已经跑满时一条都发不出去 —— 这不是失败，但必须说清楚，
+        // 否则点了确认什么都没发生。
+        toast(`即梦已跑满，${sum.queued} 条已排进本地队列，有空位就自动发`);
+      }
       if (sum.failed > 0) toast.error(`${sum.failed} 条提交失败：${sum.firstError ?? ""}`);
       setCmdPreview(null);
       setSel(new Set());
       await load();
     });
   }, [cmdPreview, guard, load]);
+
+  /** 撤回放行：本地队列 → 等你点确认提交。没发出去所以不涉及钱。 */
+  const unqueue = useCallback(
+    (ids: number[]) =>
+      guard(async () => {
+        const n = await unwrap(commands.unqueueV2vClips(ids));
+        toast(n > 0 ? `已撤回放行 ${n} 条（未产生额度消耗）` : "这些条目已经发出去了，撤不回来");
+        setSel(new Set());
+        await load();
+      }),
+    [guard, load],
+  );
 
   const remove = useCallback(
     () =>
@@ -650,6 +677,7 @@ export function V2vPage() {
           passRate={passRate}
           stale={false}
           staleSecs={null}
+          queue={queue}
           auto={auto}
           passCount={0}
           onObserve={() => setShowObserve(true)}
@@ -665,7 +693,9 @@ export function V2vPage() {
           </div>
         </div>
         {showLog && <V2vLogPanel onClose={() => setShowLog(false)} />}
-        {showParams && <V2vParamsPanel models={models} onClose={() => setShowParams(false)} />}
+        {showParams && (
+          <V2vParamsPanel models={models} queue={queue} onClose={() => setShowParams(false)} />
+        )}
         {showObserve && (
           <ObserveModal
             tick={tick}
@@ -688,6 +718,7 @@ export function V2vPage() {
         passRate={passRate}
         stale={stale}
         staleSecs={staleSecs}
+        queue={queue}
         auto={auto}
         passCount={passN}
         onObserve={() => setShowObserve(true)}
@@ -973,7 +1004,7 @@ export function V2vPage() {
                     </button>
                   </>
                 )}
-                {onlyStage === "ready" && (
+                {selected.some((r) => r.action === "submit") && (
                   <button
                     type="button"
                     className="btn xs pri"
@@ -981,9 +1012,24 @@ export function V2vPage() {
                     onClick={() => void openSubmit([...sel])}
                   >
                     <Send className="ic12" />
-                    提交 {sel.size} 条
+                    提交 {selected.filter((r) => r.action === "submit").length} 条
                     {estimateOf(selected) != null && ` · 约 ${estimateOf(selected)} 额度`}{" "}
                     <span className="kh">⌘⏎</span>
+                  </button>
+                )}
+                {selected.some((r) => r.action === "queued") && (
+                  <button
+                    type="button"
+                    className="btn xs gho"
+                    disabled={busy}
+                    onClick={() =>
+                      void unqueue(
+                        selected.filter((r) => r.action === "queued").map((r) => r.clip.id),
+                      )
+                    }
+                    title="它们还没发出去、一分钱没扣 —— 撤回后退回「等你点确认提交」"
+                  >
+                    撤回放行 {selected.filter((r) => r.action === "queued").length} 条
                   </button>
                 )}
                 {selected.some((r) => r.signals.has("timeout")) && (
@@ -1112,6 +1158,7 @@ export function V2vPage() {
           preview={cmdPreview.data}
           ids={cmdPreview.ids}
           models={models}
+          queue={queue}
           busy={busy}
           onApplyParams={(p) => applyParams(cmdPreview.ids, p, true)}
           onClose={() => setCmdPreview(null)}
@@ -1123,11 +1170,13 @@ export function V2vPage() {
       {showParams && (
         <V2vParamsPanel
           models={models}
+          queue={queue}
           onClose={() => {
             setShowParams(false);
             void unwrap(commands.v2vEffectiveParams())
               .then(setEff)
               .catch(() => {});
+            void load();
           }}
         />
       )}
@@ -1257,6 +1306,7 @@ function V2vHeader({
   passRate,
   stale,
   staleSecs,
+  queue,
   auto,
   passCount,
   onObserve,
@@ -1270,6 +1320,7 @@ function V2vHeader({
   passRate: number | null;
   stale: boolean;
   staleSecs: number | null;
+  queue: QueueStats | null;
   auto: AutofillStatus | null;
   passCount: number;
   onObserve: () => void;
@@ -1287,7 +1338,7 @@ function V2vHeader({
         title={
           tick?.error
             ? `上一轮出错：${tick.error}`
-            : "后台按已等时长退避轮询（10s→10min），心跳每 6 秒一次；关掉应用不影响已扣额度的任务"
+            : "后台整表扫描即梦（含 VIP 5 分钟一次、全非 VIP 10 分钟一次），心跳每 6 秒一次；关掉应用不影响已扣额度的任务"
         }
       >
         <span className="dot" />
@@ -1303,6 +1354,7 @@ function V2vHeader({
           {fmtDur(staleSecs)} 未出片
         </span>
       )}
+      <QueuePill queue={queue} onOpen={onParams} />
       <AutofillPill auto={auto} onOpen={onParams} />
       <span className="fs11 t3 nowrap">
         余额 <b className="mono t1">{balance ?? "—"}</b> · 今日{" "}
@@ -1338,6 +1390,39 @@ function V2vHeader({
 }
 
 /**
+ * 在跑上限与本地待发队列的 pill（0028）。
+ *
+ * 它回答的是这一版最核心的那个问题：**「我放行了 9 条，为什么只跑 1 条」**。
+ * 在此之前界面上没有任何一处提到过并发上限的存在，于是 9 条一起砸向即梦、
+ * 8 条被 `ExceedConcurrencyLimit` 弹回来判死，而人只看到「8 个错误」。
+ */
+function QueuePill({ queue, onOpen }: { queue: QueueStats | null; onOpen: () => void }) {
+  if (!queue) return null;
+  const { running, inFlightLimit, queued, observedLimit } = queue;
+  if (running === 0 && queued === 0) return null;
+  return (
+    <button
+      type="button"
+      className={cn("autopill", queued > 0 && "idle")}
+      onClick={onOpen}
+      title={[
+        `即梦同一时间只跑得下 ${inFlightLimit} 条（账户级并发上限）。`,
+        observedLimit != null
+          ? "这个数是本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收。"
+          : "可在参数面板里调整。",
+        queued > 0
+          ? `另有 ${queued} 条已放行、正排在本地等空位，出一条自动补一条 —— 不必再点提交。`
+          : "",
+      ].join("")}
+    >
+      <span className="dot" />
+      即梦 {running}/{inFlightLimit}
+      {queued > 0 && ` · 本地排队 ${queued}`}
+    </button>
+  );
+}
+
+/**
  * 常驻队列的 pill。
  *
  * 它要答的是**「开着」与「在跑」的差别** —— 没料了、日限满了、余额不够都会让这条
@@ -1356,11 +1441,12 @@ function AutofillPill({ auto, onOpen }: { auto: AutofillStatus | null; onOpen: (
       title={
         auto.error ??
         `常驻的非 VIP 队列：保持 ${auto.depth} 条在跑，完成一条补一条。` +
+          `位子与你手动放行的那些共用（即梦的并发上限是账户级的），所以「在跑 ${auto.running}」数的是全部。` +
           `今日已提交 ${auto.spentToday}${auto.dailyCredits > 0 ? `/${auto.dailyCredits}` : ""} 额度。`
       }
     >
       <span className="dot" />
-      常驻 {auto.running}/{auto.depth}
+      常驻补单 {auto.running}/{auto.depth}
       {bad ? " · 配置有误" : auto.blocked ? ` · ${auto.blocked}` : ` · 存量 ${auto.stock}`}
     </button>
   );
@@ -1398,7 +1484,10 @@ function SectionBlock({
   onRerunBatch: (ids: number[]) => void;
   onRewriteGroup: (ids: number[]) => void;
 }) {
-  const ready = s.rows.filter((r) => r.stage === "ready");
+  // 「待放行」与「已放行、在本地排队」都是 `ready` 阶段，但按钮只该管前者 ——
+  // 对已经放过行的再点一次「确认提交」什么也不会发生，而按钮上写着 9 条。
+  const ready = s.rows.filter((r) => r.action === "submit");
+  const queuedRows = s.rows.filter((r) => r.action === "queued");
   const rev = s.rows.filter((r) => r.stage === "rev");
   const fails = s.rows.filter((r) => r.stage === "fail");
   const phantoms = fails.filter((r) => r.signals.has("phantom"));
@@ -1463,6 +1552,11 @@ function SectionBlock({
           >
             确认提交 {ready.length} 条{cost != null && ` · 预估 ${cost} 额度`}
           </button>
+        )}
+        {queuedRows.length > 0 && (
+          <span className="fs11 t3 nowrap" title="已放行、正排在本地等即梦的空位，出一条自动补一条">
+            排队中 {queuedRows.length}
+          </span>
         )}
         {rev.length > 0 && (
           <button
@@ -1658,6 +1752,7 @@ function SubmitConfirm({
   preview,
   ids,
   models,
+  queue,
   busy,
   onApplyParams,
   onClose,
@@ -1666,6 +1761,8 @@ function SubmitConfirm({
   preview: SubmitPreview;
   ids: number[];
   models: ModelInfo[];
+  /** 在跑上限与当前占用 —— 这一批里有几条会当场发出去，由它决定。 */
+  queue: QueueStats | null;
   busy: boolean;
   /** 把参数写进这一批条目并重取预览。 */
   onApplyParams: (p: Params) => void;
@@ -1673,6 +1770,12 @@ function SubmitConfirm({
   onConfirm: () => void;
 }) {
   const short = preview.estimatedCredits;
+  // 即梦同时只跑得下这么多条，其余留在本地排队自动接上。**这个数必须出现在按下确认
+  // 之前**：这一版之前，选 9 条点确认得到的是「已提交 9 条」，而实际只有 1 条入队、
+  // 8 条被即梦以 ExceedConcurrencyLimit 弹回来判死 —— 界面从头到尾没提过有这个上限。
+  const limit = queue?.inFlightLimit ?? 1;
+  const goesNow = Math.max(0, Math.min(preview.commands.length, limit - (queue?.running ?? 0)));
+  const waits = preview.commands.length - goesNow;
   const [p, setP] = useState<Params>({ modelVersion: "", duration: null, videoResolution: "" });
   const [dirty, setDirty] = useState(false);
   return (
@@ -1687,7 +1790,9 @@ function SubmitConfirm({
             预计消耗 {preview.unpriced.length > 0 ? "≥ " : ""}
             {short} 额度
           </span>
-          <span className="fs11 t3">提交即扣费，无法撤回</span>
+          <span className="fs11 t3">
+            {waits > 0 ? `先发 ${goesNow} 条 · 其余排队时才扣费` : "提交即扣费，无法撤回"}
+          </span>
           <div className="f1" />
           <button type="button" className="btn sm gho" onClick={onClose}>
             取消
@@ -1755,6 +1860,23 @@ function SubmitConfirm({
               余额不足：即梦逐条扣费，会提交到一半开始报错，而前面扣掉的退不回来。
             </div>
           )}
+        </div>
+        <div className="costbar mb8">
+          <div className="fs12">
+            即梦同一时间只跑得下 <b>{limit}</b> 条
+            {(queue?.running ?? 0) > 0 && `（现在已占 ${queue?.running}）`}，所以这一批{" "}
+            <b>先发 {goesNow} 条</b>
+            {waits > 0 && (
+              <>
+                ，其余 <b>{waits} 条排在本地</b>，出一条自动补一条 —— 不必再来点一次
+              </>
+            )}
+            。
+          </div>
+          <div className="fs11 t3">
+            排队的那些<b>还没扣费</b>：额度是在真正发出去的那一刻扣的，所以下面那个预估是
+            这一批全部跑完的总数，不是现在就要花掉的。
+          </div>
         </div>
         <div className="fs12 t2 mb8" style={{ lineHeight: 1.7 }}>
           下面是<b>即将执行的完整命令行</b>（与真正 exec 的参数同源）。

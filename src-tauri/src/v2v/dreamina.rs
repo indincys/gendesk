@@ -466,6 +466,25 @@ pub fn classify_status(gen_status: &str) -> Outcome {
     }
 }
 
+/// 这份失败原因是不是「同时在跑的太多了」。
+///
+/// 实测回体：`api error: ret=1310, message=ExceedConcurrencyLimit, logid=2026…`。
+/// 2026-07-28 一批 9 条同时提交，即梦逐条给了 submit_id（提交侧「成功 9 · 失败 0」），
+/// 随后 8 条以这个原因判失败 —— 非 VIP 通道同一时间只跑得动 1 条。
+///
+/// 它和别的失败**不是一类东西**：一分钱没扣、任务从没跑过、提示词与图都没问题，
+/// 唯一的问题是排在了后面。记成 `fail` 就得人一条条去点重跑，而重跑又会撞上同一堵墙。
+/// 故 `runner::settle` 见到它是把条目放回本地队列，不是判死。
+///
+/// 认 `ret=1310` 与英文 message 两路：数字是协议、文案会被翻译或改写，
+/// 而两者同时变的可能性远低于任何一个单独变。
+pub fn is_concurrency_reject(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("exceedconcurrencylimit")
+        || r.contains("ret=1310")
+        || r.contains("concurrency limit")
+}
+
 /// 一次 `query_result` 的解析结果。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QueryResult {
@@ -1199,6 +1218,29 @@ mod tests {
     //
     // 这条推翻了此前那句「即梦排队期不回传位次」——那个结论是从 18 条坏单上归纳的。
     // 排队中位次与计费**都有**，这正是识别幽灵单的基线。
+    // 「同时在跑的太多了」必须与真失败区分开：前者一分钱没扣、放回队列即可，
+    // 后者要人去看原因。认 ret 码与英文文案两路 —— 数字是协议，文案会被改写。
+    #[test]
+    fn concurrency_reject_is_recognised_by_either_code_or_message() {
+        // 2026-07-28 实测原文。
+        assert!(is_concurrency_reject(
+            "api error: ret=1310, message=ExceedConcurrencyLimit, logid=202607280301581921680310396A"
+        ));
+        assert!(is_concurrency_reject("ExceedConcurrencyLimit"));
+        assert!(is_concurrency_reject("ret=1310"));
+        assert!(is_concurrency_reject("Concurrency limit exceeded"));
+        // 别的失败一律不许沾边：把它们也放回队列，等于让一条真坏掉的片子无限重投。
+        for s in [
+            "",
+            "expired",
+            "content policy violation",
+            "api error: ret=1200, message=InternalError",
+            "余额不足",
+        ] {
+            assert!(!is_concurrency_reject(s), "{s}");
+        }
+    }
+
     #[test]
     fn healthy_queued_payload_carries_position_and_credit() {
         let raw = r#"{

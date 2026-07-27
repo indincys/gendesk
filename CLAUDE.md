@@ -93,7 +93,6 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 5. **token 只从 `globals.css` 取** → guardrails 检查 `oklch(` 仅限该文件；
    `classnames.test.ts` 另检查**用到的 class / `var(--x)` 必须真的存在**、
    **定义了的 class 必须有人用**、**不写 Tailwind 工具类**（本仓库全用自定义类）。
-6. **视觉以原型 HTML 源码为准**（读 `docs/prototype/*.dc.html` 源码，不截图猜测）。
 
 ## IPC 约定
 

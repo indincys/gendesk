@@ -172,11 +172,6 @@ a:hover {
   height: 12px;
   flex: none;
 }
-.ic18 {
-  width: 18px;
-  height: 18px;
-  flex: none;
-}
 
 /* ============================ 应用外壳 ============================ */
 .app {
@@ -196,22 +191,6 @@ a:hover {
 }
 .app.win .tbar {
   padding-right: 0;
-}
-.tlc {
-  width: 12px;
-  height: 12px;
-  border-radius: 99px;
-  display: inline-block;
-  box-shadow: inset 0 0 0 0.5px oklch(0% 0 0 / 0.12);
-}
-.tlr {
-  background: #ec6a5e;
-}
-.tly {
-  background: #f5bf4f;
-}
-.tlg {
-  background: #61c554;
 }
 .wb {
   width: 44px;
@@ -376,20 +355,6 @@ a:hover {
   color: oklch(45% 0.1 70);
   background: var(--wrbg);
 }
-.qcard {
-  border: 1px solid var(--line);
-  background: oklch(100% 0 0 / 0.7);
-  border-radius: 10px;
-  box-shadow: var(--sh1);
-  padding: 9px 11px;
-  margin: 10px 2px 4px;
-  cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
-}
-.qcard:hover {
-  border-color: var(--line2);
-  background: #fff;
-}
 .sfoot {
   font-size: 10.5px;
   color: var(--t3);
@@ -481,17 +446,6 @@ a:hover {
   padding: 0 12px;
   min-height: 46px;
 }
-.cico {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: var(--inset);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--t2);
-  flex: none;
-}
 .cnt {
   font-size: 11px;
   color: var(--t3);
@@ -504,25 +458,6 @@ a:hover {
 .empt {
   padding: 30px 20px 34px;
   text-align: center;
-  border-top: 1px solid var(--line);
-}
-.emic {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  background: var(--inset);
-  color: var(--t3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 10px;
-}
-.grow {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 44px;
-  padding: 4px 12px;
   border-top: 1px solid var(--line);
 }
 .gdot {
@@ -872,23 +807,6 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* ============================ Key 状态条 ============================ */
-.kbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 0 14px;
-  background: var(--sub);
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
-  transition: background 0.12s;
-  flex: none;
-}
-.kbar:hover {
-  background: var(--inset);
-}
 .kd {
   width: 7px;
   height: 7px;
@@ -897,29 +815,8 @@ a:hover {
 .kd-ok {
   background: var(--ok);
 }
-.kd-lim {
-  background: var(--wr);
-}
 .kd-off {
   background: oklch(82% 0.008 260);
-}
-.kd-auth {
-  background: var(--er);
-}
-.kexp {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--sub);
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-  gap: 10px;
-}
-.kcard {
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 10px 11px;
-  box-shadow: var(--sh1);
 }
 .ban {
   display: flex;
@@ -1022,11 +919,6 @@ a:hover {
 /* 首行贴顶（工具栏与首行间不留多余空隙）。 */
 .rvrow.first {
   padding-top: 0;
-}
-/* T1：等高网格行——列数由内联 grid-template-columns 驱动，方格高度已知，零重排。 */
-.rgrid2 {
-  display: grid;
-  gap: 12px;
 }
 /* 验收齐行（justified）：一行共用行高，每格宽度按各自真实宽高比由 JS 算好后内联。
    高度与宽度都在渲染前确定，故虚拟化不需要回测任何一行——滚动全程零重排。
@@ -1507,28 +1399,6 @@ a:hover {
   min-height: 48px;
   padding: 4px 18px 0;
 }
-.prow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 32px;
-  padding: 0 18px 0 40px;
-  cursor: pointer;
-  transition: background 0.1s;
-  font-size: 12.5px;
-}
-.prow:hover {
-  background: var(--sub);
-}
-.prow .star {
-  opacity: 0;
-}
-.prow:hover .star {
-  opacity: 1;
-}
-.prow .star.on {
-  opacity: 1;
-}
 .pid {
   font: 500 10.5px var(--mono);
   color: var(--acc2);
@@ -1549,51 +1419,12 @@ a:hover {
   break-inside: avoid;
   margin-bottom: 12px;
 }
-.pgrid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 18px 16px;
-}
-.pchip {
-  font: 500 10.5px var(--mono);
-  color: var(--t2);
-  background: var(--sub);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 8px;
-  cursor: pointer;
-  transition: border-color 0.1s, color 0.1s, background 0.1s;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.pchip:hover {
-  border-color: var(--accln);
-  color: var(--acc2);
-  background: var(--accbg);
-}
 .favdot {
   width: 5px;
   height: 5px;
   border-radius: 99px;
   background: oklch(68% 0.13 80);
   flex: none;
-}
-/* E36 提示词多选：选中态 */
-.pchip.sel {
-  border-color: var(--accln);
-  color: var(--acc2);
-  background: var(--accbg2);
-}
-/* E20 分组标签筛选条 */
-.tagbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 2px 18px 8px;
-  border-bottom: 1px solid var(--line);
 }
 .tagchip {
   font-size: 11.5px;
@@ -1783,17 +1614,6 @@ a:hover {
 .gmi.dng:hover {
   background: var(--erbg);
 }
-/* 用途分区标题与分隔线（分组菜单顶部）。 */
-.gmlbl {
-  font-size: 11px;
-  color: var(--t3);
-  padding: 6px 9px 3px;
-}
-.gmsep {
-  height: 1px;
-  background: var(--line2);
-  margin: 4px 2px;
-}
 
 /* ============================ 废纸篓 ============================ */
 .xrow {
@@ -1856,14 +1676,6 @@ a:hover {
 }
 .chevr.open {
   transform: rotate(0deg);
-}
-.krow {
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: #fff;
-  box-shadow: var(--sh1);
-  padding: 11px 13px;
-  margin-bottom: 8px;
 }
 .stp {
   display: inline-flex;
@@ -2127,41 +1939,6 @@ a:hover {
   border-color: var(--accln);
   background: var(--accbg);
 }
-.dscrim {
-  position: fixed;
-  inset: 0;
-  background: oklch(22% 0.02 262 / 0.14);
-  z-index: 40;
-  animation: fin 0.13s;
-}
-.drw {
-  position: fixed;
-  top: 52px;
-  right: 10px;
-  bottom: 10px;
-  width: 400px;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  box-shadow: var(--sh3);
-  z-index: 45;
-  display: flex;
-  flex-direction: column;
-  animation: din 0.2s cubic-bezier(0.2, 0.9, 0.3, 1);
-  overflow: hidden;
-}
-.att {
-  display: flex;
-  gap: 10px;
-  padding: 7px 0;
-}
-.attdot {
-  width: 7px;
-  height: 7px;
-  border-radius: 99px;
-  margin-top: 4px;
-  flex: none;
-}
 .gpick {
   border: 1px solid var(--line);
   border-radius: 11px;
@@ -2236,34 +2013,6 @@ a:hover {
   width: 52px;
   flex: none;
 }
-
-/* ============================ Toast ============================ */
-.tstwrap {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 80;
-  pointer-events: none;
-}
-.tst {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: oklch(25% 0.015 262);
-  color: oklch(96% 0.003 255);
-  font-size: 12.5px;
-  font-weight: 500;
-  padding: 9px 13px;
-  border-radius: 10px;
-  box-shadow: var(--sh3);
-  animation: tin 0.22s cubic-bezier(0.2, 0.9, 0.3, 1);
-}
-.tsi {
-  color: oklch(75% 0.1 155);
-}
 .bigempty {
   display: flex;
   flex-direction: column;
@@ -2308,9 +2057,6 @@ a:hover {
 .ohide {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.posrel {
-  position: relative;
 }
 .tc {
   text-align: center;
@@ -2393,12 +2139,6 @@ a:hover {
 .mt14 {
   margin-top: 14px;
 }
-.mt20 {
-  margin-top: 20px;
-}
-.mr6 {
-  margin-right: 6px;
-}
 .gap5 {
   gap: 5px;
 }
@@ -2422,26 +2162,6 @@ a:hover {
 }
 .wr2 {
   color: var(--wr2);
-}
-
-/* 紧凑密度（设置页动效/密度切换用） */
-.cmp .tr {
-  min-height: 35px;
-}
-.cmp .nv {
-  height: 26px;
-}
-.cmp .prow {
-  height: 28px;
-}
-.cmp .phd {
-  min-height: 44px;
-}
-.cmp .grow {
-  min-height: 38px;
-}
-.cmp .xrow {
-  min-height: 46px;
 }
 
 /* ============================ 动画 ============================ */
@@ -2976,7 +2696,7 @@ a:hover {
   padding: 14px 18px 30px;
 }
 .skc {
-  background: var(--card, #fff);
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 11px;
   box-shadow: var(--sh1);
@@ -3089,7 +2809,7 @@ a:hover {
   height: 17px;
   border-radius: 6px;
   border: 1px solid var(--line2);
-  background: var(--card, #fff);
+  background: var(--panel);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3111,7 +2831,7 @@ a:hover {
 }
 .statcard {
   flex: 1;
-  background: var(--card, #fff);
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--sh1);
@@ -3157,7 +2877,7 @@ a:hover {
   border: 1px solid var(--line2);
   border-radius: 10px;
   padding: 12px 14px;
-  background: var(--card, #fff);
+  background: var(--panel);
 }
 .pathwell {
   font: 500 11.5px var(--mono);
@@ -3186,7 +2906,7 @@ a:hover {
 .wgrp {
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: var(--card, #fff);
+  background: var(--panel);
   box-shadow: var(--sh1);
   margin: 0 18px 12px;
   overflow: hidden;
@@ -3211,19 +2931,6 @@ a:hover {
 .wrow + .wrow {
   border-top: 1px solid var(--line);
 }
-.tlrow {
-  display: grid;
-  grid-template-columns: 44px 30px minmax(120px, 160px) 58px minmax(130px, 170px) minmax(140px, 1fr) 96px 78px;
-  align-items: center;
-  column-gap: 10px;
-  padding: 5px 18px;
-  min-height: 40px;
-  border-bottom: 1px solid var(--line);
-  font-size: 12.5px;
-}
-.tlrow:hover .tract {
-  opacity: 1;
-}
 .susban {
   border: 1px solid oklch(60% 0.11 75 / 0.5);
   background: var(--wrbg);
@@ -3233,19 +2940,6 @@ a:hover {
   color: oklch(38% 0.09 70);
   line-height: 1.7;
 }
-.agrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
-  gap: 10px;
-}
-.acard {
-  background: var(--card, #fff);
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  box-shadow: var(--sh1);
-  padding: 11px 12px;
-  min-width: 0;
-}
 .kd {
   width: 7px;
   height: 7px;
@@ -3253,9 +2947,6 @@ a:hover {
 }
 .kd-ok {
   background: var(--ok);
-}
-.kd-lim {
-  background: var(--wr);
 }
 .kd-off {
   background: oklch(82% 0.008 260);
@@ -3855,9 +3546,9 @@ a:hover {
   top: 6px;
   padding: 2px 6px;
   border-radius: 5px;
-  background: color-mix(in oklch, var(--bg1) 78%, transparent);
+  background: color-mix(in oklch, var(--panel) 78%, transparent);
   border: 1px solid var(--line2);
-  font: 600 10px var(--sans);
+  font: 600 10px inherit;
   color: var(--t2);
 }
 .vsec {
@@ -3992,7 +3683,7 @@ a:hover {
   padding: 0 4px;
   border-radius: 5px;
   border: 1px solid var(--line);
-  background: var(--card);
+  background: var(--panel);
   color: var(--t2);
   cursor: pointer;
   flex: none;
@@ -4431,15 +4122,6 @@ a:hover {
   background: var(--er);
 }
 
-/* 卡片上的即梦状态行（状态原文 + 队列位次 + 上次问到答案的时刻）。 */
-.vstat {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font: 400 10px var(--mono);
-  color: var(--t3);
-}
-
 /* 队列观测条：回答「还在动吗」。 */
 .qbar {
   margin: 10px 18px 0;
@@ -4549,7 +4231,7 @@ a:hover {
   border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 10px;
-  background: var(--bg1);
+  background: var(--panel);
 }
 .ikbody {
   display: grid;

@@ -301,12 +301,16 @@ export function deriveRows(
           : (receipt ?? (settled || stage === "run" ? estimate : null));
     const creditEstimated = receipt == null && credit != null && !isPhantom;
 
+    // vip 由后端下发（`ModelInfo.vip`），不在这里判后缀 —— 即梦哪天出一个不带
+    // `_vip` 后缀的付费加急档，抄在前端的这条规则会安静地漏掉它。
+    const vip = info?.vip ?? false;
+
     const signals = new Set<SignalKey>();
     if (isPhantom) signals.add("phantom");
     if (isTimeout) signals.add("timeout");
     if (slow) signals.add("slow");
     if (c.attempt > 1) signals.add("rerun");
-    if (modelFull?.endsWith("_vip")) signals.add("vip");
+    if (vip) signals.add("vip");
     if (c.autoSubmitted) signals.add("auto");
 
     // 「情况」这一列必须点名**动作**与**代价**，而不是复述阶段（阶段就在旁边的色点上）。
@@ -356,7 +360,7 @@ export function deriveRows(
       action: nextAction(stage, phantomLive),
       modelFull,
       modelShort: modelFull ? shortModel(modelFull) : "CLI 默认",
-      vip: modelFull?.endsWith("_vip") ?? false,
+      vip,
       duration,
       resolution,
       estimate,

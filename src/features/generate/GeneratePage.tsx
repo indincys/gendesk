@@ -92,7 +92,8 @@ export function GeneratePage() {
       // 提示词组默认按拼音首字母排序：左栏词组卡、右侧参考图挂靠弹层、
       // 「选择提示词组」弹窗均沿用此序（配色仍按选中先后，稳定不乱）。
       setGroups(sortGroupsByPinyin(await unwrap(commands.listPromptGroups())));
-      setRefs(await unwrap(commands.listRefImages()));
+      // 生成页是唯一要看见临时上传的地方：人刚拖进来的那几张就在里面。
+      setRefs(await unwrap(commands.listRefImages(true)));
       setKeys(await unwrap(commands.listApiKeys()));
       setOverview(await unwrap(commands.productionOverview()).catch(() => null));
     } catch (e) {

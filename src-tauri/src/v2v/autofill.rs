@@ -126,7 +126,7 @@ impl AutofillCfg {
                     .into(),
             ));
         };
-        if model.ends_with("_vip") {
+        if crate::v2v::dreamina::is_vip(&model) {
             return Err(AppError::InvalidInput(format!(
                 "常驻队列不接受 VIP 通道（{model}）：同规格实测贵 5.5 倍，买到的只是不排队，\
                  而这条队列的前提恰恰是「排队不要钱」。要跑 VIP 请手动提交。"

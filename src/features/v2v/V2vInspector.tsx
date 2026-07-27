@@ -72,7 +72,7 @@ export function V2vInspector({
   const showFrame = (showFirstFrame || !video) && !!frame;
 
   return (
-    <div className="vinsp sc">
+    <div className="vinsp">
       <div className="fx ac gap6">
         <span className="pid">{c.promptCode}</span>
         <span className="vstg" style={{ background: meta.bg, color: meta.fg }}>

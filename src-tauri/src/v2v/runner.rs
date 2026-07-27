@@ -1009,10 +1009,11 @@ pub fn spawn(
                 .await
                 .map(|ms| {
                     ms.iter().any(|m| {
-                        m.as_deref()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or(settings.model_version.as_str())
-                            .ends_with("_vip")
+                        dreamina::is_vip(
+                            m.as_deref()
+                                .filter(|s| !s.trim().is_empty())
+                                .unwrap_or(settings.model_version.as_str()),
+                        )
                     })
                 })
                 .unwrap_or(false);
@@ -1106,7 +1107,6 @@ mod tests {
             finished_at: None,
             reviewed_at: None,
             auto_submitted: 0,
-            asset_pack_id: None,
             updated_at: 0,
             prompt_code: "GG-0001".into(),
             image_path: "/img.jpg".into(),
@@ -1501,7 +1501,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_queue_still_counts_as_one_sweep() {
         let (pool, _d) = crate::db::test_support::test_pool().await;
-        let dirs = DataDirs::new("/tmp/gendesk-test-never-written");
+        let dirs = DataDirs::new("/tmp/gd-sweep-test-never-written");
         LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
         SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
 

@@ -714,12 +714,6 @@ pub struct ClipView {
     pub reviewed_at: Option<i64>,
     /// 是不是常驻队列（自动补单）替人放行的（0026）。
     pub auto_submitted: bool,
-    /// 历史上打进过哪个素材包（0025）。
-    ///
-    /// v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
-    /// 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
-    /// 但没有任何逻辑再读它，界面上也不再出现。
-    pub asset_pack_id: Option<i64>,
     /// 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
     ///
     /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
@@ -784,7 +778,6 @@ impl From<repo::ClipRow> for ClipView {
             finished_at: r.finished_at,
             reviewed_at: r.reviewed_at,
             auto_submitted: r.auto_submitted != 0,
-            asset_pack_id: r.asset_pack_id,
             export_path: r.export_path,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,

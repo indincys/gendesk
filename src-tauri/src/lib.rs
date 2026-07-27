@@ -84,7 +84,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::pause_queue,
             commands::batches::resume_queue,
             commands::tasks::list_tasks,
-            commands::tasks::get_task,
             commands::tasks::retry_task,
             commands::tasks::retry_failed_tasks,
             commands::tasks::delete_task,
@@ -100,7 +99,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::review::reject_tasks,
             // works 域
             commands::works::list_works,
-            commands::works::get_work,
             commands::works::toggle_work_favorite,
             commands::works::trash_work,
             commands::works::file_exists,
@@ -108,7 +106,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::set_works_favorite,
             commands::works::trash_works,
             commands::works::export_works,
-            commands::works::export_works_v2v,
             // intake 域（Claude Code / Codex 投单 → 自动建批）
             commands::intake::get_intake_settings,
             commands::intake::update_intake_settings,
@@ -200,7 +197,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_assets::pack_from_works,
             commands::publish_assets::retire_pack,
             commands::publish_assets::restore_pack,
-            commands::publish_assets::delete_pack,
             commands::publish_assets::update_pack,
             commands::publish_assets::activate_pack,
             // inbox 域

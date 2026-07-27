@@ -9,7 +9,6 @@ interface BatchSummaryState {
   passed: number;
   rejected: number;
   total: number;
-  activeConcurrency: number;
   paused: boolean;
 }
 
@@ -30,16 +29,12 @@ interface EngineState {
   /** 应用内更新态 */
   updateReady: boolean;
   updateVersion: string | null;
-  updateChecking: boolean;
-
-  currentBatchId: number | null;
   tasks: TaskView[];
 
   /** 订阅引擎事件（仅 Tauri 环境）。返回反订阅函数。 */
   init: () => Promise<() => void>;
   /** 乐观设置暂停态（暂停/继续命令不会立即回推汇总事件，需前端即时反映）。 */
   setPaused: (paused: boolean) => void;
-  setCurrentBatch: (batchId: number | null) => void;
   /**
    * 拉任务列表。`batchId = null` = 全部批次，这是现在唯一的用法：
    * 批次不再是可切换的对象（v0.21.0），任务队列答的是「现在还有哪些活」。
@@ -59,8 +54,6 @@ export const useEngineStore = create<EngineState>((set) => ({
   trashCount: 0,
   updateReady: false,
   updateVersion: null,
-  updateChecking: false,
-  currentBatchId: null,
   tasks: [],
 
   init: async () => {
@@ -79,7 +72,6 @@ export const useEngineStore = create<EngineState>((set) => ({
             ...s.summaries,
             [p.batchId]: {
               ...p.counts,
-              activeConcurrency: p.activeConcurrency,
               paused: p.paused,
             },
           },
@@ -88,10 +80,10 @@ export const useEngineStore = create<EngineState>((set) => ({
         })),
       onProgress: (p) =>
         set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } })),
+      // 批次不再是可切换的对象（v0.21.0）：任务页展示全部在制任务，
+      // 所以任何批次的状态变化都要镜像进来，没有「当前批次」这个概念了。
       onStatus: (p) =>
         set((s) => {
-          // currentBatchId 为 null = 正在看全部批次，任何批次的状态变化都要镜像进来。
-          if (s.currentBatchId !== null && p.batchId !== s.currentBatchId) return {};
           return {
             tasks: s.tasks.map((t) =>
               t.id === p.taskId
@@ -110,7 +102,6 @@ export const useEngineStore = create<EngineState>((set) => ({
       onKeyHealth: (p) => set((s) => ({ keyHealth: { ...s.keyHealth, [p.keyId]: p.state } })),
       onUpdateState: (p) =>
         set({
-          updateChecking: p.state === "checking" || p.state === "downloading",
           updateReady: p.state === "ready",
           updateVersion: p.version,
         }),
@@ -120,11 +111,9 @@ export const useEngineStore = create<EngineState>((set) => ({
   // 继续队列即消费自动暂停：乐观清除原因（后端 resume 同步清除并回推 summary）。
   setPaused: (paused) => set(paused ? { paused } : { paused, autoPauseReason: null }),
 
-  setCurrentBatch: (batchId) => set({ currentBatchId: batchId }),
-
   loadBatchTasks: async (batchId, statusGroup) => {
     const tasks = await unwrap(commands.listTasks(batchId, statusGroup ?? null, null));
-    set({ currentBatchId: batchId, tasks });
+    set({ tasks });
   },
 
   /** 清掉某几个任务的本地镜像（批量中止/删除之后立刻生效，不必等重拉）。 */

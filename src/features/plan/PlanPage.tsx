@@ -226,7 +226,7 @@ function CalendarTab({ onOpenSheet }: { onOpenSheet: (id: number) => void }) {
                   cursor: c.sheetId != null ? "pointer" : "default",
                   background:
                     c.published > 0
-                      ? `color-mix(in oklch, var(--ok) ${Math.round(12 + density * 30)}%, var(--card))`
+                      ? `color-mix(in oklch, var(--ok) ${Math.round(12 + density * 30)}%, var(--panel))`
                       : undefined,
                 }}
               >

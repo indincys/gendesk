@@ -341,17 +341,24 @@ async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// 列出全部未删除参考图（供参考图库/生成页选择）。
+/// 列出未删除参考图（供参考图库/生成页选择）。
 ///
-/// 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
-/// 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
-/// 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
+/// `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
+///
+/// **默认不要**，只有生成页传 true —— 它得渲染自己刚传的那几张。这个开关从消费端
+/// 收回到参数里，是因为「每个消费端自己记得过滤」这条约定漏一处就静默出错：
+/// 引导卡片的「上传参考图」那一步就漏了，于是随手在生成页拖一张试跑，
+/// 那一步立刻显示成已完成，而长期图库里其实一张都没有。
 #[tauri::command]
 #[specta::specta]
-pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefImageView>> {
+pub async fn list_ref_images(
+    state: State<'_, AppState>,
+    include_ephemeral: bool,
+) -> AppResult<Vec<RefImageView>> {
     let rows = repo::list_active(&state.db).await?;
     Ok(rows
         .into_iter()
+        .filter(|r| include_ephemeral || !r.ephemeral)
         .map(|r| RefImageView {
             id: r.id,
             name: r.name,

@@ -2,7 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { RefImportOverlay, useRefImport } from "@/features/_shared/RefImport";
-import { assetSrc } from "@/lib/img";
+import { bg } from "@/lib/img";
 import {
   type RefGroupView,
   type RefImageDetail,
@@ -41,8 +41,8 @@ export function RefsPage() {
   const load = useCallback(async () => {
     try {
       // 临时上传（生成页随手传的图）不属于长期图库，这里一律不列。
-      const all = await unwrap(commands.listRefImages());
-      setRefs(all.filter((r) => !r.ephemeral));
+      // 临时上传不进图库（0019）—— 过滤已收进命令参数，不再各页各写一遍。
+      setRefs(await unwrap(commands.listRefImages(false)));
       setGroups(await unwrap(commands.listRefGroups()));
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
@@ -739,11 +739,4 @@ function ManageGroupsModal({
       </div>
     </Modal>
   );
-}
-
-function bg(path?: string | null): React.CSSProperties {
-  const src = assetSrc(path);
-  return src
-    ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : {};
 }

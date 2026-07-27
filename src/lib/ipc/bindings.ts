@@ -219,15 +219,18 @@ async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>>
 }
 },
 /**
- * 列出全部未删除参考图（供参考图库/生成页选择）。
+ * 列出未删除参考图（供参考图库/生成页选择）。
  * 
- * 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
- * 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
- * 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
+ * `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
+ * 
+ * **默认不要**，只有生成页传 true —— 它得渲染自己刚传的那几张。这个开关从消费端
+ * 收回到参数里，是因为「每个消费端自己记得过滤」这条约定漏一处就静默出错：
+ * 引导卡片的「上传参考图」那一步就漏了，于是随手在生成页拖一张试跑，
+ * 那一步立刻显示成已完成，而长期图库里其实一张都没有。
  */
-async listRefImages() : Promise<Result<RefImageView[], AppError>> {
+async listRefImages(includeEphemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_ref_images") };
+    return { status: "ok", data: await TAURI_INVOKE("list_ref_images", { includeEphemeral }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -488,14 +491,6 @@ async listTasks(batchId: number | null, statusGroup: string | null, page: number
     else return { status: "error", error: e  as any };
 }
 },
-async getTask(id: number) : Promise<Result<TaskView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_task", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
  */
@@ -651,14 +646,6 @@ async listWorks(filter: WorkFilter, page: number | null) : Promise<Result<WorkVi
     else return { status: "error", error: e  as any };
 }
 },
-async getWork(id: number) : Promise<Result<WorkView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_work", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async toggleWorkFavorite(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("toggle_work_favorite", { id }) };
@@ -730,20 +717,6 @@ async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
 async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_works", { ids, destDir }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 导出图生视频包（一包一组）。
- * 
- * 一包一组不是为了目录整齐：同组的分镜图最后要剪进同一条成片，运镜语言与时长必须统一，
- * 跨组混一个包改写出来的风格会飘。所选作品按 group_id 分堆，每堆一个包。
- */
-async exportWorksV2v(ids: number[], destDir: string) : Promise<Result<PackSummary[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("export_works_v2v", { ids, destDir }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1589,20 +1562,6 @@ async restorePack(id: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
- * 
- * **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
- * 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
- */
-async deletePack(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_pack", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async updatePack(id: number, patch: PackPatch) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_pack", { id, patch }) };
@@ -2336,14 +2295,6 @@ createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewed
  */
 autoSubmitted: boolean; 
 /**
- * 历史上打进过哪个素材包（0025）。
- * 
- * v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
- * 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
- * 但没有任何逻辑再读它，界面上也不再出现。
- */
-assetPackId: number | null; 
-/**
  * 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
  * 
  * 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
@@ -2825,22 +2776,6 @@ export type PackPatch = { note: string | null;
  * `Some(None)` = 清除封面；`Some(Some)` = 设为该包内文件名。
  */
 cover: string | null }
-/**
- * 一次导出的结果摘要（回前端 toast）。
- */
-export type PackSummary = { 
-/**
- * 包目录绝对路径。
- */
-packDir: string; 
-/**
- * 包目录名（= work_exports.pack_id）。
- */
-packId: string; exported: number; 
-/**
- * 源文件缺失而跳过的条目数。
- */
-skipped: number; strippedPrefixChars: number; strippedSuffixChars: number }
 export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
 /**
  * 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
@@ -3678,10 +3613,6 @@ export type WorkFilter = { groupId: number | null; favoriteOnly: boolean;
  * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
  */
 tag: string | null; 
-/**
- * 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
- */
-hideExported: boolean; 
 /**
  * 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
  * 

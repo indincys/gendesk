@@ -2,7 +2,7 @@ import { Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { moveByRow, packJustifiedRows } from "@/features/review/layout";
-import { assetSrc } from "@/lib/img";
+import { assetSrc, bg } from "@/lib/img";
 import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -855,13 +855,6 @@ export function ReviewPage() {
       )}
     </PageScaffold>
   );
-}
-
-function bg(path?: string | null): React.CSSProperties {
-  const src = assetSrc(path);
-  return src
-    ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : {};
 }
 
 /**

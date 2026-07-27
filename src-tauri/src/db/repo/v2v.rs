@@ -63,11 +63,10 @@ pub struct ClipRow {
     pub reviewed_at: Option<i64>,
     /// 这一条是补单器放行的还是人放行的（0026）。
     pub auto_submitted: i64,
-    /// 打包进资产库时留下的素材包 id（0025）。
-    pub asset_pack_id: Option<i64>,
-    /// 那个素材包**现在还在不在**（包被退役删除后应回落成「尚未入库」）。
-    /// SQLite 的 EXISTS 回 0/1，故用 i64 承接。
-    /// 验收通过后交付到 `outputs/视频/` 的那份拷贝（0027）。有它才答得出「片子在哪」。
+    /// 验收通过后交付到 `{交付目录}/` 的那份拷贝（0027）。有它才答得出「片子在哪」。
+    ///
+    /// 0025 的 `asset_pack_id` 列**不再读取**：v0.22.0 起成片不入资产库
+    /// （它们是 B-roll 素材，不适合直接发布）。迁移 forward-only，列留在表里。
     pub export_path: Option<String>,
     pub updated_at: i64,
     /// 父图编号（`accepted_works.prompt_code` 快照）。
@@ -86,7 +85,7 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type,
         c.first_submitted_at, c.submit_credit, c.submit_status,
         c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at,
-        c.auto_submitted, c.asset_pack_id,
+        c.auto_submitted,
         c.export_path, c.updated_at,
         COALESCE(w.prompt_code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,

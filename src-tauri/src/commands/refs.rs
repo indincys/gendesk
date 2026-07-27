@@ -515,41 +515,24 @@ pub async fn replace_ref_image_file(
     path: String,
 ) -> AppResult<()> {
     state.dirs.init()?;
-    let src = PathBuf::from(&path);
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(files::sanitize_filename)
-        .ok_or_else(|| AppError::InvalidInput("无效文件路径".into()))?;
-    let ext = src
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("png")
-        .to_lowercase();
-    let dest = unique_path(&state.dirs.refs(), &stem, &ext);
-    std::fs::copy(&src, &dest)?;
-    let thumb = unique_path(&state.dirs.thumbs(), &stem, "jpg");
-    let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
-    let size = std::fs::metadata(&dest)
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
-    // 文件已更换：刷新内容 hash（E30b）与上传压缩副本（E41）。
-    let content_hash = files::content_hash(&dest).ok();
-    let upload_dest = unique_path(&state.dirs.refs(), &format!("{stem}_up"), "jpg");
-    let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
-        Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
-        _ => None,
-    };
+    let (refs_dir, thumbs_dir) = (state.dirs.refs(), state.dirs.thumbs());
+    // 走 `ingest_one` 而不是在这里再写一遍拷贝 + 缩略图 + hash + 压缩副本：
+    // 那是同一条管线的第二份抄本，而两份抄本只会在下一次改口径时分叉
+    // （E30b 的 hash、E41 的上传副本都是后来补进去的，抄本迟早会漏掉某一次）。
+    // 顺带把这整段纯 CPU/IO 挪进 `spawn_blocking`（同 v0.14.0 导入那次的教训）。
+    let ing = tokio::task::spawn_blocking(move || ingest_one(&path, &refs_dir, &thumbs_dir))
+        .await
+        .map_err(|e| AppError::Io(format!("参考图更换任务失败：{e}")))??;
     repo::update_file(
         &state.db,
         id,
-        &dest.to_string_lossy(),
-        &thumb.to_string_lossy(),
-        w as i64,
-        h as i64,
-        size,
-        content_hash.as_deref(),
-        upload_path.as_deref(),
+        &ing.file_path,
+        &ing.thumb_path,
+        ing.width,
+        ing.height,
+        ing.file_size,
+        ing.content_hash.as_deref(),
+        ing.upload_path.as_deref(),
     )
     .await?;
     Ok(())

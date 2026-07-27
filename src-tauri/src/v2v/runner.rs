@@ -1493,6 +1493,30 @@ mod tests {
         ));
     }
 
+    /// 空的在跑集合**照样算跑过一轮**。
+    ///
+    /// 反过来的话 `LAST_SWEEP` 永远停在 0，循环里那句「到点了吗」恒为真：每 6 秒
+    /// 进一次扫描分支，顺带把跟在它后面的自动补单也拉成 6 秒一轮 —— 而队列空恰恰
+    /// 正是补单器最活跃的时候。队列面板那句「下次查询还有 N 秒」也会永远没有答案。
+    #[tokio::test]
+    async fn an_empty_queue_still_counts_as_one_sweep() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let dirs = DataDirs::new("/tmp/gendesk-test-never-written");
+        LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
+        SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
+
+        let sum = sweep_once(&pool, &dirs, "dreamina", None, &Activity::silent())
+            .await
+            .unwrap();
+        assert_eq!(sum.polled, 0, "没有在跑条目 → 一个进程都不该起");
+        let after = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > 0, "空表也要记下「这一轮跑过了」");
+        assert!(
+            next_sweep_in(after).is_some_and(|s| s > 0),
+            "下一轮必须等满一个间隔，而不是下个 tick 立刻再来"
+        );
+    }
+
     // 队列面板那句「下次查询还有 N 秒」必须与真正跑的循环同源。
     #[test]
     fn next_sweep_countdown_tracks_the_loop() {

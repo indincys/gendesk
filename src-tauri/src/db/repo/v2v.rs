@@ -158,18 +158,27 @@ pub async fn stage_counts(pool: &SqlitePool) -> Result<Vec<(String, i64)>, sqlx:
 }
 
 /// 写入组内公共前后缀剥离结果（工单物化时按组批量算一次）。
+/// 落可变部分（物化工单时顺手算出来的）。
+///
+/// **值没变就一个字都不写**。工单物化是自动的：队列一变就重写一遍，而 `updated_at`
+/// 是业务变更时间，看板照它显示「几分钟前」—— 每次物化都刷一遍，等于让整块看板
+/// 永远显示「刚刚」（同 `mark_polled` 那条注释里的理由）。
+/// 这也是「`v2v_handoff_status` 可以随处调用」的前提：它会顺手重写工单。
 pub async fn set_variable_part(
     pool: &SqlitePool,
     id: i64,
     variable_part: &str,
     now: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE v2v_clips SET variable_part = ?2, updated_at = ?3 WHERE id = ?1")
-        .bind(id)
-        .bind(variable_part)
-        .bind(now)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE v2v_clips SET variable_part = ?2, updated_at = ?3
+          WHERE id = ?1 AND variable_part <> ?2",
+    )
+    .bind(id)
+    .bind(variable_part)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -760,6 +769,20 @@ pub async fn count_pass_undelivered(pool: &SqlitePool) -> Result<i64, sqlx::Erro
     .fetch_one(pool)
     .await?;
     Ok(n)
+}
+
+/// 一次取回若干条（撤销那条路径要拿整批的当前状态对比快照）。
+pub async fn get_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!("{SELECT} WHERE c.id IN ({holes})");
+    let mut q = sqlx::query_as::<_, ClipRow>(&sql);
+    for i in ids {
+        q = q.bind(*i);
+    }
+    q.fetch_all(pool).await
 }
 
 /// 这些 clip **此刻**指着的成片与封面路径（去空）。

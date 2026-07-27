@@ -248,7 +248,6 @@ pub async fn export_works(
         return Ok(0);
     }
     let dest = std::path::PathBuf::from(&dest_dir);
-    std::fs::create_dir_all(&dest).map_err(|e| AppError::Io(e.to_string()))?;
 
     let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!("SELECT image_path FROM accepted_works WHERE id IN ({ph})");
@@ -258,29 +257,36 @@ pub async fn export_works(
     }
     let paths = q.fetch_all(&state.db).await?;
 
-    let mut exported = 0i64;
-    for p in paths {
-        let src = std::path::PathBuf::from(&p);
-        if !src.is_file() {
-            continue;
+    // 拷贝几十上百张图是纯阻塞 IO —— 留在异步执行器上会把整个 IPC 卡住，
+    // 而这条命令恰恰是「人选了一整页作品点导出」时跑的（同 v0.14.0 那次的教训）。
+    tokio::task::spawn_blocking(move || -> AppResult<i64> {
+        std::fs::create_dir_all(&dest).map_err(|e| AppError::Io(e.to_string()))?;
+        let mut exported = 0i64;
+        for p in paths {
+            let src = std::path::PathBuf::from(&p);
+            if !src.is_file() {
+                continue;
+            }
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            // 目标同名冲突时追加序号，避免覆盖。
+            let mut out = dest.join(name);
+            let mut n = 1;
+            while out.exists() {
+                let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("work");
+                let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
+                out = dest.join(format!("{stem}_{n}.{ext}"));
+                n += 1;
+            }
+            if std::fs::copy(&src, &out).is_ok() {
+                exported += 1;
+            }
         }
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        // 目标同名冲突时追加序号，避免覆盖。
-        let mut out = dest.join(name);
-        let mut n = 1;
-        while out.exists() {
-            let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("work");
-            let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("jpg");
-            out = dest.join(format!("{stem}_{n}.{ext}"));
-            n += 1;
-        }
-        if std::fs::copy(&src, &out).is_ok() {
-            exported += 1;
-        }
-    }
-    Ok(exported)
+        Ok(exported)
+    })
+    .await
+    .map_err(|e| AppError::Io(format!("导出任务失败：{e}")))?
 }
 
 /// 导出用的作品行（含组前缀，供包目录命名）。

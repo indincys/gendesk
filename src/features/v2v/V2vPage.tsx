@@ -202,7 +202,15 @@ export function V2vPage() {
   }, []);
 
   // ── 派生 ─────────────────────────────────────────────
-  const rows = useMemo(() => deriveRows(clips, models, eff, now), [clips, models, eff, now]);
+  // 喂给 `deriveRows` 的秒表**量化到 30 秒**（照 V2vClipsPage 的先例）。
+  // 它要遍历全表、逐行重算判据与情况文案，原样喂 1 秒秒表等于每秒重算一整页；
+  // 而它用到的时间全是「已等多久 / 多久前查过」这类以分钟为单位读的值。
+  // 顶部那个心跳 pill 与倒计时仍读未量化的 `now`，那才是真需要每秒走字的地方。
+  const coarseNow = Math.floor(now / 30) * 30;
+  const rows = useMemo(
+    () => deriveRows(clips, models, eff, coarseNow),
+    [clips, models, eff, coarseNow],
+  );
   const byId = useMemo(() => new Map(rows.map((r) => [r.clip.id, r])), [rows]);
 
   const visible = useMemo(() => {

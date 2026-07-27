@@ -15,7 +15,14 @@ pub struct StageCounts {
     pub pass: i64,
     pub rej: i64,
     pub fail: i64,
-    /// 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败。
+    /// 在跑、但一处计费证据都没有的条数（幽灵疑单，`repo::count_phantom_suspects`）。
+    ///
+    /// 它是唯一一类**阻在人身上却不在四个待办阶段里**的条目：躺在 `run`（按阶段说
+    /// 「机器在跑，人插不上手」），可它恰恰是机器根本没在跑的那些，处置是免费重跑。
+    /// 事故那次 18 条挂了十几个小时，而徽章全程是 0。
+    pub phantom: i64,
+    /// 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败，
+    /// 外加藏在 `run` 里的幽灵疑单（见 [`Self::phantom`]）。
     ///
     /// **待改写在里面**（v0.22.0 改的）。旧口径把它排除在外，理由是「那一步在
     /// Claude Code 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk
@@ -51,8 +58,19 @@ impl StageCounts {
                 _ => {}
             }
         }
-        c.actionable = c.rewrite + c.ready + c.rev + c.fail;
+        c.recount();
         c
+    }
+
+    /// 补上幽灵疑单数并重算徽章。阶段计数一条 SQL、幽灵一条 SQL，故分两步。
+    pub fn with_phantom(mut self, n: i64) -> Self {
+        self.phantom = n;
+        self.recount();
+        self
+    }
+
+    fn recount(&mut self) {
+        self.actionable = self.rewrite + self.ready + self.rev + self.fail + self.phantom;
     }
 }
 
@@ -148,5 +166,17 @@ mod tests {
             c.actionable, 16,
             "rewrite(10) + ready(2) + rev(3) + fail(1)；不含 run/pass/rej"
         );
+    }
+
+    // 幽灵疑单虽然躺在 run 里，却是阻在人身上的：机器根本没在跑它，处置是免费重跑。
+    // 事故那次 18 条这样的单挂了十几个小时，而徽章全程是 0 —— 因为按阶段算，
+    // 它们属于「机器在跑，人插不上手」的那一类。
+    #[test]
+    fn badge_counts_phantom_suspects_hiding_inside_run() {
+        let c = StageCounts::from_rows(&[("run".to_string(), 19), ("rev".to_string(), 1)]);
+        assert_eq!(c.actionable, 1, "没有幽灵时 run 一条都不算待办");
+        let c = c.with_phantom(18);
+        assert_eq!(c.actionable, 19, "rev(1) + 藏在 run 里的幽灵疑单(18)");
+        assert_eq!(c.run, 19, "run 的口径不变 —— 幽灵是它的子集，不是另一个阶段");
     }
 }

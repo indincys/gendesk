@@ -288,6 +288,11 @@ pub async fn set_params(
 ///
 /// **不动 `updated_at`**：它是业务变更时间，看板按它排序也按它显示「几分钟前」。
 /// 每轮把在跑的条目全刷一遍会让整块看板永远显示「刚刚」，那等于把这个信息删掉。
+///
+/// `queue_idx` 走 `COALESCE` 与 [`mark_swept`] 同形：位次是幽灵判定的两个信号之一，
+/// 而它在任务离开排队、开始生成之后就不再出现在回体里 —— 无条件写回等于在这一刻
+/// 亲手抹掉「这条确实进过队列」的证据。那条注释里写的保护意图，要两处都 COALESCE
+/// 才真正成立。
 pub async fn mark_polled(
     pool: &SqlitePool,
     id: i64,
@@ -295,7 +300,11 @@ pub async fn mark_polled(
     queue_idx: Option<i64>,
     now: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE v2v_clips SET gen_status=?2, queue_idx=?3, polled_at=?4 WHERE id=?1")
+    sqlx::query(
+        "UPDATE v2v_clips
+            SET gen_status=?2, queue_idx=COALESCE(?3, queue_idx), polled_at=?4
+          WHERE id=?1",
+    )
         .bind(id)
         .bind(gen_status)
         .bind(queue_idx)
@@ -404,6 +413,10 @@ pub async fn running_models(pool: &SqlitePool) -> Result<Vec<Option<String>>, sq
 }
 
 /// 成片落盘：run → rev（待验收）。
+///
+/// `credit_count` / `benefit_type` 走 `COALESCE`（同 [`mark_swept`]）：出片那一份回体
+/// 未必再带计费字段，而钱在提交那一刻就扣了、扫描一路上也可能早就问到过。无条件写回
+/// 等于**在出片那一刻把这条的账抹掉** —— 「这一批花了多少」从此再也答不准。
 #[allow(clippy::too_many_arguments)] // 视频元数据是一整组，拆结构体只会多一层无信息的包装
 pub async fn mark_ready_for_review(
     pool: &SqlitePool,
@@ -420,7 +433,10 @@ pub async fn mark_ready_for_review(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE v2v_clips SET stage='rev', video_path=?2, poster_path=?3, width=?4, height=?5,
-             fps=?6, duration_sec=?7, credit_count=?8, benefit_type=?10, finished_at=?9,
+             fps=?6, duration_sec=?7,
+             credit_count=COALESCE(?8, credit_count),
+             benefit_type=COALESCE(?10, benefit_type),
+             finished_at=?9,
              updated_at=?9, error_type=NULL, error_message=NULL
          WHERE id=?1",
     )
@@ -674,6 +690,28 @@ pub async fn count_pass_undelivered(pool: &SqlitePool) -> Result<i64, sqlx::Erro
         "SELECT COUNT(*) FROM v2v_clips
           WHERE stage='pass' AND (export_path IS NULL OR TRIM(export_path)='')",
     )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 幽灵疑单的条数：在跑、任何一处计费证据都没有、且过了宽限期。
+///
+/// 徽章要计入它，因为它是**唯一一类阻在人身上却不在四个待办阶段里**的条目 ——
+/// 它躺在 `run`（「机器在跑，人插不上手」），可它恰恰是机器根本没在跑的那些，
+/// 而处置是免费重跑。事故那次 18 条这样的单挂了十几个小时，徽章全程是 0。
+///
+/// 判据与 `runner::clip_looks_phantom` 是同一条，只是这里在 SQL 里数（徽章要的是一个
+/// 数字，把整表拉回来过一遍纯属浪费）。**两处必须一起改** —— 有测试守住它们一致。
+/// `before` = `now - runner::PHANTOM_GRACE_SECS`，宽限期常量留在 runner 一处定义。
+pub async fn count_phantom_suspects(pool: &SqlitePool, before: i64) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM v2v_clips
+          WHERE stage='run' AND submit_id IS NOT NULL
+            AND credit_count IS NULL AND submit_credit IS NULL AND queue_idx IS NULL
+            AND submitted_at IS NOT NULL AND submitted_at < ?1",
+    )
+    .bind(before)
     .fetch_one(pool)
     .await?;
     Ok(n)
@@ -1494,6 +1532,117 @@ mod tests {
         assert_eq!(row.queue_idx, Some(3));
         assert_eq!(row.polled_at, Some(900));
         assert_eq!(row.updated_at, before, "轮询快照不得刷新业务变更时间");
+    }
+
+    /// 队列位次一旦问到就**只增不抹**：它是幽灵判定的两个信号之一。
+    ///
+    /// 任务离开排队、开始生成之后回体里就不再有 `queue_info`，无条件写回等于在那一刻
+    /// 亲手删掉「这条确实进过队列」的证据 —— 而下一轮判定读的正是它。
+    #[tokio::test]
+    async fn polling_never_erases_a_queue_position_it_already_knew() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
+            .await
+            .unwrap();
+
+        mark_polled(&pool, id, "queue", Some(4485), 900).await.unwrap();
+        // 开始生成了 —— 这一份回体不再带 queue_info。
+        mark_polled(&pool, id, "generating", None, 1000)
+            .await
+            .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.queue_idx, Some(4485), "已问到的位次不得被抹成空");
+        assert_eq!(row.gen_status.as_deref(), Some("generating"), "状态照常更新");
+        assert_eq!(row.polled_at, Some(1000));
+    }
+
+    /// 出片那一刻不得把这条的账抹掉。
+    ///
+    /// 钱在提交那一刻就扣了，扫描一路上也可能早就问到过计费；而出片那份回体未必再带
+    /// `credit_count`。无条件写回 = 成片入库的同时把「这一批花了多少」变成永远答不准。
+    #[tokio::test]
+    async fn finishing_never_erases_the_bill() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
+            .await
+            .unwrap();
+        // 扫描路上问到了计费与计费型号。
+        mark_swept(&pool, id, "generating", Some(8), Some("dreamina_x"), 600)
+            .await
+            .unwrap();
+        // 出片回体只有视频元数据，没有 commerce_info。
+        mark_ready_for_review(
+            &pool,
+            id,
+            "/clips/1.mp4",
+            None,
+            Some(720),
+            Some(1280),
+            None,
+            Some(4.0),
+            None,
+            None,
+            700,
+        )
+        .await
+        .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "rev");
+        assert_eq!(row.credit_count, Some(8), "扣费回执不得在出片时被抹掉");
+        assert_eq!(row.benefit_type.as_deref(), Some("dreamina_x"));
+    }
+
+    /// 徽章里那个幽灵计数（SQL）与逐行判据（Rust）必须给同一个答案。
+    ///
+    /// 它们是同一条规则的两种写法 —— 一个数数、一个判行，改了一处忘了另一处，
+    /// 表现就是「徽章说有 3 条待办，点进去一条高亮的都没有」。
+    #[tokio::test]
+    async fn phantom_count_agrees_with_the_row_level_predicate() {
+        use crate::v2v::runner::{clip_looks_phantom, PHANTOM_GRACE_SECS};
+        let (pool, _d) = test_pool().await;
+        let now = 100_000i64;
+        let submitted = now - PHANTOM_GRACE_SECS - 60;
+        for w in 1..=4 {
+            seed_work(&pool, w).await;
+            enqueue_one(&pool, w).await;
+        }
+        let ids: Vec<i64> = list_by_stages(&pool, &["rewrite"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        // 1：幽灵（提交回执什么都没给）。2：提交就带计费。3：扫描路上问到过位次。
+        // 4：还在宽限期内。
+        mark_submitted(&pool, ids[0], &SubmitReceipt::bare("sub-1"), submitted)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[1], &SubmitReceipt::healthy("sub-2", 8), submitted)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[2], &SubmitReceipt::bare("sub-3"), submitted)
+            .await
+            .unwrap();
+        mark_polled(&pool, ids[2], "queue", Some(4485), submitted + 10)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[3], &SubmitReceipt::bare("sub-4"), now - 60)
+            .await
+            .unwrap();
+
+        let n = count_phantom_suspects(&pool, now - PHANTOM_GRACE_SECS)
+            .await
+            .unwrap();
+        let rows = list_by_stages(&pool, &["run"]).await.unwrap();
+        let by_row = rows.iter().filter(|c| clip_looks_phantom(c, now)).count() as i64;
+        assert_eq!(n, 1, "只有 sub-1 一条没有任何计费证据且过了宽限期");
+        assert_eq!(n, by_row, "SQL 计数与逐行判据必须一致");
     }
 
     // 重跑/退回改写必须把上一轮的即梦状态一起清掉，否则一条刚退回待提交的条目

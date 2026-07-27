@@ -327,6 +327,12 @@ pub struct PollSummary {
     pub polled: i64,
     /// 本轮因未到退避时间而跳过的条数（不是异常，是设计）。
     pub skipped: i64,
+    /// 本轮**首次**为某条落库计费证据（扣费额度 / 计费型号）的条数。
+    ///
+    /// 它必须能触发一次界面刷新：这条数字一变，那一行的「额度」列就从预估变成实收，
+    /// 「情况」列也可能从「疑幽灵单」变回「即梦在跑」—— 而在跑条目本身没有阶段变化，
+    /// 于是原来这份新证据要一直躺到出片那一刻才会被人看见。
+    pub evidence: i64,
 }
 
 /// 超时判定（纯函数，便于测试）。`timeout` 为 `None` 即**不限**，永不判死。
@@ -343,6 +349,66 @@ pub fn is_timed_out(submitted_at: Option<i64>, now: i64, timeout: Option<i64>) -
 /// `queue_idx` 与 `credit_count`（`seedance2.0fast` 通道，队列第 4485 位）。
 pub const PHANTOM_GRACE_SECS: i64 = 15 * 60;
 
+/// 一条在跑条目的**全部计费证据**：本次回体里的 + 已经落库的。
+///
+/// ## 为什么必须是一个结构体，而不是「回体里那两个 Option」
+///
+/// 证据是**累积**的：`mark_swept` 特意用 `COALESCE` 保住已问到的 `credit_count`，
+/// 提交回执里的 `submit_credit` 也在 0024 特意落了库 —— 可判定那一侧只看本次回体，
+/// 于是攒下来的证据一处都没被读。结果是一条已经扣过钱、只是这一轮回体恰好没带计费
+/// 字段的单子会被判成「从未计费」的幽灵单，而界面还会告诉人「重跑不花钱」。
+///
+/// 规则一句话：**任一处非空 = 这单确实进了即梦，永久免疫幽灵判定**。它只会从
+/// 「没证据」变成「有证据」，绝不会反向 —— 所以一条单最多为幽灵嫌疑单查一次。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Evidence {
+    /// 本次回体里的计费额度。
+    pub fresh_credit: Option<i64>,
+    /// 本次回体里的队列位次。
+    pub fresh_queue: Option<i64>,
+    /// 已落库的计费额度（`v2v_clips.credit_count`，由扫描/出片写入）。
+    pub credit: Option<i64>,
+    /// 提交回执里的计费额度（`v2v_clips.submit_credit`，0024）。
+    pub submit_credit: Option<i64>,
+    /// 历史上问到过的队列位次（`v2v_clips.queue_idx`）。
+    pub queue: Option<i64>,
+}
+
+impl Evidence {
+    /// 取库里那一行已经攒下的三处证据（回体那两处由 [`Self::with_fresh`] 补）。
+    pub fn from_clip(c: &repo::ClipRow) -> Self {
+        Self {
+            fresh_credit: None,
+            fresh_queue: None,
+            credit: c.credit_count,
+            submit_credit: c.submit_credit,
+            queue: c.queue_idx,
+        }
+    }
+
+    /// 叠上本次回体带来的两处。
+    pub fn with_fresh(mut self, credit: Option<i64>, queue: Option<i64>) -> Self {
+        self.fresh_credit = credit;
+        self.fresh_queue = queue;
+        self
+    }
+
+    /// 计费那一路 —— **决定性**信号。健康单从排队第一秒起就带 `credit_count`。
+    pub fn billed(&self) -> bool {
+        self.fresh_credit.is_some() || self.credit.is_some() || self.submit_credit.is_some()
+    }
+
+    /// 队列那一路。单独出现不足以判死，但单独出现足以**免死**。
+    pub fn queued(&self) -> bool {
+        self.fresh_queue.is_some() || self.queue.is_some()
+    }
+
+    /// 有没有任何一处证明这单进了即梦。
+    pub fn any(&self) -> bool {
+        self.billed() || self.queued()
+    }
+}
+
 /// 幽灵单判定（纯函数，便于测试）。
 ///
 /// 「幽灵单」= 即梦接了单、给了 submit_id、`list_task` 里也查得到，但**从未入队、
@@ -351,40 +417,49 @@ pub const PHANTOM_GRACE_SECS: i64 = 15 * 60;
 /// 因为在 GenDesk 眼里它和「在排队」长得一模一样，而超时默认不限，于是会一直轮询下去。
 ///
 /// 判据要两个信号同时缺席，而不是只看队列位次：
-/// - `credit_count` 是**决定性**的那个。健康单从排队第一秒起就带它（实测排队中的
-///   `query_result` 返回 `credit_count: 8`），它缺席意味着这单根本没进计费。
-/// - `queue_idx` 单独缺席不足以判死：万一哪天即梦对某些通道不下发 `queue_info`，
+/// - 计费是**决定性**的那个（[`Evidence::billed`]）。健康单从排队第一秒起就带它
+///   （实测排队中的 `query_result` 返回 `credit_count: 8`），缺席意味着没进计费。
+/// - 队列位次单独缺席不足以判死：万一哪天即梦对某些通道不下发 `queue_info`，
 ///   只看它会把正在排队、已经扣了钱的任务当场标死。
+///
+/// 两路都读 [`Evidence`] 而不是只读本次回体 —— 见那个结构体的说明。
 ///
 /// 判定结果是 `fail(phantom)` 而**不是**自动重投：重投要花钱，那是人的决定。
 /// submit_id 照样留着（`额度不可撤回`），万一它哪天真的出片，重跑前还查得到。
-pub fn is_phantom(
-    gen_status: &str,
-    queue_idx: Option<i64>,
-    credit_count: Option<i64>,
-    submitted_at: Option<i64>,
-    now: i64,
-) -> bool {
-    phantom_suspect(gen_status, credit_count, submitted_at, now) && queue_idx.is_none()
+pub fn is_phantom(gen_status: &str, ev: &Evidence, submitted_at: Option<i64>, now: i64) -> bool {
+    phantom_suspect(gen_status, ev, submitted_at, now) && !ev.queued()
 }
 
 /// 「像幽灵单，但还差一个信号才敢下结论」。
 ///
-/// 整表扫描（`list_task`）**不回传 `queue_info`**，所以在那条路径上 `queue_idx` 永远
-/// 缺席 —— 只凭它判死，等于把两个信号的规则悄悄降成一个。故扫描路径先用这个宽判据
-/// 挑出嫌疑，再单发一次 `query_result` 拿队列位次，由 [`is_phantom`] 下最终结论。
+/// 整表扫描（`list_task`）**不回传 `queue_info`**，所以在那条路径上本次回体的
+/// `queue_idx` 永远缺席 —— 只凭它判死，等于把两个信号的规则悄悄降成一个。故扫描路径
+/// 先用这个宽判据挑出嫌疑，再单发一次 `query_result` 拿队列位次，由 [`is_phantom`]
+/// 下最终结论。
 ///
-/// 决定性的那个信号是 `credit_count`：它一旦出现，这单就确实进了即梦的计费，
-/// 从此再不必为它单查一次 —— 这也是扫描机制能把单条查询降到几乎为零的原因。
+/// 一旦 [`Evidence::billed`] 成立，这单就确实进了即梦的计费，从此再不入嫌疑名单 ——
+/// 这也是扫描机制能把单条查询降到几乎为零的原因。
 pub fn phantom_suspect(
     gen_status: &str,
-    credit_count: Option<i64>,
+    ev: &Evidence,
     submitted_at: Option<i64>,
     now: i64,
 ) -> bool {
     dreamina::classify_status(gen_status) == Outcome::Running
-        && credit_count.is_none()
+        && !ev.billed()
         && submitted_at.is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
+}
+
+/// 「这一行现在看着像幽灵单吗」—— 供界面用（没有回体，只看已落库的证据）。
+///
+/// 界面与判定必须**同一个函数说了算**。前端原来自己抄了一份判据（三个字段 + 一个
+/// 手抄的宽限期常量），而它用 `firstSubmittedAt` 算等待时长、Rust 用 `submitted_at`
+/// —— 「继续等待」按过一次之后两边就会对同一条给出不同结论。
+pub fn clip_looks_phantom(c: &repo::ClipRow, now: i64) -> bool {
+    c.stage == "run"
+        && !Evidence::from_clip(c).any()
+        && c.submitted_at
+            .is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
 }
 
 /// 整表扫描一轮 —— **主路径**。
@@ -404,10 +479,14 @@ pub async fn sweep_once(
 ) -> AppResult<PollSummary> {
     let running = repo::list_running(pool).await?;
     let mut sum = PollSummary::default();
+    // **先记这一轮跑过了，再判空**。反过来的话，一个空的在跑集合会让 `LAST_SWEEP`
+    // 永远停在 0，于是循环里那句「到点了吗」恒为真：每 6 秒进一次这个分支，
+    // 顺带把跟在它后面的自动补单也拉成 6 秒一轮，而队列面板那句「下次查询还有 N 秒」
+    // 则永远没有答案（`next_sweep_in` 拿 0 当「还没跑过第一轮」）。
+    LAST_SWEEP.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
     if running.is_empty() {
         return Ok(sum);
     }
-    LAST_SWEEP.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
     std::fs::create_dir_all(dirs.clips())?;
 
     // 翻页直到把我们关心的 submit_id 都找齐（或翻不动了）。上限 5 页 = 500 条，
@@ -457,6 +536,13 @@ pub async fn sweep_once(
         let now = now_unix();
         match found.get(&submit_id) {
             Some(q) => {
+                // 「这一轮才第一次拿到计费证据」——库里那行还是空的，回体给了。
+                // 记下来是为了让这一轮结束后推一次刷新（见 `PollSummary::evidence`）。
+                if (clip.credit_count.is_none() && q.credit_count.is_some())
+                    || (clip.benefit_type.is_none() && q.benefit_type.is_some())
+                {
+                    sum.evidence += 1;
+                }
                 // 扫描里的 queue_idx 恒为 None（list_task 不带 queue_info）→ 用
                 // COALESCE 写库，绝不能把已经问到过的位次抹成空。
                 let _ = repo::mark_swept(
@@ -688,9 +774,10 @@ async fn settle(
             // 这一步每条最多发生一次 —— 一旦看到计费回执或队列位次，这条就再不入嫌疑名单。
             let mut q = q;
             let mut authoritative = queue_authoritative;
-            if !authoritative
-                && phantom_suspect(&q.gen_status, q.credit_count, clip.submitted_at, now)
-            {
+            // 证据 = 已落库的三处 + 本次回体的两处。只读回体那两处，等于把
+            // `mark_swept` 特意保住的、`0024` 特意落库的证据全都白攒了。
+            let mut ev = Evidence::from_clip(clip).with_fresh(q.credit_count, q.queue_idx);
+            if !authoritative && phantom_suspect(&q.gen_status, &ev, clip.submitted_at, now) {
                 if let Some(sid) = clip.submit_id.as_deref() {
                     match dreamina::query(bin, sid, None, log, who).await {
                         Ok(full) => {
@@ -702,6 +789,10 @@ async fn settle(
                                 now,
                             )
                             .await;
+                            ev = ev.with_fresh(
+                                full.credit_count.or(q.credit_count),
+                                full.queue_idx.or(q.queue_idx),
+                            );
                             q = full;
                             authoritative = true;
                         }
@@ -717,15 +808,7 @@ async fn settle(
                     }
                 }
             }
-            if authoritative
-                && is_phantom(
-                    &q.gen_status,
-                    q.queue_idx,
-                    q.credit_count,
-                    clip.submitted_at,
-                    now,
-                )
-            {
+            if authoritative && is_phantom(&q.gen_status, &ev, clip.submitted_at, now) {
                 // 与超时是两回事，文案也必须相反：超时说「额度已扣，先继续等待」，
                 // 幽灵单说「没扣费，可以直接重跑」。指错方向的代价是真金白银。
                 let msg = format!(
@@ -773,7 +856,9 @@ pub fn fmt_dur(secs: i64) -> String {
 
 /// 当前七态计数（事件载荷）。
 pub async fn counts(pool: &SqlitePool) -> AppResult<StageCounts> {
-    let mut c = StageCounts::from_rows(&repo::stage_counts(pool).await?);
+    let phantom =
+        repo::count_phantom_suspects(pool, now_unix() - PHANTOM_GRACE_SECS).await?;
+    let mut c = StageCounts::from_rows(&repo::stage_counts(pool).await?).with_phantom(phantom);
     c.undelivered = repo::count_pass_undelivered(pool).await?;
     Ok(c)
 }
@@ -877,7 +962,10 @@ pub fn spawn(
                             }
                             .emit(&app);
                         }
-                        if sum.finished > 0 || sum.failed > 0 {
+                        // 计费证据首次落库也要刷新：那一行的额度列会从「预估」变成
+                        // 「实收」，「情况」列也可能从「疑幽灵单」变回「即梦在跑」，
+                        // 而在跑条目本身没有阶段变化，不推就要躺到出片那一刻才被看见。
+                        if sum.finished > 0 || sum.failed > 0 || sum.evidence > 0 {
                             crate::commands::v2v::emit_changed(&pool, &app, None).await;
                             if sum.finished > 0 {
                                 use crate::engine::events::EventSink;
@@ -1038,13 +1126,18 @@ mod tests {
         assert!(!is_timed_out(Some(0), 999_999_999, None));
     }
 
+    /// 本次回体带来的证据（库里那行什么都没有）—— 旧签名的等价物。
+    fn fresh(credit: Option<i64>, queue: Option<i64>) -> Evidence {
+        Evidence::default().with_fresh(credit, queue)
+    }
+
     // 幽灵单：即梦接了单却没入队，`queue_idx` 与 `credit_count` 双双缺席。
     // 2026-07-27 一次提交 19 条中了 18 条，而「超时默认不限」意味着没人会去打断它。
     #[test]
     fn phantom_needs_both_signals_missing_and_the_grace_period_over() {
         let late = PHANTOM_GRACE_SECS + 1;
         assert!(
-            is_phantom("querying", None, None, Some(0), late),
+            is_phantom("querying", &fresh(None, None), Some(0), late),
             "两个信号都缺 + 过了宽限期 = 幽灵单"
         );
     }
@@ -1054,8 +1147,7 @@ mod tests {
     fn phantom_is_not_judged_inside_the_grace_period() {
         assert!(!is_phantom(
             "querying",
-            None,
-            None,
+            &fresh(None, None),
             Some(0),
             PHANTOM_GRACE_SECS
         ));
@@ -1066,11 +1158,11 @@ mod tests {
     #[test]
     fn credit_receipt_alone_saves_a_clip_from_being_judged_phantom() {
         assert!(
-            !is_phantom("querying", None, Some(8), Some(0), 999_999),
+            !is_phantom("querying", &fresh(Some(8), None), Some(0), 999_999),
             "有计费回执就说明真进了即梦，不得判幽灵"
         );
         assert!(
-            !is_phantom("querying", Some(4485), None, Some(0), 999_999),
+            !is_phantom("querying", &fresh(None, Some(4485)), Some(0), 999_999),
             "有队列位次同样不得判幽灵"
         );
     }
@@ -1078,8 +1170,103 @@ mod tests {
     // 终态不归幽灵管：出片的走 Done、判失败的走 Failed，各有各的处置。
     #[test]
     fn phantom_only_applies_to_running_clips() {
-        assert!(!is_phantom("success", None, None, Some(0), 999_999));
-        assert!(!is_phantom("expired", None, None, Some(0), 999_999));
+        assert!(!is_phantom("success", &fresh(None, None), Some(0), 999_999));
+        assert!(!is_phantom("expired", &fresh(None, None), Some(0), 999_999));
+    }
+
+    /// **已落库的计费证据同样免死**。这是「证据落库了但没人读」那个系统性缺口的核心：
+    /// `mark_swept` 特意 COALESCE 保住的 `credit_count`、0024 特意落库的 `submit_credit`、
+    /// 以及历史上问到过的 `queue_idx`，判定那一侧原来一处都没读。
+    ///
+    /// 一正一反并排：同样是「本次回体双双缺席 + 过了宽限期」，只差库里有没有攒下证据。
+    #[test]
+    fn persisted_evidence_is_as_good_as_a_fresh_receipt() {
+        let late = PHANTOM_GRACE_SECS + 1;
+        // 反：从来没有任何一处证据 → 判幽灵。
+        assert!(
+            is_phantom("querying", &Evidence::default(), Some(0), late),
+            "五处证据全空才是幽灵单"
+        );
+        // 正：三处已落库的证据，各自单独都足以免死。
+        for ev in [
+            Evidence {
+                credit: Some(8),
+                ..Default::default()
+            },
+            Evidence {
+                submit_credit: Some(8),
+                ..Default::default()
+            },
+            Evidence {
+                queue: Some(4485),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !is_phantom("querying", &ev, Some(0), late),
+                "已落库的证据 {ev:?} 必须与新鲜回执等效"
+            );
+        }
+    }
+
+    /// 计费是决定性信号，队列位次不是：有计费就连**嫌疑**都不成立，
+    /// 而只有队列位次时仍是嫌疑（扫描路径要为它单查一次拿准），只是最终判不死。
+    #[test]
+    fn billing_evidence_clears_the_suspicion_queue_evidence_only_clears_the_verdict() {
+        let late = PHANTOM_GRACE_SECS + 1;
+        let billed = Evidence {
+            submit_credit: Some(8),
+            ..Default::default()
+        };
+        assert!(!phantom_suspect("querying", &billed, Some(0), late));
+        let queued = Evidence {
+            queue: Some(4485),
+            ..Default::default()
+        };
+        assert!(
+            phantom_suspect("querying", &queued, Some(0), late),
+            "没有计费回执 → 仍是嫌疑"
+        );
+        assert!(
+            !is_phantom("querying", &queued, Some(0), late),
+            "但进过队列就不得判死"
+        );
+    }
+
+    /// 界面读的判据必须与真正会去判死的那条同源 —— 这是把 `phantomSuspect` 从前端
+    /// 挪到 Rust 的全部理由。取样覆盖三处已落库证据，任一非空即不再显示为幽灵。
+    #[test]
+    fn the_view_predicate_agrees_with_the_verdict_predicate() {
+        let late = PHANTOM_GRACE_SECS + 1;
+        let mut c = clip(None, None, None);
+        c.stage = "run".into();
+        c.submitted_at = Some(0);
+        assert!(clip_looks_phantom(&c, late));
+        assert!(
+            !clip_looks_phantom(&c, PHANTOM_GRACE_SECS),
+            "宽限期内不显示为幽灵"
+        );
+
+        for patch in [
+            |c: &mut repo::ClipRow| c.credit_count = Some(8),
+            |c: &mut repo::ClipRow| c.submit_credit = Some(8),
+            |c: &mut repo::ClipRow| c.queue_idx = Some(4485),
+        ] {
+            let mut with_evidence = c.clone();
+            patch(&mut with_evidence);
+            assert!(!clip_looks_phantom(&with_evidence, late));
+            assert!(!is_phantom(
+                "querying",
+                &Evidence::from_clip(&with_evidence),
+                with_evidence.submitted_at,
+                late
+            ));
+        }
+
+        // 只对在跑的条目成立：已经判死的 fail 行由 error_type 说话，不再重判。
+        let mut done = c.clone();
+        done.stage = "fail".into();
+        assert!(!clip_looks_phantom(&done, late));
     }
 
     // 退避是「能不能睡一觉再来收」的成本前提：每条每 6 秒查一次，19 条跑一夜
@@ -1211,16 +1398,21 @@ mod tests {
     fn a_suspect_is_not_yet_a_verdict() {
         let late = PHANTOM_GRACE_SECS + 1;
         // 嫌疑成立：过了宽限期还没有计费回执。
-        assert!(phantom_suspect("querying", None, Some(0), late));
+        assert!(phantom_suspect("querying", &fresh(None, None), Some(0), late));
         // 但只有同时拿到「队列位次也缺席」这一条，才是判决。
-        assert!(is_phantom("querying", None, None, Some(0), late));
+        assert!(is_phantom("querying", &fresh(None, None), Some(0), late));
         assert!(
-            !is_phantom("querying", Some(4485), None, Some(0), late),
+            !is_phantom("querying", &fresh(None, Some(4485)), Some(0), late),
             "确认查询问到了位次 → 它在排队，只是即梦这一路没回传计费"
         );
         // 有计费就连嫌疑都不成立 —— 这条正是扫描能把单条查询降到几乎为零的原因：
         // 一旦看到计费，这一条永远不再需要为「它是不是幽灵」单独问一次。
-        assert!(!phantom_suspect("querying", Some(8), Some(0), late));
+        assert!(!phantom_suspect(
+            "querying",
+            &fresh(Some(8), None),
+            Some(0),
+            late
+        ));
     }
 
     // 队列面板那句「下次查询还有 N 秒」必须与真正跑的循环同源。

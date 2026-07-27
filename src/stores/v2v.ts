@@ -21,6 +21,7 @@ const EMPTY: StageCounts = {
   pass: 0,
   rej: 0,
   fail: 0,
+  phantom: 0,
   actionable: 0,
   undelivered: 0,
 };

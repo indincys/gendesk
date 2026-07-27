@@ -1,6 +1,5 @@
 import {
   type ActionFilter,
-  PHANTOM_GRACE_SECS,
   type Row,
   buildSections,
   deriveRows,
@@ -98,6 +97,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     autoSubmitted: false,
     assetPackId: null,
     exportPath: null,
+    phantomSuspect: false,
     acceptedAt: NOW - 8000,
     updatedAt: NOW - 600,
     ...over,
@@ -107,14 +107,18 @@ function clip(over: Partial<ClipView> = {}): ClipView {
 const derive = (cs: ClipView[]) => deriveRows(cs, MODELS, EFF, NOW);
 
 describe("幽灵单判定", () => {
-  // 与 Rust 侧 `runner::is_phantom` 同构：两个信号**同时**缺席，且过了宽限期。
-  it("队列位次与扣费回执双双缺席、且过了宽限期才算", () => {
+  /**
+   * 判定**不在这里**：`clip.phantomSuspect` 由 Rust 下发（`runner::clip_looks_phantom`），
+   * 它读的是全部五处计费证据（本次回体两处 + 已落库三处），也正是真会走去
+   * `fail(phantom)` 那条路径的同一个函数。
+   *
+   * 前端曾抄过一份判据（三个字段 + 一个手抄的 15 分钟宽限期常量），而它按
+   * `firstSubmittedAt` 计时、Rust 按 `submittedAt` 计时 —— 「继续等待」按过一次之后
+   * 两边就会对同一条给出相反的结论。这里剩下的责任只有一条：**照它说的办**。
+   */
+  it("下发的结论直接决定情况、信号与额度口径", () => {
     const [r] = derive([
-      clip({
-        stage: "run",
-        videoPath: null,
-        firstSubmittedAt: NOW - PHANTOM_GRACE_SECS - 60,
-      }),
+      clip({ stage: "run", videoPath: null, firstSubmittedAt: NOW - 9000, phantomSuspect: true }),
     ]);
     expect(r?.phantomLive).toBe(true);
     expect(r?.signals.has("phantom")).toBe(true);
@@ -122,34 +126,22 @@ describe("幽灵单判定", () => {
     expect(r?.credit).toBe(0);
   });
 
-  it("宽限期内不判 —— 实测健康单 25 秒内才拿到位次，早判会把正常单说成事故", () => {
-    const [r] = derive([clip({ stage: "run", videoPath: null, firstSubmittedAt: NOW - 60 })]);
+  it("没下发就当它在正常排队 —— 前端绝不自己补一套判据", () => {
+    // 刻意摆出「三个字段全空 + 等了两个半小时」这个旧判据一定会判幽灵的形状：
+    // Rust 说不是（比如它看到了提交回执或历史队列位次），这里就必须说不是。
+    const [r] = derive([
+      clip({
+        stage: "run",
+        videoPath: null,
+        firstSubmittedAt: NOW - 9000,
+        submitCredit: null,
+        queueIdx: null,
+        creditCount: null,
+        phantomSuspect: false,
+      }),
+    ]);
     expect(r?.phantomLive).toBe(false);
     expect(r?.situation).toContain("即梦在跑");
-  });
-
-  it("有扣费回执就不是幽灵单 —— 那条是决定性的信号，钱已经扣了", () => {
-    const [r] = derive([
-      clip({
-        stage: "run",
-        videoPath: null,
-        submitCredit: 8,
-        firstSubmittedAt: NOW - PHANTOM_GRACE_SECS - 3600,
-      }),
-    ]);
-    expect(r?.phantomLive).toBe(false);
-  });
-
-  it("有队列位次也不算 —— 只看一个信号会在即梦不下发 queue_info 时误判", () => {
-    const [r] = derive([
-      clip({
-        stage: "run",
-        videoPath: null,
-        queueIdx: 4485,
-        firstSubmittedAt: NOW - PHANTOM_GRACE_SECS - 3600,
-      }),
-    ]);
-    expect(r?.phantomLive).toBe(false);
   });
 });
 
@@ -219,6 +211,7 @@ describe("等待异常", () => {
         stage: "run",
         videoPath: null,
         firstSubmittedAt: NOW - 9000,
+        phantomSuspect: true,
       }),
     ]);
     const ghost = rows.find((r) => r.clip.id === 3);
@@ -316,7 +309,8 @@ describe("下一步动作", () => {
         id: 1,
         stage: "run",
         videoPath: null,
-        firstSubmittedAt: NOW - PHANTOM_GRACE_SECS - 60,
+        firstSubmittedAt: NOW - 9000,
+        phantomSuspect: true,
       }),
     ]);
     const ghost = rows[0];

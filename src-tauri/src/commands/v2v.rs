@@ -725,13 +725,24 @@ pub struct ClipView {
     /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
     /// 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
     pub export_path: Option<String>,
+    /// 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
+    ///
+    /// **由 Rust 下发而不是前端自己算**。前端原来抄了一份判据（三个字段 + 一个手抄的
+    /// 15 分钟常量），而它按 `firstSubmittedAt` 算等待时长、Rust 按 `submittedAt` 算
+    /// —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
+    /// 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
+    pub phantom_suspect: bool,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
 
 impl From<repo::ClipRow> for ClipView {
     fn from(r: repo::ClipRow) -> Self {
+        // 视图是一份快照，判定要一个「现在」。取当前时刻而不是让调用方传：
+        // 每个列表命令各传一次，就等于给这条规则开了 N 个改错的机会。
+        let phantom_suspect = runner::clip_looks_phantom(&r, crate::db::now_unix());
         Self {
+            phantom_suspect,
             id: r.id,
             work_id: r.work_id,
             group_id: r.group_id,

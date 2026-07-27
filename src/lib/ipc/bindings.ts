@@ -2337,7 +2337,16 @@ assetPackId: number | null;
  * 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
  * 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
  */
-exportPath: string | null; acceptedAt: number; updatedAt: number }
+exportPath: string | null; 
+/**
+ * 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
+ * 
+ * **由 Rust 下发而不是前端自己算**。前端原来抄了一份判据（三个字段 + 一个手抄的
+ * 15 分钟常量），而它按 `firstSubmittedAt` 算等待时长、Rust 按 `submittedAt` 算
+ * —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
+ * 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
+ */
+phantomSuspect: boolean; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -3300,7 +3309,16 @@ materialDays: number | null; titleDays: number | null; bodyDays: number | null }
  */
 export type StageCounts = { rewrite: number; ready: number; run: number; rev: number; pass: number; rej: number; fail: number; 
 /**
- * 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败。
+ * 在跑、但一处计费证据都没有的条数（幽灵疑单，`repo::count_phantom_suspects`）。
+ * 
+ * 它是唯一一类**阻在人身上却不在四个待办阶段里**的条目：躺在 `run`（按阶段说
+ * 「机器在跑，人插不上手」），可它恰恰是机器根本没在跑的那些，处置是免费重跑。
+ * 事故那次 18 条挂了十几个小时，而徽章全程是 0。
+ */
+phantom: number; 
+/**
+ * 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败，
+ * 外加藏在 `run` 里的幽灵疑单（见 [`Self::phantom`]）。
  * 
  * **待改写在里面**（v0.22.0 改的）。旧口径把它排除在外，理由是「那一步在
  * Claude Code 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk

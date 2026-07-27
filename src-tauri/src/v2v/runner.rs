@@ -162,16 +162,35 @@ pub async fn submit_batch(
             Ok(receipt) => {
                 repo::mark_submitted(pool, clip.id, &receipt, now_unix()).await?;
                 if receipt.looks_healthy() {
+                    let billed = receipt.credit_count.unwrap_or(0);
                     log.info(
                         "submit",
                         who,
-                        format!(
-                            "已提交 · {} · 计费 {} 额度",
-                            receipt.submit_id,
-                            receipt.credit_count.unwrap_or(0)
-                        ),
+                        format!("已提交 · {} · 计费 {billed} 额度", receipt.submit_id),
                         None,
                     );
+                    // 价格表是实测出来的，即梦随时可以调价而不通知任何人。回执是唯一的
+                    // 真账单，对不上就当场喊 —— 否则确认卡会一直拿着过期的数字骗人，
+                    // 而下一次发现要等到月底看余额。
+                    if let (Some(m), Some(r), Some(d)) = (
+                        opts.model_version.as_deref(),
+                        opts.video_resolution.as_deref(),
+                        opts.duration,
+                    ) {
+                        if let Some(est) = dreamina::estimate_credits(m, r, d) {
+                            if est != billed {
+                                log.warn(
+                                    "submit",
+                                    who,
+                                    format!(
+                                        "计费与预估不符：{m}/{r}/{d}s 预估 {est}，实收 {billed}。\
+                                         即梦可能调价了，价格表（dreamina.rs PRICES）需要重测。"
+                                    ),
+                                    None,
+                                );
+                            }
+                        }
+                    }
                 } else {
                     // 提交这一刻还不能判它死（见 `dreamina::submit` 的说明），但必须出声：
                     // 事故那次 18 条全程一句异常都没有，人只能看着卡片停在「已提交」。

@@ -773,22 +773,42 @@ pub async fn set_v2v_clip_params(
     Ok(n)
 }
 
-/// 提交前给人看的**真实命令行**（每条一行）。
+/// 提交确认卡的全部内容：真实命令行 + 预计额度消耗 + 当前余额。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitPreview {
+    /// 每条一行，与真正 exec 的 argv 同源。
+    pub commands: Vec<String>,
+    /// 已知单价那部分的合计。**不含** `unpriced` 里的条目，所以它是**下限**不是总数。
+    pub estimated_credits: i64,
+    /// 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
+    pub unpriced: Vec<String>,
+    /// 提交前实拉的余额；拉不到（掉线/未登录）为 None，此时不拦人，只是不显示。
+    pub balance: Option<i64>,
+}
+
+/// 提交前给人看的**真实命令行 + 这一下要花多少额度**。
 ///
 /// 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
 /// 同源（`dreamina::command_line`），不是另写一份格式化字符串。
+///
+/// 额度预估同理，且更要紧：即梦**提交那一刻就扣费且不可撤回**，而通道之间差 5.5 倍
+/// （4s/720p：`seedance2.0fast` 8 vs `seedance2.0fast_vip` 44）。18 条一批就是 144 与
+/// 792 的区别 —— 这个数必须出现在「确认提交」按钮**旁边**，不是事后在报告里。
 #[tauri::command]
 #[specta::specta]
 pub async fn preview_v2v_commands(
     state: State<'_, AppState>,
     ids: Vec<i64>,
-) -> AppResult<Vec<String>> {
+) -> AppResult<SubmitPreview> {
     let s = load_settings(&state.db).await?;
     let defaults = s.defaults();
     // 展示的就是即将 exec 的那一串，所以这里也要解析成绝对路径 —— 顺带让「CLI 找不到」
     // 在花钱之前就报出来，而不是点了提交才发现。
     let bin = dreamina::resolve_bin(&s.bin)?;
-    let mut out = Vec::new();
+    let mut commands = Vec::new();
+    let mut estimated_credits = 0;
+    let mut unpriced: Vec<String> = Vec::new();
     for clip in repo::take_ready(&state.db, &ids).await? {
         let opts = dreamina::normalize_opts(&runner::opts_for(&clip, &defaults))?;
         let argv = dreamina::command_line(
@@ -797,9 +817,41 @@ pub async fn preview_v2v_commands(
             clip.video_prompt.as_deref().unwrap_or(""),
             &opts,
         );
-        out.push(dreamina::display_command(&argv));
+        commands.push(dreamina::display_command(&argv));
+        // 三件套为空 = 走 CLI 默认路径，发什么模型我们不知道，价也就无从谈起。
+        match (
+            opts.model_version.as_deref(),
+            opts.video_resolution.as_deref(),
+            opts.duration,
+        ) {
+            (Some(m), Some(r), Some(d)) => match dreamina::estimate_credits(m, r, d) {
+                Some(c) => estimated_credits += c,
+                None => {
+                    let key = format!("{m}/{r}");
+                    if !unpriced.contains(&key) {
+                        unpriced.push(key);
+                    }
+                }
+            },
+            _ => {
+                let key = "跟随 CLI 默认".to_string();
+                if !unpriced.contains(&key) {
+                    unpriced.push(key);
+                }
+            }
+        }
     }
-    Ok(out)
+    // 余额是**尽力而为**：网络抖一下不该挡住提交，少显示一行而已。
+    let balance = dreamina::user_credit(&s.bin, &state.v2v_log)
+        .await
+        .ok()
+        .map(|c| c.total_credit);
+    Ok(SubmitPreview {
+        commands,
+        estimated_credits,
+        unpriced,
+        balance,
+    })
 }
 
 /// 批量提交到即梦。

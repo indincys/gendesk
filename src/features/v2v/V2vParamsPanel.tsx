@@ -171,7 +171,8 @@ export function V2vParamsPanel({
             <option value="">跟随 CLI 默认（不发高级参数）</option>
             {models.map((m) => (
               <option key={m.modelVersion} value={m.modelVersion}>
-                {m.modelVersion}（{m.minDuration}–{m.maxDuration}s · {m.resolutions.join("/")}）
+                {m.modelVersion}（{m.minDuration}–{m.maxDuration}s · {m.resolutions.join("/")} ·{" "}
+                {m.creditAtMin === null ? "单价未实测" : `${m.creditAtMin} 额度起/条`}）
               </option>
             ))}
           </select>

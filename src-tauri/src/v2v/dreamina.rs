@@ -161,21 +161,61 @@ pub fn detect_bin(configured: &str) -> Option<String> {
     resolve_bin(configured).ok()
 }
 
-/// 即梦模型族的取值与约束。**只作提交前的本地预检**，最终真相仍是 CLI 自己的 `-h`。
+/// 即梦模型族的取值与约束。**只作提交前的本地预检**，最终真相仍是服务端。
 ///
 /// 预检的价值在于「花钱之前拦住」：组合不合法时 CLI 会拒，但那时已经走了一趟网络，
 /// 而批量提交 20 条会连报 20 次同样的错。
+///
+/// **这张表的取值来自实测，不是抄 `dreamina image2video -h`**（2026-07-27）。
+/// CLI 帮助文本里三处与服务端不符，照抄会在花钱那一刻才炸：
+///   - `seedance1.0fast` 帮助写 3–10，服务端要 **5–10**（`ret=10001 duration should >=5 && <=10`）
+///   - `seedance1.5pro`  帮助写 4–12，服务端要 **5–12**
+///   - `seedance1.0`     帮助写 720p，服务端只收 **1080p**，而 CLI 本地又拦着
+///     「1080p 只能配 seedance2.0_vip」—— 两边打架，此模型经 CLI **根本发不出去**，
+///     故整条从表里删掉：留着只会让人选中后必然失败。
 const MODELS: &[(&str, i64, i64, &[&str])] = &[
     // (model_version, 最短时长, 最长时长, 允许的分辨率)
-    ("seedance1.0fast", 3, 10, &["720p"]),
-    ("seedance1.0", 3, 10, &["720p"]),
-    ("seedance1.5pro", 4, 12, &["720p"]),
+    ("seedance1.0fast", 5, 10, &["720p"]),
+    ("seedance1.5pro", 5, 12, &["720p"]),
     ("seedance2.0", 4, 15, &["720p"]),
     ("seedance2.0fast", 4, 15, &["720p"]),
     ("seedance2.0_vip", 4, 15, &["720p", "1080p", "4k"]),
     ("seedance2.0fast_vip", 4, 15, &["720p"]),
     ("seedance2.0mini", 4, 15, &["720p"]),
 ];
+
+/// 每秒单价（额度/秒），按 (model_version, video_resolution) 查。
+///
+/// 即梦**没有价格查询接口**，价格只在提交回体的 `credit_count` 里出现一次 —— 而那时
+/// 已经扣完了。所以这张表是 2026-07-27 逐个通道实拍出来的：同一张首帧图各发一条，
+/// 记回执单价，账面 13785→13631 与五条回执之和 154 分毫不差，确认「提交即扣费」。
+///
+/// **线性**：`credit = 单价 × 时长秒数`，两个通道各有两个时长点可交叉验证
+/// （fast 8@4s/10@5s → 2；fast_vip 44@4s/55@5s → 11）。分辨率单列一维，因为
+/// 2.0_vip 的 720p 与 4k 差 5.7 倍，不是时长能解释的。
+///
+/// 查不到 = **不猜**。`estimate_credits` 返回 None，界面显示「未实测」，
+/// 宁可说不知道，也不能给一个像模像样的错数字诱导人点确认。
+const PRICES: &[(&str, &str, i64)] = &[
+    // (model_version, video_resolution, 额度/秒)
+    ("seedance1.0fast", "720p", 2),      // 实测 10 @ 5s
+    ("seedance1.5pro", "720p", 8),       // 实测 40 @ 5s
+    ("seedance2.0", "720p", 3),          // 实测 12 @ 4s
+    ("seedance2.0fast", "720p", 2),      // 实测 8 @ 4s、10 @ 5s
+    ("seedance2.0fast_vip", "720p", 11), // 实测 44 @ 4s、55 @ 5s
+    ("seedance2.0mini", "720p", 9),      // 实测 36 @ 4s
+    ("seedance2.0_vip", "720p", 14),     // 实测 56 @ 4s
+    ("seedance2.0_vip", "4k", 80),       // 实测 320 @ 4s
+                                         // 2.0_vip / 1080p 未实测：留空比编一个数诚实。
+];
+
+/// 预估一次提交要扣多少额度；查不到单价返回 `None`（界面必须显示「未实测」而非 0）。
+pub fn estimate_credits(model_version: &str, video_resolution: &str, duration: i64) -> Option<i64> {
+    PRICES
+        .iter()
+        .find(|(m, r, _)| *m == model_version && *r == video_resolution)
+        .map(|(_, _, per_sec)| per_sec * duration)
+}
 
 /// 受控模型清单（前端选择器渲染源）。
 #[derive(Debug, Clone, Serialize, Type)]
@@ -185,6 +225,9 @@ pub struct ModelInfo {
     pub min_duration: i64,
     pub max_duration: i64,
     pub resolutions: Vec<String>,
+    /// 最短时长 + 首个分辨率下的预估额度 —— 选择器里那行「≈N 额度/条」。
+    /// 选模型这一刻才是价格该出现的地方：44 与 8 差 5.5 倍，选完再告知就晚了。
+    pub credit_at_min: Option<i64>,
 }
 
 pub fn models() -> Vec<ModelInfo> {
@@ -195,6 +238,7 @@ pub fn models() -> Vec<ModelInfo> {
             min_duration: *lo,
             max_duration: *hi,
             resolutions: res.iter().map(|r| (*r).to_string()).collect(),
+            credit_at_min: estimate_credits(m, res[0], *lo),
         })
         .collect()
 }
@@ -886,8 +930,12 @@ mod tests {
         let n = normalize_opts(&opts(Some("seedance2.0fast"), None, None)).unwrap();
         assert_eq!(n.duration, Some(4), "补最短时长");
         assert_eq!(n.video_resolution.as_deref(), Some("720p"));
-        let n = normalize_opts(&opts(Some("seedance1.0"), None, None)).unwrap();
-        assert_eq!(n.duration, Some(3), "1.0 族最短是 3 秒");
+        let n = normalize_opts(&opts(Some("seedance1.0fast"), None, None)).unwrap();
+        assert_eq!(
+            n.duration,
+            Some(5),
+            "1.0 族最短是 5 秒（实测，非 -h 写的 3）"
+        );
     }
 
     // 分辨率约束：只有 vip 支持 1080p/4k，其余一律 720p。
@@ -903,14 +951,15 @@ mod tests {
         );
     }
 
-    // 时长范围按模型族不同（1.0 族 3–10、1.5pro 4–12、2.0 族 4–15）。
+    // 时长范围按模型族不同（1.0fast 5–10、1.5pro 5–12、2.0 族 4–15）。
+    // 下界取**实测值**：CLI 的 -h 把 1.0fast 写成 3、1.5pro 写成 4，服务端两个都要 5。
     #[test]
     fn duration_range_is_enforced_per_model() {
         assert!(normalize_opts(&opts(Some("seedance1.5pro"), Some(12), None)).is_ok());
         let err = normalize_opts(&opts(Some("seedance1.5pro"), Some(15), None)).unwrap_err();
-        assert!(format!("{err}").contains("4–12"), "{err}");
+        assert!(format!("{err}").contains("5–12"), "{err}");
         let err = normalize_opts(&opts(Some("seedance1.0fast"), Some(2), None)).unwrap_err();
-        assert!(format!("{err}").contains("3–10"), "{err}");
+        assert!(format!("{err}").contains("5–10"), "{err}");
     }
 
     #[test]
@@ -1210,6 +1259,67 @@ mod tests {
             );
             assert!(!m.resolutions.is_empty());
             assert!(m.min_duration <= m.max_duration);
+        }
+    }
+
+    // 2026-07-27 逐通道实测的回执单价，同一张首帧图各发一条。
+    // 这组断言是价格表的**来源凭证**：改动 PRICES 必须先重测，不能顺手调数。
+    #[test]
+    fn measured_prices_reproduce_the_receipts() {
+        for (model, res, dur, want) in [
+            ("seedance2.0fast", "720p", 4, 8),
+            ("seedance2.0fast", "720p", 5, 10),
+            ("seedance2.0", "720p", 4, 12),
+            ("seedance2.0mini", "720p", 4, 36),
+            ("seedance2.0fast_vip", "720p", 4, 44),
+            ("seedance2.0fast_vip", "720p", 5, 55),
+            ("seedance2.0_vip", "720p", 4, 56),
+            ("seedance2.0_vip", "4k", 4, 320),
+            ("seedance1.0fast", "720p", 5, 10),
+            ("seedance1.5pro", "720p", 5, 40),
+        ] {
+            assert_eq!(
+                estimate_credits(model, res, dur),
+                Some(want),
+                "{model}/{res}/{dur}s 的实测计费是 {want}"
+            );
+        }
+    }
+
+    // 没测过的组合宁可说不知道：确认卡显示「未实测」，而不是一个像模像样的 0。
+    #[test]
+    fn unmeasured_combination_has_no_price() {
+        assert_eq!(estimate_credits("seedance2.0_vip", "1080p", 4), None);
+        assert_eq!(estimate_credits("seedance2.0fast", "4k", 4), None);
+    }
+
+    // CLI 帮助文本说 1.0fast 最短 3 秒、1.5pro 最短 4 秒，服务端两个都要 5 秒
+    // （`ret=10001 invalid param:duration`）。这条测试锁住实测值，防止有人照着 -h 改回去。
+    #[test]
+    fn min_durations_follow_the_server_not_the_cli_help() {
+        assert!(normalize_opts(&opts(Some("seedance1.0fast"), Some(3), None)).is_err());
+        assert!(normalize_opts(&opts(Some("seedance1.0fast"), Some(5), None)).is_ok());
+        assert!(normalize_opts(&opts(Some("seedance1.5pro"), Some(4), None)).is_err());
+        assert!(normalize_opts(&opts(Some("seedance1.5pro"), Some(5), None)).is_ok());
+    }
+
+    // seedance1.0：服务端只收 1080p，CLI 本地又只许 2.0_vip 用 1080p —— 发不出去。
+    // 留在清单里等于摆一个「选中必失败」的坑，故整条删除。
+    #[test]
+    fn unreachable_model_is_not_offered() {
+        assert!(!models().iter().any(|m| m.model_version == "seedance1.0"));
+        assert!(normalize_opts(&opts(Some("seedance1.0"), None, None)).is_err());
+    }
+
+    // 选择器上那行「≈N 额度/条」不能是空壳：每个在售模型都得有价。
+    #[test]
+    fn every_offered_model_shows_a_price() {
+        for m in models() {
+            assert!(
+                m.credit_at_min.is_some_and(|c| c > 0),
+                "{} 缺单价，选择器会显示成未实测",
+                m.model_version
+            );
         }
     }
 }

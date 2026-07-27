@@ -113,6 +113,7 @@ export type {
   EffectiveParams,
   QueueStats,
   SubmitSummary,
+  SubmitPreview,
   MaterializeSummary,
   IngestSummary,
   PurposeBackfill,

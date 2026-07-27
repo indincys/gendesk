@@ -1228,12 +1228,16 @@ async setV2vClipParams(ids: number[], modelVersion: string | null, duration: num
 }
 },
 /**
- * 提交前给人看的**真实命令行**（每条一行）。
+ * 提交前给人看的**真实命令行 + 这一下要花多少额度**。
  * 
  * 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
  * 同源（`dreamina::command_line`），不是另写一份格式化字符串。
+ * 
+ * 额度预估同理，且更要紧：即梦**提交那一刻就扣费且不可撤回**，而通道之间差 5.5 倍
+ * （4s/720p：`seedance2.0fast` 8 vs `seedance2.0fast_vip` 44）。18 条一批就是 144 与
+ * 792 的区别 —— 这个数必须出现在「确认提交」按钮**旁边**，不是事后在报告里。
  */
-async previewV2vCommands(ids: number[]) : Promise<Result<string[], AppError>> {
+async previewV2vCommands(ids: number[]) : Promise<Result<SubmitPreview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("preview_v2v_commands", { ids }) };
 } catch (e) {
@@ -2698,7 +2702,12 @@ skipped: number }
 /**
  * 受控模型清单（前端选择器渲染源）。
  */
-export type ModelInfo = { modelVersion: string; minDuration: number; maxDuration: number; resolutions: string[] }
+export type ModelInfo = { modelVersion: string; minDuration: number; maxDuration: number; resolutions: string[]; 
+/**
+ * 最短时长 + 首个分辨率下的预估额度 —— 选择器里那行「≈N 额度/条」。
+ * 选模型这一刻才是价格该出现的地方：44 与 8 差 5.5 倍，选完再告知就晚了。
+ */
+creditAtMin: number | null }
 export type PackFileView = { name: string; origName: string; bytes: number }
 /**
  * 素材包的一条发布记录（F10：辅助人工退役决策——「这个包发过几次、都发到哪了」）。
@@ -3216,6 +3225,26 @@ export type StageCounts = { rewrite: number; ready: number; run: number; rev: nu
  * 演进（将来 fail 也许该催），留在前端就会与后端的判断悄悄分叉。
  */
 actionable: number }
+/**
+ * 提交确认卡的全部内容：真实命令行 + 预计额度消耗 + 当前余额。
+ */
+export type SubmitPreview = { 
+/**
+ * 每条一行，与真正 exec 的 argv 同源。
+ */
+commands: string[]; 
+/**
+ * 已知单价那部分的合计。**不含** `unpriced` 里的条目，所以它是**下限**不是总数。
+ */
+estimatedCredits: number; 
+/**
+ * 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
+ */
+unpriced: string[]; 
+/**
+ * 提交前实拉的余额；拉不到（掉线/未登录）为 None，此时不拦人，只是不显示。
+ */
+balance: number | null }
 /**
  * 提交摘要。
  */

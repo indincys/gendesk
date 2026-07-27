@@ -227,6 +227,9 @@ export function V2vSection() {
           {models.map((m) => (
             <option key={m.modelVersion} value={m.modelVersion}>
               {m.modelVersion}
+              {m.creditAtMin === null
+                ? ""
+                : `（${m.creditAtMin} 额度起/条 · ${m.minDuration}s ${m.resolutions[0]}）`}
             </option>
           ))}
         </select>

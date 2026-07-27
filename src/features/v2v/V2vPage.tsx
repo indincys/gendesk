@@ -9,6 +9,7 @@ import {
   type ModelInfo,
   type SkuView,
   type StageCounts,
+  type SubmitPreview,
   type V2vTick,
   commands,
   subscribeV2v,
@@ -63,7 +64,7 @@ export function V2vPage() {
   const [counts, setCounts] = useState<StageCounts | null>(null);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [detail, setDetail] = useState<ClipView | null>(null);
-  const [cmdPreview, setCmdPreview] = useState<string[] | null>(null);
+  const [cmdPreview, setCmdPreview] = useState<SubmitPreview | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [assetPick, setAssetPick] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -497,10 +498,15 @@ export function V2vPage() {
           title="确认提交到即梦"
           width="w700"
           onClose={() => setCmdPreview(null)}
-          headerExtra={<span className="chip">{cmdPreview.length} 条</span>}
+          headerExtra={<span className="chip">{cmdPreview.commands.length} 条</span>}
           footer={
             <>
-              <span className="fs11 t3">提交即消耗额度，且无法撤回</span>
+              {/* 花多少钱要贴着「确认提交」这个按钮，而不是躺在正文里等人往下滚。 */}
+              <span className="fs12" style={{ fontWeight: 600 }}>
+                预计消耗 {cmdPreview.unpriced.length > 0 ? "≥ " : ""}
+                {cmdPreview.estimatedCredits} 额度
+              </span>
+              <span className="fs11 t3">提交即扣费，无法撤回</span>
               <div className="f1" />
               <button type="button" className="btn sm gho" onClick={() => setCmdPreview(null)}>
                 取消
@@ -513,12 +519,42 @@ export function V2vPage() {
           }
         >
           <div style={{ padding: 4 }}>
+            <div className="costbar mb8">
+              <div className="fs12">
+                <b>{cmdPreview.commands.length}</b> 条 · 预计消耗{" "}
+                <b>
+                  {cmdPreview.unpriced.length > 0 ? "≥ " : ""}
+                  {cmdPreview.estimatedCredits}
+                </b>{" "}
+                额度
+                {cmdPreview.balance !== null && (
+                  <>
+                    ｜余额 <b>{cmdPreview.balance}</b> → 提交后约{" "}
+                    <b>{cmdPreview.balance - cmdPreview.estimatedCredits}</b>
+                  </>
+                )}
+              </div>
+              {cmdPreview.unpriced.length > 0 && (
+                <div className="twarn">
+                  {cmdPreview.unpriced.join("、")} 没实测过单价，未计入 —— 实际只会更高。
+                </div>
+              )}
+              {cmdPreview.balance !== null && cmdPreview.balance < cmdPreview.estimatedCredits && (
+                <div className="terr">
+                  余额不足：即梦逐条扣费，会提交到一半开始报错，而前面扣掉的退不回来。
+                </div>
+              )}
+              <div className="fs11 t3">
+                单价为 4 秒 720p 实测值：fast 8 · 2.0 12 · mini 36 · fast_vip 44 · 2.0_vip 56。
+                即梦无价格接口，此表可能过期；回执与预估对不上时日志会当场报出来。
+              </div>
+            </div>
             <div className="fs12 t2 mb8" style={{ lineHeight: 1.7 }}>
               下面是**即将执行的完整命令行**（与真正 exec 的参数同源）。
               「我设了却没生效」这类怀疑只能靠把真实请求摆在确认之前来消除。
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {cmdPreview.map((line, i) => (
+              {cmdPreview.commands.map((line, i) => (
                 <div key={`${i}-${line.slice(0, 24)}`} className="cmdwell">
                   {line}
                 </div>
@@ -842,6 +878,7 @@ function ClipDetail({
                 {models.map((m) => (
                   <option key={m.modelVersion} value={m.modelVersion}>
                     {m.modelVersion}
+                    {m.creditAtMin === null ? "" : `（${m.creditAtMin} 额度起/条）`}
                   </option>
                 ))}
               </select>

@@ -1856,6 +1856,18 @@ a:hover {
   color: var(--t2);
   user-select: text;
 }
+/* 提交确认卡顶部那条「这一下要花多少额度」。即梦提交即扣、不可撤回，
+   且通道之间差 5.5 倍，所以这条要在命令行正文**之上**、不需要滚动就能看见。 */
+.costbar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 12px;
+  line-height: 1.75;
+}
 .sw {
   width: 32px;
   height: 19px;

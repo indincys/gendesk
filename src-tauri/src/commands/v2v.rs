@@ -32,8 +32,14 @@ pub struct V2vSettings {
     /// 即梦 CLI 可执行（默认走 PATH 的 `dreamina`；可填绝对路径）。
     #[serde(default = "d_bin")]
     pub bin: String,
-    /// 默认模型。空 = 不发高级控制，走 CLI 自己的默认路径（最稳，不锁定模型名）。
-    #[serde(default)]
+    /// 默认模型。空 = 不发高级控制，走 CLI 自己的默认路径。
+    ///
+    /// **默认值是 `seedance2.0fast`，不是空**。「跟随 CLI 默认」看着最稳，实际上是把
+    /// 「这批片子按什么价钱生成」交给了一个我们不控制、会随版本变的选择：实测同为
+    /// 4s/720p，`seedance2.0fast` 走 `dreamina_fusion_video40` 收 8 额度，而
+    /// `seedance2.0fast_vip` 走 `..._vision` 收 44 —— 5.5 倍差价，画幅时长完全一样。
+    /// 花钱的选择必须是显式的。
+    #[serde(default = "d_model")]
     pub model_version: String,
     #[serde(default)]
     pub duration: Option<i64>,
@@ -61,6 +67,10 @@ fn d_root() -> String {
 fn d_bin() -> String {
     dreamina::DEFAULT_BIN.to_string()
 }
+/// 默认模型 = 最便宜的够用档（8 额度 · 4s · 720p）。见 `V2vSettings::model_version`。
+fn d_model() -> String {
+    dreamina::DEFAULT_MODEL.to_string()
+}
 fn d_true() -> bool {
     true
 }
@@ -70,7 +80,7 @@ impl Default for V2vSettings {
         Self {
             handoff_root: d_root(),
             bin: d_bin(),
-            model_version: String::new(),
+            model_version: d_model(),
             duration: None,
             video_resolution: String::new(),
             session: None,
@@ -454,9 +464,16 @@ pub struct ClipView {
     pub polled_at: Option<i64>,
     /// 即梦实际计费的型号（回执，非我们的输入）。
     pub benefit_type: Option<String>,
-    /// 提交时刻。卡片上的「已等 3 小时 12 分」由它算 —— 即梦不回传排队位次，
-    /// 「我这条等了多久」是我们唯一测得准的进度。
+    /// 提交时刻。退避轮询与超时判定读它；「继续等待」会把它重置成当下。
     pub submitted_at: Option<i64>,
+    /// **首次**提交时刻（0024）。卡片上的「已等 3 小时 12 分」要用它算 ——
+    /// 用 `submitted_at` 算的话，按过一次「继续等待」的条目会把已经等掉的时间抹掉，
+    /// 事故当天就是这样把等了十几小时的一批显示成「10 小时 54 分」。
+    pub first_submitted_at: Option<i64>,
+    /// 提交回执里的计费额度与状态（0024）。`submitCredit` 为空 = 即梦没给计费回执，
+    /// 配合 `queueIdx` 为空即幽灵单；界面据此可以明说「这条没扣费，重跑不会重复扣」。
+    pub submit_credit: Option<i64>,
+    pub submit_status: Option<String>,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -495,6 +512,11 @@ impl From<repo::ClipRow> for ClipView {
             polled_at: r.polled_at,
             benefit_type: r.benefit_type,
             submitted_at: r.submitted_at,
+            // 存量行（0024 之前提交的）没有这一列，回落到 submitted_at：
+            // 它是个已知偏小的下界，好过让卡片上的等待时长整个消失。
+            first_submitted_at: r.first_submitted_at.or(r.submitted_at),
+            submit_credit: r.submit_credit,
+            submit_status: r.submit_status,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }

@@ -27,6 +27,17 @@ use crate::v2v::activity::{Activity, Who};
 /// 默认可执行名。设置里留空即用它，并走 [`resolve_bin`] 自动探测。
 pub const DEFAULT_BIN: &str = "dreamina";
 
+/// 默认模型：够用的最便宜档。
+///
+/// 实测（2026-07-27，同账号同一张首帧图，都是 4s / 720p / 竖版 720×1280）：
+/// - `seedance2.0fast` → 队列 `dreamina_fusion_video40`，**8 额度**
+/// - `seedance2.0fast_vip` → 队列 `dreamina_fusion_video40_vision`，**44 额度**
+///
+/// 5.5 倍差价，输出规格一模一样；vip 通道换来的是不排队（实测直接 `Generating`，
+/// 而非 vip 排在第 4485 位）。B-Roll 空镜是可以过夜的活，用不着为插队付 5.5 倍。
+/// 要赶时间就在设置里临时改成 vip —— 但那必须是一次显式的选择。
+pub const DEFAULT_MODEL: &str = "seedance2.0fast";
+
 /// 除 `PATH` 之外还要翻的安装目录。
 ///
 /// **「走 PATH」对 GUI 应用基本是句空话**：macOS 上从 Finder/Dock 启动的进程不经过登录
@@ -383,12 +394,18 @@ pub struct QueryResult {
     pub fps: Option<f64>,
     pub duration_sec: Option<f64>,
     pub credit_count: Option<i64>,
-    /// 队列位次。
+    /// 队列位次。**健康的任务从排队第一秒起就有它**。
     ///
-    /// **即梦当前不回传它**：实测排队中的 `query_result` 只有 submit_id / prompt /
-    /// logid / gen_status 四个字段，`queue_info` 只在**已完成**的回体里出现过
-    /// （`{queue_idx: 0, queue_status: "Finish"}`）。解析留着是因为字段本来就在它的
-    /// 数据形状里，哪天开始回传就自动生效；但界面上不能把它当成「一定有」的东西。
+    /// 早前这里写着「即梦当前不回传它」，那条结论是从一批坏单上归纳出来的 ——
+    /// 取样正是下面 `queued_payload_has_no_queue_position` 用的 `027e202c`，
+    /// 而那条属于 2026-07-27 事故里 18 条从未入队的幽灵单。
+    ///
+    /// 实测（同账号、同 `seedance2.0fast` 通道、提交后 25 秒）：
+    /// `{queue_idx: 4485, priority: 1, queue_status: "Queueing", queue_length: 574522}`。
+    /// 完成后变成 `{queue_idx: 0, queue_status: "Finish", queue_length: 0}`。
+    ///
+    /// 所以它缺席不是常态而是**征兆**：`queue_idx` 与 `credit_count` 双双为 None，
+    /// 就是「即梦接了单但没入队」。判定见 `runner::is_phantom`。
     pub queue_idx: Option<i64>,
     /// 实际计费型号（`commerce_info.triplets[].benefit_type`），形如
     /// `dreamina_seedance_20_fast_5s`。这是**回执**，不是我们的输入 ——
@@ -630,7 +647,58 @@ pub fn parse_sessions(stdout: &str) -> Vec<SessionInfo> {
     out
 }
 
-/// 提交一条图生视频任务，返回 submit_id。
+/// 一次提交的回执。
+///
+/// 原先 `submit()` 只从回体里挑走 `submit_id`，其余整个丢掉。2026-07-27 那次事故
+/// 之后要复盘「提交当时即梦到底怎么答的」，发现库里一个字都没有 —— 于是把回执
+/// 整体带出来，落进 `submit_credit` / `submit_status`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitReceipt {
+    pub submit_id: String,
+    /// 提交回体里的 `gen_status`（正常是 `querying`）。
+    pub gen_status: String,
+    /// 提交回体里的 `credit_count`。**健康的提交当场就有它**（实测 8 / 44 两档）；
+    /// 缺席是最早可得的异常信号。
+    pub credit_count: Option<i64>,
+}
+
+impl SubmitReceipt {
+    /// 回执是否看起来正常。用于**记日志**，不用于拒收 —— 见 `submit()` 的说明。
+    pub fn looks_healthy(&self) -> bool {
+        self.credit_count.is_some() && classify_status(&self.gen_status) != Outcome::Failed
+    }
+}
+
+/// 两个形状的构造器 —— 生产代码只从 CLI 回体里解析回执，故只给测试用。
+#[cfg(test)]
+impl SubmitReceipt {
+    /// 正常回执：`querying` + 有计费。
+    pub fn healthy(submit_id: &str, credit: i64) -> Self {
+        Self {
+            submit_id: submit_id.to_string(),
+            gen_status: "querying".into(),
+            credit_count: Some(credit),
+        }
+    }
+
+    /// 只有 submit_id 的回执 —— 2026-07-27 那 18 条幽灵单在提交这一刻的形状。
+    pub fn bare(submit_id: &str) -> Self {
+        Self {
+            submit_id: submit_id.to_string(),
+            gen_status: "querying".into(),
+            credit_count: None,
+        }
+    }
+}
+
+/// 提交一条图生视频任务，返回回执。
+///
+/// **回执异常不在这里报错**。CLI skill 写的是「`gen_status` 为 fail 才算提交失败」，
+/// 但本仓库的铁律更严：拿到 submit_id 就必须记下来（`额度不可撤回`）。一条既有
+/// submit_id 又缺 `credit_count` 的回执，究竟是没扣费还是只是回体少给了一个字段，
+/// 提交这一刻答不了 —— 而猜错的代价不对称：判它没扣费就丢掉 submit_id，万一扣了
+/// 就是花钱买了个认不出主人的孤儿。所以这里照收，把判断交给轮询（`is_phantom`），
+/// 那时有连续多轮的观测可用，比一次回体可靠得多。
 pub async fn submit(
     bin: &str,
     image: &Path,
@@ -638,7 +706,7 @@ pub async fn submit(
     opts: &GenOpts,
     log: &Activity,
     who: Who<'_>,
-) -> AppResult<String> {
+) -> AppResult<SubmitReceipt> {
     if !image.is_file() {
         return Err(AppError::InvalidInput(format!(
             "首帧图不存在：{}",
@@ -649,11 +717,21 @@ pub async fn submit(
     let bin = resolve_bin(bin)?;
     let argv = command_line(&bin, &image.to_string_lossy(), prompt, &opts);
     let stdout = run(argv.clone(), log, who, true).await?;
-    extract_submit_id(&extract_json(&stdout)?).ok_or_else(|| {
+    let v = extract_json(&stdout)?;
+    let submit_id = extract_submit_id(&v).ok_or_else(|| {
         AppError::Internal(format!(
             "提交成功但未能从返回里取到 submit_id。命令：{}",
             display_command(&argv)
         ))
+    })?;
+    Ok(SubmitReceipt {
+        submit_id,
+        gen_status: v
+            .get("gen_status")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        credit_count: v.get("credit_count").and_then(|x| x.as_i64()),
     })
 }
 
@@ -960,10 +1038,33 @@ mod tests {
         assert_eq!(q.credit_count, Some(44));
     }
 
-    // **排队中的真实回体**（本机 CLI 抓的）：只有四个字段，没有 queue_info。
-    // 这条测的是一个否定事实：即梦不回传排队位次，所以界面上不能凭空造一个「第 N 位」。
+    // **健康的排队回体**（2026-07-27 本机 CLI 抓的，`seedance2.0fast`，提交后 25 秒）。
+    //
+    // 这条推翻了此前那句「即梦排队期不回传位次」——那个结论是从 18 条坏单上归纳的。
+    // 排队中位次与计费**都有**，这正是识别幽灵单的基线。
     #[test]
-    fn queued_payload_has_no_queue_position() {
+    fn healthy_queued_payload_carries_position_and_credit() {
+        let raw = r#"{
+          "submit_id": "4584a328-11de-4edf-a541-cc6af0422915",
+          "logid": "2026072711423919216803103916668AA",
+          "gen_status": "querying",
+          "credit_count": 8,
+          "queue_info": {
+            "queue_idx": 4485, "priority": 1,
+            "queue_status": "Queueing", "queue_length": 574522
+          }
+        }"#;
+        let q = parse_query(&extract_json(raw).unwrap());
+        assert_eq!(classify_status(&q.gen_status), Outcome::Running);
+        assert_eq!(q.queue_idx, Some(4485), "排队中就该有位次");
+        assert_eq!(q.credit_count, Some(8), "排队中就该有计费回执");
+        assert!(q.video_path.is_none());
+    }
+
+    // **幽灵单的真实回体**：只有四个字段。取样 `027e202c` 正是 2026-07-27 事故里
+    // 18 条从未入队的其中一条 —— 与上面那条健康回体的差别就是判据本身。
+    #[test]
+    fn phantom_payload_has_neither_position_nor_credit() {
         let raw = r#"{
           "submit_id": "027e202c-7b5f-4fa0-99ef-dea5c6ab556f",
           "prompt": "首帧自然延续：窗台另一头趴着的那只猫极缓地呼吸……",
@@ -972,12 +1073,35 @@ mod tests {
         }"#;
         let q = parse_query(&extract_json(raw).unwrap());
         assert_eq!(classify_status(&q.gen_status), Outcome::Running);
-        assert!(
-            q.queue_idx.is_none(),
-            "即梦排队期不回传位次，不得凭空造一个"
-        );
+        assert!(q.queue_idx.is_none());
+        assert!(q.credit_count.is_none(), "从未入队，故从未计费");
         assert!(q.video_path.is_none());
-        assert!(q.credit_count.is_none(), "还没出片就还没有扣费回执");
+    }
+
+    // 提交回执必须**整份**带出来，不能只挑走 submit_id：
+    // 「这条到底计没计费」事后要靠它回答。真实提交回体形状。
+    #[test]
+    fn submit_receipt_keeps_status_and_credit() {
+        let healthy = r#"{
+          "submit_id": "4584a328-11de-4edf-a541-cc6af0422915",
+          "logid": "2026072711423919216803103916668AA",
+          "gen_status": "querying",
+          "credit_count": 8
+        }"#;
+        let v = extract_json(healthy).unwrap();
+        let r = SubmitReceipt {
+            submit_id: extract_submit_id(&v).unwrap(),
+            gen_status: v["gen_status"].as_str().unwrap_or_default().to_string(),
+            credit_count: v["credit_count"].as_i64(),
+        };
+        assert_eq!(r.credit_count, Some(8));
+        assert!(r.looks_healthy());
+
+        // 没有 credit_count 的回执不算健康 —— 但它**依然带着 submit_id**，
+        // 提交层照收（额度不可撤回），判死留给轮询。
+        let bare = SubmitReceipt::bare("027e202c");
+        assert!(!bare.looks_healthy());
+        assert_eq!(bare.submit_id, "027e202c");
     }
 
     // 计费型号来自**回执**而不是我们的输入：`--model_version` 被上游忽略或降级时，

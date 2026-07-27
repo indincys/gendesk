@@ -36,14 +36,23 @@ pub struct ClipRow {
     /// 即梦返回的 `gen_status` 原文（0021）。不翻译成自造中文态：它加新态时翻译层只会
     /// 显示「未知」，而原文至少还能被搜索、被拿去问客服。
     pub gen_status: Option<String>,
-    /// 排队位次。即梦当前**不回传**（见 `dreamina::QueryResult::queue_idx`），恒为 None；
-    /// 留着是因为字段在它的数据形状里，哪天开始给就自动生效。
+    /// 排队位次（见 `dreamina::QueryResult::queue_idx`）。健康的任务从排队第一秒起就有它，
+    /// 缺席是幽灵单的征兆之一。
     pub queue_idx: Option<i64>,
     /// 最后一次**发起查询**的时刻（成功与否都记）。退避轮询据此决定这一条到点没有。
     pub polled_at: Option<i64>,
     /// 实际计费型号（0022，来自回执）。回答「到底走的哪个模型」——
     /// 用我们自己发出去的 `model_version` 回答等于自问自答。
     pub benefit_type: Option<String>,
+    /// **首次**提交时刻（0024）。与 `submitted_at` 的差别就是「继续等待」：
+    /// 那个按钮会把 `submitted_at` 重置成当下（否则下一轮立刻又判超时），
+    /// 而这一列不动，于是「这条到底等了多久」还答得出来。
+    pub first_submitted_at: Option<i64>,
+    /// 提交回执里的 `credit_count`（0024）。健康的提交当场就有它；
+    /// 它与 `queue_idx` 双双缺席即幽灵单（`runner::is_phantom`）。
+    pub submit_credit: Option<i64>,
+    /// 提交回执里的 `gen_status`（0024）。
+    pub submit_status: Option<String>,
     pub updated_at: i64,
     /// 父图编号（`accepted_works` → `prompts.code`）。
     pub prompt_code: String,
@@ -58,7 +67,8 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.source_prompt, c.variable_part, c.video_prompt, c.model_version, c.duration,
         c.video_resolution, c.submit_id, c.credit_count, c.video_path, c.poster_path,
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
-        c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type, c.updated_at,
+        c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type,
+        c.first_submitted_at, c.submit_credit, c.submit_status, c.updated_at,
         COALESCE(p.code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
         COALESCE(w.thumb_path,'') AS thumb_path,
@@ -290,22 +300,29 @@ pub async fn mark_poll_attempt(pool: &SqlitePool, id: i64, now: i64) -> Result<(
     Ok(())
 }
 
-/// ready → run（记下 submit_id）。
+/// ready → run（记下 submit_id 与整份提交回执）。
+///
+/// `first_submitted_at` 在这里**无条件**更新：走到这一步就是一个新的 submit_id，
+/// 从它开始重新计时才对。会被「继续等待」重置的是 `submitted_at`（那条路径不换单，
+/// 故不动 `first_submitted_at`）—— 两列的分工全部体现在这个差别上。
 pub async fn mark_submitted(
     pool: &SqlitePool,
     id: i64,
-    submit_id: &str,
+    receipt: &crate::v2v::dreamina::SubmitReceipt,
     now: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE v2v_clips SET stage='run', submit_id=?2, submitted_at=?3, updated_at=?3,
+             first_submitted_at=?3, submit_credit=?4, submit_status=?5,
              attempt = attempt + 1, error_type=NULL, error_message=NULL,
              gen_status=NULL, queue_idx=NULL, polled_at=NULL
          WHERE id=?1",
     )
     .bind(id)
-    .bind(submit_id)
+    .bind(&receipt.submit_id)
     .bind(now)
+    .bind(receipt.credit_count)
+    .bind(&receipt.gen_status)
     .execute(pool)
     .await?;
     Ok(())
@@ -419,12 +436,18 @@ pub async fn requeue_for_run(pool: &SqlitePool, id: i64, now: i64) -> Result<boo
 /// 实测 19 条在 45 分钟被判超时时，`dreamina list_task` 里它们全都还是 `querying`。
 ///
 /// 重置 `submitted_at` 是必须的：不重置的话下一轮立刻又判超时，按钮点了等于没点。
+/// 但**不动 `first_submitted_at`** —— 重置的代价原先是原始提交时刻被永久覆盖，
+/// 事故当天看板因此显示「最久已等 10 小时 54 分」，而那只是从按下这个按钮算起的。
+///
+/// 只放 `timeout`：`phantom` 那类没进队列、没扣费，「继续等待」对它毫无意义
+/// （再等一万年也不会出片），该走的是重跑。
 pub async fn resume_timed_out(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, sqlx::Error> {
     let res = sqlx::query(
         "UPDATE v2v_clips
             SET stage='run', submitted_at=?2, updated_at=?2,
                 error_type=NULL, error_message=NULL, polled_at=NULL
-          WHERE id=?1 AND stage='fail' AND submit_id IS NOT NULL AND submit_id <> ''",
+          WHERE id=?1 AND stage='fail' AND error_type='timeout'
+            AND submit_id IS NOT NULL AND submit_id <> ''",
     )
     .bind(id)
     .bind(now)
@@ -582,6 +605,7 @@ pub async fn recover_orphan_submits(pool: &SqlitePool, now: i64) -> Result<i64, 
 mod tests {
     use super::*;
     use crate::db::test_support::test_pool;
+    use crate::v2v::dreamina::SubmitReceipt;
 
     async fn seed_work(pool: &SqlitePool, work_id: i64) {
         sqlx::query("INSERT OR IGNORE INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
@@ -631,7 +655,9 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
 
         assert!(!enqueue_one(&pool, 1).await);
         let row = get(&pool, id).await.unwrap().unwrap();
@@ -655,7 +681,9 @@ mod tests {
             "rewrite 态应可收录"
         );
         tx.commit().await.unwrap();
-        mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
 
         let mut tx = pool.begin().await.unwrap();
         assert!(
@@ -690,7 +718,9 @@ mod tests {
         .await
         .unwrap();
         tx.commit().await.unwrap();
-        mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
         mark_ready_for_review(
             &pool,
             id,
@@ -740,7 +770,9 @@ mod tests {
                 .await
                 .unwrap();
             tx.commit().await.unwrap();
-            mark_submitted(&pool, id, "s", 300).await.unwrap();
+            mark_submitted(&pool, id, &SubmitReceipt::healthy("s", 8), 300)
+                .await
+                .unwrap();
             mark_ready_for_review(
                 &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
             )
@@ -797,7 +829,9 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
 
         assert!(!update_ready(&pool, id, "想改", None, None, None, 400)
             .await
@@ -823,7 +857,9 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        mark_submitted(&pool, id, "s", 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("s", 8), 300)
+            .await
+            .unwrap();
         mark_ready_for_review(
             &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
         )
@@ -860,7 +896,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        mark_submitted(&pool, paid, "sub-paid", 300).await.unwrap();
+        mark_submitted(&pool, paid, &SubmitReceipt::healthy("sub-paid", 8), 300)
+            .await
+            .unwrap();
 
         assert_eq!(recover_orphan_submits(&pool, 400).await.unwrap(), 1);
         assert_eq!(get(&pool, orphan).await.unwrap().unwrap().stage, "ready");
@@ -899,7 +937,9 @@ mod tests {
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_submitted(&pool, id, "sub-1", 500).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
+            .await
+            .unwrap();
         let before = get(&pool, id).await.unwrap().unwrap().updated_at;
 
         mark_polled(&pool, id, "queue", Some(3), 900).await.unwrap();
@@ -918,7 +958,9 @@ mod tests {
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_submitted(&pool, id, "sub-1", 500).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
+            .await
+            .unwrap();
         mark_polled(&pool, id, "success", None, 900).await.unwrap();
 
         assert!(requeue_for_run(&pool, id, 1000).await.unwrap());
@@ -938,7 +980,7 @@ mod tests {
         }
         let rows = list_by_stages(&pool, &["rewrite"]).await.unwrap();
         let (waiting, submitted) = (rows[0].id, rows[1].id);
-        mark_submitted(&pool, submitted, "sub-1", 500)
+        mark_submitted(&pool, submitted, &SubmitReceipt::healthy("sub-1", 8), 500)
             .await
             .unwrap();
 
@@ -978,15 +1020,25 @@ mod tests {
             .collect();
         let now = 100_000i64;
         // 两条还在跑（一条等了 3 小时、一条等了 10 分钟），第三条已出片。
-        mark_submitted(&pool, ids[0], "s0", now - 3 * 3600)
+        mark_submitted(
+            &pool,
+            ids[0],
+            &SubmitReceipt::healthy("s0", 8),
+            now - 3 * 3600,
+        )
+        .await
+        .unwrap();
+        mark_submitted(&pool, ids[1], &SubmitReceipt::healthy("s1", 8), now - 600)
             .await
             .unwrap();
-        mark_submitted(&pool, ids[1], "s1", now - 600)
-            .await
-            .unwrap();
-        mark_submitted(&pool, ids[2], "s2", now - 4 * 3600)
-            .await
-            .unwrap();
+        mark_submitted(
+            &pool,
+            ids[2],
+            &SubmitReceipt::healthy("s2", 8),
+            now - 4 * 3600,
+        )
+        .await
+        .unwrap();
         mark_ready_for_review(
             &pool,
             ids[2],
@@ -1034,7 +1086,9 @@ mod tests {
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_submitted(&pool, id, "s", 1_000).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("s", 8), 1_000)
+            .await
+            .unwrap();
         mark_failed(&pool, id, "timeout", "45 分钟仍未出片", 99_000)
             .await
             .unwrap();
@@ -1057,7 +1111,9 @@ mod tests {
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_submitted(&pool, id, "sub-paid", 500).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-paid", 8), 500)
+            .await
+            .unwrap();
         mark_failed(&pool, id, "timeout", "45 分钟仍未出片", 3_200)
             .await
             .unwrap();
@@ -1077,6 +1133,56 @@ mod tests {
         );
         assert!(row.error_type.is_none());
         assert_eq!(row.attempt, 1, "继续等待不是新一次尝试，不该 attempt+1");
+        assert_eq!(
+            row.first_submitted_at,
+            Some(500),
+            "首次提交时刻不得被重置抹掉 —— 抹掉了「这条到底等了多久」就再也答不出来"
+        );
+    }
+
+    // 幽灵单（从未入队、从未计费）**不给「继续等待」**：再等一万年也不会出片，
+    // 而那个按钮的全部意义是「钱已经花了，别重复花」。它该走的是重跑。
+    #[tokio::test]
+    async fn phantom_clip_is_not_resumable() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted(&pool, id, &SubmitReceipt::bare("sub-ghost"), 500)
+            .await
+            .unwrap();
+        mark_failed(&pool, id, "phantom", "即梦接了单但未入队", 3_200)
+            .await
+            .unwrap();
+
+        assert!(!resume_timed_out(&pool, id, 9_000).await.unwrap());
+        assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "fail");
+    }
+
+    // 提交回执落库：`submit_credit` 为空即「即梦没给计费回执」，
+    // 界面据此才敢对用户说「这条没扣费，重跑不会重复扣」。
+    #[tokio::test]
+    async fn submit_receipt_is_persisted() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-ok", 8), 500)
+            .await
+            .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.submit_credit, Some(8));
+        assert_eq!(row.submit_status.as_deref(), Some("querying"));
+        assert_eq!(row.first_submitted_at, Some(500));
+
+        // 重投换新单 → 首次提交时刻跟着换（这才是新一次等待的起点）。
+        mark_submitted(&pool, id, &SubmitReceipt::bare("sub-ghost"), 7_000)
+            .await
+            .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.submit_credit, None, "没有计费回执就该是空");
+        assert_eq!(row.first_submitted_at, Some(7_000));
     }
 
     // 没有提交单的失败（提交本身就没成功）**不能**放回轮询：
@@ -1111,7 +1217,9 @@ mod tests {
             .collect();
         // 两条出片（44 与 66 额度），第三条还没提交 → 无回执。
         for (id, credit, at) in [(ids[0], 44, 1_000), (ids[1], 66, 2_000)] {
-            mark_submitted(&pool, id, "s", at).await.unwrap();
+            mark_submitted(&pool, id, &SubmitReceipt::healthy("s", 8), at)
+                .await
+                .unwrap();
             mark_ready_for_review(
                 &pool,
                 id,

@@ -663,11 +663,17 @@ function ClipCard({
           <div className="vstat">
             <span className="spn" style={{ width: 8, height: 8 }} />
             <span>{status || "等待首次查询"}</span>
-            {/* 已等待时长是这条卡片上最有信息量的数字：即梦不回传排队位次，
-                「我这条等了多久」是我们唯一测得准的进度。 */}
-            {c.submittedAt != null && <span>· 等 {fmtAgo(Math.max(0, now - c.submittedAt))}</span>}
+            {/* 已等待时长按**首次**提交算。用 submittedAt 算的话，按过一次
+                「继续等待」的条目会把已经等掉的时间抹掉 —— 事故当天一批等了十几小时的
+                就是这样显示成「10 小时 54 分」的。 */}
+            {c.firstSubmittedAt != null && (
+              <span>· 等 {fmtAgo(Math.max(0, now - c.firstSubmittedAt))}</span>
+            )}
             {c.polledAt != null && <span>· {fmtAgo(Math.max(0, now - c.polledAt))}查过</span>}
             {c.queueIdx != null && c.queueIdx > 0 && <span>· 队列 {c.queueIdx}</span>}
+            {/* 没入队 = 没扣费。这一条决定用户该点「继续等待」还是「重跑」，
+                而两者的差价是一整批的额度。 */}
+            {c.submitCredit == null && c.queueIdx == null && <span>· 未入队</span>}
           </div>
         )}
         {c.stage !== "run" && status && <div className="fs10 t3">即梦：{status}</div>}

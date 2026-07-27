@@ -159,9 +159,38 @@ pub async fn submit_batch(
             None,
         );
         match dreamina::submit(bin, Path::new(&clip.image_path), prompt, &opts, log, who).await {
-            Ok(submit_id) => {
-                repo::mark_submitted(pool, clip.id, &submit_id, now_unix()).await?;
-                log.info("submit", who, format!("已提交 · {submit_id}"), None);
+            Ok(receipt) => {
+                repo::mark_submitted(pool, clip.id, &receipt, now_unix()).await?;
+                if receipt.looks_healthy() {
+                    log.info(
+                        "submit",
+                        who,
+                        format!(
+                            "已提交 · {} · 计费 {} 额度",
+                            receipt.submit_id,
+                            receipt.credit_count.unwrap_or(0)
+                        ),
+                        None,
+                    );
+                } else {
+                    // 提交这一刻还不能判它死（见 `dreamina::submit` 的说明），但必须出声：
+                    // 事故那次 18 条全程一句异常都没有，人只能看着卡片停在「已提交」。
+                    log.warn(
+                        "submit",
+                        who,
+                        format!(
+                            "已提交但回执异常 · {} · 状态 {} · 无计费回执，\
+                             若 15 分钟内仍拿不到队列位次将判为幽灵单",
+                            receipt.submit_id,
+                            if receipt.gen_status.is_empty() {
+                                "—"
+                            } else {
+                                &receipt.gen_status
+                            }
+                        ),
+                        None,
+                    );
+                }
                 sum.submitted += 1;
                 // 每条提交完就把看板推一次：整批跑完才刷新的话，人盯着一列不动的卡片
                 // 无法判断是「在提交」还是「卡住了」。
@@ -212,6 +241,40 @@ pub fn is_timed_out(submitted_at: Option<i64>, now: i64, timeout: Option<i64>) -
         return false;
     };
     submitted_at.is_some_and(|t| now - t > limit)
+}
+
+/// 幽灵单的宽限期。超过它还没拿到队列位次或计费回执，就不再当成「刚提交」。
+///
+/// 取 15 分钟是留了两个数量级的余量：实测健康单在提交后 **25 秒**内就同时有了
+/// `queue_idx` 与 `credit_count`（`seedance2.0fast` 通道，队列第 4485 位）。
+pub const PHANTOM_GRACE_SECS: i64 = 15 * 60;
+
+/// 幽灵单判定（纯函数，便于测试）。
+///
+/// 「幽灵单」= 即梦接了单、给了 submit_id、`list_task` 里也查得到，但**从未入队、
+/// 从未计费**：`queue_info` 与 `credit_count` 双双缺席，`gen_status` 永远停在
+/// `querying`。2026-07-27 一次提交 19 条中了 18 条，挂了十几个小时无人察觉 ——
+/// 因为在 GenDesk 眼里它和「在排队」长得一模一样，而超时默认不限，于是会一直轮询下去。
+///
+/// 判据要两个信号同时缺席，而不是只看队列位次：
+/// - `credit_count` 是**决定性**的那个。健康单从排队第一秒起就带它（实测排队中的
+///   `query_result` 返回 `credit_count: 8`），它缺席意味着这单根本没进计费。
+/// - `queue_idx` 单独缺席不足以判死：万一哪天即梦对某些通道不下发 `queue_info`，
+///   只看它会把正在排队、已经扣了钱的任务当场标死。
+///
+/// 判定结果是 `fail(phantom)` 而**不是**自动重投：重投要花钱，那是人的决定。
+/// submit_id 照样留着（`额度不可撤回`），万一它哪天真的出片，重跑前还查得到。
+pub fn is_phantom(
+    gen_status: &str,
+    queue_idx: Option<i64>,
+    credit_count: Option<i64>,
+    submitted_at: Option<i64>,
+    now: i64,
+) -> bool {
+    dreamina::classify_status(gen_status) == Outcome::Running
+        && queue_idx.is_none()
+        && credit_count.is_none()
+        && submitted_at.is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
 }
 
 /// 轮询一轮：把到点的条目查一遍，出片的搬到 clips/ 并置待验收，失败的置 fail。
@@ -343,7 +406,25 @@ pub async fn poll_once(
                 sum.failed += 1;
             }
             Outcome::Running => {
-                if is_timed_out(clip.submitted_at, now, timeout_secs) {
+                if is_phantom(
+                    &q.gen_status,
+                    q.queue_idx,
+                    q.credit_count,
+                    clip.submitted_at,
+                    now,
+                ) {
+                    // 与超时是两回事，文案也必须相反：超时说「额度已扣，先继续等待」，
+                    // 幽灵单说「没扣费，可以直接重跑」。指错方向的代价是真金白银。
+                    let msg = format!(
+                        "即梦接了单但未入队：提交后 {} 仍拿不到队列位次，也没有计费回执\
+                         （末次状态 {}）。这单没有扣额度，直接「重跑」即可，不会重复扣费。",
+                        fmt_dur(clip.submitted_at.map_or(0, |t| now - t)),
+                        q.gen_status
+                    );
+                    log.error("poll", who, format!("幽灵单：{msg}"), None);
+                    repo::mark_failed(pool, clip.id, "phantom", &msg, now).await?;
+                    sum.failed += 1;
+                } else if is_timed_out(clip.submitted_at, now, timeout_secs) {
                     // 文案要指向「继续等待」而不是「重跑」：额度已经扣了，
                     // 而重跑会清掉 submit_id = 再花一份钱买同一条视频。
                     let msg = format!(
@@ -522,6 +603,9 @@ mod tests {
             queue_idx: None,
             polled_at: None,
             benefit_type: None,
+            first_submitted_at: None,
+            submit_credit: None,
+            submit_status: None,
             updated_at: 0,
             prompt_code: "GG-0001".into(),
             image_path: "/img.jpg".into(),
@@ -612,6 +696,50 @@ mod tests {
     fn no_timeout_never_kills_a_running_task() {
         assert_eq!(DEFAULT_TIMEOUT_HOURS, None, "默认必须是不限");
         assert!(!is_timed_out(Some(0), 999_999_999, None));
+    }
+
+    // 幽灵单：即梦接了单却没入队，`queue_idx` 与 `credit_count` 双双缺席。
+    // 2026-07-27 一次提交 19 条中了 18 条，而「超时默认不限」意味着没人会去打断它。
+    #[test]
+    fn phantom_needs_both_signals_missing_and_the_grace_period_over() {
+        let late = PHANTOM_GRACE_SECS + 1;
+        assert!(
+            is_phantom("querying", None, None, Some(0), late),
+            "两个信号都缺 + 过了宽限期 = 幽灵单"
+        );
+    }
+
+    // 宽限期内不判：健康单实测 25 秒内就拿到位次，但网络慢一点也不该被当场标死。
+    #[test]
+    fn phantom_is_not_judged_inside_the_grace_period() {
+        assert!(!is_phantom(
+            "querying",
+            None,
+            None,
+            Some(0),
+            PHANTOM_GRACE_SECS
+        ));
+    }
+
+    // **单看队列位次不足以判死**。万一哪天即梦对某些通道不下发 queue_info，
+    // 只凭它会把正在排队、钱已经扣了的任务当场标死 —— 那是不可逆的误伤。
+    #[test]
+    fn credit_receipt_alone_saves_a_clip_from_being_judged_phantom() {
+        assert!(
+            !is_phantom("querying", None, Some(8), Some(0), 999_999),
+            "有计费回执就说明真进了即梦，不得判幽灵"
+        );
+        assert!(
+            !is_phantom("querying", Some(4485), None, Some(0), 999_999),
+            "有队列位次同样不得判幽灵"
+        );
+    }
+
+    // 终态不归幽灵管：出片的走 Done、判失败的走 Failed，各有各的处置。
+    #[test]
+    fn phantom_only_applies_to_running_clips() {
+        assert!(!is_phantom("success", None, None, Some(0), 999_999));
+        assert!(!is_phantom("expired", None, None, Some(0), 999_999));
     }
 
     // 退避是「能不能睡一觉再来收」的成本前提：每条每 6 秒查一次，19 条跑一夜

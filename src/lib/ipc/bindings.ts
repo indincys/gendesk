@@ -2295,10 +2295,20 @@ genStatus: string | null; queueIdx: number | null; polledAt: number | null;
  */
 benefitType: string | null; 
 /**
- * 提交时刻。卡片上的「已等 3 小时 12 分」由它算 —— 即梦不回传排队位次，
- * 「我这条等了多久」是我们唯一测得准的进度。
+ * 提交时刻。退避轮询与超时判定读它；「继续等待」会把它重置成当下。
  */
-submittedAt: number | null; acceptedAt: number; updatedAt: number }
+submittedAt: number | null; 
+/**
+ * **首次**提交时刻（0024）。卡片上的「已等 3 小时 12 分」要用它算 ——
+ * 用 `submitted_at` 算的话，按过一次「继续等待」的条目会把已经等掉的时间抹掉，
+ * 事故当天就是这样把等了十几小时的一批显示成「10 小时 54 分」。
+ */
+firstSubmittedAt: number | null; 
+/**
+ * 提交回执里的计费额度与状态（0024）。`submitCredit` 为空 = 即梦没给计费回执，
+ * 配合 `queueIdx` 为空即幽灵单；界面据此可以明说「这条没扣费，重跑不会重复扣」。
+ */
+submitCredit: number | null; submitStatus: string | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -3407,7 +3417,13 @@ handoffRoot?: string;
  */
 bin?: string; 
 /**
- * 默认模型。空 = 不发高级控制，走 CLI 自己的默认路径（最稳，不锁定模型名）。
+ * 默认模型。空 = 不发高级控制，走 CLI 自己的默认路径。
+ * 
+ * **默认值是 `seedance2.0fast`，不是空**。「跟随 CLI 默认」看着最稳，实际上是把
+ * 「这批片子按什么价钱生成」交给了一个我们不控制、会随版本变的选择：实测同为
+ * 4s/720p，`seedance2.0fast` 走 `dreamina_fusion_video40` 收 8 额度，而
+ * `seedance2.0fast_vip` 走 `..._vision` 收 44 —— 5.5 倍差价，画幅时长完全一样。
+ * 花钱的选择必须是显式的。
  */
 modelVersion?: string; duration?: number | null; videoResolution?: string; 
 /**

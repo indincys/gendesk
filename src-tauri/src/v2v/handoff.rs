@@ -490,6 +490,7 @@ async fn find_clip(
 mod tests {
     use super::*;
     use crate::db::test_support::test_pool;
+    use crate::v2v::dreamina::SubmitReceipt;
 
     async fn seed(
         pool: &SqlitePool,
@@ -747,7 +748,9 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        repo::mark_submitted(&pool, id, "sub-1", 300).await.unwrap();
+        repo::mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
 
         let done = root
             .join(V2V)

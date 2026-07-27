@@ -147,6 +147,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::set_v2v_clip_params,
             commands::v2v::preview_v2v_commands,
             commands::v2v::submit_v2v_clips,
+            commands::v2v::unqueue_v2v_clips,
             commands::v2v::poll_v2v_now,
             commands::v2v::review_v2v_clips,
             commands::v2v::requeue_v2v_clips,

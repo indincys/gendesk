@@ -34,19 +34,28 @@ export function isLive(stage: Stage): boolean {
  * 「等 skill 写回 · 交接已物化」四句互相矛盾的话：阶段名就写在每一条脸上，
  * 是最不缺的信息；真正没人回答的是「所以我现在该干嘛」。
  */
-export type NextAction = "rewrite" | "submit" | "review" | "fix" | "wait" | "done";
+export type NextAction = "rewrite" | "submit" | "review" | "fix" | "queued" | "wait" | "done";
 
 export const ACTION_META: Record<NextAction, { label: string; fg: string; dot: string }> = {
   fix: { label: "处理异常", fg: "var(--er)", dot: "var(--sg-fail)" },
   rewrite: { label: "去改写", fg: "var(--acc2)", dot: "var(--sg-rewrite)" },
   submit: { label: "待放行", fg: "var(--acc2)", dot: "var(--sg-ready)" },
   review: { label: "待验收", fg: "var(--st-rev)", dot: "var(--sg-rev)" },
+  queued: { label: "排队中", fg: "var(--t3)", dot: "var(--sg-ready)" },
   wait: { label: "等即梦", fg: "var(--t3)", dot: "var(--sg-run)" },
   done: { label: "已定案", fg: "var(--t3)", dot: "var(--sg-pass)" },
 };
 
-/** 五档在制动作 + 已定案。顺序 = 「离人最近的排最前」，节头摘要也照这个序。 */
-export const ACTION_ORDER: NextAction[] = ["fix", "rewrite", "submit", "review", "wait", "done"];
+/** 六档在制动作 + 已定案。顺序 = 「离人最近的排最前」，节头摘要也照这个序。 */
+export const ACTION_ORDER: NextAction[] = [
+  "fix",
+  "rewrite",
+  "submit",
+  "review",
+  "queued",
+  "wait",
+  "done",
+];
 
 /**
  * 阻在**人**身上的四档 —— 「需要我」就是它们的并集。
@@ -64,13 +73,25 @@ export const MINE: NextAction[] = ["fix", "rewrite", "submit", "review"];
  * 而旧的「需要我」= ready|rev|fail 不含 run —— 于是唯一该**免费**重跑的那一类，
  * 被默认筛选藏了起来。这里结构上不可能再漏。
  */
-export function nextAction(stage: Stage, phantom: boolean): NextAction {
+export function nextAction(stage: Stage, phantom: boolean, queued = false): NextAction {
   if (stage === "pass" || stage === "rej") return "done";
   if (stage === "fail") return "fix";
   if (stage === "run") return phantom ? "fix" : "wait";
   if (stage === "rev") return "review";
-  if (stage === "ready") return "submit";
+  if (stage === "ready") return queued ? "queued" : "submit";
   return "rewrite";
+}
+
+/**
+ * 这一条是不是「人已放行、正在本地排队等即梦的空位」（0028）。
+ *
+ * 即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），超出的部分会被它逐条
+ * 以 `ExceedConcurrencyLimit` 弹回来。所以 GenDesk 只发得下的那几条，其余留在本地。
+ * 这一格与「等你点确认提交」必须分开显示 —— 在此之前两者长得一模一样，
+ * 于是一批放行完的片子看起来像是没人管。
+ */
+export function isQueued(c: ClipView): boolean {
+  return c.stage === "ready" && c.submitQueuedAt != null;
 }
 
 /** 动作筛选片。`mine` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
@@ -86,6 +107,7 @@ export const ACTION_CHIPS: { key: ActionFilter; label: string }[] = [
   { key: "mine", label: "需要我" },
   { key: "all", label: "全部在制" },
   ...MINE.map((a) => ({ key: a as ActionFilter, label: ACTION_META[a].label })),
+  { key: "queued", label: ACTION_META.queued.label },
   { key: "wait", label: ACTION_META.wait.label },
   { key: "rej", label: STAGE_META.rej.label },
 ];
@@ -148,6 +170,15 @@ export interface Row {
   waitSecs: number;
   /** 距上次发起查询多少秒；从未查过为 null。 */
   polledAgo: number | null;
+  /**
+   * 排在第几位。两条队列**语义不同，不能混成一个数字**：
+   * - `ready + 已放行` → **本地**队列位次（1 = 下一条发出去的），由这一层算。
+   * - `run` → **即梦**队列位次（`clip.queueIdx`，实测能到四千多位），由即梦下发。
+   *
+   * 前者是「还要等我们发几条」，后者是「即梦那边前面还有多少人」——
+   * 把它们显示成同一个「第 N 位」会让人以为本地排第 3 就快了。
+   */
+  queuePos: number | null;
   /**
    * 在跑但一处计费证据都没有、且过了宽限期 —— **Rust 下发的结论**（`clip.phantomSuspect`）。
    *
@@ -242,7 +273,16 @@ export function deriveRows(
   models: ModelInfo[],
   eff: EffectiveParams | null,
   now: number,
+  /** 即梦同时跑得下几条（`QueueStats.inFlightLimit`）。只用于文案，算不出来时按 1。 */
+  inFlightLimit = 1,
 ): Row[] {
+  // 本地队列位次：严格照后端取用的顺序（放行时刻，其次 id）算一遍。
+  // 两边分叉的代价是界面说「你排第 1」而实际先发的是另一条 —— 那种错没人查得出来。
+  const queueOrder = clips
+    .filter(isQueued)
+    .sort((a, b) => (a.submitQueuedAt ?? 0) - (b.submitQueuedAt ?? 0) || a.id - b.id)
+    .map((c) => c.id);
+  const queuePosOf = new Map(queueOrder.map((id, i) => [id, i + 1]));
   // 「等待异常」是相对判据：跟同一批的其它在跑条目比，而不是跟一个拍脑袋的绝对秒数比。
   // 按批分组取中位数 —— 不同批次的提交时刻差着几小时，混在一起算出来的中位数谁也不代表。
   const runWaits = new Map<string, number[]>();
@@ -278,6 +318,8 @@ export function deriveRows(
     const perSec = creditPerSec(models, modelFull, resolution);
     const estimate = perSec != null && duration != null ? perSec * duration : null;
 
+    const queued = isQueued(c);
+    const queuePos = queued ? (queuePosOf.get(c.id) ?? null) : c.queueIdx;
     const waitSecs = c.firstSubmittedAt == null ? 0 : Math.max(0, now - c.firstSubmittedAt);
     const polledAgo = c.polledAt == null ? null : Math.max(0, now - c.polledAt);
 
@@ -325,7 +367,12 @@ export function deriveRows(
       situation = `等待异常 · 已超本批中位数 ${SLOW_FACTOR} 倍，别手动催`;
       situationTone = "wr";
     } else if (stage === "run") {
-      situation = `即梦在跑 · 本批已出 ${batchDone.get(key) ?? 0}/${batchTotal.get(key) ?? 0}`;
+      // 位次是排队几小时里**唯一**有意义的进度：「第 4485 位」和「第 12 位」是两件
+      // 完全不同的事。问不到时才回落到本批进度 —— 绝不编一个位次出来。
+      situation =
+        c.queueIdx != null && c.queueIdx > 0
+          ? `即梦在排队 · 前面还有 ${c.queueIdx} 个`
+          : `即梦在跑 · 本批已出 ${batchDone.get(key) ?? 0}/${batchTotal.get(key) ?? 0}`;
     } else if (isTimeout) {
       situation = "继续等待 · 额度已扣，即梦还在跑";
       situationTone = "er";
@@ -344,6 +391,13 @@ export function deriveRows(
       if (!delivered(c)) situationTone = "er";
     } else if (stage === "rej") {
       situation = "你判了不通过 · 成片已进废纸篓";
+    } else if (queued) {
+      // 这一格要同时答出「为什么还没发出去」和「还要多久轮到我」。只说「排队中」
+      // 会立刻引出「排谁的队、卡在哪」——而那正是这次事故里没人答得上来的问题。
+      situation =
+        queuePos != null && queuePos > 1
+          ? `已放行 · 本地排第 ${queuePos}，即梦同时只跑 ${inFlightLimit} 条`
+          : `已放行 · 下一个就发它（即梦同时只跑 ${inFlightLimit} 条）`;
     } else if (stage === "ready") {
       situation = "等你点确认提交 · 提交即扣费";
       situationTone = "acc";
@@ -357,7 +411,7 @@ export function deriveRows(
     return {
       clip: c,
       stage,
-      action: nextAction(stage, phantomLive),
+      action: nextAction(stage, phantomLive, queued),
       modelFull,
       modelShort: modelFull ? shortModel(modelFull) : "CLI 默认",
       vip,
@@ -368,6 +422,7 @@ export function deriveRows(
       creditEstimated,
       waitSecs,
       polledAgo,
+      queuePos,
       phantomLive,
       slow,
       signals,
@@ -450,7 +505,8 @@ function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   if (counts.rewrite > 0) parts.push(`${counts.rewrite} 条等你改写`);
   if (counts.submit > 0) parts.push(`${counts.submit} 条等你放行`);
   if (counts.review > 0) parts.push(`${counts.review} 条等你验收`);
-  if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦排队`);
+  if (counts.queued > 0) parts.push(`${counts.queued} 条排队等发`);
+  if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦跑`);
   const headlineTone: Section["headlineTone"] =
     counts.fix > 0 ? "er" : counts.rewrite + counts.submit + counts.review > 0 ? "acc" : "t3";
   const headline =

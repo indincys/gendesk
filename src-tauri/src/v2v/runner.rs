@@ -153,8 +153,107 @@ pub const DEFAULT_TIMEOUT_HOURS: Option<i64> = None;
 pub struct SubmitSummary {
     pub submitted: i64,
     pub failed: i64,
+    /// 这一批里被在跑上限挡在本地、排队等空位的条数（0028）。**不是失败**。
+    pub queued: i64,
     /// 第一条失败的原因（批量提交时逐条上报太吵，给一条代表 + 计数）。
     pub first_error: Option<String>,
+}
+
+// ─────────────────────── 在跑上限（即梦的账户级并发闸门）───────────────────────
+
+/// 默认同时在跑几条。
+///
+/// **1，因为那是实测到的真值**：2026-07-28 一批 9 条同时提交，即梦逐条给了 submit_id，
+/// 随后 8 条回来 `ret=1310 ExceedConcurrencyLimit`，只有 1 条真的进了队列。
+///
+/// 猜大猜小的代价不对等：猜小只是让后面那些多等一会儿（而「等」在非 VIP 通道上本来
+/// 就是免费的，那正是常驻队列成立的前提）；猜大则是一批片子集体躺进「处理异常」，
+/// 还得人一条条辨认哪些是真失败。所以默认往小了猜，由 [`observe_concurrency_reject`]
+/// 在撞墙时自己收敛。
+pub const DEFAULT_MAX_IN_FLIGHT: i64 = 1;
+
+/// 配置值的取值范围。上限 20 不是技术限制，是「一次性把余额烧光」的护栏。
+pub const MAX_IN_FLIGHT_CAP: i64 = 20;
+
+/// 这一次运行里**实测**到的并发上限（`i64::MAX` = 还没撞过墙）。
+///
+/// 进程内、不落库：即梦随时可以按账户等级调整这个数，而一个被写进库的旧观测会在
+/// 上限放宽之后永远把队列压在低位，且没人知道为什么。重启即重新试探，代价只是
+/// 再撞一次墙 —— 而撞墙现在不花钱也不丢条目。
+static OBSERVED_LIMIT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
+
+/// 生效的在跑上限 = 配置值与实测值取小。
+pub fn effective_in_flight(configured: i64) -> i64 {
+    let cfg = configured.clamp(1, MAX_IN_FLIGHT_CAP);
+    let observed = OBSERVED_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+    cfg.min(observed.max(1))
+}
+
+/// 撞上 `ExceedConcurrencyLimit` 了 —— 把实测上限收敛到「即梦当时确实收下的条数」。
+///
+/// `accepted` 取此刻在跑、且有计费回执或队列位次的条数（`repo::count_running_accepted`）：
+/// 被拒的那些两样都没有，所以剩下的正是即梦愿意同时跑的量。
+///
+/// 只降不升（`fetch_min`），且下限为 1：升回去交给下次重启。这条路径要防的是
+/// 「设了 5、真值是 1」时每轮提交 4 条、每轮被弹回 4 条的空转，一轮之内就该收敛。
+pub fn observe_concurrency_reject(accepted: i64) -> i64 {
+    let v = accepted.max(1);
+    OBSERVED_LIMIT.fetch_min(v, std::sync::atomic::Ordering::Relaxed);
+    OBSERVED_LIMIT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
+
+/// 实测到的上限（`None` = 这次运行还没撞过墙）。设置页据此说明「为什么只跑了 1 条」。
+pub fn observed_in_flight_limit() -> Option<i64> {
+    let v = OBSERVED_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+    (v != i64::MAX).then_some(v.max(1))
+}
+
+/// 现在还能往即梦发几条。
+pub async fn free_slots(pool: &SqlitePool, configured: i64) -> AppResult<i64> {
+    Ok((effective_in_flight(configured) - repo::count_in_flight(pool).await?).max(0))
+}
+
+/// 放行一批：人点了「确认提交」。
+///
+/// **能发几条发几条，其余留在本地队列**（0028），由轮询循环在空位腾出来时自动补上。
+/// 这是这一版的核心改动：在此之前，选 9 条就是 9 条一起砸向即梦，而即梦只接得住 1 条。
+///
+/// 全部 id 先进本地队列再取队首去发 —— 而不是「发 N 条、剩下的另行标记」：
+/// 两条路径会在「发到一半失败了」时对同一条给出不同的归属，而队列是唯一真相时不会。
+pub async fn release_and_submit(
+    pool: &SqlitePool,
+    bin: &str,
+    ids: &[i64],
+    defaults: &GenOpts,
+    configured: i64,
+    log: &Activity,
+) -> AppResult<SubmitSummary> {
+    let now = now_unix();
+    repo::mark_submit_queued(pool, ids, now).await?;
+    let mut sum = drain_queue(pool, bin, defaults, configured, log).await?;
+    sum.queued = repo::count_submit_queued(pool).await?;
+    Ok(sum)
+}
+
+/// 把本地队列往即梦补到满。空位为 0 就什么都不做（连一次库都不必多读）。
+pub async fn drain_queue(
+    pool: &SqlitePool,
+    bin: &str,
+    defaults: &GenOpts,
+    configured: i64,
+    log: &Activity,
+) -> AppResult<SubmitSummary> {
+    let slots = free_slots(pool, configured).await?;
+    if slots <= 0 {
+        return Ok(SubmitSummary::default());
+    }
+    let ids = repo::pick_submit_queued(pool, slots).await?;
+    if ids.is_empty() {
+        return Ok(SubmitSummary::default());
+    }
+    submit_batch(pool, bin, &ids, defaults, log).await
 }
 
 /// 每条 clip 的生成参数：改写结果里带的优先，其次设置里的默认值。
@@ -402,6 +501,8 @@ pub struct PollSummary {
     pub polled: i64,
     /// 本轮因未到退避时间而跳过的条数（不是异常，是设计）。
     pub skipped: i64,
+    /// 本轮被即梦以「同时在跑的太多了」弹回本地队列的条数（0028）。**没花钱、不是失败**。
+    pub requeued: i64,
     /// 本轮**首次**为某条落库计费证据（扣费额度 / 计费型号）的条数。
     ///
     /// 它必须能触发一次界面刷新：这条数字一变，那一行的「额度」列就从预估变成实收，
@@ -536,6 +637,54 @@ pub fn clip_looks_phantom(c: &repo::ClipRow, now: i64) -> bool {
         && c.submitted_at.is_some_and(|t| now - t > PHANTOM_GRACE_SECS)
 }
 
+/// 存量修复：把升级前被并发上限判死的条目救回本地队列（一次性，启动时跑）。
+///
+/// 0028 之前 `ExceedConcurrencyLimit` 一律记成 `fail(provider)`。用户那一批 9 条里
+/// 有 8 条就这么躺在「处理异常」——**一分钱没扣、任务从没跑过**，却要人一条条去点
+/// 重跑，而重跑还会撞上同一堵墙。只改新逻辑不管存量，等于让这个 bug 的后果留在原地。
+///
+/// 两道闸与实时路径完全一致：认得出是并发拒收（`dreamina::is_concurrency_reject`），
+/// 且没有任何计费证据（`Evidence::billed`）。有回执的那条说明它真花过钱，
+/// 那是另一回事，交给人判断。
+///
+/// 救回来的条目直接进**本地队列**而不是退回「待放行」：这些正是人已经点过确认的那批，
+/// 而 0028 的全部意思就是「你点一次，剩下的自动排队接上」。反悔的出口也有了 ——
+/// 界面上的「撤回放行」。
+pub async fn heal_concurrency_rejects(pool: &SqlitePool, log: &Activity) -> AppResult<i64> {
+    let mut healed = 0;
+    for clip in repo::list_by_stages(pool, &["fail"]).await? {
+        if clip.error_type.as_deref() != Some("provider") {
+            continue;
+        }
+        let reason = clip.error_message.as_deref().unwrap_or_default();
+        if !dreamina::is_concurrency_reject(reason) || Evidence::from_clip(&clip).billed() {
+            continue;
+        }
+        let queued_at = clip.first_submitted_at.or(clip.submitted_at).unwrap_or(0);
+        if repo::revive_rejected_fail(pool, clip.id, queued_at, now_unix()).await? {
+            healed += 1;
+        }
+    }
+    if healed > 0 {
+        log.warn(
+            "submit",
+            None,
+            format!(
+                "{healed} 条曾被即梦以「同时在跑的太多了」拒收、并被误记成失败的条目已救回本地队列                 （它们从未扣费）。有空位会自动逐条发出去，不想跑就在表格里选中它们「撤回放行」。"
+            ),
+            None,
+        );
+    }
+    Ok(healed)
+}
+
+/// 一轮扫描里最多为几条单独问一次排队位次。
+///
+/// `list_task` 不带 `queue_info`，位次只能逐条 `query_result`（O(n) 个进程）。并发闸门
+/// 把在跑条数压到个位数之后这笔开销可以忽略，但历史库里可能攒着一堆 `run` 条目 ——
+/// 这个预算就是那种情况下的止损线，剩下的下一轮再问。
+pub const POSITION_QUERY_BUDGET: i64 = 8;
+
 /// 整表扫描一轮 —— **主路径**。
 ///
 /// 一次 `dreamina list_task` 拿回全部在跑任务的状态，逐条落库；只有两种情况才会为
@@ -603,6 +752,7 @@ pub async fn sweep_once(
         );
     }
 
+    let mut position_budget = POSITION_QUERY_BUDGET;
     for clip in running {
         let Some(submit_id) = clip.submit_id.clone() else {
             continue;
@@ -628,14 +778,37 @@ pub async fn sweep_once(
                     now,
                 )
                 .await;
+                // 排队位次只有 `query_result` 给得出，而它恰恰是排队几小时时**唯一**
+                // 有意义的进度：「第 4485 位」与「第 12 位」是两件完全不同的事，
+                // 而在此之前界面上两者都只说得出一句「即梦在跑」。
+                //
+                // 之所以现在负担得起：在跑条数已被并发闸门压到个位数。仍留预算上限 ——
+                // 历史上攒下的一堆在跑条目不该把一轮扫描重新变成 O(n) 个进程。
+                let mut q = q.clone();
+                let mut authoritative = false;
+                if position_budget > 0
+                    && dreamina::classify_status(&q.gen_status) == Outcome::Running
+                {
+                    position_budget -= 1;
+                    let who = Some((clip.id, clip.prompt_code.as_str()));
+                    if let Ok(full) = dreamina::query(bin, &submit_id, None, log, who).await {
+                        let _ =
+                            repo::mark_polled(pool, clip.id, &full.gen_status, full.queue_idx, now)
+                                .await;
+                        // 位次问到了 = 这份回体是权威的，settle 里那次幽灵确认查询
+                        // 就不必再发一遍。
+                        q = full;
+                        authoritative = true;
+                    }
+                }
                 settle(
                     pool,
                     dirs,
                     bin,
                     &clip,
-                    q.clone(),
+                    q,
                     timeout_secs,
-                    false,
+                    authoritative,
                     log,
                     &mut sum,
                 )
@@ -839,6 +1012,32 @@ async fn settle(
             } else {
                 q.fail_reason.clone()
             };
+            // 「同时在跑的太多了」不是失败，是**没排上**：一分钱没扣、任务从没跑过。
+            // 判死它等于让一条只是排在后面的片子躺进「处理异常」，而人点重跑又会撞
+            // 同一堵墙。放回本地队列，由空位腾出来时自动补上。
+            //
+            // `billed()` 是硬闸门：万一哪天即梦收了钱又回这个 reason，那就是一条
+            // 真花过钱的单，清掉它的 submit_id 等于把凭证扔了 —— 交给人判断。
+            let ev = Evidence::from_clip(clip);
+            if dreamina::is_concurrency_reject(&reason) && !ev.billed() {
+                let limit = observe_concurrency_reject(repo::count_running_accepted(pool).await?);
+                let queued_at = clip
+                    .submit_queued_at
+                    .or(clip.first_submitted_at)
+                    .unwrap_or(now);
+                repo::requeue_after_reject(pool, clip.id, queued_at, now).await?;
+                log.warn(
+                    "submit",
+                    who,
+                    format!(
+                        "即梦同时只跑得下 {limit} 条，这一单没排上（未扣费）→ 已放回本地队列，\
+                         有空位就自动补上"
+                    ),
+                    None,
+                );
+                sum.requeued += 1;
+                return Ok(());
+            }
             log.error("poll", who, format!("即梦判定失败：{reason}"), None);
             repo::mark_failed(pool, clip.id, "provider", &reason, now).await?;
             sum.failed += 1;
@@ -962,6 +1161,10 @@ pub fn spawn(
             Err(e) => log.error("poll", None, format!("中断恢复失败：{e}"), None),
             _ => {}
         }
+        // 存量修复：0028 之前被并发上限误判成失败的条目救回队列。
+        if let Err(e) = heal_concurrency_rejects(&pool, &log).await {
+            log.error("submit", None, format!("并发拒收存量修复失败：{e}"), None);
+        }
         // 「上一轮扫描的时刻」用全局 `LAST_SWEEP` 而不是循环局部变量：提交成功后会调
         // `request_sweep_soon` 把它往前挪来请求补扫，局部变量收不到那个请求。
         // 上一次「队列告急」通知的时刻。放在循环局部而不是库里：重启应用后重发一次
@@ -1039,7 +1242,11 @@ pub fn spawn(
                         // 计费证据首次落库也要刷新：那一行的额度列会从「预估」变成
                         // 「实收」，「情况」列也可能从「疑幽灵单」变回「即梦在跑」，
                         // 而在跑条目本身没有阶段变化，不推就要躺到出片那一刻才被看见。
-                        if sum.finished > 0 || sum.failed > 0 || sum.evidence > 0 {
+                        if sum.finished > 0
+                            || sum.failed > 0
+                            || sum.evidence > 0
+                            || sum.requeued > 0
+                        {
                             crate::commands::v2v::emit_changed(&pool, &app, None).await;
                             if sum.finished > 0 {
                                 use crate::engine::events::EventSink;
@@ -1054,6 +1261,27 @@ pub fn spawn(
                         log.error("poll", None, format!("本轮轮询失败：{e}"), None);
                         tick.error = Some(format!("{e}"));
                     }
+                }
+                // 本地待发队列往前推 —— **排在自动补单之前**：人已经放行过的那些
+                // 是明确的意图，理应先于补单器随手挑的那些占用空位。
+                //
+                // 放在扫描之后：扫描刚刚才把出片/判死/被弹回的条目挪出 `run`，
+                // 此刻数出来的空位才是准的。
+                match drain_queue(
+                    &pool,
+                    &settings.bin,
+                    &settings.defaults(),
+                    settings.max_in_flight,
+                    &log,
+                )
+                .await
+                {
+                    Ok(s) if s.submitted > 0 => {
+                        request_sweep_soon(now_unix());
+                        crate::commands::v2v::emit_changed(&pool, &app, None).await;
+                    }
+                    Err(e) => log.error("submit", None, format!("本地队列补位失败：{e}"), None),
+                    _ => {}
                 }
                 // 自动补单跟着扫描的节拍走：它要看的「在跑几条」正是扫描刚更新过的。
                 super::autofill::tick(&pool, &settings, &app, &log, &mut last_refill).await;
@@ -1107,12 +1335,46 @@ mod tests {
             finished_at: None,
             reviewed_at: None,
             auto_submitted: 0,
+            submit_queued_at: None,
             updated_at: 0,
             prompt_code: "GG-0001".into(),
             image_path: "/img.jpg".into(),
             thumb_path: "/thumb.jpg".into(),
             accepted_at: 0,
         }
+    }
+
+    // 在跑上限：配置值与实测值取小，实测值只降不升。
+    //
+    // **整条链路写在一个测试里**是有意的：`OBSERVED_LIMIT` 是进程级静态量，拆成几个
+    // 并行跑的测试会互相污染 —— 一个把它压到 1，另一个正好在断言 5。
+    #[test]
+    fn in_flight_limit_clamps_to_both_the_setting_and_what_dreamina_actually_allows() {
+        // 还没撞过墙 → 完全听配置的，但受硬护栏夹取。
+        assert_eq!(effective_in_flight(5), 5);
+        assert_eq!(effective_in_flight(0), 1, "0 条在跑等于这条链路停摆");
+        assert_eq!(effective_in_flight(9999), MAX_IN_FLIGHT_CAP);
+        assert_eq!(observed_in_flight_limit(), None);
+
+        // 撞墙：即梦当时只收下了 1 条 → 从此上限就是 1，配置再大也没用。
+        assert_eq!(observe_concurrency_reject(1), 1);
+        assert_eq!(observed_in_flight_limit(), Some(1));
+        assert_eq!(effective_in_flight(5), 1);
+
+        // 只降不升：又一次观测到 3 不该把上限放宽回去（那会让空转重新开始）。
+        observe_concurrency_reject(3);
+        assert_eq!(effective_in_flight(5), 1);
+
+        // 0 条被收下时兜底为 1：判成 0 会让整条队列永久停摆，
+        // 而「一条都跑不了」几乎一定是别的故障，不该由这里下结论。
+        assert_eq!(observe_concurrency_reject(0), 1);
+    }
+
+    // 默认往小了猜：猜小只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费），
+    // 猜大是一批片子集体躺进「处理异常」。
+    #[test]
+    fn default_in_flight_is_the_measured_truth() {
+        assert_eq!(DEFAULT_MAX_IN_FLIGHT, 1);
     }
 
     // skill 对某一条给的建议优先于全局默认：它是看过图之后的判断

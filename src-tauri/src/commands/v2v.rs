@@ -64,6 +64,13 @@ pub struct V2vSettings {
     /// 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
     #[serde(default)]
     pub autofill: AutofillCfg,
+    /// 同时最多有几条在即梦手上（0028）。**所有**提交路径共用它 —— 人点确认提交、
+    /// 常驻队列补单、失败重跑，抢的都是即梦那一份账户级并发配额。
+    ///
+    /// 默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队，其余 8 条回来
+    /// `ExceedConcurrencyLimit`。超出的条目不再往外发，而是留在本地队列排队等空位。
+    #[serde(default = "d_in_flight")]
+    pub max_in_flight: i64,
     /// 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
     ///
     /// 成片是 B-roll 素材，下游是剪辑而不是发布链，故它必须落在用户自己的工作目录里
@@ -90,6 +97,9 @@ fn d_model() -> String {
 fn d_true() -> bool {
     true
 }
+fn d_in_flight() -> i64 {
+    runner::DEFAULT_MAX_IN_FLIGHT
+}
 
 impl Default for V2vSettings {
     fn default() -> Self {
@@ -103,6 +113,7 @@ impl Default for V2vSettings {
             poll_enabled: true,
             timeout_hours: runner::DEFAULT_TIMEOUT_HOURS,
             autofill: AutofillCfg::default(),
+            max_in_flight: d_in_flight(),
             clips_output_dir: String::new(),
         }
     }
@@ -370,6 +381,13 @@ pub struct QueueStats {
     pub next_poll_in: Option<i64>,
     /// 超时上限小时数；None = 不限。
     pub timeout_hours: Option<i64>,
+    /// 生效的在跑上限（配置值与实测值取小）。`running/limit` 就是「即梦这边跑满没有」。
+    pub in_flight_limit: i64,
+    /// 本次运行实测到的上限；有值即「我们撞过 `ExceedConcurrencyLimit`，
+    /// 所以就算你设得更大也只能跑这么多」。
+    pub observed_limit: Option<i64>,
+    /// **本地队列**里等空位的条数（0028）—— 人已放行、还没发出去的那些。
+    pub queued: i64,
 }
 
 #[tauri::command]
@@ -396,6 +414,9 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
         eta_secs,
         next_poll_in,
         timeout_hours: s.timeout_hours,
+        in_flight_limit: runner::effective_in_flight(s.max_in_flight),
+        observed_limit: runner::observed_in_flight_limit(),
+        queued: repo::count_submit_queued(&state.db).await?,
     })
 }
 
@@ -408,8 +429,9 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
 #[serde(rename_all = "camelCase")]
 pub struct AutofillStatus {
     pub enabled: bool,
+    /// 生效的常驻条数 = 配置深度与即梦并发上限取小。
     pub depth: i64,
-    /// 补单器自己放出去、此刻在跑的条数。
+    /// 此刻在即梦手上的条数（**全部**提交路径，见 `repo::count_in_flight`）。
     pub running: i64,
     /// 待提交存量（有视频提示词的）。
     pub stock: i64,
@@ -432,10 +454,14 @@ pub async fn v2v_autofill_status(state: State<'_, AppState>) -> AppResult<Autofi
     let s = load_settings(&state.db).await?;
     let cfg = &s.autofill;
     let now = now_unix();
+    // 深度受即梦的账户级并发上限压制：设成 3 而上限是 1 时，界面必须显示 1 ——
+    // 否则「常驻 0/3」会让人一直等一个永远不会发生的第二、三条。
+    let hard_limit = runner::effective_in_flight(s.max_in_flight);
     let mut out = AutofillStatus {
         enabled: cfg.enabled,
-        depth: cfg.depth,
-        running: repo::count_auto_running(&state.db).await?,
+        depth: cfg.depth.min(hard_limit),
+        // 在跑数要数**全部**（不只是补单器自己的）：它们抢的是同一份并发配额。
+        running: repo::count_in_flight(&state.db).await?,
         stock: repo::count_autofill_pool(&state.db).await?,
         low_water: cfg.low_water,
         spent_today: repo::credit_submitted_since(&state.db, now - 24 * 3600).await?,
@@ -460,6 +486,7 @@ pub async fn v2v_autofill_status(state: State<'_, AppState>) -> AppResult<Autofi
             let p = crate::v2v::autofill::plan(
                 cfg,
                 out.running,
+                hard_limit,
                 out.stock,
                 out.spent_today,
                 None,
@@ -714,6 +741,12 @@ pub struct ClipView {
     pub reviewed_at: Option<i64>,
     /// 是不是常驻队列（自动补单）替人放行的（0026）。
     pub auto_submitted: bool,
+    /// 人已放行、正在**本地队列**等即梦空位的时刻（0028）。
+    ///
+    /// 只在 `stage='ready'` 时有意义：它把「等你点确认提交」和「你点过了，在排队」
+    /// 分成两件事 —— 而这两件事此前在界面上长得一模一样，于是一批放行完的片子
+    /// 看起来像是没人管。
+    pub submit_queued_at: Option<i64>,
     /// 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
     ///
     /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
@@ -778,6 +811,7 @@ impl From<repo::ClipRow> for ClipView {
             finished_at: r.finished_at,
             reviewed_at: r.reviewed_at,
             auto_submitted: r.auto_submitted != 0,
+            submit_queued_at: r.submit_queued_at,
             export_path: r.export_path,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
@@ -1122,7 +1156,11 @@ pub async fn preview_v2v_commands(
     })
 }
 
-/// 批量提交到即梦。
+/// 放行一批到即梦。
+///
+/// **不再是「N 条一起砸过去」**：即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），
+/// 超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里只发得下的那几条，
+/// 其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序自动补上。
 #[tauri::command]
 #[specta::specta]
 pub async fn submit_v2v_clips(
@@ -1131,7 +1169,15 @@ pub async fn submit_v2v_clips(
     ids: Vec<i64>,
 ) -> AppResult<SubmitSummary> {
     let s = load_settings(&state.db).await?;
-    let sum = runner::submit_batch(&state.db, &s.bin, &ids, &s.defaults(), &state.v2v_log).await?;
+    let sum = runner::release_and_submit(
+        &state.db,
+        &s.bin,
+        &ids,
+        &s.defaults(),
+        s.max_in_flight,
+        &state.v2v_log,
+    )
+    .await?;
     // 刚提交完人正盯着屏幕，而常规档位是 5/10 分钟 —— 请求一次 60 秒后的补扫。
     // 按批不按条：20 条一起提交也只多这一个进程。
     if sum.submitted > 0 {
@@ -1139,6 +1185,31 @@ pub async fn submit_v2v_clips(
     }
     emit_changed(&state.db, &app, None).await;
     Ok(sum)
+}
+
+/// 撤回放行：把还在本地队列里等空位的条目退回「等你点确认提交」。
+///
+/// 只动没提交出去的（`stage='ready'`）—— 已经在即梦手上的那条撤不回来，钱已经扣了。
+/// 它存在的理由是「放行」现在是一个**延时生效**的决定：人点完确认之后可能改主意，
+/// 而在此之前唯一的退出方式是把条目整个删掉。
+#[tauri::command]
+#[specta::specta]
+pub async fn unqueue_v2v_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<i64> {
+    let n = repo::unqueue_submit(&state.db, &ids, now_unix()).await?;
+    if n > 0 {
+        state.v2v_log.info(
+            "submit",
+            None,
+            format!("撤回放行 {n} 条（还没提交出去，未产生额度消耗）"),
+            None,
+        );
+        emit_changed(&state.db, &app, None).await;
+    }
+    Ok(n)
 }
 
 /// 立刻轮询一轮（用户点「刷新」；后台轮询器照常在跑）。
@@ -1162,6 +1233,21 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
         &state.v2v_log,
     )
     .await?;
+    // 手动查一轮可能刚好腾出空位（出片/判死都会让条目离开 run）—— 顺手把本地队列
+    // 往前推一格，否则人点了「查一次进度」看到一条出片了，队列却要再等一轮扫描才动。
+    if let Err(e) = runner::drain_queue(
+        &state.db,
+        &s.bin,
+        &s.defaults(),
+        s.max_in_flight,
+        &state.v2v_log,
+    )
+    .await
+    {
+        state
+            .v2v_log
+            .error("submit", None, format!("本地队列补位失败：{e}"), None);
+    }
     emit_changed(&state.db, &app, None).await;
     Ok(sum.finished)
 }

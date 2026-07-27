@@ -63,6 +63,11 @@ pub struct ClipRow {
     pub reviewed_at: Option<i64>,
     /// 这一条是补单器放行的还是人放行的（0026）。
     pub auto_submitted: i64,
+    /// 人已经点过「确认提交」、但被在跑上限挡在本地的时刻（0028）。
+    ///
+    /// 它与 `stage='ready'` 并存：这一条的一切（改参数、退回改写、删除）都还成立，
+    /// 差别只是「有没有人放过行」。轮询循环按它先进先出地往即梦补位。
+    pub submit_queued_at: Option<i64>,
     /// 验收通过后交付到 `{交付目录}/` 的那份拷贝（0027）。有它才答得出「片子在哪」。
     ///
     /// 0025 的 `asset_pack_id` 列**不再读取**：v0.22.0 起成片不入资产库
@@ -85,7 +90,7 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type,
         c.first_submitted_at, c.submit_credit, c.submit_status,
         c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at,
-        c.auto_submitted,
+        c.auto_submitted, c.submit_queued_at,
         c.export_path, c.updated_at,
         COALESCE(w.prompt_code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
@@ -834,16 +839,169 @@ pub async fn count_phantom_suspects(pool: &SqlitePool, before: i64) -> Result<i6
     Ok(n)
 }
 
-/// 补单器自己放出去、此刻还在跑的条数（0026）。
+/// 此刻在即梦手上的条数 —— **所有**提交路径的总和。
 ///
-/// **只数它自己的**：人手动提交的一批不该顶掉补单器的深度配额，否则手动跑 20 条时
-/// 常驻队列就静悄悄停摆了，而「常年保持有任务在排队」正是它存在的全部理由。
-pub async fn count_auto_running(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
-    let (n,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND auto_submitted=1")
-            .fetch_one(pool)
-            .await?;
+/// 0028 之前这里只数补单器自己放出去的（`auto_submitted=1`），理由是「人手动提交的
+/// 一批不该顶掉补单器的深度配额」。那条理由被实测推翻了：即梦的并发上限是**账户级**
+/// 的，人提交的和补单器提交的抢的是同一个位子。按旧口径数，补单器会在人已经把唯一
+/// 那个位子占满时继续往外发，而那些单子回来的是 `ExceedConcurrencyLimit`。
+pub async fn count_in_flight(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM v2v_clips WHERE stage='run'")
+        .fetch_one(pool)
+        .await?;
     Ok(n)
+}
+
+/// 在跑、且**即梦确实收下了**的条数（有计费回执或队列位次）。
+///
+/// 它是「即梦这一刻实际允许我们同时跑几条」的下界：撞上 `ExceedConcurrencyLimit`
+/// 那一刻，被收下的这些就是上限本身。自适应夹取（`runner::observe_concurrency_reject`）
+/// 用它，免得逼人去猜一个只有即梦知道的数字。
+pub async fn count_running_accepted(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run'
+           AND (credit_count IS NOT NULL OR submit_credit IS NOT NULL OR queue_idx IS NOT NULL)",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 本地待发队列的成员判据（0028）：人已放行、有提示词、还没轮到它。
+const QUEUED_POOL: &str = "stage='ready' AND submit_queued_at IS NOT NULL
+      AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''";
+
+/// 记下「人已放行、在等即梦的空位」。已在队列里的不刷新时刻（保先进先出）。
+pub async fn mark_submit_queued(
+    pool: &SqlitePool,
+    ids: &[i64],
+    now: i64,
+) -> Result<i64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "UPDATE v2v_clips SET submit_queued_at=?, updated_at=?
+          WHERE stage='ready' AND submit_queued_at IS NULL AND id IN ({holes})"
+    );
+    let mut q = sqlx::query(&sql).bind(now).bind(now);
+    for i in ids {
+        q = q.bind(*i);
+    }
+    Ok(q.execute(pool).await?.rows_affected() as i64)
+}
+
+/// 本地待发队列里还有几条。
+pub async fn count_submit_queued(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM v2v_clips WHERE {QUEUED_POOL}"
+    ))
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 取队首的 `limit` 条。**先进先出**（放行时刻，其次 id）：一批 20 条的顺序
+/// 就是人当时在表格里看到的顺序，而不是每轮随机挑几条。
+pub async fn pick_submit_queued(pool: &SqlitePool, limit: i64) -> Result<Vec<i64>, sqlx::Error> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(i64,)> = sqlx::query_as(&format!(
+        "SELECT id FROM v2v_clips WHERE {QUEUED_POOL} ORDER BY submit_queued_at, id LIMIT ?1"
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// 撤回放行：本地待发 → 回到「等你点确认提交」。只动还没提交出去的。
+pub async fn unqueue_submit(pool: &SqlitePool, ids: &[i64], now: i64) -> Result<i64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "UPDATE v2v_clips SET submit_queued_at=NULL, updated_at=?
+          WHERE stage='ready' AND submit_queued_at IS NOT NULL AND id IN ({holes})"
+    );
+    let mut q = sqlx::query(&sql).bind(now);
+    for i in ids {
+        q = q.bind(*i);
+    }
+    Ok(q.execute(pool).await?.rows_affected() as i64)
+}
+
+/// 把一条被并发上限判死的 `fail` 条目救回本地队列。
+///
+/// 它只服务于一次性的存量修复（`runner::heal_concurrency_rejects`）：0028 之前
+/// `ExceedConcurrencyLimit` 一律记成 `fail(provider)`，于是升级前被弹回来的那些
+/// 会永远躺在「处理异常」里等人一条条点重跑 —— 而重跑又会撞上同一堵墙。
+///
+/// 谓词里的 `submit_id` 保持不动地被清掉：那个 id 早就死了（即梦判了 fail）。
+/// 调用方必须先确认这一条没有任何计费证据。
+pub async fn revive_rejected_fail(
+    pool: &SqlitePool,
+    id: i64,
+    queued_at: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE v2v_clips
+            SET stage='ready', submit_id=NULL, submit_queued_at=?2,
+                gen_status=NULL, queue_idx=NULL, polled_at=NULL,
+                submitted_at=NULL, submit_credit=NULL, submit_status=NULL,
+                error_type=NULL, error_message=NULL, finished_at=NULL, updated_at=?3,
+                attempt = MAX(0, attempt - 1)
+          WHERE id=?1 AND stage='fail' AND error_type='provider'",
+    )
+    .bind(id)
+    .bind(queued_at)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// 即梦以「同时在跑的太多了」为由拒了这一单 → 放回本地队列，**排在队首**。
+///
+/// 与 [`mark_failed`] 的区别就是这条路径存在的全部理由：`ExceedConcurrencyLimit`
+/// 回来时 `credit_count` 缺席 —— 一分钱没扣，任务也从没跑过。把它记成 `fail` 等于
+/// 让一条「排在后面」的片子躺进「处理异常」，还得人一条条去点重跑。
+///
+/// 清 `submit_id` 是必须的（那个 id 已经死了，下次要重新下单），所以调用方**必须**
+/// 先确认这一单没有任何计费证据（`runner::Evidence::billed`）。真扣了钱的那一条
+/// 该走 `mark_failed`，让人自己判断。
+///
+/// `submit_queued_at` 取**原提交时刻**而不是当下：它本来就该排在后面那些还没试过的
+/// 前面 —— 它已经等过一轮了。
+///
+/// `attempt` 要**退回去**：那一列的含义是「这张图花过几份额度」（界面上的「重跑过」
+/// 信号就读它），而这一次连队都没入。不退的话，一批被并发上限弹回来的片子会集体
+/// 显示成「重跑过」，把真正重跑过、真花过两份钱的那些淹掉。
+pub async fn requeue_after_reject(
+    pool: &SqlitePool,
+    id: i64,
+    queued_at: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE v2v_clips
+            SET stage='ready', submit_id=NULL, submit_queued_at=?2,
+                gen_status=NULL, queue_idx=NULL, polled_at=NULL,
+                submitted_at=NULL, submit_credit=NULL, submit_status=NULL,
+                error_type=NULL, error_message=NULL, updated_at=?3,
+                attempt = MAX(0, attempt - 1)
+          WHERE id=?1 AND stage='run'",
+    )
+    .bind(id)
+    .bind(queued_at)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
 }
 
 /// 补单器能碰的条目：待提交、有视频提示词、且**没人给它指定过模型**。
@@ -851,8 +1009,12 @@ pub async fn count_auto_running(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
 /// 最后一条是硬边界。补单器会把自己的廉价参数写进它挑中的条目 —— 若它捡走一条用户
 /// （或 skill）特意设了 `seedance2.0_vip / 1080p` 的片子，那份选择会被静悄悄降级，
 /// 而人要到出片时才看得出来。指定过参数 = 一个深思熟虑的决定，常驻队列不碰它。
+/// 另有一条 `submit_queued_at IS NULL`（0028）：人已经放行、正在本地队列里等空位的
+/// 条目，补单器不许碰 —— 它会把自己的廉价参数写进挑中的条目，而那一批人是照着
+/// 确认卡上那套参数点的确认。
 const AUTOFILL_POOL: &str = "stage='ready'
       AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''
+      AND submit_queued_at IS NULL
       AND (model_version IS NULL OR TRIM(model_version) = '')";
 
 /// 可供补单的存量条数。
@@ -1173,9 +1335,15 @@ mod tests {
         assert_eq!(picked, vec![ids[0], ids[2]], "其余按 id 先进先出");
     }
 
-    // 深度只数补单器自己放出去的：人手动跑 20 条时，常驻队列不该静悄悄停摆。
+    // 深度数的是**全部**在跑条目，不只是补单器自己放出去的（0028 推翻了旧口径）。
+    //
+    // 旧断言是「只数它自己的 = 1」，理由是「人手动跑 20 条时常驻队列不该静悄悄停摆」。
+    // 那条理由被实测推翻：即梦的并发上限是账户级的，人占满了唯一那个位子时补单器
+    // 再发出去的单子回来的是 `ExceedConcurrencyLimit` —— 「停摆」正是此时唯一正确的
+    // 行为，而按旧口径它会一边发一边被弹回来。`auto_submitted` 仍在，但只用于
+    // 「这一条是谁放行的」的展示。
     #[tokio::test]
-    async fn autofill_depth_counts_only_its_own_submissions() {
+    async fn in_flight_counts_every_submission_regardless_of_who_released_it() {
         let (pool, _d) = test_pool().await;
         for w in 1..=2 {
             seed_work(&pool, w).await;
@@ -1201,7 +1369,171 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(count_auto_running(&pool).await.unwrap(), 1);
+        assert_eq!(
+            count_in_flight(&pool).await.unwrap(),
+            2,
+            "两条都在即梦手上，抢的是同一份并发配额"
+        );
+    }
+
+    /// 建 n 条走到 `ready`（待提交）的 clip，返回 id 列表。
+    async fn seed_ready(pool: &SqlitePool, n: i64) -> Vec<i64> {
+        for w in 1..=n {
+            seed_work(pool, w).await;
+            enqueue_one(pool, w).await;
+        }
+        let ids: Vec<i64> = list_by_stages(pool, &["rewrite"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        for id in &ids {
+            let mut tx = pool.begin().await.unwrap();
+            apply_rewrite(&mut tx, *id, "视频提示词", None, None, None, 200)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        ids
+    }
+
+    // 本地待发队列（0028）：放行 = 记一个时刻，取用严格先进先出。
+    //
+    // 顺序不是洁癖：一批 20 条的提交顺序就是人在表格里看到的顺序，而它们要花好几个
+    // 小时才轮完 —— 每轮随机挑几条的话，「这一批做到哪了」在中途完全无法回答。
+    #[tokio::test]
+    async fn submit_queue_is_strictly_first_in_first_out() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        // 放行顺序故意与 id 顺序相反，验证排的是**放行时刻**而不是 id。
+        mark_submit_queued(&pool, &[ids[2]], 300).await.unwrap();
+        mark_submit_queued(&pool, &[ids[0], ids[1]], 301)
+            .await
+            .unwrap();
+        assert_eq!(count_submit_queued(&pool).await.unwrap(), 3);
+        assert_eq!(
+            pick_submit_queued(&pool, 2).await.unwrap(),
+            vec![ids[2], ids[0]],
+            "先放行的先走"
+        );
+        // 重复放行不刷新时刻，否则再点一次确认就会把队首挤到队尾。
+        mark_submit_queued(&pool, &ids, 999).await.unwrap();
+        assert_eq!(pick_submit_queued(&pool, 1).await.unwrap(), vec![ids[2]]);
+    }
+
+    // 撤回放行只动还没发出去的，且撤回后就不在队列里了。
+    #[tokio::test]
+    async fn unqueue_only_touches_what_has_not_been_sent() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        mark_submit_queued(&pool, &ids, 300).await.unwrap();
+        mark_submitted(&pool, ids[0], &SubmitReceipt::healthy("s", 8), 400)
+            .await
+            .unwrap();
+        assert_eq!(
+            unqueue_submit(&pool, &ids, 500).await.unwrap(),
+            1,
+            "已经在即梦手上的那条撤不回来"
+        );
+        assert_eq!(count_submit_queued(&pool).await.unwrap(), 0);
+    }
+
+    // 补单器不许碰人已经放行的条目：它会把自己的廉价参数写进去，
+    // 而那一批人是照着确认卡上那套参数点的确认。
+    #[tokio::test]
+    async fn autofill_never_steals_from_the_local_submit_queue() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        assert_eq!(count_autofill_pool(&pool).await.unwrap(), 2);
+        mark_submit_queued(&pool, &[ids[0]], 300).await.unwrap();
+        assert_eq!(count_autofill_pool(&pool).await.unwrap(), 1);
+        assert_eq!(pick_autofill(&pool, 10).await.unwrap(), vec![ids[1]]);
+    }
+
+    // 「同时在跑的太多了」被弹回来 ≠ 失败：回到 ready、排在队首、attempt 退回去。
+    //
+    // attempt 那一格是这条测试的重点：它的含义是「这张图花过几份额度」，界面上的
+    // 「重跑过」信号读它。一批被并发上限弹回来的片子若集体带着 +1，就会把真正
+    // 重跑过、真花过两份钱的那些淹掉。
+    #[tokio::test]
+    async fn concurrency_reject_returns_to_the_head_of_the_queue_without_counting_an_attempt() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 1).await;
+        let id = ids[0];
+        mark_submit_queued(&pool, &[id], 300).await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-x", 8), 400)
+            .await
+            .unwrap();
+        let before = list_by_stages(&pool, &["run"]).await.unwrap()[0].clone();
+        assert_eq!(before.attempt, 1);
+
+        assert!(requeue_after_reject(&pool, id, 300, 500).await.unwrap());
+        let after = list_by_stages(&pool, &["ready"]).await.unwrap()[0].clone();
+        assert_eq!(after.stage, "ready");
+        assert!(after.submit_id.is_none(), "那个 submit_id 已经死了");
+        assert_eq!(after.submit_queued_at, Some(300), "保住原来的队列位置");
+        assert_eq!(after.attempt, 0, "连队都没入，不算一次尝试");
+        assert!(after.error_type.is_none(), "它不是一条出了错的记录");
+        assert_eq!(
+            pick_submit_queued(&pool, 5).await.unwrap(),
+            vec![id],
+            "弹回来之后仍在本地队列里等空位"
+        );
+    }
+
+    // 存量修复：升级前被并发上限误判成 fail 的条目要能救回队列。
+    //
+    // 只改新逻辑不管存量，等于让这个 bug 的后果留在原地 —— 用户那批 9 条里有 8 条
+    // 就躺在「处理异常」，一分钱没扣却要人一条条点重跑，而重跑还会撞同一堵墙。
+    #[tokio::test]
+    async fn a_rejected_fail_can_be_revived_into_the_queue() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 1).await;
+        let id = ids[0];
+        mark_submitted(&pool, id, &SubmitReceipt::bare("dead-id"), 400)
+            .await
+            .unwrap();
+        mark_failed(
+            &pool,
+            id,
+            "provider",
+            "api error: ret=1310, message=ExceedConcurrencyLimit, logid=x",
+            500,
+        )
+        .await
+        .unwrap();
+
+        assert!(revive_rejected_fail(&pool, id, 400, 600).await.unwrap());
+        let after = list_by_stages(&pool, &["ready"]).await.unwrap()[0].clone();
+        assert_eq!(after.submit_queued_at, Some(400));
+        assert!(after.submit_id.is_none());
+        assert_eq!(after.attempt, 0);
+        assert!(after.finished_at.is_none(), "它并没有「结束」过");
+        assert_eq!(pick_submit_queued(&pool, 5).await.unwrap(), vec![id]);
+
+        // 幂等：第二次没东西可救（它已经不是 fail 了）。
+        assert!(!revive_rejected_fail(&pool, id, 400, 700).await.unwrap());
+    }
+
+    // 并发配额是账户级的：人放行的和补单器放行的都算。
+    #[tokio::test]
+    async fn accepted_count_only_counts_what_dreamina_actually_took() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        mark_submitted(&pool, ids[0], &SubmitReceipt::healthy("a", 8), 400)
+            .await
+            .unwrap();
+        // 第二条：即梦给了 submit_id 却没有任何计费/位次证据（正是被并发上限拒掉的样子）。
+        mark_submitted(&pool, ids[1], &SubmitReceipt::bare("b"), 400)
+            .await
+            .unwrap();
+        assert_eq!(count_in_flight(&pool).await.unwrap(), 2);
+        assert_eq!(
+            count_running_accepted(&pool).await.unwrap(),
+            1,
+            "只有拿到计费回执的那条算即梦真收下了 —— 它就是并发上限本身"
+        );
     }
 
     // 撤销的核心不变量：整份写回，成片路径与扣费回执一并复原。

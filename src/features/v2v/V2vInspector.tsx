@@ -216,6 +216,12 @@ export function V2vInspector({
           }
         />
         <Fact k="已等" v={row.waitSecs === 0 ? "—" : fmtDur(row.waitSecs)} />
+        {/* 位次分两种，标签必须说清是谁的队 —— 本地排第 3 和即梦排第 4485 是
+            完全不同的两件事，混成一个「第 N 位」会让人以为快轮到了。 */}
+        <Fact
+          k={row.action === "queued" ? "本地队列" : "即梦队列"}
+          v={row.queuePos == null ? "—" : `第 ${row.queuePos} 位`}
+        />
         <Fact
           k="上次查询"
           v={row.polledAgo == null ? "—" : `${fmtDur(row.polledAgo)}前`}

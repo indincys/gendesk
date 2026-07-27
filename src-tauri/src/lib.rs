@@ -84,7 +84,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::pause_queue,
             commands::batches::resume_queue,
             commands::tasks::list_tasks,
-            commands::tasks::get_task,
             commands::tasks::retry_task,
             commands::tasks::retry_failed_tasks,
             commands::tasks::delete_task,
@@ -100,7 +99,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::review::reject_tasks,
             // works 域
             commands::works::list_works,
-            commands::works::get_work,
             commands::works::toggle_work_favorite,
             commands::works::trash_work,
             commands::works::file_exists,
@@ -108,7 +106,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::set_works_favorite,
             commands::works::trash_works,
             commands::works::export_works,
-            commands::works::export_works_v2v,
             // intake 域（Claude Code / Codex 投单 → 自动建批）
             commands::intake::get_intake_settings,
             commands::intake::update_intake_settings,
@@ -200,7 +197,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_assets::pack_from_works,
             commands::publish_assets::retire_pack,
             commands::publish_assets::restore_pack,
-            commands::publish_assets::delete_pack,
             commands::publish_assets::update_pack,
             commands::publish_assets::activate_pack,
             // inbox 域
@@ -407,11 +403,20 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     engine.set_global_fail_threshold(settings.global_fail_threshold.max(0) as u32);
 
     // E22/E40（决策 D3）：启动时到期自动清理归档批次与废纸篓（0 天 = 关闭）。
-    tauri::async_runtime::block_on(commands::trash::run_startup_cleanup(
-        &pool,
-        settings.batch_retention_days,
-        settings.trash_retention_days,
-    ));
+    //
+    // **spawn 而不是 block_on**：这一步要物理删文件（几百上千个）再跑一轮退休扫描，
+    // 而它挡在窗口出现之前 —— 攒了半年废纸篓的机器上，表现就是双击图标之后
+    // 长时间什么都不发生（同 v0.20.1 那个「dock 弹一下就没了」的手感来源）。
+    // 它与启动没有任何依赖关系：清的是过期数据，晚几秒发生不影响任何人。
+    // 内部顺序（先 purge 再 retire）在函数里已经保证。照发布收件箱补扫的既有形制。
+    {
+        let pool = pool.clone();
+        let (batch_days, trash_days) =
+            (settings.batch_retention_days, settings.trash_retention_days);
+        tauri::async_runtime::spawn(async move {
+            commands::trash::run_startup_cleanup(&pool, batch_days, trash_days).await;
+        });
+    }
 
     let dirs_for_v2v = dirs.clone();
     let dirs_for_intake = dirs.clone();

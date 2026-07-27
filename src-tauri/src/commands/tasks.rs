@@ -97,17 +97,6 @@ pub struct BulkTaskResult {
     pub skipped: i64,
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn get_task(state: State<'_, AppState>, id: i64) -> AppResult<TaskView> {
-    let sql = format!("{TASK_SELECT} WHERE t.id = ?");
-    sqlx::query_as::<_, TaskView>(&sql)
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("任务不存在".into()))
-}
-
 /// 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
 #[tauri::command]
 #[specta::specta]

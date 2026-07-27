@@ -714,24 +714,29 @@ pub struct ClipView {
     pub reviewed_at: Option<i64>,
     /// 是不是常驻队列（自动补单）替人放行的（0026）。
     pub auto_submitted: bool,
-    /// 历史上打进过哪个素材包（0025）。
-    ///
-    /// v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
-    /// 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
-    /// 但没有任何逻辑再读它，界面上也不再出现。
-    pub asset_pack_id: Option<i64>,
     /// 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
     ///
     /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
     /// 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
     pub export_path: Option<String>,
+    /// 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
+    ///
+    /// **由 Rust 下发而不是前端自己算**。前端原来抄了一份判据（三个字段 + 一个手抄的
+    /// 15 分钟常量），而它按 `firstSubmittedAt` 算等待时长、Rust 按 `submittedAt` 算
+    /// —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
+    /// 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
+    pub phantom_suspect: bool,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
 
 impl From<repo::ClipRow> for ClipView {
     fn from(r: repo::ClipRow) -> Self {
+        // 视图是一份快照，判定要一个「现在」。取当前时刻而不是让调用方传：
+        // 每个列表命令各传一次，就等于给这条规则开了 N 个改错的机会。
+        let phantom_suspect = runner::clip_looks_phantom(&r, crate::db::now_unix());
         Self {
+            phantom_suspect,
             id: r.id,
             work_id: r.work_id,
             group_id: r.group_id,
@@ -773,7 +778,6 @@ impl From<repo::ClipRow> for ClipView {
             finished_at: r.finished_at,
             reviewed_at: r.reviewed_at,
             auto_submitted: r.auto_submitted != 0,
-            asset_pack_id: r.asset_pack_id,
             export_path: r.export_path,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
@@ -825,6 +829,7 @@ pub async fn enqueue_works_v2v(
 /// 入队一条所需的作品侧信息（组名冗余进 clip，作品删了看板仍能归组显示）。
 #[derive(sqlx::FromRow)]
 struct QueueSeed {
+    id: i64,
     group_id: Option<i64>,
     group_name: Option<String>,
     batch_id: Option<i64>,
@@ -832,28 +837,33 @@ struct QueueSeed {
 }
 
 /// 入队若干作品，返回真正新增的条数。验收命令与手动入队共用。
+///
+/// **一次 IN 查询 + 一个事务**：验收页一次性通过一整页是常态（几十上百张），
+/// 而原来是每张一次 SELECT 加一次 BEGIN/COMMIT —— 上百次事务提交，
+/// 每次都是一轮 fsync，而它们本来就属于同一个动作。
 pub async fn enqueue_works(pool: &SqlitePool, work_ids: &[i64]) -> AppResult<i64> {
     if work_ids.is_empty() {
         return Ok(0);
     }
+    let holes = vec!["?"; work_ids.len()].join(",");
+    let sql = format!(
+        "SELECT w.id, w.group_id, g.name AS group_name, w.batch_id, w.prompt_text
+           FROM accepted_works w LEFT JOIN prompt_groups g ON g.id = w.group_id
+          WHERE w.id IN ({holes})"
+    );
+    let mut q = sqlx::query_as::<_, QueueSeed>(&sql);
+    for wid in work_ids {
+        q = q.bind(*wid);
+    }
+    let seeds = q.fetch_all(pool).await?;
+
     let now = now_unix();
     let mut added = 0i64;
-    for wid in work_ids {
-        let row: Option<QueueSeed> = sqlx::query_as(
-            "SELECT w.group_id, g.name AS group_name, w.batch_id, w.prompt_text
-               FROM accepted_works w LEFT JOIN prompt_groups g ON g.id = w.group_id
-              WHERE w.id = ?1",
-        )
-        .bind(wid)
-        .fetch_optional(pool)
-        .await?;
-        let Some(seed) = row else {
-            continue;
-        };
-        let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await?;
+    for seed in seeds {
         if repo::enqueue(
             &mut tx,
-            *wid,
+            seed.id,
             seed.group_id,
             seed.group_name.as_deref().unwrap_or(""),
             seed.batch_id,
@@ -864,8 +874,8 @@ pub async fn enqueue_works(pool: &SqlitePool, work_ids: &[i64]) -> AppResult<i64
         {
             added += 1;
         }
-        tx.commit().await?;
     }
+    tx.commit().await?;
     Ok(added)
 }
 
@@ -1067,7 +1077,7 @@ pub async fn preview_v2v_commands(
     let mut commands = Vec::new();
     let mut estimated_credits = 0;
     let mut unpriced: Vec<String> = Vec::new();
-    for clip in repo::take_ready(&state.db, &ids).await? {
+    for clip in repo::list_ready(&state.db, &ids).await? {
         let opts = dreamina::normalize_opts(&runner::opts_for(&clip, &defaults))?;
         let argv = dreamina::command_line(
             &bin,
@@ -1277,23 +1287,26 @@ pub async fn undo_v2v(
 ) -> AppResult<i64> {
     let now = now_unix();
     let mut n = 0i64;
+    // 一次 IN 查询取回整批当前状态：撤销是「看片流里连判了 20 条，⌘Z」，
+    // 逐条 SELECT 加逐条事务只是把一个动作拆成几十轮往返。
+    let ids: Vec<i64> = entries.iter().map(|e| e.clip_id).collect();
+    let current = repo::get_many(&state.db, &ids).await?;
+    let mut trash_ids: Vec<i64> = Vec::new();
     for e in &entries {
         // 已经重新提交出去的条目不能撤销回旧态：那会把新的 submit_id 抹掉，
         // 而那条任务在即梦那边正跑着、额度已经扣了 —— 抹掉它就再也认不出主人。
-        let cur = repo::get(&state.db, e.clip_id).await?;
-        if let Some(c) = &cur {
-            if c.submit_id.is_some() && c.submit_id != e.submit_id {
-                continue;
-            }
-        } else {
+        let Some(cur) = current.iter().find(|c| c.id == e.clip_id) else {
+            continue;
+        };
+        if cur.submit_id.is_some() && cur.submit_id != e.submit_id {
             continue;
         }
         // 撤销一次「通过」= 那条片子不再算交付，把交付拷贝收回来。
         // 不收的话 outputs/视频/ 下会留一个再也没有主人的文件——而人拿它去发布时，
         // 库里那条恰恰是没通过的（同 0025「包被删就该回落成待办」的道理）。
         if e.stage != "pass" {
-            if let Some(p) = cur.as_ref().and_then(|c| c.export_path.clone()) {
-                let _ = std::fs::remove_file(&p);
+            if let Some(p) = cur.export_path.clone() {
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&p)).await;
                 let _ = repo::set_export_path(&state.db, e.clip_id, None).await;
             }
         }
@@ -1301,10 +1314,13 @@ pub async fn undo_v2v(
             n += 1;
         }
         if let Some(tid) = e.trash_id {
-            let mut tx = state.db.begin().await?;
-            trash_repo::delete_rows(&mut tx, &[tid]).await?;
-            tx.commit().await?;
+            trash_ids.push(tid);
         }
+    }
+    if !trash_ids.is_empty() {
+        let mut tx = state.db.begin().await?;
+        trash_repo::delete_rows(&mut tx, &trash_ids).await?;
+        tx.commit().await?;
     }
     refresh_handoff(&state.db, &app).await;
     Ok(n)
@@ -1371,7 +1387,7 @@ pub async fn review_v2v_clips(
                 // 通过即交付：把成片从内部暂存区 clips/clip{id}.mp4 拷进
                 // outputs/视频/{组}/{编号}_{日期}.mp4。图片验收通过时做的就是这件事，
                 // 视频此前却只留在那个人在 Finder 里认不出谁是谁的内部目录里。
-                match export_clip(&settings, &state, &clip) {
+                match export_clip(&settings, &state, &clip).await {
                     Ok(Some(p)) => {
                         exported += 1;
                         let _ = repo::set_export_path(&state.db, id, Some(&p)).await;
@@ -1416,9 +1432,12 @@ pub async fn review_v2v_clips(
 /// 磁盘代价是每条成片多占一份——几十 MB，换来的是撤销永远只改库不动文件。
 ///
 /// 返回 `Ok(None)` = 这条根本没有成片文件（不该发生，但也不是错误）。
-fn export_clip(
-    settings: &V2vSettings,
-    state: &State<'_, AppState>,
+/// 交付一条成片：把 `clips/clip{id}.mp4` 拷进 `{交付目录}/{组}/{编号}_{日期}.mp4`。
+///
+/// **整个函数在 `spawn_blocking` 里跑**（见 [`export_clip`]）：一条成片几十 MB，
+/// 而看片流里空格键判一条就走一次这里 —— 留在异步执行器上，判得越快卡得越狠。
+fn export_clip_blocking(
+    dir_base: std::path::PathBuf,
     clip: &repo::ClipRow,
 ) -> AppResult<Option<String>> {
     let Some(src) = clip.video_path.as_deref().filter(|p| !p.is_empty()) else {
@@ -1429,7 +1448,7 @@ fn export_clip(
     } else {
         files::sanitize_filename(&clip.group_name)
     };
-    let dir = settings.clips_dir(&state.dirs).join(group);
+    let dir = dir_base.join(group);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
 
     // 编号去连字符，与图片输出命名同口径（files::output_filename）。
@@ -1456,6 +1475,19 @@ fn export_clip(
     let dest = dir.join(name);
     std::fs::copy(src, &dest).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(Some(dest.to_string_lossy().to_string()))
+}
+
+/// [`export_clip_blocking`] 的异步包装：把那几十 MB 的拷贝挪出异步执行器。
+async fn export_clip(
+    settings: &V2vSettings,
+    state: &State<'_, AppState>,
+    clip: &repo::ClipRow,
+) -> AppResult<Option<String>> {
+    let base = settings.clips_dir(&state.dirs);
+    let clip = clip.clone();
+    tokio::task::spawn_blocking(move || export_clip_blocking(base, &clip))
+        .await
+        .map_err(|e| AppError::Io(format!("成片交付任务失败：{e}")))?
 }
 
 /// 重新交付：把成片再拷一次到当前交付目录。
@@ -1485,7 +1517,7 @@ pub async fn redeliver_v2v_clips(
         if clip.stage != "pass" {
             continue;
         }
-        match export_clip(&settings, &state, &clip) {
+        match export_clip(&settings, &state, &clip).await {
             Ok(Some(p)) => {
                 repo::set_export_path(&state.db, id, Some(&p)).await?;
                 n += 1;
@@ -1582,6 +1614,24 @@ pub async fn requeue_v2v_clips(
         if ok {
             n += 1;
             last_code = code;
+            // **收回这条 clip 的废纸篓行**。重跑是就地的：`v2v_clips` 只有一行，
+            // 成片路径锚在 clip id 上（`clips/clip{id}.mp4`）。判过「不通过」的条目
+            // 重跑之后，新片子会落到与旧片子完全相同的路径，而废纸篓里那行还指着它
+            // —— 下一次清空废纸篓就会物理删掉一条还活着的成片。
+            //
+            // 代价是撤销这次重排后，那个文件不再有废纸篓行去回收它（最坏留下一个
+            // 孤儿文件）。与「删掉正在用的成片」不对等，选这一边。
+            let mut tx = state.db.begin().await?;
+            let dropped = trash_repo::delete_by_clip(&mut tx, id).await?;
+            tx.commit().await?;
+            if dropped > 0 {
+                state.v2v_log.info(
+                    "review",
+                    None,
+                    format!("{last_code} 重排，同时收回它在废纸篓里的 {dropped} 条记录"),
+                    None,
+                );
+            }
             if let Some(s) = snap {
                 undo.push(V2vUndoEntry::from_snapshot(s, None));
             }

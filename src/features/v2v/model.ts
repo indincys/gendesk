@@ -60,14 +60,14 @@ export const MINE: NextAction[] = ["fix", "rewrite", "submit", "review"];
 /**
  * 阶段 + 幽灵判定 → 下一步动作。
  *
- * `run + phantomLive → fix` 是这层派生存在的第二个理由：幽灵单只存在于 `run`，
+ * `run + 幽灵疑单 → fix` 是这层派生存在的第二个理由：幽灵单只存在于 `run`，
  * 而旧的「需要我」= ready|rev|fail 不含 run —— 于是唯一该**免费**重跑的那一类，
  * 被默认筛选藏了起来。这里结构上不可能再漏。
  */
-export function nextAction(stage: Stage, phantomLive: boolean): NextAction {
+export function nextAction(stage: Stage, phantom: boolean): NextAction {
   if (stage === "pass" || stage === "rej") return "done";
   if (stage === "fail") return "fix";
-  if (stage === "run") return phantomLive ? "fix" : "wait";
+  if (stage === "run") return phantom ? "fix" : "wait";
   if (stage === "rev") return "review";
   if (stage === "ready") return "submit";
   return "rewrite";
@@ -126,9 +126,6 @@ export type SortKey = keyof typeof SORTS;
 /** 「等待异常」的判据倍数。中位数的 3 倍 —— 单条慢不算事，慢出一个数量级才是。 */
 const SLOW_FACTOR = 3;
 
-/** 幽灵单的宽限期（秒），与 Rust 侧 `runner::PHANTOM_GRACE_SECS` 同值。 */
-export const PHANTOM_GRACE_SECS = 15 * 60;
-
 /** 表格一行所需的全部派生值。 */
 export interface Row {
   clip: ClipView;
@@ -151,7 +148,14 @@ export interface Row {
   waitSecs: number;
   /** 距上次发起查询多少秒；从未查过为 null。 */
   polledAgo: number | null;
-  /** 在跑但两个信号双双缺席且过了宽限期 —— 与 Rust 判据同构。 */
+  /**
+   * 在跑但一处计费证据都没有、且过了宽限期 —— **Rust 下发的结论**（`clip.phantomSuspect`）。
+   *
+   * 这里不再自己算。前端曾抄过一份判据，它只看三个字段、还手抄了一份 15 分钟的宽限期
+   * 常量，而 Rust 那侧读的是五处证据（含提交回执与历史队列位次）、按 `submittedAt`
+   * 计时。两份判据给同一条不同结论时，指向的是两个相反的动作：幽灵单重跑不花钱，
+   * 正在排队的重跑要再花一份。
+   */
   phantomLive: boolean;
   slow: boolean;
   signals: Set<SignalKey>;
@@ -277,14 +281,9 @@ export function deriveRows(
     const waitSecs = c.firstSubmittedAt == null ? 0 : Math.max(0, now - c.firstSubmittedAt);
     const polledAgo = c.polledAt == null ? null : Math.max(0, now - c.polledAt);
 
-    // 与 Rust 侧 `runner::is_phantom` 同构：两个信号**同时**缺席才算，且过了宽限期。
-    // 只看队列位次会在即梦哪天不下发 queue_info 时把已扣费的任务误判成没花钱。
-    const phantomLive =
-      stage === "run" &&
-      c.submitCredit == null &&
-      c.queueIdx == null &&
-      c.creditCount == null &&
-      waitSecs > PHANTOM_GRACE_SECS;
+    // 幽灵判定**只有一个来源**：Rust。它读的是全部五处计费证据（本次回体两处 +
+    // 已落库三处），而且就是真正会去 `fail(phantom)` 那条路径用的同一个函数。
+    const phantomLive = c.phantomSuspect;
 
     const med = medians.get(key) ?? 0;
     const slow = stage === "run" && med > 0 && waitSecs > med * SLOW_FACTOR && !phantomLive;
@@ -302,12 +301,16 @@ export function deriveRows(
           : (receipt ?? (settled || stage === "run" ? estimate : null));
     const creditEstimated = receipt == null && credit != null && !isPhantom;
 
+    // vip 由后端下发（`ModelInfo.vip`），不在这里判后缀 —— 即梦哪天出一个不带
+    // `_vip` 后缀的付费加急档，抄在前端的这条规则会安静地漏掉它。
+    const vip = info?.vip ?? false;
+
     const signals = new Set<SignalKey>();
     if (isPhantom) signals.add("phantom");
     if (isTimeout) signals.add("timeout");
     if (slow) signals.add("slow");
     if (c.attempt > 1) signals.add("rerun");
-    if (modelFull?.endsWith("_vip")) signals.add("vip");
+    if (vip) signals.add("vip");
     if (c.autoSubmitted) signals.add("auto");
 
     // 「情况」这一列必须点名**动作**与**代价**，而不是复述阶段（阶段就在旁边的色点上）。
@@ -357,7 +360,7 @@ export function deriveRows(
       action: nextAction(stage, phantomLive),
       modelFull,
       modelShort: modelFull ? shortModel(modelFull) : "CLI 默认",
-      vip: modelFull?.endsWith("_vip") ?? false,
+      vip,
       duration,
       resolution,
       estimate,

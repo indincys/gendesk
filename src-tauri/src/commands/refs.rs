@@ -341,17 +341,24 @@ async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// 列出全部未删除参考图（供参考图库/生成页选择）。
+/// 列出未删除参考图（供参考图库/生成页选择）。
 ///
-/// 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
-/// 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
-/// 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
+/// `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
+///
+/// **默认不要**，只有生成页传 true —— 它得渲染自己刚传的那几张。这个开关从消费端
+/// 收回到参数里，是因为「每个消费端自己记得过滤」这条约定漏一处就静默出错：
+/// 引导卡片的「上传参考图」那一步就漏了，于是随手在生成页拖一张试跑，
+/// 那一步立刻显示成已完成，而长期图库里其实一张都没有。
 #[tauri::command]
 #[specta::specta]
-pub async fn list_ref_images(state: State<'_, AppState>) -> AppResult<Vec<RefImageView>> {
+pub async fn list_ref_images(
+    state: State<'_, AppState>,
+    include_ephemeral: bool,
+) -> AppResult<Vec<RefImageView>> {
     let rows = repo::list_active(&state.db).await?;
     Ok(rows
         .into_iter()
+        .filter(|r| include_ephemeral || !r.ephemeral)
         .map(|r| RefImageView {
             id: r.id,
             name: r.name,
@@ -515,41 +522,24 @@ pub async fn replace_ref_image_file(
     path: String,
 ) -> AppResult<()> {
     state.dirs.init()?;
-    let src = PathBuf::from(&path);
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(files::sanitize_filename)
-        .ok_or_else(|| AppError::InvalidInput("无效文件路径".into()))?;
-    let ext = src
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("png")
-        .to_lowercase();
-    let dest = unique_path(&state.dirs.refs(), &stem, &ext);
-    std::fs::copy(&src, &dest)?;
-    let thumb = unique_path(&state.dirs.thumbs(), &stem, "jpg");
-    let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
-    let size = std::fs::metadata(&dest)
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
-    // 文件已更换：刷新内容 hash（E30b）与上传压缩副本（E41）。
-    let content_hash = files::content_hash(&dest).ok();
-    let upload_dest = unique_path(&state.dirs.refs(), &format!("{stem}_up"), "jpg");
-    let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
-        Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
-        _ => None,
-    };
+    let (refs_dir, thumbs_dir) = (state.dirs.refs(), state.dirs.thumbs());
+    // 走 `ingest_one` 而不是在这里再写一遍拷贝 + 缩略图 + hash + 压缩副本：
+    // 那是同一条管线的第二份抄本，而两份抄本只会在下一次改口径时分叉
+    // （E30b 的 hash、E41 的上传副本都是后来补进去的，抄本迟早会漏掉某一次）。
+    // 顺带把这整段纯 CPU/IO 挪进 `spawn_blocking`（同 v0.14.0 导入那次的教训）。
+    let ing = tokio::task::spawn_blocking(move || ingest_one(&path, &refs_dir, &thumbs_dir))
+        .await
+        .map_err(|e| AppError::Io(format!("参考图更换任务失败：{e}")))??;
     repo::update_file(
         &state.db,
         id,
-        &dest.to_string_lossy(),
-        &thumb.to_string_lossy(),
-        w as i64,
-        h as i64,
-        size,
-        content_hash.as_deref(),
-        upload_path.as_deref(),
+        &ing.file_path,
+        &ing.thumb_path,
+        ing.width,
+        ing.height,
+        ing.file_size,
+        ing.content_hash.as_deref(),
+        ing.upload_path.as_deref(),
     )
     .await?;
     Ok(())

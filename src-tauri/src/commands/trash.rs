@@ -9,6 +9,7 @@ use tauri::State;
 
 use crate::db::repo::tasks as task_repo;
 use crate::db::repo::trash as repo;
+use crate::db::repo::v2v as v2v_repo;
 use crate::db::repo::works as work_repo;
 use crate::error::AppResult;
 use crate::{files, ids};
@@ -110,6 +111,46 @@ fn parse_code(code: &str) -> Option<(String, i64)> {
     Some((prefix.to_string(), n))
 }
 
+/// 剔掉「文件还被活着的 clip 引用」的废纸篓行 —— 那些一条都不许物理删。
+///
+/// 只对 `entity_type='clip'` 生效：其余四类的文件不会被就地复用。被剔掉的行**留在
+/// 废纸篓里**（人还看得见它，也还能自己判断），并留一条 warn 说明为什么没清掉。
+async fn filter_live_clip_files(
+    pool: &sqlx::SqlitePool,
+    rows: Vec<crate::db::repo::trash::TrashItemRow>,
+) -> AppResult<Vec<crate::db::repo::trash::TrashItemRow>> {
+    let clip_ids: Vec<i64> = rows
+        .iter()
+        .filter(|r| r.entity_type == "clip")
+        .filter_map(|r| r.ref_id)
+        .collect();
+    if clip_ids.is_empty() {
+        return Ok(rows);
+    }
+    let live = v2v_repo::current_media_paths(pool, &clip_ids).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        if r.entity_type != "clip" {
+            out.push(r);
+            continue;
+        }
+        let mut files: Vec<String> = serde_json::from_str(&r.file_paths_json).unwrap_or_default();
+        if let Some(t) = &r.thumb_path {
+            files.push(t.clone());
+        }
+        if files.iter().any(|f| live.contains(f)) {
+            tracing::warn!(
+                trash_id = r.id,
+                clip_id = ?r.ref_id,
+                "废纸篓项指向的成片文件仍被活着的 clip 引用（多半是判过不通过又重跑了），跳过物理删除"
+            );
+            continue;
+        }
+        out.push(r);
+    }
+    Ok(out)
+}
+
 async fn purge(state: &crate::state::AppState, ids_in: &[i64]) -> AppResult<i64> {
     let n = purge_ids(&state.db, ids_in).await?;
     // 清掉未通过结果，正是「这一批彻底了结了」的最后一步：批次的退休条件里第二条
@@ -123,6 +164,20 @@ async fn purge(state: &crate::state::AppState, ids_in: &[i64]) -> AppResult<i64>
 /// 物理删 + 级联删记录 + 编号回收（同事务）。命令层与启动清理（E40）共用。
 pub async fn purge_ids(pool: &sqlx::SqlitePool, ids_in: &[i64]) -> AppResult<i64> {
     let rows = repo::take(pool, ids_in).await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    // 0) **物理删之前，核对 clip 行现在还认不认这些文件**。
+    //
+    // 这是第二道闸（第一道是重跑时收回废纸篓行，见 `requeue_v2v_clips`），两道各自
+    // 独立成立：视频重跑是就地的，成片路径锚在 clip id 上，于是一条判过「不通过」
+    // 的 clip 重跑之后，新片子会落在与旧片子完全相同的路径。若那一行废纸篓记录
+    // 因为任何原因还在（撤销、旧版本留下的、手工造的），清空废纸篓就会删掉一条
+    // **还活着**的成片。
+    //
+    // 判据不是 stage 而是**路径**：问的就是「这个文件现在有主人吗」，
+    // 而那正是删不删得的唯一依据。
+    let rows = filter_live_clip_files(pool, rows).await?;
     if rows.is_empty() {
         return Ok(0);
     }
@@ -240,7 +295,17 @@ pub async fn restore_trash_items(
                 .as_deref()
                 .and_then(|j| serde_json::from_str::<work_repo::AcceptedWorkRow>(j).ok())
             {
-                Some(row) => work_repo::restore(&state.db, &row).await.map(|()| true),
+                Some(row) => match work_repo::restore(&state.db, &row).await {
+                    // 原任务已经随批次退休了（v0.21.0：提示词是消耗品）。作品照样还原
+                    // 得回来——编号与组名在 0027 就冗余进了本行——但要说清楚它跟原任务
+                    // 的连线断了，否则「验收记录去哪了」会变成一个没人答得上来的问题。
+                    Ok(true) => {
+                        failures.push(format!("{label}：已还原，但原任务已退休，验收链接为空"));
+                        Ok(true)
+                    }
+                    Ok(false) => Ok(true),
+                    Err(e) => Err(e),
+                },
                 None => {
                     // 0027 之前删掉的作品没有载荷可还原。说清楚而不是假装成功——
                     // 「点了还原、作品库里却没有」比直接说还不回去更难查。
@@ -312,4 +377,87 @@ pub async fn purge_all_trash(state: State<'_, crate::state::AppState>) -> AppRes
 #[specta::specta]
 pub async fn count_trash(state: State<'_, crate::state::AppState>) -> AppResult<i64> {
     Ok(repo::count(&state.db).await?)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::*;
+    use crate::db::repo::trash::{NewTrashItem, TrashItemRow};
+    use crate::db::test_support::test_pool;
+
+    async fn seed_clip(pool: &sqlx::SqlitePool, stage: &str, video: Option<&str>) -> i64 {
+        sqlx::query("INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (1,1,'GG-0001','t','active','library',0,0)").execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at,prompt_code,group_name)
+             VALUES (1,'/img.jpg','/thumb.jpg',1,'原文',1,7,100,'GG-0001','g')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO v2v_clips (work_id, group_id, group_name, batch_id, stage, source_prompt,
+                 variable_part, video_path, poster_path, created_at, updated_at)
+             VALUES (1, 1, 'g', 7, ?1, '原文', '', ?2, NULL, 0, 0) RETURNING id",
+        )
+        .bind(stage)
+        .bind(video)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+    }
+
+    async fn trash_clip(pool: &sqlx::SqlitePool, clip_id: i64, files: Vec<String>) -> TrashItemRow {
+        let mut tx = pool.begin().await.unwrap();
+        let id = repo::insert(
+            &mut tx,
+            &NewTrashItem {
+                entity_type: "clip".into(),
+                ref_id: Some(clip_id),
+                thumb_path: None,
+                prompt_text: None,
+                code: Some("GG-0001".into()),
+                title: Some("g".into()),
+                source_label: "视频验收未通过".into(),
+                file_paths: files,
+                payload_json: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        repo::take(pool, &[id]).await.unwrap().remove(0)
+    }
+
+    /// 第二道闸：一条 clip **现在**还指着的成片文件，一个都不许物理删。
+    ///
+    /// 视频重跑是就地的（`v2v_clips` 只有一行，路径锚在 clip id 上），所以
+    /// 「判不通过 → 重跑 → 新片子落在同一个路径」是常态。那一行陈旧的废纸篓记录若
+    /// 还在，清空废纸篓就会删掉一条还活着的成片。
+    #[tokio::test]
+    async fn purging_never_deletes_a_file_a_live_clip_still_points_at() {
+        let (pool, _d) = test_pool().await;
+        // 重跑之后：clip 又指着同一个路径了（阶段回到 rev，成片是新的那一条）。
+        let clip_id = seed_clip(&pool, "rev", Some("/clips/clip1.mp4")).await;
+        let stale = trash_clip(&pool, clip_id, vec!["/clips/clip1.mp4".into()]).await;
+
+        let kept = filter_live_clip_files(&pool, vec![stale]).await.unwrap();
+        assert!(
+            kept.is_empty(),
+            "文件还有主人 → 这条废纸篓记录必须留着，一个字节都不许删"
+        );
+    }
+
+    /// 真的没有主人了就照删 —— 闸门只挡住冲突，不挡住正常清理。
+    #[tokio::test]
+    async fn purging_proceeds_when_the_clip_no_longer_owns_those_files() {
+        let (pool, _d) = test_pool().await;
+        let clip_id = seed_clip(&pool, "rej", None).await;
+        let row = trash_clip(&pool, clip_id, vec!["/clips/clip1.mp4".into()]).await;
+
+        let kept = filter_live_clip_files(&pool, vec![row]).await.unwrap();
+        assert_eq!(kept.len(), 1);
+    }
 }

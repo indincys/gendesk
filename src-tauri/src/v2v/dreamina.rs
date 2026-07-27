@@ -246,6 +246,17 @@ pub struct ModelInfo {
     pub vip: bool,
 }
 
+/// 这个通道要不要花「不排队」那笔钱。**判据单点定义在这里**。
+///
+/// 五处曾各写一遍 `ends_with("_vip")`（补单器的拒收闸、轮询分档、模型清单、前端两处）。
+/// 即梦哪天出一个不带 `_vip` 后缀的付费加急档，补单器会整夜按 5.5 倍价往外提交，
+/// 而那五处会一处一处地被人想起来 —— 或者想不起来。
+///
+/// 前端不再自己判：`ModelInfo.vip` 就是这个函数的结果，随模型清单一起下发。
+pub fn is_vip(model_version: &str) -> bool {
+    model_version.ends_with("_vip")
+}
+
 pub fn models() -> Vec<ModelInfo> {
     MODELS
         .iter()
@@ -267,7 +278,7 @@ pub fn models() -> Vec<ModelInfo> {
                         })
                 })
                 .collect(),
-            vip: m.ends_with("_vip"),
+            vip: is_vip(m),
         })
         .collect()
 }
@@ -1507,12 +1518,7 @@ mod tests {
     #[test]
     fn vip_flag_matches_the_channel_suffix() {
         for m in models() {
-            assert_eq!(
-                m.vip,
-                m.model_version.ends_with("_vip"),
-                "{}",
-                m.model_version
-            );
+            assert_eq!(m.vip, is_vip(&m.model_version), "{}", m.model_version);
         }
         assert!(models().iter().any(|m| m.vip), "清单里应当有 vip 通道");
         assert!(models().iter().any(|m| !m.vip), "清单里应当有非 vip 通道");

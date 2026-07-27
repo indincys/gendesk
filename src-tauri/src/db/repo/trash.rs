@@ -113,6 +113,21 @@ pub async fn delete_rows(conn: &mut SqliteConnection, ids: &[i64]) -> Result<(),
     Ok(())
 }
 
+/// 删掉某条 clip 的废纸篓行（重跑/退回改写时收回它）。返回删了几行。
+///
+/// 视频重跑是**就地**的：`v2v_clips` 只有一行，成片路径锚在 clip id 上
+/// （`clips/clip{id}.mp4`）。于是一条被判「不通过」的 clip 重跑之后，新片子会落到
+/// 与旧片子**完全相同**的路径，而废纸篓里那行还指着它 —— 下一次清空废纸篓就会
+/// 物理删掉一条还活着的成片。收回这一行是两道闸中的第一道。
+pub async fn delete_by_clip(conn: &mut SqliteConnection, clip_id: i64) -> Result<u64, sqlx::Error> {
+    let n = sqlx::query("DELETE FROM trash_items WHERE entity_type = 'clip' AND ref_id = ?1")
+        .bind(clip_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    Ok(n)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {

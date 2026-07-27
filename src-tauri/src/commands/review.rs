@@ -1,5 +1,7 @@
 //! review 域命令（执行计划 2.1 / 需求 13 / R7 / R8）。
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 use specta::Type;
 use sqlx::FromRow;
@@ -158,9 +160,38 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
-    WHERE t.id = ? AND t.status = 'rev'";
+    WHERE t.status = 'rev' AND t.id IN ";
 
-/// 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)，单事务。
+/// 一次取回本批全部待验收行（一条 IN 查询，不是 N 条 SELECT）。
+async fn accept_rows(pool: &sqlx::SqlitePool, ids: &[i64]) -> AppResult<Vec<AcceptRow>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!("{ACCEPT_SELECT}({holes})");
+    let mut q = sqlx::query_as::<_, AcceptRow>(&sql);
+    for id in ids {
+        q = q.bind(*id);
+    }
+    let mut rows = q.fetch_all(pool).await?;
+    // 按调用方给的顺序还原 —— 验收是人一张张点出来的序列，输出与提示都跟着它走。
+    rows.sort_by_key(|r| ids.iter().position(|i| *i == r.id).unwrap_or(usize::MAX));
+    Ok(rows)
+}
+
+/// 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)。
+///
+/// ## 拷贝先做完，再动库
+///
+/// 输出拷贝是**阻塞 IO**，一张几 MB，一次验收几十上百张 —— 留在异步执行器上会把整个
+/// IPC 卡住（同 v0.14.0 参考图导入那次的教训：界面十几秒一声不吭，人以为没点上）。
+/// 故整批拷贝进一个 `spawn_blocking`，一次线程往返而不是每张一次。
+///
+/// **不把整批塞进一个事务**（这一点与「整批改单事务」的直觉相反，理由是文件）：
+/// 拷贝无法回滚。真做成一个事务，第 150 张失败就会把前 149 条作品记录回滚掉，
+/// 而它们的输出文件已经躺在 outputs/ 里了 —— 变成一堆没有主人的图。现在的顺序
+/// （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
+/// 要么全部拷成功再记账，要么什么账都没记。
 #[tauri::command]
 #[specta::specta]
 pub async fn accept_tasks(
@@ -177,18 +208,13 @@ pub async fn accept_tasks(
     let mut to_queue: Vec<i64> = Vec::new();
     let date = files::date_yymmdd(now_unix());
 
-    for tid in task_ids {
-        let Some(row) = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
-            .bind(tid)
-            .fetch_optional(&state.db)
-            .await?
-        else {
-            continue;
-        };
+    let rows = accept_rows(&state.db, &task_ids).await?;
+    // 算出每张的落点（纯字符串活，留在这边），再一次性交给阻塞线程去拷。
+    let mut jobs: Vec<(i64, String, PathBuf)> = Vec::new();
+    for row in &rows {
         let Some(src) = row.result_image_path.clone() else {
             continue; // 无结果图，跳过
         };
-
         // 任务6：输出到 outputs/{批次}/{分组}/参考图名_YYMMDD_编号.EXT。
         // 按提示词分组分文件夹存放，多分组批次天然各归各处而非全混一处。
         // 分组名做文件系统安全清洗，空分组归入「未分组」。
@@ -202,15 +228,40 @@ pub async fn accept_tasks(
             .outputs()
             .join(row.batch_id.to_string())
             .join(&group_folder);
-        std::fs::create_dir_all(&out_dir)?;
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
         let filename =
             files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index, &ext);
-        let out_path = out_dir.join(&filename);
-        // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
-        std::fs::copy(&src, &out_path)?;
+        jobs.push((row.id, src, out_dir.join(&filename)));
+    }
+    if jobs.is_empty() {
+        return Ok(AcceptResult {
+            accepted: 0,
+            promoted_groups: Vec::new(),
+            queued_v2v: 0,
+        });
+    }
+    let to_copy: Vec<(i64, String, PathBuf)> = jobs.clone();
+    // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
+    let copied: std::io::Result<Vec<i64>> = tokio::task::spawn_blocking(move || {
+        let mut ok = Vec::with_capacity(to_copy.len());
+        for (id, src, dest) in to_copy {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dest)?;
+            ok.push(id);
+        }
+        Ok(ok)
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Io(format!("输出拷贝任务失败：{e}")))?;
+    copied?;
 
+    for row in rows {
+        let Some((_, src, out_path)) = jobs.iter().find(|(id, _, _)| *id == row.id).cloned() else {
+            continue;
+        };
         let thumb = row.result_thumb_path.clone().unwrap_or_else(|| src.clone());
 
         // 事务：写作品 + 微调写回 + 临时组转正 + 状态迁移。
@@ -312,15 +363,8 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
     let mut rejected = 0i64;
     let mut batches: Vec<i64> = Vec::new();
 
-    for tid in task_ids {
-        let Some(row) = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
-            .bind(tid)
-            .fetch_optional(&state.db)
-            .await?
-        else {
-            continue;
-        };
-
+    // 一条 IN 查询取回整批，而不是每条一次 SELECT。
+    for row in accept_rows(&state.db, &task_ids).await? {
         // E02：原图不再立即物理删除，随缩略图一并暂存进废纸篓 file_paths，
         // 由「彻底删除/清空废纸篓」时的 purge 统一物理删除。误触「不通过」不再丢原图。
         let file_paths = rejected_file_paths(&row.result_image_path, &row.result_thumb_path);
@@ -382,23 +426,15 @@ mod tests {
     async fn accept_select_only_matches_rev_tasks() {
         let (pool, _d) = test_pool().await;
         seed_task(&pool, "pass").await;
-        let row = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
-            .bind(1)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-        assert!(row.is_none(), "已通过任务不应被验收命令再次选中");
+        let rows = accept_rows(&pool, &[1]).await.unwrap();
+        assert!(rows.is_empty(), "已通过任务不应被验收命令再次选中");
 
         sqlx::query("UPDATE tasks SET status='rev' WHERE id=1")
             .execute(&pool)
             .await
             .unwrap();
-        let row = sqlx::query_as::<_, AcceptRow>(ACCEPT_SELECT)
-            .bind(1)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-        assert!(row.is_some(), "rev 待验收任务应被选中");
+        let rows = accept_rows(&pool, &[1]).await.unwrap();
+        assert_eq!(rows.len(), 1, "rev 待验收任务应被选中");
     }
 
     // 验收页排序：最近一批在最顶部（批次倒序），批次内保持生成序（id 升序）。

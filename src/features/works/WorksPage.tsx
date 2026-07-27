@@ -2,7 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
-import { assetSrc } from "@/lib/img";
+import { assetSrc, bg } from "@/lib/img";
 import {
   type GroupView,
   type PurposeView,
@@ -72,7 +72,6 @@ export function WorksPage() {
   const [groupFilter, setGroupFilter] = useState<number | null>(null);
   const [purposes, setPurposes] = useState<PurposeView[]>([]);
   const [purposeFilter, setPurposeFilter] = useState<string | null>(null);
-  const [hideExported, setHideExported] = useState(false);
   const [page, setPage] = useState(0);
   const [atEnd, setAtEnd] = useState(false);
 
@@ -83,7 +82,6 @@ export function WorksPage() {
         groupId: groupFilter,
         favoriteOnly: favOnly,
         tag: purposeFilter,
-        hideExported,
         query: query.trim() === "" ? null : query.trim(),
         batchId: null,
       };
@@ -94,7 +92,7 @@ export function WorksPage() {
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [groupFilter, favOnly, purposeFilter, hideExported, query, page]);
+  }, [groupFilter, favOnly, purposeFilter, query, page]);
 
   useEffect(() => {
     void unwrap(commands.listPurposes())
@@ -107,7 +105,7 @@ export function WorksPage() {
   // 改筛选条件即回到第一页，否则筛完停在第 3 页会显示成「什么都没有」。
   useEffect(() => {
     setPage(0);
-  }, [groupFilter, favOnly, purposeFilter, hideExported, query]);
+  }, [groupFilter, favOnly, purposeFilter, query]);
 
   // ── 分节 ─────────────────────────────────────────────────────
   // 后端已按「批次倒序 + 批次内生成序」返回，这里只做连续切分，不重排序。
@@ -371,16 +369,6 @@ export function WorksPage() {
               <Star className="ic12" />
               收藏
             </button>
-            {purposeFilter != null && (
-              <button
-                type="button"
-                className={cn("btn sm", hideExported ? "" : "gho")}
-                onClick={() => setHideExported((v) => !v)}
-                title="隐藏已经导出过图生视频包的作品（跨包去重，读导出台账）"
-              >
-                隐藏已导出
-              </button>
-            )}
             <div className="f1" />
             <div className="seg">
               {(Object.keys(GROUP_BY_LABEL) as GroupBy[]).map((k) => (
@@ -847,11 +835,4 @@ function WorksToAssetModal({
 function fmtDate(unix: number): string {
   const d = new Date(unix * 1000);
   return `${d.getMonth() + 1}月${d.getDate()}日`;
-}
-
-function bg(path?: string | null): React.CSSProperties {
-  const src = assetSrc(path);
-  return src
-    ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : {};
 }

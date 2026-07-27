@@ -1,6 +1,6 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { assetSrc } from "@/lib/img";
+import { assetSrc, bg } from "@/lib/img";
 import { type TrashItemView, commands, unwrap } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
 import { Check, Eye, Trash2, Undo2 } from "lucide-react";
@@ -305,10 +305,4 @@ function entityLabel(t: string): string {
 function fmtTime(unix: number): string {
   const d = new Date(unix * 1000);
   return `${d.getMonth() + 1}月${d.getDate()}日`;
-}
-function bg(path?: string | null): React.CSSProperties {
-  const src = assetSrc(path);
-  return src
-    ? { backgroundImage: `url(${src})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : {};
 }

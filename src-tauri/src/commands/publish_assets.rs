@@ -353,36 +353,6 @@ pub async fn restore_pack(state: State<'_, AppState>, id: i64) -> AppResult<()> 
     Ok(())
 }
 
-/// 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
-///
-/// **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
-/// 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
-#[tauri::command]
-#[specta::specta]
-pub async fn delete_pack(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    ensure_unlocked(&state, id).await?;
-    let published: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_ledger WHERE pack_id = ?1")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
-    if published > 0 {
-        return Err(AppError::InvalidInput(format!(
-            "该素材包已发布过 {published} 次，删除会让发布历史与查重窗口失真；请改用「退役」"
-        )));
-    }
-    let pack = repo::get(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("素材包不存在".into()))?;
-    if let Ok(root) = publish_settings::root_local(&state.db).await {
-        let dir = RelPath::new(&pack.dir_rel).to_local(&root);
-        if dir.is_dir() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-    repo::delete(&state.db, id).await?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PackPatch {

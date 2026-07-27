@@ -220,16 +220,31 @@ pub async fn set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), 
     Ok(())
 }
 
-pub async fn mark_running(pool: &SqlitePool, id: i64, api_key_id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE tasks SET status = 'run', api_key_id = ?2, error_type = NULL, error_message = NULL, updated_at = ?3 WHERE id = ?1",
+/// 认领一个任务：`from` → `run`。**返回是否认领成功**。
+///
+/// `AND status = ?4` 不是多余的防御，它是这条路径唯一的并发闸门：调度器先
+/// `fetch_queued` 读一批，再逐个派发，两步之间是异步的 —— 用户在这段窗口里点
+/// 「批量中止」把行删了或改成别的态，无谓词的 UPDATE 会把一个已经不该跑的任务
+/// 重新写成 `run`，然后 spawn 一个 worker **发一次付费请求**，而结果无处可写。
+///
+/// 谓词用调用方刚读到的那个状态原文（`q` 或 `retry`），而不是写死 `'q'`：
+/// 冷却结束的重试任务也走这条路（`Retry → Run` 是合法迁移），写死会让它们永不派发。
+pub async fn mark_running(
+    pool: &SqlitePool,
+    id: i64,
+    api_key_id: i64,
+    from: &str,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE tasks SET status = 'run', api_key_id = ?2, error_type = NULL, error_message = NULL, updated_at = ?3 WHERE id = ?1 AND status = ?4",
     )
     .bind(id)
     .bind(api_key_id)
     .bind(now_unix())
+    .bind(from)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 /// 落盘完成 → 待验收。`size` 是结果图的真实像素（0027）：验收页按真实比例排版，
@@ -464,6 +479,24 @@ impl RetireReport {
 /// **编号不回收**。废纸篓清理会把编号还进号池（那是「这条从来没成过」的语义），
 /// 而这里恰恰相反：编号已经印在输出文件名与作品行上，是花掉的。号池按前缀存 next_seq，
 /// 分组删掉也不影响它——同名 txt 再导入一次，前缀一样、编号从上次的下一个继续。
+/// 废纸篓里那些被删掉的作品，各自属于哪个批次。
+///
+/// 载荷解析不动就跳过：它只是让这一批**晚一点**退休，而解析失败不该把整轮扫描弄挂。
+async fn batches_held_by_trashed_works(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+    let rows: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT payload_json FROM trash_items WHERE entity_type = 'work'")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(j,)| j)
+        .filter_map(|j| serde_json::from_str::<crate::db::repo::works::AcceptedWorkRow>(&j).ok())
+        .filter_map(|w| w.batch_id)
+        .collect())
+}
+
 pub async fn retire_resolved_batches(pool: &SqlitePool) -> Result<RetireReport, sqlx::Error> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT b.id FROM batches b
@@ -477,8 +510,21 @@ pub async fn retire_resolved_batches(pool: &SqlitePool) -> Result<RetireReport, 
     .fetch_all(pool)
     .await?;
 
+    // 废纸篓里**被删掉的作品**同样是还原锚点，而它们不在上面那条 SQL 的视野里：
+    // 作品是唯一「删除即真删行」的实体，靠 0027 的 `payload_json` 整行写回，
+    // 于是 `trash_items` 与 `accepted_works` 之间没有任何可 JOIN 的东西 ——
+    // 归属只写在那份 JSON 里。批次一退休，本批的任务跟着级联删掉，
+    // 那份载荷里的 `task_id` 就成了指向不存在行的外键。
+    //
+    // 在 Rust 里解析而不是用 `json_extract`：本仓库其余地方一处都没依赖 JSON1，
+    // 为一句条件引入一个「打包时可能没编进去」的扩展不划算。
+    let held = batches_held_by_trashed_works(pool).await?;
+
     let mut report = RetireReport::default();
     for bid in ids {
+        if held.contains(&bid) {
+            continue;
+        }
         // 本批消耗掉的分组：以任务实际用到的提示词为准（batch_refs 只是挂靠意图，
         // 而任务才是真的跑过什么）。必须在删批次之前取——删完就查不到了。
         let groups: Vec<i64> = sqlx::query_scalar(
@@ -680,6 +726,54 @@ mod tests {
         (bid, ids)
     }
 
+    /// 认领任务是有闸门的：只有仍停在调用方刚读到的那个状态时才认领得到。
+    ///
+    /// 调度器先 `fetch_queued` 读一批，再逐个派发，两步之间隔着若干次 await。用户在
+    /// 这段窗口里点「批量中止」把行删了或改成别的态 —— 无谓词的 UPDATE 会把它重新
+    /// 写成 `run`，然后 spawn 一个 worker 去发一次**付费请求**，而结果无处可写。
+    #[tokio::test]
+    async fn claiming_a_task_requires_it_to_still_be_where_we_left_it() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 2).await;
+        sqlx::query(
+            "INSERT INTO api_keys (id,name,keyring_account,base_url,model,concurrency_limit,enabled,created_at)
+             VALUES (1,'k','acct','http://x','m',1,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 正常：状态没变 → 认领成功。
+        assert!(mark_running(&pool, ids[0], 1, "q").await.unwrap());
+        assert_eq!(
+            get_task(&pool, ids[0]).await.unwrap().unwrap().status,
+            "run"
+        );
+
+        // 中止：用户在读队列与派发之间把它掐了。
+        set_status(&pool, ids[1], "fail").await.unwrap();
+        assert!(
+            !mark_running(&pool, ids[1], 1, "q").await.unwrap(),
+            "状态已经变了 → 不得认领，调度器据此不 spawn worker"
+        );
+        assert_eq!(
+            get_task(&pool, ids[1]).await.unwrap().unwrap().status,
+            "fail",
+            "认领失败不得把它改回 run"
+        );
+
+        // 删除：行都没了。
+        delete_tasks_where(&pool, &[ids[1]], &["fail"])
+            .await
+            .unwrap();
+        assert!(!mark_running(&pool, ids[1], 1, "q").await.unwrap());
+
+        // 重试任务走的是 `retry → run`，谓词用调用方读到的状态原文而不是写死 'q' ——
+        // 写死会让冷却结束的重试任务永远派发不出去。
+        set_status(&pool, ids[0], "retry").await.unwrap();
+        assert!(mark_running(&pool, ids[0], 1, "retry").await.unwrap());
+    }
+
     // E22 / D3：归档满 N 天的批次启动时删除（级联任务），作品（accepted_works）不受影响。
     #[tokio::test]
     async fn delete_old_archived_batches_keeps_works() {
@@ -839,6 +933,45 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// 被删掉的**作品**同样挡住退休 —— 而它不在那条 SQL 的视野里。
+    ///
+    /// 作品是唯一「删除即真删行」的实体，靠 payload_json 整行写回，于是 trash_items
+    /// 与 accepted_works 之间没有任何可 JOIN 的东西：归属只写在那份 JSON 里。
+    /// 批次一退休，本批任务级联消失，那份载荷里的 task_id 就成了悬空外键。
+    #[tokio::test]
+    async fn batch_waits_while_a_deleted_work_of_its_own_sits_in_trash() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 1).await;
+        set_status(&pool, ids[0], "pass").await.unwrap();
+        let payload = serde_json::json!({
+            "id": 1, "task_id": ids[0], "image_path": "/o.jpg", "thumb_path": "/t.jpg",
+            "prompt_id": 1, "prompt_text": "t", "group_id": 1, "ref_image_id": 1,
+            "batch_id": bid, "favorite": 0, "accepted_at": 0,
+            "prompt_code": "GG-0001", "group_name": "g"
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO trash_items (entity_type, ref_id, source_label, deleted_at, payload_json)
+             VALUES ('work', 1, '作品删除', 0, ?1)",
+        )
+        .bind(&payload)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            retire_resolved_batches(&pool).await.unwrap().is_empty(),
+            "本批的作品还躺在废纸篓里等还原，批次不许退休"
+        );
+
+        // 作品还原回去之后，这一批才轮到退休。
+        sqlx::query("DELETE FROM trash_items")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retire_resolved_batches(&pool).await.unwrap().batches, 1);
     }
 
     // 主路径：全部任务落在 pass/rej 且废纸篓已清 → 批次连同它消耗掉的提示词与分组一起消失，

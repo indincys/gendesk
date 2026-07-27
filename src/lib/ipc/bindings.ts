@@ -219,15 +219,18 @@ async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>>
 }
 },
 /**
- * 列出全部未删除参考图（供参考图库/生成页选择）。
+ * 列出未删除参考图（供参考图库/生成页选择）。
  * 
- * 临时上传（0019）**也在返回里**——生成页要靠它渲染刚上传的那几张。
- * 「不进图库」由消费端按 `ephemeral` 过滤（图库页、从图库选择弹窗），
- * 而不是在这里切掉：切掉了生成页当场就显示不出自己刚传的图。
+ * `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
+ * 
+ * **默认不要**，只有生成页传 true —— 它得渲染自己刚传的那几张。这个开关从消费端
+ * 收回到参数里，是因为「每个消费端自己记得过滤」这条约定漏一处就静默出错：
+ * 引导卡片的「上传参考图」那一步就漏了，于是随手在生成页拖一张试跑，
+ * 那一步立刻显示成已完成，而长期图库里其实一张都没有。
  */
-async listRefImages() : Promise<Result<RefImageView[], AppError>> {
+async listRefImages(includeEphemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_ref_images") };
+    return { status: "ok", data: await TAURI_INVOKE("list_ref_images", { includeEphemeral }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -488,14 +491,6 @@ async listTasks(batchId: number | null, statusGroup: string | null, page: number
     else return { status: "error", error: e  as any };
 }
 },
-async getTask(id: number) : Promise<Result<TaskView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_task", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
  */
@@ -610,7 +605,19 @@ async listPendingReview(batchId: number | null) : Promise<Result<ReviewItemView[
 }
 },
 /**
- * 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)，单事务。
+ * 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)。
+ * 
+ * ## 拷贝先做完，再动库
+ * 
+ * 输出拷贝是**阻塞 IO**，一张几 MB，一次验收几十上百张 —— 留在异步执行器上会把整个
+ * IPC 卡住（同 v0.14.0 参考图导入那次的教训：界面十几秒一声不吭，人以为没点上）。
+ * 故整批拷贝进一个 `spawn_blocking`，一次线程往返而不是每张一次。
+ * 
+ * **不把整批塞进一个事务**（这一点与「整批改单事务」的直觉相反，理由是文件）：
+ * 拷贝无法回滚。真做成一个事务，第 150 张失败就会把前 149 条作品记录回滚掉，
+ * 而它们的输出文件已经躺在 outputs/ 里了 —— 变成一堆没有主人的图。现在的顺序
+ * （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
+ * 要么全部拷成功再记账，要么什么账都没记。
  */
 async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
     try {
@@ -634,14 +641,6 @@ async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
 async listWorks(filter: WorkFilter, page: number | null) : Promise<Result<WorkView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_works", { filter, page }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getWork(id: number) : Promise<Result<WorkView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_work", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -718,20 +717,6 @@ async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
 async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_works", { ids, destDir }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 导出图生视频包（一包一组）。
- * 
- * 一包一组不是为了目录整齐：同组的分镜图最后要剪进同一条成片，运镜语言与时长必须统一，
- * 跨组混一个包改写出来的风格会飘。所选作品按 group_id 分堆，每堆一个包。
- */
-async exportWorksV2v(ids: number[], destDir: string) : Promise<Result<PackSummary[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("export_works_v2v", { ids, destDir }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1577,20 +1562,6 @@ async restorePack(id: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * 删除素材包：校验锁定 + 台账引用 → 物理删目录 + 删记录。
- * 
- * **发过的包不能物理删**：usage_ledger 里那条发布记录会指向一个不存在的 pack_id，
- * 发布历史与查重窗口就此失真。已发过的包请走「退役」（不再参与排期，历史仍完整）。
- */
-async deletePack(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_pack", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async updatePack(id: number, patch: PackPatch) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_pack", { id, patch }) };
@@ -2324,20 +2295,21 @@ createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewed
  */
 autoSubmitted: boolean; 
 /**
- * 历史上打进过哪个素材包（0025）。
- * 
- * v0.22.0 起成片**不再入资产库**（它们是 B-roll 素材，不适合直接发布），
- * 这条路径已整个拆掉。列保留是因为迁移 forward-only，且老数据里的值仍是事实；
- * 但没有任何逻辑再读它，界面上也不再出现。
- */
-assetPackId: number | null; 
-/**
  * 验收通过后交付到 `{交付目录}/{组}/` 的那份拷贝（0027）。
  * 
  * 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
  * 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
  */
-exportPath: string | null; acceptedAt: number; updatedAt: number }
+exportPath: string | null; 
+/**
+ * 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
+ * 
+ * **由 Rust 下发而不是前端自己算**。前端原来抄了一份判据（三个字段 + 一个手抄的
+ * 15 分钟常量），而它按 `firstSubmittedAt` 算等待时长、Rust 按 `submittedAt` 算
+ * —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
+ * 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
+ */
+phantomSuspect: boolean; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -2804,22 +2776,6 @@ export type PackPatch = { note: string | null;
  * `Some(None)` = 清除封面；`Some(Some)` = 设为该包内文件名。
  */
 cover: string | null }
-/**
- * 一次导出的结果摘要（回前端 toast）。
- */
-export type PackSummary = { 
-/**
- * 包目录绝对路径。
- */
-packDir: string; 
-/**
- * 包目录名（= work_exports.pack_id）。
- */
-packId: string; exported: number; 
-/**
- * 源文件缺失而跳过的条目数。
- */
-skipped: number; strippedPrefixChars: number; strippedSuffixChars: number }
 export type PackView = { id: number; skuId: number; kind: string; dirRel: string; files: PackFileView[]; cover: string | null; 
 /**
  * 缩略图绝对本地路径（前端 assetSrc 读）：封面优先，无封面取包内首张图片；
@@ -3300,7 +3256,16 @@ materialDays: number | null; titleDays: number | null; bodyDays: number | null }
  */
 export type StageCounts = { rewrite: number; ready: number; run: number; rev: number; pass: number; rej: number; fail: number; 
 /**
- * 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败。
+ * 在跑、但一处计费证据都没有的条数（幽灵疑单，`repo::count_phantom_suspects`）。
+ * 
+ * 它是唯一一类**阻在人身上却不在四个待办阶段里**的条目：躺在 `run`（按阶段说
+ * 「机器在跑，人插不上手」），可它恰恰是机器根本没在跑的那些，处置是免费重跑。
+ * 事故那次 18 条挂了十几个小时，而徽章全程是 0。
+ */
+phantom: number; 
+/**
+ * 侧栏徽章数：阻在**人**身上的四处 —— 待改写、待提交、待验收、失败，
+ * 外加藏在 `run` 里的幽灵疑单（见 [`Self::phantom`]）。
  * 
  * **待改写在里面**（v0.22.0 改的）。旧口径把它排除在外，理由是「那一步在
  * Claude Code 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk
@@ -3648,10 +3613,6 @@ export type WorkFilter = { groupId: number | null; favoriteOnly: boolean;
  * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
  */
 tag: string | null; 
-/**
- * 隐藏已导出到图生视频包的作品（跨包去重，读 work_exports 台账）。
- */
-hideExported: boolean; 
 /**
  * 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
  * 

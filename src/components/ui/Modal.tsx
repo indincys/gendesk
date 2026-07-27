@@ -74,7 +74,7 @@ export function ConfirmModal({
         </div>
         <div
           className="mfoot"
-          style={{ borderTop: "none", background: "#fff", borderRadius: "0 0 13px 13px" }}
+          style={{ borderTop: "none", background: "var(--panel)", borderRadius: "0 0 13px 13px" }}
         >
           <div className="f1" />
           <button type="button" className="btn sm" onClick={onClose}>

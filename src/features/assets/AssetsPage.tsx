@@ -542,7 +542,7 @@ function SkuRow({
       data-sku-id={s.id}
       style={
         dropping
-          ? { outline: "2px solid var(--ac)", outlineOffset: -2, borderRadius: 6 }
+          ? { outline: "2px solid var(--acc)", outlineOffset: -2, borderRadius: 6 }
           : undefined
       }
     >
@@ -1529,7 +1529,7 @@ function PackModal({
                 aspectRatio: "1",
                 objectFit: "cover",
                 borderRadius: 6,
-                border: f.name === cover ? "2px solid var(--ac)" : "1px solid var(--line)",
+                border: f.name === cover ? "2px solid var(--acc)" : "1px solid var(--line)",
               }}
             />
           ))}

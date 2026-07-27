@@ -19,7 +19,6 @@ export type {
   CreateBatchInput,
   FrontendErrorPayload,
   GroupView,
-  PackSummary,
   ProductionOverview,
   PurposeView,
   ImportPreview,

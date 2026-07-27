@@ -1,3 +1,4 @@
+import { fmtSpan } from "@/features/v2v/model";
 import { type QueueStats, type V2vTick, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useCallback, useEffect, useState } from "react";
@@ -68,17 +69,17 @@ export function V2vQueuePanel({
         </span>
         {q.running > 0 && (
           <span className="fs11 t3">
-            最久已等 <b>{fmtDur(q.oldestWait + drift)}</b>
-            {q.newestWait !== q.oldestWait && ` · 最新 ${fmtDur(q.newestWait + drift)}`}
+            最久已等 <b>{fmtSpan(q.oldestWait + drift)}</b>
+            {q.newestWait !== q.oldestWait && ` · 最新 ${fmtSpan(q.newestWait + drift)}`}
           </span>
         )}
         <span className={cn("fs11", stale ? "qwarn" : "t3")}>
           {q.sinceLastFinish == null
             ? "这批还没有出过片"
-            : `上次出片 ${fmtDur(q.sinceLastFinish + drift)}前`}
+            : `上次出片 ${fmtSpan(q.sinceLastFinish + drift)}前`}
         </span>
         {q.etaSecs != null && (
-          <span className="fs11 t3">按当前速度全部收完约需 {fmtDur(q.etaSecs)}</span>
+          <span className="fs11 t3">按当前速度全部收完约需 {fmtSpan(q.etaSecs)}</span>
         )}
         <div className="f1" />
         <span className="fs10 t3 nowrap">
@@ -107,19 +108,11 @@ export function V2vQueuePanel({
 
       {stale && (
         <div className="fs11 mt8 qwarn" style={{ lineHeight: 1.7 }}>
-          已经 {fmtDur((q.sinceLastFinish ?? 0) + drift)}{" "}
+          已经 {fmtSpan((q.sinceLastFinish ?? 0) + drift)}{" "}
           没有新片落盘了。任务不会因此丢失（额度已扣、
           即梦那边照跑），但值得开「执行日志」看看最近几轮查询有没有报错。
         </div>
       )}
     </div>
   );
-}
-
-/** 秒 → 「3 小时 12 分」。与 Rust 侧 `runner::fmt_dur` 同一套读法。 */
-function fmtDur(sec: number): string {
-  const s = Math.max(0, Math.floor(sec));
-  if (s < 60) return `${s} 秒`;
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟`;
-  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
 }

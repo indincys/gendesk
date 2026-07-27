@@ -217,8 +217,13 @@ pub async fn materialize(pool: &SqlitePool, root: &Path) -> AppResult<Materializ
                 summary.skipped += 1;
                 continue;
             }
-            std::fs::copy(&c.thumb_path, dir.join("thumbs").join(&thumb_name))
-                .map_err(|e| AppError::Io(e.to_string()))?;
+            // 目标已存在就跳过：物化是自动的（队列一变就重写一遍），而缩略图是
+            // 只读的输入拷贝 —— 每轮把同一批图重拷一遍纯属白干，条目多时还很响。
+            let thumb_dest = dir.join("thumbs").join(&thumb_name);
+            if !thumb_dest.is_file() {
+                std::fs::copy(&c.thumb_path, &thumb_dest)
+                    .map_err(|e| AppError::Io(e.to_string()))?;
+            }
             let variable = super::variable_part(&c.source_prompt, pre, suf);
             // 顺手把可变部分落库：看板与「重新物化」都读它，不必每次重算。
             repo::set_variable_part(pool, c.id, &variable, now).await?;
@@ -394,7 +399,11 @@ pub async fn ingest(pool: &SqlitePool, root: &Path) -> AppResult<IngestSummary> 
                 continue;
             }
         };
+        // **逐文件计数**。归档判据只能看这一份文件干了什么：`sum.*` 是跨文件累计的，
+        // 用它做判据意味着「前面某个文件出过一条 unmatched」之后，后面每一个文件都会被
+        // 移进 _已收录 —— 包括那些一行都没解析成的。那种文件被移走，人会以为它已经收了。
         let mut applied_here = 0i64;
+        let mut touched_here = 0i64;
         for (lineno, raw) in body.lines().enumerate() {
             let raw = raw.trim();
             if raw.is_empty() {
@@ -405,6 +414,7 @@ pub async fn ingest(pool: &SqlitePool, root: &Path) -> AppResult<IngestSummary> 
                 Err(e) => {
                     tracing::warn!(line = lineno + 1, error = %e, "改写结果 JSON 行解析失败");
                     sum.unmatched += 1;
+                    touched_here += 1;
                     continue;
                 }
             };
@@ -415,14 +425,17 @@ pub async fn ingest(pool: &SqlitePool, root: &Path) -> AppResult<IngestSummary> 
                 .filter(|s| !s.is_empty())
             else {
                 sum.unmatched += 1;
+                touched_here += 1;
                 continue;
             };
             let Some((clip_id, work_id)) = resolve_target(&line) else {
                 sum.unmatched += 1;
+                touched_here += 1;
                 continue;
             };
             let Some(clip) = find_clip(pool, clip_id, work_id).await? else {
                 sum.unmatched += 1;
+                touched_here += 1;
                 continue;
             };
 
@@ -443,12 +456,13 @@ pub async fn ingest(pool: &SqlitePool, root: &Path) -> AppResult<IngestSummary> 
                 applied_here += 1;
             } else {
                 sum.stale += 1;
+                touched_here += 1;
             }
         }
 
         // 移档而非删除：留证（同 v0.9.0「丢弃改移档」），也避免下一轮 rescan 反复收录。
         // 移不动就地留着——下轮会再收一次，`apply_rewrite` 幂等，代价只是多一次无效更新。
-        if applied_here > 0 || sum.stale > 0 || sum.unmatched > 0 {
+        if applied_here > 0 || touched_here > 0 {
             let consumed = done_root.join(CONSUMED);
             if std::fs::create_dir_all(&consumed).is_ok() {
                 let dest = consumed.join(format!("{name}-{now}.jsonl"));

@@ -40,7 +40,12 @@ interface EngineState {
   /** 乐观设置暂停态（暂停/继续命令不会立即回推汇总事件，需前端即时反映）。 */
   setPaused: (paused: boolean) => void;
   setCurrentBatch: (batchId: number | null) => void;
-  loadBatchTasks: (batchId: number, statusGroup?: string | null) => Promise<void>;
+  /**
+   * 拉任务列表。`batchId = null` = 全部批次，这是现在唯一的用法：
+   * 批次不再是可切换的对象（v0.21.0），任务队列答的是「现在还有哪些活」。
+   */
+  loadBatchTasks: (batchId: number | null, statusGroup?: string | null) => Promise<void>;
+  dropTasks: (ids: number[]) => void;
   /** 刷新废纸篓徽章计数（切页/清理后调用；非轮询）。 */
   refreshBadgeCounts: () => Promise<void>;
 }
@@ -85,7 +90,8 @@ export const useEngineStore = create<EngineState>((set) => ({
         set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } })),
       onStatus: (p) =>
         set((s) => {
-          if (p.batchId !== s.currentBatchId) return {};
+          // currentBatchId 为 null = 正在看全部批次，任何批次的状态变化都要镜像进来。
+          if (s.currentBatchId !== null && p.batchId !== s.currentBatchId) return {};
           return {
             tasks: s.tasks.map((t) =>
               t.id === p.taskId
@@ -120,6 +126,9 @@ export const useEngineStore = create<EngineState>((set) => ({
     const tasks = await unwrap(commands.listTasks(batchId, statusGroup ?? null, null));
     set({ currentBatchId: batchId, tasks });
   },
+
+  /** 清掉某几个任务的本地镜像（批量中止/删除之后立刻生效，不必等重拉）。 */
+  dropTasks: (ids) => set((s) => ({ tasks: s.tasks.filter((t) => !ids.includes(t.id)) })),
 
   refreshBadgeCounts: async () => {
     try {

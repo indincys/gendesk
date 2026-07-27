@@ -56,6 +56,15 @@ export function V2vInspector({
   const video = assetSrc(c.videoPath);
   const frame = assetSrc(c.thumbPath);
   const hint = hintFor(row);
+  /**
+   * 还没有成片时（待改写/待提交/已提交）直接显示**首帧原图**，而不是一块
+   * 「尚无成片」的空占位。
+   *
+   * 这几个阶段人在这一栏要做的事恰恰都要看那张图：判断改写出来的运镜配不配得上它、
+   * 决定要不要放行提交。而空占位既没有信息、又占掉这一栏最大的一块地方。
+   * 有片子的时候仍然默认放片子——那时要判的是「动起来之后还对不对」。
+   */
+  const showFrame = (showFirstFrame || !video) && !!frame;
 
   return (
     <div className="vinsp sc">
@@ -73,13 +82,10 @@ export function V2vInspector({
 
       {/* 小窗默认 9:16 竖幅 —— 出的片子基本都是竖版，横幅画框会把它压成中间一条，
           左右两大块全是黑边，而这一栏的宽度本来就只有 268px，浪费不起。 */}
-      {showFirstFrame ? (
+      {showFrame ? (
         <div className="vstage pt mt8">
-          {frame ? (
-            <img src={frame} alt="首帧原图" className="vstageimg" />
-          ) : (
-            <span className="vstagenote">首帧原图不可用</span>
-          )}
+          <img src={frame} alt="首帧原图" className="vstageimg" />
+          {!video && <span className="vstagetag">首帧原图</span>}
         </div>
       ) : video ? (
         // 循环 + 静音自动播放：验收判的是「动起来之后还对不对」，
@@ -92,7 +98,7 @@ export function V2vInspector({
           </span>
         </div>
       )}
-      {(c.width != null || c.durationSec != null) && !showFirstFrame && (
+      {(c.width != null || c.durationSec != null) && !showFrame && (
         <div className="fs10 t3 mt5">
           {c.width}×{c.height}
           {c.durationSec != null && ` · ${c.durationSec.toFixed(1)}s`}
@@ -103,9 +109,10 @@ export function V2vInspector({
       <div className="fx gap6 mt6">
         <button
           type="button"
-          className={cn("btn xs f1", showFirstFrame && "pri")}
+          className={cn("btn xs f1", showFrame && "pri")}
           onClick={onToggleFrame}
-          disabled={!frame}
+          // 没有成片时首帧本来就在显示，切不出别的东西来。
+          disabled={!frame || !video}
         >
           <ImageIcon className="ic12" />
           对照首帧 <span className="kh">F</span>

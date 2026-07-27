@@ -18,11 +18,9 @@ export type {
   DataDirInfo,
   CreateBatchInput,
   FrontendErrorPayload,
-  GroupStat,
   GroupView,
   PackSummary,
   ProductionOverview,
-  PromptStat,
   PurposeView,
   ImportPreview,
   ImportPreviewGroup,
@@ -123,12 +121,11 @@ export type {
   SubmitPreview,
   MaterializeSummary,
   IngestSummary,
-  PurposeBackfill,
-  PurposeHit,
   // 生图工单收件（Claude Code / Codex 投单）
   IntakeSettings,
   IntakeChanged,
   JobView,
+  JobPreview,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */

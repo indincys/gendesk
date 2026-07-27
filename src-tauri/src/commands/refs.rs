@@ -333,6 +333,7 @@ async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
             title: None,
             source_label: "手动删除".into(),
             file_paths,
+            payload_json: None,
         },
     )
     .await?;

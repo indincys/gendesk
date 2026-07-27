@@ -159,6 +159,165 @@ pub async fn retry_intake_job(
     scan_intake_now(state, app).await
 }
 
+// ───────────────────────── 开跑前的可视化确认 ─────────────────────────
+
+/// 一份待确认工单的完整对应关系（提示词组 ↔ 参考图 ↔ 参数）。
+///
+/// **存在的理由**：超阈值的工单是自动收录链路上唯一一处「停下来等人点头」的地方，
+/// 而在此之前那句「XX 张，去设置页确认」并不足以让人做出判断 —— 真正要看的是
+/// **哪个组配了哪几张图**。配错的代价是整批图跑出来全是错的，且要到验收时才发现，
+/// 那时钱已经花完了。所以这里给的是生成页那张「已经挂好靠」的图，而不是一个数字。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPreview {
+    pub id: i64,
+    pub job_id: String,
+    pub dir_name: String,
+    /// 工单目录绝对路径（「在访达里打开」用）。
+    pub dir: String,
+    pub groups: Vec<JobPreviewGroup>,
+    pub task_count: i64,
+    pub batch_count: i64,
+    /// 当前阈值（前端说明「超过它才要确认」）。
+    pub threshold: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPreviewGroup {
+    pub name: String,
+    pub prefix: Option<String>,
+    pub purposes: Vec<String>,
+    /// 本组全部提示词正文（人要能逐条读，不只是数一个条数）。
+    pub prompts: Vec<String>,
+    /// 挂靠到本组的参考图。
+    pub refs: Vec<JobPreviewRef>,
+    /// 本组生效的参数快照与实际进 multipart 的字段。
+    pub params_json: String,
+    pub wire_json: String,
+    pub draws: i64,
+    pub task_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPreviewRef {
+    pub file_name: String,
+    /// 内联 data: URI 缩略图。
+    ///
+    /// **不能走 asset 协议**：它的 scope 限定在 `$APPDATA/$APPLOCALDATA/$PICTURE`，
+    /// 而工单目录在交接根下（默认 `~/GenDesk交接/`）。为了给一张预览图去放宽
+    /// 整个应用的文件读取范围，代价与收益完全不成比例。
+    pub thumb_data_uri: Option<String>,
+}
+
+/// 预览一份待确认工单。**只读**：与真正收录走的是同一个 `intake::plan`，
+/// 故这里看见的对应关系就是确认之后会发生的那一份，不存在两套解析各说各话。
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_intake_job(state: State<'_, AppState>, id: i64) -> AppResult<JobPreview> {
+    let job = repo::get(&state.db, id).await?;
+    let s = load_settings(&state.db).await?;
+    let dir = intake::pending_dir(&s.root_path()).join(&job.dir_name);
+    if !dir.is_dir() {
+        return Err(AppError::InvalidInput(format!(
+            "工单目录已不在：{}",
+            dir.display()
+        )));
+    }
+    // 解析 + 读图都是纯 IO/CPU，别占着 IPC 的异步执行器。
+    let threshold = s.task_threshold;
+    let job_id = job.job_id.clone();
+    let dir_name = job.dir_name.clone();
+    tokio::task::spawn_blocking(move || build_preview(id, &job_id, &dir_name, &dir, threshold))
+        .await
+        .map_err(|e| AppError::Internal(format!("预览工单失败：{e}")))?
+}
+
+fn build_preview(
+    id: i64,
+    job_id: &str,
+    dir_name: &str,
+    dir: &std::path::Path,
+    threshold: i64,
+) -> AppResult<JobPreview> {
+    let plan = intake::plan(dir, dir_name).map_err(AppError::InvalidInput)?;
+    let groups = plan
+        .groups
+        .iter()
+        .map(|g| JobPreviewGroup {
+            name: g.parsed.name.clone(),
+            prefix: g.parsed.prefix.clone(),
+            purposes: g
+                .parsed
+                .tags
+                .iter()
+                .filter(|t| crate::purpose::is_purpose(t))
+                .cloned()
+                .collect(),
+            prompts: g.parsed.prompts.iter().map(|p| p.text.clone()).collect(),
+            refs: g
+                .refs
+                .iter()
+                .map(|p| JobPreviewRef {
+                    file_name: p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    thumb_data_uri: preview_thumb(p),
+                })
+                .collect(),
+            params_json: g.params_json.clone(),
+            wire_json: g.wire_json.clone(),
+            draws: g.draws,
+            task_count: g.task_count(),
+        })
+        .collect();
+    Ok(JobPreview {
+        id,
+        job_id: job_id.to_string(),
+        dir_name: dir_name.to_string(),
+        dir: dir.to_string_lossy().to_string(),
+        groups,
+        task_count: plan.task_count(),
+        batch_count: plan.batch_count() as i64,
+        threshold,
+    })
+}
+
+/// 预览缩略图长边像素。够看清「是不是这张图」，又不至于让一份 30 张图的工单
+/// 把几十 MB base64 塞进一次 IPC 回包。
+const PREVIEW_EDGE: u32 = 240;
+
+/// 参考图 → `data:image/jpeg;base64,…`。读不出来就返回 None（前端画占位框）——
+/// 一张图预览失败不该让整份确认卡打不开。
+fn preview_thumb(path: &std::path::Path) -> Option<String> {
+    use base64::Engine as _;
+    use image::codecs::jpeg::JpegEncoder;
+
+    let img = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
+        .to_rgb8();
+    let mut buf: Vec<u8> = Vec::new();
+    JpegEncoder::new_with_quality(&mut buf, 72)
+        .encode(
+            &img,
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&buf)
+    ))
+}
+
 /// 确认开跑一份超阈值的工单。
 ///
 /// 做的事就两件：**在工单目录里写下 `确认.txt`**，然后删掉台账那行让它重新收录。

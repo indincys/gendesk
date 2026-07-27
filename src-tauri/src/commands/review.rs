@@ -29,6 +29,10 @@ pub struct ReviewItemView {
     /// 参考图缩略图/原图（E08 大图对比）。
     pub ref_thumb_path: Option<String>,
     pub ref_image_path: Option<String>,
+    /// 结果图真实像素（0027）。验收页按真实比例排版，行高在渲染前就要算得出来 ——
+    /// 等图片加载完再量，每张图落地都会把它下面的行往下顶一次，滚动时就是持续抖动。
+    pub result_width: Option<i64>,
+    pub result_height: Option<i64>,
 }
 
 /// 验收结果。
@@ -48,7 +52,8 @@ pub struct AcceptResult {
 const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref_name,
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
         k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
-        r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path
+        r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path,
+        t.result_width, t.result_height
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
@@ -76,7 +81,51 @@ pub async fn list_pending_review(
     if let Some(b) = bind {
         q = q.bind(b);
     }
-    Ok(q.fetch_all(&state.db).await?)
+    let mut rows = q.fetch_all(&state.db).await?;
+    backfill_sizes(&state.db, &mut rows).await;
+    Ok(rows)
+}
+
+/// 补齐 0027 之前生成的结果图像素，并写回库里（补一次，此后不再算）。
+///
+/// 读的是**缩略图**而不是原图：比例一样，而缩略图小两个数量级；且
+/// `image_dimensions` 只读文件头，不解码像素。拿不到就留 None ——
+/// 前端对 None 用一个中性比例兜底，绝不为了排版去猜一个假尺寸。
+async fn backfill_sizes(pool: &sqlx::SqlitePool, rows: &mut [ReviewItemView]) {
+    let todo: Vec<(i64, String)> = rows
+        .iter()
+        .filter(|r| r.result_width.is_none() || r.result_height.is_none())
+        .filter_map(|r| {
+            r.result_thumb_path
+                .clone()
+                .or_else(|| r.result_image_path.clone())
+                .map(|p| (r.id, p))
+        })
+        .collect();
+    if todo.is_empty() {
+        return;
+    }
+    // 纯 IO/CPU，别占着 IPC 的异步执行器（同 v0.14.0 ingest_one 那次的教训）。
+    let measured = tokio::task::spawn_blocking(move || {
+        todo.into_iter()
+            .filter_map(|(id, path)| {
+                image::image_dimensions(&path)
+                    .ok()
+                    .map(|(w, h)| (id, w as i64, h as i64))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    for (id, w, h) in measured {
+        if let Some(r) = rows.iter_mut().find(|r| r.id == id) {
+            r.result_width = Some(w);
+            r.result_height = Some(h);
+        }
+        // 写回失败不影响本次显示，下次再补。
+        let _ = task_repo::set_result_size(pool, id, w, h).await;
+    }
 }
 
 /// 验收通过内部承载。
@@ -177,6 +226,10 @@ pub async fn accept_tasks(
                 group_id: row.group_id,
                 ref_image_id: row.ref_image_id,
                 batch_id: row.batch_id,
+                // 编号与组名当场存成快照（0027）：提示词是消耗品，批次跑完就随批次删掉，
+                // 现读 JOIN 的话作品会在那一刻丢掉自己的身份。
+                prompt_code: row.prompt_code.clone(),
+                group_name: row.group_name.clone(),
             },
         )
         .await?;
@@ -229,6 +282,8 @@ pub async fn accept_tasks(
         // 验收改变了任务态：补发批次汇总，驱动侧栏「待验收」徽章即时更新。
         state.engine.emit_summary(*b).await;
     }
+    // 汇总发完之后再退休：先删批次会让上面那句 emit 对着一个已经不存在的批次算数。
+    crate::commands::batches::retire_batches_quietly(&state.db).await;
     promoted.dedup();
     Ok(AcceptResult {
         accepted,
@@ -281,6 +336,7 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
                 title: row.prompt_title.clone(),
                 source_label: "验收未通过".into(),
                 file_paths,
+                payload_json: None,
             },
         )
         .await?;
@@ -298,6 +354,9 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
         // 验收改变了任务态：补发批次汇总，驱动侧栏「待验收」徽章即时更新。
         state.engine.emit_summary(*b).await;
     }
+    // 这里通常**不会**真的退休任何批次：刚判的这几条正躺在废纸篓里等着「误删可还原」，
+    // 而那正是退休条件里的第二条。等废纸篓清干净了才轮到它。
+    crate::commands::batches::retire_batches_quietly(&state.db).await;
     Ok(rejected)
 }
 

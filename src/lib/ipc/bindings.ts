@@ -359,62 +359,6 @@ async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
 }
 },
 /**
- * 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
- * 自动从分组名生成唯一前缀（号池按前缀发放）。
- */
-async createPromptGroup(name: string) : Promise<Result<GroupView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_prompt_group", { name }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 重命名分组（E20，前缀/编号不变）。
- */
-async renamePromptGroup(id: number, name: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rename_prompt_group", { id, name }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 归档 / 取消归档分组（0016）。批次开跑后由 `engine::create_batch` 自动归档；
- * 此命令供库页手动恢复（或手动归档一个用不上的旧组）。
- */
-async setPromptGroupArchived(id: number, archived: boolean) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_prompt_group_archived", { id, archived }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 设置分组的受控「用途」，返回该组的最终标签集合。
- * 
- * 标签此前只有导入 txt 里写 `标签: xxx` 一条写入路径——而实测用户的 txt 从不带任何语法标记
- * （v0.12.0 的形态推断就是为此而生），于是全库 tags 表长期一条记录都没有：机制建好了，
- * 但入口只开在一个没人走的地方。此命令补上第二条、也是实际会走的那条路径。
- * 
- * **只替换用途标签，保留该组从 txt 导入的自由标签**：用途选择器不该顺手抹掉用户
- * 在 txt 里写的 `标签: 白底,3C`。
- * 
- * 取值在此**强制校验**，不只靠 UI 只给选择器：命令是公开边界，一旦放进自由字符串，
- * 「图生视频 / 图转视频 / v2v」三种拼法就会同时进库，下游按名字筛选各漏一半。
- */
-async setPromptGroupPurposes(id: number, purposes: string[]) : Promise<Result<string[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_prompt_group_purposes", { id, purposes }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
  */
 async listPurposes() : Promise<Result<PurposeView[], AppError>> {
@@ -425,126 +369,9 @@ async listPurposes() : Promise<Result<PurposeView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
- * 
- * 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
- * `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
- * `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
- * 而不补就等于「验收自动入队」对全部历史资产失效。
- * 
- * **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
- */
-async backfillGroupPurposes(apply: boolean) : Promise<Result<PurposeBackfill, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("backfill_group_purposes", { apply }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
- * 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
- */
-async deletePromptGroup(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_prompt_group", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 合并分组（E20）：`fromId` 并入 `intoId`，编号前缀保留原值不重编。
- */
-async mergePromptGroups(fromId: number, intoId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("merge_prompt_groups", { fromId, intoId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批量移动提示词到指定分组（E20 单条 / E36 批量；编号前缀保留原值不重编）。
- */
-async movePromptsToGroup(ids: number[], groupId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("move_prompts_to_group", { ids, groupId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批量设置收藏（E36）。favorite=true 收藏，false 取消。
- */
-async setPromptsFavorite(ids: number[], favorite: boolean) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_prompts_favorite", { ids, favorite }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批量删除提示词 → 入废纸篓（E36；编号在清理时回收）。
- */
-async trashPrompts(ids: number[]) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trash_prompts", { ids }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async listPrompts(groupId: number) : Promise<Result<PromptView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_prompts", { groupId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async searchPrompts(query: string) : Promise<Result<PromptView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("search_prompts", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getPrompt(id: number) : Promise<Result<PromptView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_prompt", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updatePromptText(id: number, text: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_prompt_text", { id, text }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async togglePromptFavorite(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("toggle_prompt_favorite", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 删除提示词 → 进废纸篓（编号在清理时回收）。
- */
-async trashPrompt(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trash_prompt", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -618,43 +445,13 @@ async estimateTaskSeconds() : Promise<Result<number | null, AppError>> {
 }
 },
 /**
- * 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。
- * 在途（run/retry）任务不受影响，会自行跑完。返回取消数。
+ * 在系统文件管理器打开输出根目录 `outputs/`（验收通过的图按 `{批次}/{分组}/` 落在里面）。
+ * 
+ * 取代了原来那个「打开本批输出目录」——批次已经不是可点的对象，而人还是要能拿到文件。
  */
-async cancelBatchPending(batchId: number) : Promise<Result<number, AppError>> {
+async openOutputsDir() : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_batch_pending", { batchId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listBatches() : Promise<Result<BatchView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_batches") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 读取某批次的挂靠与参数快照（E07 再来一批）。只返回未删除的参考图与仍存在的分组，
- * 保证还原到生成页后可直接创建新批次。
- */
-async getBatchConfig(batchId: number) : Promise<Result<BatchConfig, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_batch_config", { batchId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批次备注命名（E10）。空串清除备注。
- */
-async renameBatch(batchId: number, note: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rename_batch", { batchId, note }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_outputs_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -677,21 +474,13 @@ async resumeQueue() : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 在系统文件管理器打开某批次的输出目录（E15）：`outputs/{batch_id}`。
- * 目录不存在（尚无通过作品）时先创建，避免打开失败。
+ * 列出任务，可按 5 视觉组筛选：all/pending/running/failed/review/done。
+ * 
+ * `batch_id = None` = **全部批次**，这是现在的常态：批次不再是可切换的对象
+ * （v0.21.0），任务队列答的是「现在还有哪些活」而不是「第 N 批做到哪了」。
+ * 批次内保持生成序，批次之间新的在前——与验收页、作品库同一排序。
  */
-async openBatchOutputDir(batchId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_batch_output_dir", { batchId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 列出某批次任务，可按 5 视觉组筛选：all/pending/running/failed/review/done。
- */
-async listTasks(batchId: number, statusGroup: string | null, page: number | null) : Promise<Result<TaskView[], AppError>> {
+async listTasks(batchId: number | null, statusGroup: string | null, page: number | null) : Promise<Result<TaskView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_tasks", { batchId, statusGroup, page }) };
 } catch (e) {
@@ -719,12 +508,12 @@ async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, 
 }
 },
 /**
- * 重试某批次全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
- * 应走「改词重试」E34 单独处理）。
+ * 重试全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
+ * 应走「改词重试」E34 单独处理）。跨全部批次，不再按批次划范围。
  */
-async retryFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
+async retryFailedTasks() : Promise<Result<number, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_failed_tasks", { batchId }) };
+    return { status: "ok", data: await TAURI_INVOKE("retry_failed_tasks") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -743,11 +532,48 @@ async deleteTask(id: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 删除某批次全部失败任务（批量「不需要了」）。返回删除数。
+ * 批量删除所选。生成中/重试中的任务拒绝删除（与在途 worker 抢同一行会让那份图
+ * 谁也找不到），计入 skipped。
  */
-async deleteFailedTasks(batchId: number) : Promise<Result<number, AppError>> {
+async deleteTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_failed_tasks", { batchId }) };
+    return { status: "ok", data: await TAURI_INVOKE("delete_tasks", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量中止所选：只掐掉**还没开跑**的排队任务。
+ * 
+ * 已经发出去的请求中止不了——钱在请求发出的那一刻就花了，硬把行删掉只会让结果
+ * 回来时无处可写。故在途任务一律计入 skipped 并如实说明，而不是假装中止成功。
+ */
+async cancelTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_tasks", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 批量重试所选（任务队列的「重试所选」）。生成中/排队中的任务不参与，计入 skipped。
+ */
+async retryTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_tasks", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 删除全部失败任务（批量「不需要了」）。跨全部批次。返回删除数。
+ */
+async deleteFailedTasks() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_failed_tasks") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -966,6 +792,18 @@ async scanIntakeNow() : Promise<Result<JobView[], AppError>> {
 async retryIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("retry_intake_job", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 预览一份待确认工单。**只读**：与真正收录走的是同一个 `intake::plan`，
+ * 故这里看见的对应关系就是确认之后会发生的那一份，不存在两套解析各说各话。
+ */
+async previewIntakeJob(id: number) : Promise<Result<JobPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_intake_job", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1359,19 +1197,11 @@ async removeV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
 }
 },
 /**
- * 各分组产出统计（E25）。按当前 prompts.group_id 归属（提示词移组后随之变化）。
+ * 在系统文件管理器打开成片交付目录 `outputs/视频/`。
  */
-async listGroupStats() : Promise<Result<GroupStat[], AppError>> {
+async openClipsOutputDir() : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_group_stats") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async promptStats(promptId: number) : Promise<Result<PromptStat, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("prompt_stats", { promptId }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_clips_output_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1388,6 +1218,27 @@ async productionOverview() : Promise<Result<ProductionOverview, AppError>> {
 async listTrash() : Promise<Result<TrashItemView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_trash") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从废纸篓还原回原位（误删撤回）。
+ * 
+ * 五类实体走两条路：
+ * - **task / prompt / ref / clip** —— 行一直都在，删除只是把状态拨到了一边，
+ * 还原就是把它拨回来（未通过 → 回待验收；提示词 → 回 active；参考图 → 清删除戳）。
+ * - **work** —— 作品是唯一「删除即真删行」的实体（accepted_works 没有 deleted_at），
+ * 靠 0027 的 `payload_json` 整行写回，连 id 一起（v2v_clips.work_id 是不设 FK 的锚点，
+ * 换个新 id 等于把那条视频认领给了别人）。
+ * 
+ * 还原**不删** trash 行以外的任何东西，也不动文件：未通过的原图本来就还在盘上
+ * （E02 决定的：reject 只是记账，物理删要等「彻底删除/清空」）。这正是它能还原的前提。
+ */
+async restoreTrashItems(ids: number[]) : Promise<Result<RestoreResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_trash_items", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2351,14 +2202,6 @@ export type BackupProgress = { done: number; total: number;
  */
 phase: string }
 /**
- * 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
- */
-export type BatchConfig = { 
-/**
- * 参考图 → 提示词组挂靠（仅保留当前仍存在的参考图与分组）。
- */
-refs: RefMappingInput2[]; paramsJson: string }
-/**
  * `batch://summary`（250ms 节流）
  */
 export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcurrency: number; paused: boolean; 
@@ -2366,23 +2209,16 @@ export type BatchSummary = { batchId: number; counts: SummaryCounts; activeConcu
  * 自动暂停原因（E05 全局熔断）；None = 非自动暂停或运行中。
  */
 autoPauseReason: string | null }
+/**
+ * 建批回执。**批次不再是一个可管理的对象**（v0.21.0）：它没有列表、没有切换器、
+ * 没有重命名，也不能「按此配置再来一批」——跑完就退出历史（`retire_resolved_batches`）。
+ * 剩下的只是「这一次点下去产生了什么」，故这个结构只回答那一句。
+ */
 export type BatchView = { id: number; createdAt: number; status: string; taskCount: number; 
 /**
- * 批次生效的生成参数快照（E16 / D1），任务页可回查。
+ * 批次生效的生成参数快照（E16 / D1）。
  */
-paramsJson: string; 
-/**
- * 批次备注名（E10）；None = 未命名。
- */
-note: string | null; 
-/**
- * 首张产出缩略图（E10 批次切换器预览）。
- */
-firstThumbPath: string | null; 
-/**
- * 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
- */
-requestCount: number }
+paramsJson: string }
 export type BriefView = { today: string; 
 /**
  * 昨日。
@@ -2400,6 +2236,13 @@ unclaimed: number;
  * 跑道告警的 SKU 数（素材 ≤ 7 天见底）。
  */
 runwayWarn: number }
+/**
+ * 批量操作回执：做成了几个、跳过了几个。
+ * 
+ * **跳过必须报出来**，不能只报成功数：中止/删除会静默放过在途任务，
+ * 而「我选了 30 个，怎么只没了 22 个」如果没人解释，下一步就是再点一次。
+ */
+export type BulkTaskResult = { affected: number; skipped: number }
 export type CalendarDay = { date: string; 
 /**
  * 实发数（台账）。
@@ -2458,7 +2301,12 @@ autoSubmitted: boolean;
  * 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
  * 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
  */
-assetPackId: number | null; inAssetLib: boolean; acceptedAt: number; updatedAt: number }
+assetPackId: number | null; inAssetLib: boolean; 
+/**
+ * 验收通过后交付到 `outputs/视频/{组}/` 的那份拷贝（0027）。
+ * 成片页据此回答「这条片子在哪」——clips/clip{id}.mp4 那个名字人在 Finder 里认不出。
+ */
+exportPath: string | null; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -2602,22 +2450,6 @@ source: string | null;
  * 关联任务 ID（若发生在任务上下文），用于全链路贯穿。
  */
 taskId: string | null }
-/**
- * 单个分组的产出统计（E25 分组卡片合格率）。
- */
-export type GroupStat = { groupId: number; 
-/**
- * 已产出图的去重组合数（分母）。
- */
-combos: number; 
-/**
- * 通过图覆盖的去重组合数（分子）。
- */
-passed: number; 
-/**
- * 累计通过作品数。
- */
-works: number }
 /**
  * 分组视图（生成页 / 提示词库列表）。
  */
@@ -2793,6 +2625,45 @@ root?: string;
  * 被绕过；而「超过多少张就得问一句」是花钱的闸门，必须是机制而不是自觉。
  */
 taskThreshold?: number }
+/**
+ * 一份待确认工单的完整对应关系（提示词组 ↔ 参考图 ↔ 参数）。
+ * 
+ * **存在的理由**：超阈值的工单是自动收录链路上唯一一处「停下来等人点头」的地方，
+ * 而在此之前那句「XX 张，去设置页确认」并不足以让人做出判断 —— 真正要看的是
+ * **哪个组配了哪几张图**。配错的代价是整批图跑出来全是错的，且要到验收时才发现，
+ * 那时钱已经花完了。所以这里给的是生成页那张「已经挂好靠」的图，而不是一个数字。
+ */
+export type JobPreview = { id: number; jobId: string; dirName: string; 
+/**
+ * 工单目录绝对路径（「在访达里打开」用）。
+ */
+dir: string; groups: JobPreviewGroup[]; taskCount: number; batchCount: number; 
+/**
+ * 当前阈值（前端说明「超过它才要确认」）。
+ */
+threshold: number }
+export type JobPreviewGroup = { name: string; prefix: string | null; purposes: string[]; 
+/**
+ * 本组全部提示词正文（人要能逐条读，不只是数一个条数）。
+ */
+prompts: string[]; 
+/**
+ * 挂靠到本组的参考图。
+ */
+refs: JobPreviewRef[]; 
+/**
+ * 本组生效的参数快照与实际进 multipart 的字段。
+ */
+paramsJson: string; wireJson: string; draws: number; taskCount: number }
+export type JobPreviewRef = { fileName: string; 
+/**
+ * 内联 data: URI 缩略图。
+ * 
+ * **不能走 asset 协议**：它的 scope 限定在 `$APPDATA/$APPLOCALDATA/$PICTURE`，
+ * 而工单目录在交接根下（默认 `~/GenDesk交接/`）。为了给一张预览图去放宽
+ * 整个应用的文件读取范围，代价与收益完全不成比例。
+ */
+thumbDataUri: string | null }
 /**
  * 工单收录结果（事件与设置页列表共用）。
  */
@@ -3001,10 +2872,6 @@ acceptedToday: number;
  */
 requestsToday: number }
 /**
- * 单条提示词的产出统计（E25 提示词详情）。
- */
-export type PromptStat = { works: number; combos: number; passed: number }
-/**
  * 提示词视图（编号网格 / 详情）。
  */
 export type PromptView = { id: number; groupId: number; code: string; title: string | null; text: string; favorite: boolean; edited: boolean }
@@ -3097,22 +2964,6 @@ schedulePaused?: boolean }
  * 设置补丁（部分更新）。
  */
 export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; dedupDays: number | null; receiptTimeoutHours: number | null; autogenTime: string | null; warnMaterial: number | null; warnTitle: number | null; warnBody: number | null; accountDailyLimitDefault: number | null; minGapMinutes: number | null; platformMatrix: PlatformMatrix | null; tierRules: TierRules | null; timeSlots: string[] | null; archiveRetentionDays: number | null; schedulePaused: boolean | null }
-/**
- * 批量补标结果。`apply=false` 时只预览（applied=0）。
- */
-export type PurposeBackfill = { hits: PurposeHit[]; applied: number; 
-/**
- * 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
- */
-scanned: number }
-/**
- * 按组名批量补标用途的一条命中。
- */
-export type PurposeHit = { groupId: number; name: string; 
-/**
- * 该组下已验收通过的作品数（让人判断这一条值不值得标）。
- */
-workCount: number; purposes: string[] }
 /**
  * 一个用途选项（前端选择器渲染源）。
  */
@@ -3239,10 +3090,6 @@ phase: string;
 failed: number }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
 /**
- * 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
- */
-export type RefMappingInput2 = { refImageId: number; promptGroupId: number }
-/**
  * 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
  */
 export type RefScanItem = { path: string; name: string; duplicate: boolean; 
@@ -3273,13 +3120,26 @@ creditPerSec: number }
  */
 export type RescanResult = { ingested: number; unclaimed: number; failed: number }
 /**
+ * 还原回执：还原了几条、几条还不回去（连同原因）。
+ */
+export type RestoreResult = { restored: number; 
+/**
+ * 还不回去的那几条为什么还不回去。空 = 全部成功。
+ */
+failures: string[] }
+/**
  * 待验收项视图。
  */
 export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
 /**
  * 参考图缩略图/原图（E08 大图对比）。
  */
-refThumbPath: string | null; refImagePath: string | null }
+refThumbPath: string | null; refImagePath: string | null; 
+/**
+ * 结果图真实像素（0027）。验收页按真实比例排版，行高在渲染前就要算得出来 ——
+ * 等图片加载完再量，每张图落地都会把它下面的行往下顶一次，滚动时就是持续抖动。
+ */
+resultWidth: number | null; resultHeight: number | null }
 /**
  * 即梦会话（`--session` 的可选值）。
  */
@@ -3586,7 +3446,12 @@ export type TrashItemView = { id: number; entityType: string; code: string | nul
 /**
  * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
  */
-imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number }
+imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number; 
+/**
+ * 能不能还原回原位。只有 0027 之前删掉的作品是 false（没留整行快照，还不回去），
+ * 其余四类的行一直都在，还原就是把状态拨回来。
+ */
+restorable: boolean }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null; 
 /**
  * None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。

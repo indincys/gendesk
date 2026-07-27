@@ -68,8 +68,10 @@ pub struct ClipRow {
     /// 那个素材包**现在还在不在**（包被退役删除后应回落成「尚未入库」）。
     /// SQLite 的 EXISTS 回 0/1，故用 i64 承接。
     pub in_asset_lib: i64,
+    /// 验收通过后交付到 `outputs/视频/` 的那份拷贝（0027）。有它才答得出「片子在哪」。
+    pub export_path: Option<String>,
     pub updated_at: i64,
-    /// 父图编号（`accepted_works` → `prompts.code`）。
+    /// 父图编号（`accepted_works.prompt_code` 快照）。
     pub prompt_code: String,
     /// 父图（首帧）绝对路径 —— 提交即梦 `--image` 用的就是它。
     pub image_path: String,
@@ -87,14 +89,13 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at,
         c.auto_submitted, c.asset_pack_id,
         EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id) AS in_asset_lib,
-        c.updated_at,
-        COALESCE(p.code,'') AS prompt_code,
+        c.export_path, c.updated_at,
+        COALESCE(w.prompt_code,'') AS prompt_code,
         COALESCE(w.image_path,'') AS image_path,
         COALESCE(w.thumb_path,'') AS thumb_path,
         COALESCE(w.accepted_at,0) AS accepted_at
     FROM v2v_clips c
-    LEFT JOIN accepted_works w ON w.id = c.work_id
-    LEFT JOIN prompts p ON p.id = w.prompt_id";
+    LEFT JOIN accepted_works w ON w.id = c.work_id";
 
 /// 入队一条（幂等）。已存在同 work 的条目 → 返回 false 不改动。
 ///
@@ -462,6 +463,24 @@ pub async fn set_reviewed(
     .execute(pool)
     .await?;
     Ok(res.rows_affected() > 0)
+}
+
+/// 记下（或清掉）交付拷贝的路径（0027）。
+///
+/// 与 `set_reviewed` 分开而不是塞进同一条 UPDATE：拷贝是**文件操作**，它可能失败
+/// （盘满、目标被占用），而那不该让「这一条已经通过验收」这个判定跟着回滚。
+/// 通过了但没拷成，是一条可以事后补的记录；判定丢了才是真丢东西。
+pub async fn set_export_path(
+    pool: &SqlitePool,
+    id: i64,
+    path: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE v2v_clips SET export_path = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(path)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 重跑同提示词：rev/rej/fail → ready，清掉上一轮的成片引用。
@@ -909,8 +928,8 @@ mod tests {
         sqlx::query("INSERT OR IGNORE INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
         sqlx::query("INSERT OR IGNORE INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (1,1,'GG-0001','t','active','library',0,0)").execute(pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at)
-             VALUES (?1,'/img.jpg','/thumb.jpg',1,'原文',1,7,100)",
+            "INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at,prompt_code,group_name)
+             VALUES (?1,'/img.jpg','/thumb.jpg',1,'原文',1,7,100,'GG-0001','g')",
         )
         .bind(work_id)
         .execute(pool)

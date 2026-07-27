@@ -232,22 +232,46 @@ pub async fn mark_running(pool: &SqlitePool, id: i64, api_key_id: i64) -> Result
     Ok(())
 }
 
+/// 落盘完成 → 待验收。`size` 是结果图的真实像素（0027）：验收页按真实比例排版，
+/// 而比例必须在渲染**之前**就知道，否则每张图加载完都会把下面的行往下顶一次。
+/// 拿不到（解码失败）就存 NULL，由验收页读缩略图文件头补齐。
 pub async fn mark_review(
     pool: &SqlitePool,
     id: i64,
     result_image_path: &str,
     result_thumb_path: &str,
+    size: Option<(u32, u32)>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE tasks SET status = 'rev', result_image_path = ?2, result_thumb_path = ?3,
+            result_width = ?5, result_height = ?6,
             error_type = NULL, error_message = NULL, updated_at = ?4 WHERE id = ?1",
     )
     .bind(id)
     .bind(result_image_path)
     .bind(result_thumb_path)
     .bind(now_unix())
+    .bind(size.map(|(w, _)| w as i64))
+    .bind(size.map(|(_, h)| h as i64))
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// 补写结果像素（0027 之前生成的历史任务）。只在读到过一次之后写回，之后不再重算。
+pub async fn set_result_size(
+    pool: &SqlitePool,
+    id: i64,
+    w: i64,
+    h: i64,
+) -> Result<(), sqlx::Error> {
+    // 不动 updated_at：这是补一条早就该有的元数据，不是任务本身发生了什么。
+    sqlx::query("UPDATE tasks SET result_width = ?2, result_height = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(w)
+        .bind(h)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -343,6 +367,175 @@ pub async fn cancel_pending(pool: &SqlitePool, batch_id: i64) -> Result<i64, sql
         .await?
         .rows_affected();
     Ok(n as i64)
+}
+
+/// 按 id 批量删除处于指定状态的任务；返回 (删除数, 涉及的批次 id)。
+///
+/// 「中止」传 `["q"]`（只掐掉还没开跑的），「删除」传除 run/retry 外的全部状态。
+/// **run/retry 一律不动**：与在途 worker 抢同一行会让它把结果写进一条已经不存在的任务，
+/// 而那份图就此谁也找不到（`delete_task` 出于同样理由拒绝在途任务）。
+///
+/// 一条 SQL 而不是前端 for 循环发 N 次 IPC：选中 200 个任务时那是 200 次往返，
+/// 中途任何一次失败都会留下一个说不清删到哪儿的中间态。
+pub async fn delete_tasks_where(
+    pool: &SqlitePool,
+    ids: &[i64],
+    statuses: &[&str],
+) -> Result<(i64, Vec<i64>), sqlx::Error> {
+    if ids.is_empty() || statuses.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let id_ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let st_ph = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+    // 先取受影响的批次：删完就查不到了，而调用方要靠它重估归档 + 补发汇总。
+    let sql = format!(
+        "SELECT DISTINCT batch_id FROM tasks WHERE id IN ({id_ph}) AND status IN ({st_ph})"
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for id in ids {
+        q = q.bind(id);
+    }
+    for s in statuses {
+        q = q.bind(*s);
+    }
+    let batches = q.fetch_all(pool).await?;
+
+    let sql = format!("DELETE FROM tasks WHERE id IN ({id_ph}) AND status IN ({st_ph})");
+    let mut q = sqlx::query(&sql);
+    for id in ids {
+        q = q.bind(id);
+    }
+    for s in statuses {
+        q = q.bind(*s);
+    }
+    let n = q.execute(pool).await?.rows_affected() as i64;
+    Ok((n, batches))
+}
+
+/// 按 id 批量回队（fail/retry/rev → q）。返回真正回队的 id（供调用方恢复批次状态）。
+pub async fn requeue_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<i64>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id FROM tasks WHERE id IN ({ph}) AND status IN ('fail','retry','rev','pass','rej')"
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for id in ids {
+        q = q.bind(id);
+    }
+    let hit = q.fetch_all(pool).await?;
+    for id in &hit {
+        // 逐条走 requeue：它另有 pass/rej 不可回队的守卫，绕开它就等于两套规则。
+        requeue(pool, *id).await?;
+    }
+    Ok(hit)
+}
+
+/// 一次退休扫描的账。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetireReport {
+    pub batches: i64,
+    pub prompts: i64,
+    pub groups: i64,
+}
+
+impl RetireReport {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 已了结的批次退出历史，连同它消耗掉的提示词一起删（0027）。
+///
+/// 「提示词是消耗品」这条决定的执行者。一个批次满足两个条件才算了结：
+///
+/// 1. **没有任何任务还悬着** —— 全部落在 pass/rej（或者任务都被删光了）。
+///    `fail` 不算了结：失败的任务还等着人决定重试还是删掉。
+/// 2. **没有本批的未通过结果还躺在废纸篓里** —— 那些行是「误删可还原」的锚点，
+///    批次一删任务就没了，还原按钮会指向一个不存在的任务。所以清空废纸篓
+///    也是触发退休的时机之一。
+///
+/// 删批次会级联带走 tasks / task_attempts / batch_refs（外键 CASCADE），
+/// `accepted_works.task_id` 是 ON DELETE SET NULL，故**作品一张都不掉**。
+///
+/// **编号不回收**。废纸篓清理会把编号还进号池（那是「这条从来没成过」的语义），
+/// 而这里恰恰相反：编号已经印在输出文件名与作品行上，是花掉的。号池按前缀存 next_seq，
+/// 分组删掉也不影响它——同名 txt 再导入一次，前缀一样、编号从上次的下一个继续。
+pub async fn retire_resolved_batches(pool: &SqlitePool) -> Result<RetireReport, sqlx::Error> {
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT b.id FROM batches b
+         WHERE NOT EXISTS (
+                 SELECT 1 FROM tasks t
+                 WHERE t.batch_id = b.id AND t.status NOT IN ('pass','rej'))
+           AND NOT EXISTS (
+                 SELECT 1 FROM trash_items ti JOIN tasks t ON t.id = ti.ref_id
+                 WHERE ti.entity_type = 'task' AND t.batch_id = b.id)",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut report = RetireReport::default();
+    for bid in ids {
+        // 本批消耗掉的分组：以任务实际用到的提示词为准（batch_refs 只是挂靠意图，
+        // 而任务才是真的跑过什么）。必须在删批次之前取——删完就查不到了。
+        let groups: Vec<i64> = sqlx::query_scalar(
+            "SELECT DISTINCT p.group_id FROM tasks t
+             JOIN prompts p ON p.id = t.prompt_id WHERE t.batch_id = ?1",
+        )
+        .bind(bid)
+        .fetch_all(pool)
+        .await?;
+
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM batches WHERE id = ?1")
+            .bind(bid)
+            .execute(&mut *tx)
+            .await?;
+        report.batches += 1;
+
+        for gid in groups {
+            // 只删「再没有任何任务引用、也没在废纸篓里等着还原」的提示词。
+            // 前者挡住还在别的批次里跑的同一组（同一份 txt 可以被跑两次）；
+            // 后者挡住手动删进废纸篓、还等着「还原」的那几条。
+            let n = sqlx::query(
+                "DELETE FROM prompts WHERE group_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.prompt_id = prompts.id)
+                   AND NOT EXISTS (SELECT 1 FROM trash_items ti
+                                   WHERE ti.entity_type = 'prompt' AND ti.ref_id = prompts.id)",
+            )
+            .bind(gid)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected() as i64;
+            report.prompts += n;
+
+            let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prompts WHERE group_id = ?1")
+                .bind(gid)
+                .fetch_one(&mut *tx)
+                .await?;
+            if left == 0 {
+                // tag_bindings 是多态表、没有外键，不手动清就会攒下一堆指向已删分组的绑定，
+                // 而作品库的「用途」判定正是 `EXISTS(tag_bindings … entity_id = w.group_id)`
+                // —— 分组 id 被后来的分组复用时，旧绑定会把用途安到无关的组头上。
+                sqlx::query(
+                    "DELETE FROM tag_bindings WHERE entity_type = 'prompt_group' AND entity_id = ?1",
+                )
+                .bind(gid)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("DELETE FROM prompt_groups WHERE id = ?1")
+                    .bind(gid)
+                    .execute(&mut *tx)
+                    .await?;
+                report.groups += 1;
+            }
+        }
+        tx.commit().await?;
+    }
+    Ok(report)
 }
 
 /// 五视觉组计数（批次汇总）。
@@ -625,5 +818,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 1, "仅失败任务被删，q 保留");
+    }
+
+    // ── 批次退出历史（0027：提示词是消耗品） ────────────────────────────
+
+    async fn count_of(pool: &SqlitePool, table: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// 往废纸篓里塞一条指向某任务的「验收未通过」记录（还原按钮的锚点）。
+    async fn trash_task(pool: &SqlitePool, task_id: i64) {
+        sqlx::query(
+            "INSERT INTO trash_items (entity_type, ref_id, source_label, deleted_at)
+             VALUES ('task', ?1, '验收未通过', 0)",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    // 主路径：全部任务落在 pass/rej 且废纸篓已清 → 批次连同它消耗掉的提示词与分组一起消失，
+    // 而作品一张不掉（accepted_works.task_id 是 ON DELETE SET NULL）。
+    #[tokio::test]
+    async fn resolved_batch_retires_with_its_prompts_but_keeps_works() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 2).await;
+        sqlx::query(
+            "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text,
+                group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name)
+             VALUES (?1,'/o.jpg','/t.jpg',1,'t',1,1,?2,0,'GG-0001','g')",
+        )
+        .bind(ids[0])
+        .bind(bid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_status(&pool, ids[0], "pass").await.unwrap();
+        set_status(&pool, ids[1], "rej").await.unwrap();
+
+        let r = retire_resolved_batches(&pool).await.unwrap();
+        assert_eq!(
+            r,
+            RetireReport {
+                batches: 1,
+                prompts: 1,
+                groups: 1
+            }
+        );
+        assert_eq!(count_of(&pool, "batches").await, 0);
+        assert_eq!(count_of(&pool, "tasks").await, 0, "任务随批次级联删除");
+        assert_eq!(count_of(&pool, "prompts").await, 0, "提示词是消耗品");
+        assert_eq!(count_of(&pool, "prompt_groups").await, 0);
+        assert_eq!(
+            count_of(&pool, "accepted_works").await,
+            1,
+            "作品是长期资产，绝不能跟着上游一起消失"
+        );
+        // 编号**不**回收：它已经印在输出文件名与作品行上，是花掉的。
+        assert_eq!(count_of(&pool, "id_recycled").await, 0);
+    }
+
+    // 未通过的结果还躺在废纸篓里 → 不许退休。删了批次那条任务就没了，
+    // 「还原回待验收」会指向一个不存在的任务，误删从此不可撤回。
+    #[tokio::test]
+    async fn batch_waits_while_its_rejects_sit_in_trash() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 1).await;
+        set_status(&pool, ids[0], "rej").await.unwrap();
+        trash_task(&pool, ids[0]).await;
+
+        assert!(retire_resolved_batches(&pool).await.unwrap().is_empty());
+        assert_eq!(count_of(&pool, "batches").await, 1);
+
+        // 清空废纸篓之后才轮到它。
+        sqlx::query("DELETE FROM trash_items")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retire_resolved_batches(&pool).await.unwrap().batches, 1);
+    }
+
+    // 失败任务不算了结：它还等着人决定重试还是删掉。
+    #[tokio::test]
+    async fn failed_task_keeps_the_batch_alive() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 2).await;
+        set_status(&pool, ids[0], "pass").await.unwrap();
+        set_status(&pool, ids[1], "fail").await.unwrap();
+        assert!(retire_resolved_batches(&pool).await.unwrap().is_empty());
+    }
+
+    // 同一份 txt 可以被跑两次：第一批了结时，第二批还在用的提示词一条都不能删，
+    // 否则 tasks.prompt_id 的 ON DELETE CASCADE 会把还在跑的任务顺手带走。
+    #[tokio::test]
+    async fn prompts_still_used_by_another_batch_survive() {
+        let (pool, _d) = test_pool().await;
+        let (_b1, ids) = seed(&pool, 1).await;
+        let mut tx = pool.begin().await.unwrap();
+        let b2 = create_batch(&mut tx, "/out", "{}").await.unwrap();
+        let live = insert_task(&mut tx, b2, 1, 1, "t", 1).await.unwrap();
+        tx.commit().await.unwrap();
+        set_status(&pool, ids[0], "pass").await.unwrap();
+
+        let r = retire_resolved_batches(&pool).await.unwrap();
+        assert_eq!(r.batches, 1, "只有第一批了结");
+        assert_eq!(r.prompts, 0, "第二批还在用这条提示词");
+        assert_eq!(count_of(&pool, "prompt_groups").await, 1);
+        let alive: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE id = ?1")
+            .bind(live)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(alive, 1, "第二批的任务不得被级联删掉");
+    }
+
+    // 分组删掉不影响号池：号池按前缀存 next_seq，同名 txt 再导入一次编号接着往下发，
+    // 不会退回去撞上已经发出去的编号。
+    #[tokio::test]
+    async fn retiring_a_group_does_not_reset_its_number_pool() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 1).await;
+        sqlx::query("INSERT INTO id_pools (prefix, next_seq) VALUES ('GG', 42)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_status(&pool, ids[0], "pass").await.unwrap();
+        retire_resolved_batches(&pool).await.unwrap();
+        let next: i64 = sqlx::query_scalar("SELECT next_seq FROM id_pools WHERE prefix='GG'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(next, 42, "号池按前缀活着，与分组的生死无关");
+    }
+
+    // 「中止」只掐排队态；在途任务一条都不动 —— 与在途 worker 抢同一行，
+    // 会让那份已经花了钱的图无处可写。
+    #[tokio::test]
+    async fn cancel_only_touches_queued_tasks() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 3).await;
+        set_status(&pool, ids[1], "run").await.unwrap();
+        set_status(&pool, ids[2], "rev").await.unwrap();
+
+        let (n, batches) = delete_tasks_where(&pool, &ids, &["q"]).await.unwrap();
+        assert_eq!(n, 1, "只有那一条 q 被中止");
+        assert_eq!(batches, vec![bid], "受影响批次要报出来供重估归档");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 2);
     }
 }

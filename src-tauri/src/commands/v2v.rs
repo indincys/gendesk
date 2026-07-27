@@ -13,6 +13,7 @@ use tauri_specta::Event;
 use crate::db::now_unix;
 use crate::db::repo::{settings as settings_repo, trash as trash_repo, v2v as repo};
 use crate::error::{AppError, AppResult};
+use crate::files;
 use crate::state::AppState;
 use crate::v2v::activity::ActivityEntry;
 use crate::v2v::autofill::AutofillCfg;
@@ -669,6 +670,9 @@ pub struct ClipView {
     /// 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
     pub asset_pack_id: Option<i64>,
     pub in_asset_lib: bool,
+    /// 验收通过后交付到 `outputs/视频/{组}/` 的那份拷贝（0027）。
+    /// 成片页据此回答「这条片子在哪」——clips/clip{id}.mp4 那个名字人在 Finder 里认不出。
+    pub export_path: Option<String>,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -719,6 +723,7 @@ impl From<repo::ClipRow> for ClipView {
             auto_submitted: r.auto_submitted != 0,
             asset_pack_id: r.asset_pack_id,
             in_asset_lib: r.in_asset_lib != 0,
+            export_path: r.export_path,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }
@@ -1227,6 +1232,15 @@ pub async fn undo_v2v(
         } else {
             continue;
         }
+        // 撤销一次「通过」= 那条片子不再算交付，把交付拷贝收回来。
+        // 不收的话 outputs/视频/ 下会留一个再也没有主人的文件——而人拿它去发布时，
+        // 库里那条恰恰是没通过的（同 0025「包被删就该回落成待办」的道理）。
+        if e.stage != "pass" {
+            if let Some(p) = cur.as_ref().and_then(|c| c.export_path.clone()) {
+                let _ = std::fs::remove_file(&p);
+                let _ = repo::set_export_path(&state.db, e.clip_id, None).await;
+            }
+        }
         if repo::restore(&state.db, &e.to_snapshot(), now).await? {
             n += 1;
         }
@@ -1251,6 +1265,7 @@ pub async fn review_v2v_clips(
 ) -> AppResult<V2vAction> {
     let now = now_unix();
     let mut n = 0i64;
+    let mut exported = 0i64;
     let mut undo: Vec<V2vUndoEntry> = Vec::new();
     let mut last_code = String::new();
     for id in ids {
@@ -1284,6 +1299,7 @@ pub async fn review_v2v_clips(
                     title: Some(clip.group_name.clone()),
                     source_label: "视频验收未通过".into(),
                     file_paths: files,
+                    payload_json: None,
                 },
             )
             .await?;
@@ -1293,6 +1309,26 @@ pub async fn review_v2v_clips(
         if repo::set_reviewed(&state.db, id, if pass { "pass" } else { "rej" }, now).await? {
             n += 1;
             last_code = clip.prompt_code.clone();
+            if pass {
+                // 通过即交付：把成片从内部暂存区 clips/clip{id}.mp4 拷进
+                // outputs/视频/{组}/{编号}_{日期}.mp4。图片验收通过时做的就是这件事，
+                // 视频此前却只留在那个人在 Finder 里认不出谁是谁的内部目录里。
+                match export_clip(&state, &clip) {
+                    Ok(Some(p)) => {
+                        exported += 1;
+                        let _ = repo::set_export_path(&state.db, id, Some(&p)).await;
+                    }
+                    Ok(None) => {}
+                    // 拷贝失败不回滚验收（判定是人做的，文件是可以补的），但必须出声：
+                    // 否则「通过了却没交付」会一直安静地不发生。
+                    Err(e) => state.v2v_log.warn(
+                        "review",
+                        Some((clip.id, clip.prompt_code.as_str())),
+                        format!("成片交付拷贝失败：{e}"),
+                        None,
+                    ),
+                }
+            }
             if let Some(s) = snap {
                 undo.push(V2vUndoEntry::from_snapshot(s, trash_id));
             }
@@ -1300,11 +1336,72 @@ pub async fn review_v2v_clips(
     }
     emit_changed(&state.db, &app, None).await;
     let verb = if pass { "已通过" } else { "已不通过" };
+    let mut label = action_label(verb, n, &last_code);
+    if exported > 0 {
+        label.push_str(&format!(" · 已交付 {exported} 条到输出目录"));
+    }
     Ok(V2vAction {
         changed: n,
-        label: action_label(verb, n, &last_code),
+        label,
         undo,
     })
+}
+
+/// `outputs/视频/{组名}/{编号}_{日期}.mp4` —— 通过验收即交付的那份拷贝。
+///
+/// **拷贝而不是移动**：clips/ 下那份是流水线自己的资产（封面、重跑、撤销都指着它），
+/// 移走会让「撤销通过」变成一次搬回来的操作，而搬运是会失败的。
+/// 磁盘代价是每条成片多占一份——几十 MB，换来的是撤销永远只改库不动文件。
+///
+/// 返回 `Ok(None)` = 这条根本没有成片文件（不该发生，但也不是错误）。
+fn export_clip(state: &State<'_, AppState>, clip: &repo::ClipRow) -> AppResult<Option<String>> {
+    let Some(src) = clip.video_path.as_deref().filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let group = if clip.group_name.trim().is_empty() {
+        "未分组".to_string()
+    } else {
+        files::sanitize_filename(&clip.group_name)
+    };
+    let dir = state.dirs.outputs().join("视频").join(group);
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
+
+    // 编号去连字符，与图片输出命名同口径（files::output_filename）。
+    let code = if clip.prompt_code.is_empty() {
+        format!("clip{}", clip.id)
+    } else {
+        clip.prompt_code.replace('-', "")
+    };
+    let ext = std::path::Path::new(src)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mp4")
+        .to_lowercase();
+    // 尝试次数进文件名：同一张图重跑几次都通过时，第二份不该悄悄盖掉第一份。
+    let attempt = if clip.attempt > 1 {
+        format!("_{}", clip.attempt)
+    } else {
+        String::new()
+    };
+    let name = format!(
+        "{code}_{}{attempt}.{ext}",
+        files::date_yymmdd(clip.reviewed_at.unwrap_or_else(now_unix))
+    );
+    let dest = dir.join(name);
+    std::fs::copy(src, &dest).map_err(|e| AppError::Io(e.to_string()))?;
+    Ok(Some(dest.to_string_lossy().to_string()))
+}
+
+/// 在系统文件管理器打开成片交付目录 `outputs/视频/`。
+#[tauri::command]
+#[specta::specta]
+pub async fn open_clips_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = state.dirs.outputs().join("视频");
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| AppError::Io(e.to_string()))
 }
 
 /// 「已通过 BR31-0140」/「已通过 12 条」—— 一条时报编号，多条时报数量。

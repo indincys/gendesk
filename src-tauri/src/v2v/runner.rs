@@ -848,6 +848,7 @@ mod tests {
             work_id: 1,
             group_id: None,
             group_name: String::new(),
+            export_path: None,
             batch_id: None,
             stage: "ready".into(),
             source_prompt: String::new(),

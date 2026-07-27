@@ -1,13 +1,12 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
-import { type BatchView, type TaskView, commands, unwrap } from "@/lib/ipc";
+import { type TaskView, commands, unwrap } from "@/lib/ipc";
 import { errorLabel, statusVisual } from "@/lib/status";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
-import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
-import { ChevronDown, FolderOpen, Repeat } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -23,23 +22,18 @@ const FILTERS: { key: string; label: string; match: (s: string) => boolean }[] =
 export function TasksPage() {
   const go = useUiStore((s) => s.go);
   const tasks = useEngineStore((s) => s.tasks);
-  const currentBatchId = useEngineStore((s) => s.currentBatchId);
   const progress = useEngineStore((s) => s.progress);
   const paused = useEngineStore((s) => s.paused);
   const autoPauseReason = useEngineStore((s) => s.autoPauseReason);
   const setPaused = useEngineStore((s) => s.setPaused);
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
-  const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
+  const dropTasks = useEngineStore((s) => s.dropTasks);
 
-  const [batches, setBatches] = useState<BatchView[]>([]);
   // 任务7：默认展示「待处理」而非「全部」。
   const [filter, setFilter] = useState("pending");
-  const [showBatchPicker, setShowBatchPicker] = useState(false);
   const [interrupted, setInterrupted] = useState(0);
   const [intDismissed, setIntDismissed] = useState(false);
-  // E03：取消剩余任务确认框。
-  const [cancelConfirm, setCancelConfirm] = useState(false);
-  // E04：批次总进度 ETA 估算所需——历史单张均值 + 有效并发。
+  // E04：总进度 ETA 估算所需——历史单张均值 + 有效并发。
   const [avgSec, setAvgSec] = useState<number | null>(null);
   const [concurrency, setConcurrency] = useState(0);
   // E34：改词重试目标 + 编辑文本。
@@ -49,22 +43,18 @@ export function TasksPage() {
   const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
   // 任务5：查看单个任务的提示词快照原文。
   const [promptView, setPromptView] = useState<TaskView | null>(null);
-  // 任务6：任务多选（跨筛选保留选择）+ shift 范围锚点 + 批量删除确认。
+  // 任务多选（跨筛选保留选择）+ shift 范围锚点 + 批量确认框。
   const [sel, setSel] = useState<Set<number>>(new Set());
   const lastPicked = useRef<number | null>(null);
-  const [bulkDelConfirm, setBulkDelConfirm] = useState(false);
+  const [confirmBulk, setConfirmBulk] = useState<null | "delete" | "cancel">(null);
   // E10：任务搜索（参考图名 / 提示词编号）。
   const [search, setSearch] = useState("");
-  // E10：批次备注行内编辑。
-  const [editNoteId, setEditNoteId] = useState<number | null>(null);
-  const [noteText, setNoteText] = useState("");
 
+  // 拉全部批次的任务。**批次不再是可切换的对象**（v0.21.0）：跑完就退出历史，
+  // 而人在这一页问的从来是「现在还有哪些活」，不是「第 N 批做到哪了」。
   const refresh = useCallback(async () => {
     try {
-      const bs = await unwrap(commands.listBatches());
-      setBatches(bs);
-      const target = currentBatchId ?? bs[0]?.id ?? null;
-      if (target != null) await loadBatchTasks(target, null);
+      await loadBatchTasks(null, null);
       setInterrupted(await unwrap(commands.countInterrupted()));
       setAvgSec(await unwrap(commands.estimateTaskSeconds()).catch(() => null));
       const keys = await unwrap(commands.listApiKeys()).catch(() => []);
@@ -72,7 +62,7 @@ export function TasksPage() {
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [currentBatchId, loadBatchTasks]);
+  }, [loadBatchTasks]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 仅挂载时引导一次
   useEffect(() => {
@@ -115,33 +105,6 @@ export function TasksPage() {
   const failedCount = counts.fail;
   const violationCount = failByType.get("ContentPolicy") ?? 0;
   const retryableFailed = failedCount - violationCount;
-  const curBatch = batches.find((b) => b.id === currentBatchId);
-
-  const switchBatch = async (id: number) => {
-    setShowBatchPicker(false);
-    await loadBatchTasks(id, null);
-  };
-
-  // E07：按此批次配置再来一批——还原挂靠与参数到生成页。
-  const reuseBatch = async (id: number) => {
-    try {
-      const cfg = await unwrap(commands.getBatchConfig(id));
-      // 快照里除 size/quality 外还带输出处理开关与抽卡次数（纯 UI 键，后端忽略）；
-      // 类型写窄会让它们看着像没还原，实际却在运行时传了过去——照实写全。
-      let params: Parameters<typeof restoreFromBatch>[1] = {};
-      try {
-        params = JSON.parse(cfg.paramsJson);
-      } catch {
-        // 参数快照损坏则仅还原挂靠
-      }
-      restoreFromBatch(cfg.refs, params);
-      setShowBatchPicker(false);
-      if (cfg.refs.length === 0) toast("该批次的参考图或分组已删除，仅还原了参数");
-      go("generate");
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
-    }
-  };
 
   const togglePause = async () => {
     const next = !paused;
@@ -156,38 +119,32 @@ export function TasksPage() {
   };
 
   const retryAllFailed = async () => {
-    if (currentBatchId == null) return;
-    const n = await unwrap(commands.retryFailedTasks(currentBatchId));
+    const n = await unwrap(commands.retryFailedTasks());
     toast(`已重试 ${n} 个失败任务`);
-    await loadBatchTasks(currentBatchId, null);
+    await refresh();
   };
 
   const deleteAllFailed = async () => {
-    if (currentBatchId == null) return;
-    const n = await unwrap(commands.deleteFailedTasks(currentBatchId));
+    const n = await unwrap(commands.deleteFailedTasks());
     toast(`已删除 ${n} 个失败任务`);
-    await loadBatchTasks(currentBatchId, null);
-  };
-
-  const cancelPending = async () => {
-    if (currentBatchId == null) return;
-    const n = await unwrap(commands.cancelBatchPending(currentBatchId));
-    toast(`已取消 ${n} 个排队任务 · 在途任务将继续跑完`);
-    await loadBatchTasks(currentBatchId, null);
+    await refresh();
   };
 
   const deleteOne = async (t: TaskView) => {
     try {
       await unwrap(commands.deleteTask(t.id));
-      if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+      dropTasks([t.id]);
+      await refresh();
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
   };
 
-  // ── 任务6 多选批量操作 ────────────────────────────────────────
+  // ── 多选批量操作（中止 / 删除 / 重试） ────────────────────────────
   // 可重试的终态：失败/待验收/已通过/未通过（生成中与排队不参与重试）。
   const RETRYABLE = new Set(["fail", "rev", "pass", "rej"]);
+  // 可中止的只有排队态：请求一旦发出去钱就花了，硬掐只会让结果无处可写。
+  const ABORTABLE = new Set(["q"]);
   const clearSel = () => {
     setSel(new Set());
     lastPicked.current = null;
@@ -228,54 +185,60 @@ export function TasksPage() {
     });
     lastPicked.current = null;
   };
-  // 选中任务里可重试的数量（供按钮显示与禁用）。
-  const selRetryable = tasks.filter((t) => sel.has(t.id) && RETRYABLE.has(t.status)).length;
+  // 选中任务里各类可操作的数量（供按钮显示与禁用）。
+  const selTasks = tasks.filter((t) => sel.has(t.id));
+  const selRetryable = selTasks.filter((t) => RETRYABLE.has(t.status)).length;
+  const selAbortable = selTasks.filter((t) => ABORTABLE.has(t.status)).length;
 
-  const bulkRetry = async () => {
-    const ids = tasks.filter((t) => sel.has(t.id) && RETRYABLE.has(t.status)).map((t) => t.id);
-    let ok = 0;
-    for (const id of ids) {
-      try {
-        await unwrap(commands.retryTask(id, null));
-        ok++;
-      } catch {
-        /* 单项失败不阻断其余 */
-      }
-    }
-    toast(`已重试 ${ok} 个任务`);
-    clearSel();
-    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
-  };
-
-  const bulkDelete = async () => {
+  /**
+   * 三个批量动作走同一条路：**一次 IPC 把整份 id 交给后端**，而不是前端 for 循环
+   * 逐个发命令。选中 200 个任务时那是 200 次往返，中途任何一次失败都会留下一个
+   * 说不清删到哪儿的中间态；后端一条 SQL 则是全有或全无。
+   *
+   * 跳过数一律报出来：中止放过在途、删除放过生成中，「我选了 30 个怎么只没了 22 个」
+   * 如果没人解释，下一步就是再点一次。
+   */
+  const runBulk = async (kind: "retry" | "delete" | "cancel") => {
     const ids = [...sel];
-    let ok = 0;
-    let skipped = 0;
-    for (const id of ids) {
-      try {
-        await unwrap(commands.deleteTask(id));
-        ok++;
-      } catch {
-        // 生成中/重试中的任务后端拒绝删除，计入跳过。
-        skipped++;
-      }
+    if (ids.length === 0) return;
+    try {
+      const res = await unwrap(
+        kind === "retry"
+          ? commands.retryTasks(ids)
+          : kind === "delete"
+            ? commands.deleteTasks(ids)
+            : commands.cancelTasks(ids),
+      );
+      const verb = kind === "retry" ? "已重试" : kind === "delete" ? "已删除" : "已中止";
+      const why =
+        kind === "retry"
+          ? "生成中/排队中不可重试"
+          : kind === "delete"
+            ? "生成中不可删除"
+            : "已开跑或已完成，中止不了";
+      toast(
+        `${verb} ${res.affected} 个任务${res.skipped > 0 ? ` · ${res.skipped} 个跳过（${why}）` : ""}`,
+      );
+      if (kind !== "retry") dropTasks(ids);
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    } finally {
+      setConfirmBulk(null);
+      clearSel();
+      await refresh();
     }
-    toast(`已删除 ${ok} 个任务${skipped > 0 ? ` · ${skipped} 个生成中跳过` : ""}`);
-    setBulkDelConfirm(false);
-    clearSel();
-    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
   };
 
   const retryInterrupted = async () => {
     const n = await unwrap(commands.retryInterruptedTasks());
     toast(`已重试 ${n} 个中断任务`);
     setInterrupted(0);
-    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+    await refresh();
   };
 
   const retryOne = async (t: TaskView) => {
     await unwrap(commands.retryTask(t.id, null));
-    if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
+    await refresh();
   };
 
   // E34：改词重试——预填快照，确认后按编辑文本回队重生。
@@ -291,18 +254,7 @@ export function TasksPage() {
       await unwrap(commands.retryTask(t.id, edited));
       setRewordTarget(null);
       toast(edited ? "已按改后的提示词重新生成" : "已重新生成");
-      if (currentBatchId != null) await loadBatchTasks(currentBatchId, null);
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
-    }
-  };
-
-  // E10：批次备注提交。
-  const saveNote = async (id: number) => {
-    setEditNoteId(null);
-    try {
-      await unwrap(commands.renameBatch(id, noteText));
-      setBatches(await unwrap(commands.listBatches()));
+      await refresh();
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -336,12 +288,8 @@ export function TasksPage() {
   const showProgress = total > 0 && remaining > 0;
 
   return (
-    <PageScaffold title="任务队列" caption="事件推送 250ms 节流 · 列表虚拟滚动">
+    <PageScaffold title="任务队列" caption="全部在制任务 · 事件推送 250ms 节流">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
-        <button type="button" className="btn sm gho" onClick={() => setShowBatchPicker(true)}>
-          {curBatch ? `批次 #${curBatch.id}` : "选择批次"}
-          <ChevronDown className="ic12" />
-        </button>
         <div className="fx ac gap6">
           <SumBadge cls="b-gray" n={counts.q} label="待处理" />
           <SumBadge cls="b-blue" n={counts.run} label="生成中" />
@@ -350,11 +298,17 @@ export function TasksPage() {
           <SumBadge cls="b-green" n={counts.done} label="已完成" />
         </div>
         <div className="f1" />
-        {counts.q > 0 && (
-          <button type="button" className="btn sm gho dng" onClick={() => setCancelConfirm(true)}>
-            取消剩余任务 · {counts.q}
-          </button>
-        )}
+        <button
+          type="button"
+          className="btn sm gho"
+          title="打开输出根目录（验收通过的图按 批次/分组 落在里面）"
+          onClick={() =>
+            void unwrap(commands.openOutputsDir()).catch(() => toast.error("打开输出目录失败"))
+          }
+        >
+          <FolderOpen className="ic12" />
+          输出目录
+        </button>
         {failedCount > 0 && (
           <>
             <button
@@ -473,11 +427,24 @@ export function TasksPage() {
             className="btn sm"
             disabled={selRetryable === 0}
             title={selRetryable === 0 ? "所选中无可重试任务（生成中/排队不可重试）" : undefined}
-            onClick={bulkRetry}
+            onClick={() => void runBulk("retry")}
           >
             重试所选{selRetryable > 0 ? ` · ${selRetryable}` : ""}
           </button>
-          <button type="button" className="btn sm gho dng" onClick={() => setBulkDelConfirm(true)}>
+          <button
+            type="button"
+            className="btn sm gho"
+            disabled={selAbortable === 0}
+            title={
+              selAbortable === 0
+                ? "所选中没有还在排队的任务——已经发出去的请求中止不了，钱在那一刻就花了"
+                : "删掉尚未开跑的排队任务；在途的会继续跑完"
+            }
+            onClick={() => setConfirmBulk("cancel")}
+          >
+            中止所选{selAbortable > 0 ? ` · ${selAbortable}` : ""}
+          </button>
+          <button type="button" className="btn sm gho dng" onClick={() => setConfirmBulk("delete")}>
             删除所选
           </button>
           <div className="f1" />
@@ -625,7 +592,9 @@ export function TasksPage() {
         {tasks.length === 0 && (
           <div className="bigempty">
             <div className="fs13 fw5 t2">当前没有任务</div>
-            <div className="fs12 t3">回到图片生成页创建新批次，或切换批次查看</div>
+            <div className="fs12 t3">
+              跑完并验收干净的批次会自动退出历史 —— 去生成页开一批，或让 skill 投一份工单进来
+            </div>
             <button type="button" className="btn mt10" onClick={() => go("generate")}>
               去生成
             </button>
@@ -697,116 +666,26 @@ export function TasksPage() {
         </Modal>
       )}
 
-      {bulkDelConfirm && (
+      {confirmBulk === "delete" && (
         <ConfirmModal
           title={`删除所选 ${sel.size} 个任务`}
           desc="将删除所选任务及其生成记录（生成中/重试中的任务会被跳过）。已通过归档的作品不受影响。此操作不可撤销。"
           confirmLabel="删除所选"
           danger
-          onConfirm={() => void bulkDelete()}
-          onClose={() => setBulkDelConfirm(false)}
+          onConfirm={() => void runBulk("delete")}
+          onClose={() => setConfirmBulk(null)}
         />
       )}
 
-      {cancelConfirm && (
+      {confirmBulk === "cancel" && (
         <ConfirmModal
-          title="取消剩余任务"
-          desc={`将删除本批次 ${counts.q} 个尚未开始的排队任务。正在生成中的任务会继续跑完，不受影响；作品与已完成任务不变。此操作不可撤销。`}
-          confirmLabel="取消剩余任务"
+          title={`中止所选 ${selAbortable} 个排队任务`}
+          desc="只会掐掉尚未开跑的排队任务。已经发出请求的（生成中/重试中）会继续跑完——那份钱在请求发出的那一刻就花了，中止它只会让结果无处可写。作品与已完成任务不变。"
+          confirmLabel="中止排队任务"
           danger
-          onConfirm={() => void cancelPending()}
-          onClose={() => setCancelConfirm(false)}
+          onConfirm={() => void runBulk("cancel")}
+          onClose={() => setConfirmBulk(null)}
         />
-      )}
-
-      {showBatchPicker && (
-        <div className="ovl" onClick={() => setShowBatchPicker(false)}>
-          <div className="mdl w420" onClick={(e) => e.stopPropagation()}>
-            <div className="mhead">
-              <span className="fw6 fs13">切换批次</span>
-              <div className="f1" />
-            </div>
-            <div className="mlist">
-              {batches.map((b) => (
-                <div key={b.id} className="pickrow" onClick={() => switchBatch(b.id)}>
-                  <span className={cn("ckb", b.id === currentBatchId && "on")} />
-                  <span className="ph thumb" style={thumbStyle(b.firstThumbPath)} />
-                  <div className="col f1" style={{ minWidth: 0, gap: 2 }}>
-                    {editNoteId === b.id ? (
-                      <input
-                        type="text"
-                        className="inp"
-                        value={noteText}
-                        placeholder={`批次 #${b.id} 备注名`}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setNoteText(e.target.value)}
-                        onBlur={() => void saveNote(b.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void saveNote(b.id);
-                          if (e.key === "Escape") setEditNoteId(null);
-                        }}
-                        // biome-ignore lint/a11y/noAutofocus: 行内编辑即时聚焦符合预期
-                        autoFocus
-                      />
-                    ) : (
-                      <span className="fs12 nowrap ohide fw5">
-                        {b.note || `批次 #${b.id}`}
-                        <button
-                          type="button"
-                          className="fs10 t3"
-                          style={{ marginLeft: 6 }}
-                          title="重命名批次"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setNoteText(b.note ?? "");
-                            setEditNoteId(b.id);
-                          }}
-                        >
-                          ✎
-                        </button>
-                      </span>
-                    )}
-                    <span className="fs10 t3 nowrap">
-                      {fmtBatchTime(b.createdAt)} · {b.status === "archived" ? "已归档" : "进行中"}{" "}
-                      · {b.taskCount} 任务 · 请求 {b.requestCount} 次 · {paramsLabel(b.paramsJson)}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn sm gho"
-                    title="打开该批次的输出文件夹"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void unwrap(commands.openBatchOutputDir(b.id)).catch(() =>
-                        toast.error("打开输出文件夹失败"),
-                      );
-                    }}
-                  >
-                    <FolderOpen className="ic12" />
-                    输出
-                  </button>
-                  <button
-                    type="button"
-                    className="btn sm gho"
-                    title="按此批次的参考图挂靠与参数还原到生成页"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void reuseBatch(b.id);
-                    }}
-                  >
-                    <Repeat className="ic12" />
-                    再来一批
-                  </button>
-                </div>
-              ))}
-              {batches.length === 0 && (
-                <div className="fs12 t3" style={{ padding: 12 }}>
-                  暂无批次
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
       )}
     </PageScaffold>
   );
@@ -814,13 +693,6 @@ export function TasksPage() {
 
 function visibleCount(tasks: TaskView[], f: { match: (s: string) => boolean }): number {
   return tasks.filter((t) => f.match(t.status)).length;
-}
-
-/** E10 批次时间：unix 秒 → 本地 MM-DD HH:mm。 */
-function fmtBatchTime(unix: number): string {
-  const d = new Date(unix * 1000);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 /** E04 剩余耗时：历史单张均值 × 剩余数 ÷ 有效并发；无历史或无并发则不估算。 */
@@ -831,27 +703,6 @@ function tasksEta(avgSec: number | null, remaining: number, concurrency: number)
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return s > 0 ? `约 ${m} 分 ${s} 秒` : `约 ${m} 分`;
-}
-
-/** 批次生效参数摘要（E16）：无显式参数则「跟随提示词」。
- *  比例/尺寸/输出格式是真发到接口的三项，抽卡是本机展开，分开表述以免误读。 */
-function paramsLabel(json: string): string {
-  try {
-    const p = JSON.parse(json) as {
-      aspectRatio?: string;
-      size?: string;
-      outputFormat?: string;
-      draws?: number;
-    };
-    const parts: string[] = [];
-    if (p.aspectRatio) parts.push(p.aspectRatio);
-    if (p.size) parts.push(p.size);
-    if (p.outputFormat) parts.push(p.outputFormat === "png" ? "PNG" : "JPG");
-    if (p.draws && p.draws > 1) parts.push(`抽卡 ×${p.draws}`);
-    return parts.length > 0 ? parts.join(" · ") : "跟随提示词";
-  } catch {
-    return "跟随提示词";
-  }
 }
 
 function SumBadge({ cls, n, label }: { cls: string; n: number; label: string }) {

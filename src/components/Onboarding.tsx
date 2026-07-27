@@ -26,11 +26,25 @@ export function Onboarding() {
 
   const check = useCallback(async () => {
     try {
-      const [keys, groups, refs, batches] = await Promise.all([
+      const [keys, groups, refs, tasks] = await Promise.all([
         unwrap(commands.listApiKeys()).catch(() => []),
         unwrap(commands.listPromptGroups()).catch(() => []),
         unwrap(commands.listRefImages()).catch(() => []),
-        unwrap(commands.listBatches()).catch(() => []),
+        // 批次跑完就退出历史（v0.21.0），故「跑过第一批没有」不能再靠批次列表回答。
+        // 任务同样会随批次消失，但作品不会 —— 出过一张图就算跑过。
+        unwrap(
+          commands.listWorks(
+            {
+              groupId: null,
+              favoriteOnly: false,
+              tag: null,
+              hideExported: false,
+              query: null,
+              batchId: null,
+            },
+            0,
+          ),
+        ).catch(() => []),
       ]);
       setSteps([
         {
@@ -43,8 +57,8 @@ export function Onboarding() {
         {
           key: "prompts",
           label: "导入提示词",
-          hint: "在提示词库导入 .txt 或新建分组",
-          route: "prompts",
+          hint: "在生成页导入 .txt，或让 skill 投一份工单进来",
+          route: "generate",
           done: groups.some((g) => g.count > 0),
         },
         {
@@ -59,7 +73,7 @@ export function Onboarding() {
           label: "开始生成",
           hint: "在生成页挂靠组合并开始第一批",
           route: "generate",
-          done: batches.length > 0,
+          done: tasks.length > 0,
         },
       ]);
     } catch {

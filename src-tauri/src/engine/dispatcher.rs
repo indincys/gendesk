@@ -493,19 +493,22 @@ impl Scheduler {
             return;
         }
         let (full_c, thumb_c) = (full.clone(), thumb.clone());
-        let thumb_ok = tokio::task::spawn_blocking(move || {
+        // 缩略图生成顺带返回原图真实像素（0027）：验收页按真实比例排版要用它，
+        // 而这里已经把整张图解码过一遍了，再读一次纯属白干。
+        let size = tokio::task::spawn_blocking(move || {
             crate::files::generate_thumbnail(&full_c, &thumb_c)
         })
         .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false);
-        let thumb_path = if thumb_ok { thumb } else { full.clone() };
+        .ok()
+        .and_then(Result::ok);
+        let thumb_path = if size.is_some() { thumb } else { full.clone() };
 
         let _ = task_repo::mark_review(
             &self.pool,
             task.id,
             &full.to_string_lossy(),
             &thumb_path.to_string_lossy(),
+            size,
         )
         .await;
         if let Some(aid) = attempt_id {

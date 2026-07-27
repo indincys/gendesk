@@ -3,7 +3,7 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type TrashItemView, commands, unwrap } from "@/lib/ipc";
 import { cn, promptLabel } from "@/lib/utils";
-import { Check, Eye, Trash2 } from "lucide-react";
+import { Check, Eye, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -13,6 +13,8 @@ export function TrashPage() {
   const [confirm, setConfirm] = useState<null | { ids: number[]; all: boolean }>(null);
   // 任务4：点击查看被丢弃的大图 + 提示词原文（清理前仍暂存）。
   const [detail, setDetail] = useState<TrashItemView | null>(null);
+  // 大图铺满查看（排除误删要看清细节，320px 的缩略图不足以下判断）。
+  const [lightbox, setLightbox] = useState<TrashItemView | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -34,6 +36,27 @@ export function TrashPage() {
     void load();
   };
 
+  /**
+   * 还原回原位。
+   *
+   * 这里之所以能做到，是因为「不通过」从来只是记账：原图与缩略图一直躺在盘上，
+   * 物理删要等到「彻底删除/清空」（E02 的决定）。故还原不动任何文件，
+   * 只把那条记录的状态拨回去 —— 未通过的图回待验收，删掉的作品写回作品库。
+   */
+  const restore = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    try {
+      const res = await unwrap(commands.restoreTrashItems(ids));
+      if (res.restored > 0) toast.success(`已还原 ${res.restored} 项回原位`);
+      // 失败逐条报出来：「点了还原却没回去」比直接说还不回去更难查。
+      for (const f of res.failures) toast.error(f);
+      setDetail(null);
+      void load();
+    } catch (e) {
+      if (e instanceof Error) toast.error(e.message);
+    }
+  };
+
   const toggle = (id: number) =>
     setSel((s) => {
       const n = new Set(s);
@@ -43,10 +66,16 @@ export function TrashPage() {
     });
 
   return (
-    <PageScaffold title="废纸篓" caption="清理后彻底删除 · 编号回收 · 不可恢复">
+    <PageScaffold title="废纸篓" caption="清理前可还原回原位 · 清理后彻底删除、编号回收、不可恢复">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
         <span className="cnt">{rows.length} 项</span>
         <div className="f1" />
+        {sel.size > 0 && (
+          <button type="button" className="btn sm" onClick={() => restore([...sel])}>
+            <Undo2 className="ic12" />
+            还原所选 · {sel.size}
+          </button>
+        )}
         {sel.size > 0 && (
           <button
             type="button"
@@ -115,6 +144,22 @@ export function TrashPage() {
               <button
                 type="button"
                 className="icb"
+                title={
+                  x.restorable
+                    ? "还原回原位（未通过的图回待验收，删掉的作品回作品库）"
+                    : "这条是旧版本删除的，没有留下可还原的记录"
+                }
+                disabled={!x.restorable}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void restore([x.id]);
+                }}
+              >
+                <Undo2 className="ic12" />
+              </button>
+              <button
+                type="button"
+                className="icb"
                 title="彻底删除"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -162,36 +207,40 @@ export function TrashPage() {
               >
                 彻底删除
               </button>
-              <button type="button" className="btn sm" onClick={() => setDetail(null)}>
-                关闭
+              <button
+                type="button"
+                className="btn pri sm"
+                disabled={!detail.restorable}
+                title={detail.restorable ? undefined : "这条是旧版本删除的，没有留下可还原的记录"}
+                onClick={() => void restore([detail.id])}
+              >
+                <Undo2 className="ic12" />
+                还原回原位
               </button>
             </>
           }
         >
           <div className="fx gap14">
             <div style={{ width: 320, flex: "none" }}>
-              {assetSrc(detail.imagePath) ? (
-                <img
-                  src={assetSrc(detail.imagePath)}
-                  alt="被丢弃的图片"
-                  style={{
-                    width: "100%",
-                    borderRadius: 10,
-                    border: "1px solid var(--line)",
-                    display: "block",
-                  }}
-                />
-              ) : assetSrc(detail.thumbPath) ? (
-                <img
-                  src={assetSrc(detail.thumbPath)}
-                  alt="缩略图"
-                  style={{
-                    width: "100%",
-                    borderRadius: 10,
-                    border: "1px solid var(--line)",
-                    display: "block",
-                  }}
-                />
+              {/* 点图放到全屏：排除误删要看清细节，320px 宽不足以下判断。 */}
+              {assetSrc(detail.imagePath) || assetSrc(detail.thumbPath) ? (
+                <button
+                  type="button"
+                  style={{ display: "block", width: "100%", padding: 0, cursor: "zoom-in" }}
+                  title="点击铺满查看"
+                  onClick={() => setLightbox(detail)}
+                >
+                  <img
+                    src={assetSrc(detail.imagePath) ?? assetSrc(detail.thumbPath)}
+                    alt="被丢弃的图片"
+                    style={{
+                      width: "100%",
+                      borderRadius: 10,
+                      border: "1px solid var(--line)",
+                      display: "block",
+                    }}
+                  />
+                </button>
               ) : (
                 <div
                   className="ph"
@@ -215,6 +264,28 @@ export function TrashPage() {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* 铺满查看：点任意处或 Esc 退出。 */}
+      {lightbox && (
+        <div
+          className="ovl"
+          style={{ cursor: "zoom-out", padding: 32 }}
+          onClick={() => setLightbox(null)}
+        >
+          <img
+            src={assetSrc(lightbox.imagePath) ?? assetSrc(lightbox.thumbPath)}
+            alt="被丢弃的图片（铺满查看）"
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              objectFit: "contain",
+              borderRadius: 8,
+              display: "block",
+              margin: "auto",
+            }}
+          />
+        </div>
       )}
     </PageScaffold>
   );

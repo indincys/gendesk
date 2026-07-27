@@ -54,8 +54,13 @@ pub struct WorkFilter {
     pub batch_id: Option<i64>,
 }
 
-const WORK_SELECT: &str = "SELECT w.id, COALESCE(p.code,'') AS prompt_code,
-        COALESCE(g.name,'') AS group_name, COALESCE(r.name,'') AS ref_name,
+/// 编号与组名读**作品自己的快照列**（0027），不再 JOIN prompts/prompt_groups。
+///
+/// 提示词成了消耗品：批次跑完即随批次一起删掉。若继续现读，作品库的编号、分组分节、
+/// 全文搜索会在上游被清理的那一刻集体变空，而作品是长期资产，不该跟着上游一起失忆。
+/// （同 0020 给 v2v_clips 冗余 group_name 的理由——下游存快照。）
+const WORK_SELECT: &str = "SELECT w.id, w.prompt_code, w.group_name,
+        COALESCE(r.name,'') AS ref_name,
         w.batch_id, w.favorite, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text,
         w.ref_image_id, w.group_id, w.task_id,
         EXISTS (SELECT 1 FROM v2v_clips c WHERE c.work_id = w.id) AS in_pipeline,
@@ -63,8 +68,6 @@ const WORK_SELECT: &str = "SELECT w.id, COALESCE(p.code,'') AS prompt_code,
                 WHERE tb.entity_type = 'prompt_group' AND tb.entity_id = w.group_id
                   AND tg.name = '图生视频') AS is_i2v
     FROM accepted_works w
-    LEFT JOIN prompts p ON p.id = w.prompt_id
-    LEFT JOIN prompt_groups g ON g.id = w.group_id
     LEFT JOIN ref_images r ON r.id = w.ref_image_id";
 
 #[tauri::command]
@@ -110,7 +113,7 @@ pub async fn list_works(
         .map(|s| format!("%{s}%"));
     if query.is_some() {
         conds.push(
-            "(p.code LIKE ? OR g.name LIKE ? OR r.name LIKE ? OR w.prompt_text LIKE ?)".into(),
+            "(w.prompt_code LIKE ? OR w.group_name LIKE ? OR r.name LIKE ? OR w.prompt_text LIKE ?)".into(),
         );
     }
     if !conds.is_empty() {
@@ -170,10 +173,17 @@ pub async fn toggle_work_favorite(state: State<'_, AppState>, id: i64) -> AppRes
 #[tauri::command]
 #[specta::specta]
 pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let Some(row) = work_repo::delete(&state.db, id).await? else {
+    trash_one_work(&state.db, id, "手动删除").await
+}
+
+/// 一条作品进废纸篓。整行序列化进 `payload_json`（0027）——作品是唯一「删除即真删行」
+/// 的实体，不留快照就还原不回来，而误删一张已经验收通过的图恰恰是最该能撤回的一种。
+async fn trash_one_work(pool: &sqlx::SqlitePool, id: i64, label: &str) -> AppResult<()> {
+    let Some(row) = work_repo::delete(pool, id).await? else {
         return Ok(());
     };
-    let mut tx = state.db.begin().await?;
+    let payload = work_repo::to_payload(&row);
+    let mut tx = pool.begin().await?;
     trash_repo::insert(
         &mut tx,
         &trash_repo::NewTrashItem {
@@ -181,11 +191,12 @@ pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
             ref_id: Some(row.id),
             thumb_path: Some(row.thumb_path.clone()),
             prompt_text: Some(row.prompt_text.clone()),
-            code: None,
-            title: None,
-            source_label: "手动删除".into(),
+            code: (!row.prompt_code.is_empty()).then(|| row.prompt_code.clone()),
+            title: (!row.group_name.is_empty()).then(|| row.group_name.clone()),
+            source_label: label.into(),
             // E21 决策：默认**不**物理删除外部输出文件（用户可能已发布/引用）；仅清缩略图。
             file_paths: vec![row.thumb_path],
+            payload_json: payload,
         },
     )
     .await?;
@@ -219,25 +230,7 @@ pub async fn set_works_favorite(
 #[specta::specta]
 pub async fn trash_works(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
     for id in ids {
-        let Some(row) = work_repo::delete(&state.db, id).await? else {
-            continue;
-        };
-        let mut tx = state.db.begin().await?;
-        trash_repo::insert(
-            &mut tx,
-            &trash_repo::NewTrashItem {
-                entity_type: "work".into(),
-                ref_id: Some(row.id),
-                thumb_path: Some(row.thumb_path.clone()),
-                prompt_text: Some(row.prompt_text.clone()),
-                code: None,
-                title: None,
-                source_label: "批量删除".into(),
-                file_paths: vec![row.thumb_path],
-            },
-        )
-        .await?;
-        tx.commit().await?;
+        trash_one_work(&state.db, id, "批量删除").await?;
     }
     Ok(())
 }
@@ -306,12 +299,14 @@ struct V2vRow {
     prompt_text: String,
 }
 
+/// 同 WORK_SELECT：编号与组名走作品自己的快照列（0027）。前缀仍现读 prompt_groups
+/// ——它只用来给导出包命名，组没了就退化成 `x`，不影响任何判定。
 const V2V_SELECT: &str = "SELECT w.id, w.group_id,
-        COALESCE(g.name,'未分组') AS group_name, COALESCE(g.prefix,'x') AS group_prefix,
-        COALESCE(p.code,'') AS prompt_code, COALESCE(r.name,'') AS ref_name,
+        CASE WHEN w.group_name <> '' THEN w.group_name ELSE '未分组' END AS group_name,
+        COALESCE(g.prefix,'x') AS group_prefix,
+        w.prompt_code, COALESCE(r.name,'') AS ref_name,
         w.batch_id, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text
     FROM accepted_works w
-    LEFT JOIN prompts p ON p.id = w.prompt_id
     LEFT JOIN prompt_groups g ON g.id = w.group_id
     LEFT JOIN ref_images r ON r.id = w.ref_image_id";
 
@@ -537,8 +532,8 @@ mod tests {
         for wid in [3i64, 4] {
             sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (?1,1,?2,'x','active','library',0,0)")
                 .bind(wid).bind(format!("AA-{wid:04}")).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at) VALUES (?1,'/i','/t',?1,'x',1,2,-999)")
-                .bind(wid).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO accepted_works (id,image_path,thumb_path,prompt_id,prompt_text,group_id,batch_id,accepted_at,prompt_code,group_name) VALUES (?1,'/i','/t',?1,'x',1,2,-999,?2,'组')")
+                .bind(wid).bind(format!("AA-{wid:04}")).execute(&pool).await.unwrap();
         }
         let sql = format!("{WORK_SELECT} ORDER BY w.batch_id DESC, w.id ASC");
         let rows = sqlx::query_as::<_, WorkView>(&sql)
@@ -559,7 +554,7 @@ mod tests {
         let (pool, _d) = test_pool().await;
         seed(&pool, 1, "AA", &[(1, "屋顶花园的木地台"), (2, "宠物餐吧")]).await;
         let sql = format!(
-            "{WORK_SELECT} WHERE (p.code LIKE ?1 OR g.name LIKE ?1 OR r.name LIKE ?1 OR w.prompt_text LIKE ?1) ORDER BY w.id"
+            "{WORK_SELECT} WHERE (w.prompt_code LIKE ?1 OR w.group_name LIKE ?1 OR r.name LIKE ?1 OR w.prompt_text LIKE ?1) ORDER BY w.id"
         );
         let hit = |pat: &str| {
             let sql = sql.clone();
@@ -620,8 +615,9 @@ mod tests {
                 .bind(wid).bind(group_id).bind(format!("{prefix}-{wid:04}")).bind(*text)
                 .execute(pool).await.unwrap();
             // task_id 留空：0008 起可空，且真实数据里就有 5 条这样的行（批次已清理）。
-            sqlx::query("INSERT INTO accepted_works (id,task_id,image_path,thumb_path,prompt_id,prompt_text,group_id,ref_image_id,batch_id,accepted_at) VALUES (?1,NULL,?2,'/t',?1,?3,?4,1,1,0)")
+            sqlx::query("INSERT INTO accepted_works (id,task_id,image_path,thumb_path,prompt_id,prompt_text,group_id,ref_image_id,batch_id,accepted_at,prompt_code,group_name) VALUES (?1,NULL,?2,'/t',?1,?3,?4,1,1,0,?5,?6)")
                 .bind(wid).bind(format!("/img{wid}.jpg")).bind(*text).bind(group_id)
+                .bind(format!("{prefix}-{wid:04}")).bind(format!("组{group_id}"))
                 .execute(pool).await.unwrap();
         }
     }

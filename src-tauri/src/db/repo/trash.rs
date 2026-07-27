@@ -18,6 +18,8 @@ pub struct TrashItemRow {
     pub source_label: String,
     pub file_paths_json: String,
     pub deleted_at: i64,
+    /// 还原载荷（0027）：行被真删掉的实体（作品）在此存整行快照。
+    pub payload_json: Option<String>,
 }
 
 pub struct NewTrashItem {
@@ -31,14 +33,17 @@ pub struct NewTrashItem {
     pub source_label: String,
     /// 待清理时物理删除的文件路径列表
     pub file_paths: Vec<String>,
+    /// 整行快照（0027）。只有「删除即真删行」的实体需要它——task/prompt/ref/clip
+    /// 还原时把状态拨回去就行，行一直都在。
+    pub payload_json: Option<String>,
 }
 
 pub async fn insert(conn: &mut SqliteConnection, t: &NewTrashItem) -> Result<i64, sqlx::Error> {
     let files = serde_json::to_string(&t.file_paths).unwrap_or_else(|_| "[]".into());
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO trash_items (entity_type, ref_id, thumb_path, prompt_text, code, title,
-            source_label, file_paths_json, deleted_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
+            source_label, file_paths_json, deleted_at, payload_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id",
     )
     .bind(&t.entity_type)
     .bind(t.ref_id)
@@ -49,6 +54,7 @@ pub async fn insert(conn: &mut SqliteConnection, t: &NewTrashItem) -> Result<i64
     .bind(&t.source_label)
     .bind(files)
     .bind(now_unix())
+    .bind(&t.payload_json)
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -137,5 +143,35 @@ mod tests {
         let cutoff = now - 30 * 86_400;
         let ids = expired_ids(&pool, cutoff).await.unwrap();
         assert_eq!(ids, vec![old], "仅 40 天前的项到期，1 天前的项保留");
+    }
+
+    // 0027：作品是唯一「删除即真删行」的实体，还原全靠这份整行快照。
+    // 它必须能原样往返（尤其是 id —— v2v_clips.work_id 是不设 FK 的锚点，
+    // 换个新 id 等于把那条视频认领给了别人）。
+    #[tokio::test]
+    async fn work_payload_round_trips_through_the_trash() {
+        use crate::db::repo::works;
+        let (pool, _d) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO accepted_works (id,task_id,image_path,thumb_path,prompt_id,prompt_text,
+                group_id,ref_image_id,batch_id,favorite,accepted_at,prompt_code,group_name)
+             VALUES (7,NULL,'/o.jpg','/t.jpg',1,'正文',2,4,5,1,900,'GG-0007','夏日组')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = works::delete(&pool, 7).await.unwrap().unwrap();
+        let payload = works::to_payload(&row).expect("整行应能序列化");
+        assert_eq!(works::count(&pool).await.unwrap(), 0);
+
+        let parsed: works::AcceptedWorkRow = serde_json::from_str(&payload).unwrap();
+        works::restore(&pool, &parsed).await.unwrap();
+
+        let back = works::get(&pool, 7).await.unwrap().expect("应还原回原 id");
+        assert_eq!(back.prompt_code, "GG-0007", "编号快照不能在往返中丢失");
+        assert_eq!(back.group_name, "夏日组");
+        assert_eq!(back.favorite, 1, "收藏这类人手动设过的状态也要原样回来");
+        assert_eq!(back.accepted_at, 900, "验收时刻不得被改成「现在」");
     }
 }

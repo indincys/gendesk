@@ -135,68 +135,6 @@ pub async fn list_prompts(state: State<'_, AppState>, group_id: i64) -> AppResul
     Ok(rows.into_iter().map(to_prompt_view).collect())
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn search_prompts(
-    state: State<'_, AppState>,
-    query: String,
-) -> AppResult<Vec<PromptView>> {
-    let rows = repo::search(&state.db, query.trim()).await?;
-    Ok(rows.into_iter().map(to_prompt_view).collect())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn get_prompt(state: State<'_, AppState>, id: i64) -> AppResult<PromptView> {
-    let row = repo::get(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("提示词不存在".into()))?;
-    Ok(to_prompt_view(row))
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn update_prompt_text(
-    state: State<'_, AppState>,
-    id: i64,
-    text: String,
-) -> AppResult<()> {
-    repo::apply_edit(&state.db, id, &text).await?;
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn toggle_prompt_favorite(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    repo::toggle_favorite(&state.db, id).await?;
-    Ok(())
-}
-
-/// 删除提示词 → 进废纸篓（编号在清理时回收）。
-#[tauri::command]
-#[specta::specta]
-pub async fn trash_prompt(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    if let Some((code, title, _gid)) = repo::set_trash(&state.db, id).await? {
-        let mut tx = state.db.begin().await?;
-        crate::db::repo::trash::insert(
-            &mut tx,
-            &crate::db::repo::trash::NewTrashItem {
-                entity_type: "prompt".into(),
-                ref_id: Some(id),
-                thumb_path: None,
-                prompt_text: None,
-                code: Some(code),
-                title,
-                source_label: "手动删除".into(),
-                file_paths: Vec::new(),
-            },
-        )
-        .await?;
-        tx.commit().await?;
-    }
-    Ok(())
-}
-
 /// 分组视图（生成页 / 提示词库列表）。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -236,138 +174,18 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
     Ok(out)
 }
 
-/// 归档 / 取消归档分组（0016）。批次开跑后由 `engine::create_batch` 自动归档；
-/// 此命令供库页手动恢复（或手动归档一个用不上的旧组）。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_prompt_group_archived(
-    state: State<'_, AppState>,
-    id: i64,
-    archived: bool,
-) -> AppResult<()> {
-    if !repo::set_group_archived(&state.db, id, archived).await? {
-        return Err(AppError::InvalidInput("分组不存在".into()));
-    }
-    Ok(())
-}
-
-/// 设置分组的受控「用途」，返回该组的最终标签集合。
+/// 一个分组该带哪些用途（纯规则，便于测试）。空 = 不标。
 ///
-/// 标签此前只有导入 txt 里写 `标签: xxx` 一条写入路径——而实测用户的 txt 从不带任何语法标记
-/// （v0.12.0 的形态推断就是为此而生），于是全库 tags 表长期一条记录都没有：机制建好了，
-/// 但入口只开在一个没人走的地方。此命令补上第二条、也是实际会走的那条路径。
+/// **已标过用途的组一律跳过**：人可能刚刚手动取消过，下一轮又给它加回去是最气人的
+/// 那种「软件比我懂」。这条规则只解决「从来没标过」这一种情况。
 ///
-/// **只替换用途标签，保留该组从 txt 导入的自由标签**：用途选择器不该顺手抹掉用户
-/// 在 txt 里写的 `标签: 白底,3C`。
-///
-/// 取值在此**强制校验**，不只靠 UI 只给选择器：命令是公开边界，一旦放进自由字符串，
-/// 「图生视频 / 图转视频 / v2v」三种拼法就会同时进库，下游按名字筛选各漏一半。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_prompt_group_purposes(
-    state: State<'_, AppState>,
-    id: i64,
-    purposes: Vec<String>,
-) -> AppResult<Vec<String>> {
-    if repo::get_group(&state.db, id).await?.is_none() {
-        return Err(AppError::InvalidInput("分组不存在".into()));
-    }
-    for p in &purposes {
-        if !crate::purpose::is_purpose(p) {
-            return Err(AppError::InvalidInput(format!("未知用途：{p}")));
-        }
-    }
-    let existing = repo::group_tags(&state.db, id).await?;
-    let merged = crate::purpose::merge_purposes(&existing, &purposes);
-
-    let mut tx = state.db.begin().await?;
-    repo::set_group_tags(&mut tx, id, &merged).await?;
-    tx.commit().await?;
-    // 回读而非回显入参：去空白/去重/排序后的真实落库值才是前端该显示的。
-    Ok(repo::group_tags(&state.db, id).await?)
-}
-
-/// 按组名批量补标用途的一条命中。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PurposeHit {
-    pub group_id: i64,
-    pub name: String,
-    /// 该组下已验收通过的作品数（让人判断这一条值不值得标）。
-    pub work_count: i64,
-    pub purposes: Vec<String>,
-}
-
-/// 批量补标结果。`apply=false` 时只预览（applied=0）。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct PurposeBackfill {
-    pub hits: Vec<PurposeHit>,
-    pub applied: i64,
-    /// 全库分组总数（让人看清 33/187 这个比例，而不是只看到一个绝对数字）。
-    pub scanned: i64,
-}
-
-/// 一个存量分组该补哪些用途（纯规则，便于测试）。空 = 跳过它。
-///
-/// **已标过用途的组一律跳过**：人可能刚刚手动取消过，下一轮重扫又给它加回去是最气人的
-/// 那种「软件比我懂」。补标只解决「从来没标过」这一种情况。
-fn backfill_candidates(existing: &[String], name: &str, scene: &str) -> Vec<String> {
+/// 存量补标那个命令随提示词库页一起去掉了（v0.21.0：提示词是消耗品，不存在需要
+/// 回头补标的历史资产），但规则本身仍是导入预览预猜用途的依据，故留在这里。
+fn purpose_candidates(existing: &[String], name: &str, scene: &str) -> Vec<String> {
     if existing.iter().any(|t| crate::purpose::is_purpose(t)) {
         return Vec::new();
     }
     crate::purpose::infer_purposes(name, scene, existing)
-}
-
-/// 按组名/场景/标签给**存量分组**批量补标用途（先预览，再确认应用）。
-///
-/// 为什么必须有这条：用途只在导入预览里选，那只覆盖**以后**导入的 txt。而实测存量
-/// `tags` 表一条记录都没有（机制建好了但入口从来没人走），187 个分组里 33 个组名带
-/// `B-Roll`/`分镜`/`首帧`、覆盖 40 张验收图 —— 让人手点 33 次是白干的活，
-/// 而不补就等于「验收自动入队」对全部历史资产失效。
-///
-/// **只增不减**：已有用途的组跳过（不重复写），也绝不因为组名不含关键词就摘掉人工标过的用途。
-#[tauri::command]
-#[specta::specta]
-pub async fn backfill_group_purposes(
-    state: State<'_, AppState>,
-    apply: bool,
-) -> AppResult<PurposeBackfill> {
-    let groups = repo::list_groups(&state.db).await?;
-    let scanned = groups.len() as i64;
-    let mut hits: Vec<PurposeHit> = Vec::new();
-    let mut applied = 0i64;
-
-    for g in groups {
-        let existing = repo::group_tags(&state.db, g.id).await?;
-        let guessed = backfill_candidates(&existing, &g.name, &g.scene);
-        if guessed.is_empty() {
-            continue;
-        }
-        let work_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works WHERE group_id = ?1")
-                .bind(g.id)
-                .fetch_one(&state.db)
-                .await?;
-        if apply {
-            let merged = crate::purpose::merge_purposes(&existing, &guessed);
-            let mut tx = state.db.begin().await?;
-            repo::set_group_tags(&mut tx, g.id, &merged).await?;
-            tx.commit().await?;
-            applied += 1;
-        }
-        hits.push(PurposeHit {
-            group_id: g.id,
-            name: g.name,
-            work_count,
-            purposes: guessed,
-        });
-    }
-    Ok(PurposeBackfill {
-        hits,
-        applied,
-        scanned,
-    })
 }
 
 /// 受控用途清单（前端选择器渲染源，单点定义在 `purpose.rs`）。
@@ -375,185 +193,6 @@ pub async fn backfill_group_purposes(
 #[specta::specta]
 pub async fn list_purposes() -> AppResult<Vec<crate::purpose::PurposeView>> {
     Ok(crate::purpose::all())
-}
-
-/// 新建正式分组（E30a 参考图导入选组 /「新建分组」；E20 分组管理复用）。
-/// 自动从分组名生成唯一前缀（号池按前缀发放）。
-#[tauri::command]
-#[specta::specta]
-pub async fn create_prompt_group(state: State<'_, AppState>, name: String) -> AppResult<GroupView> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::InvalidInput("分组名不能为空".into()));
-    }
-    // 生成唯一前缀：与导入 resolve_prefix 同规则（name 首两位 ASCII，冲突追加序号）。
-    let base = gen_prefix_from_name(trimmed);
-    let mut candidate = base.clone();
-    let mut n = 1;
-    while repo::find_group_by_prefix(&state.db, &candidate)
-        .await?
-        .is_some()
-    {
-        n += 1;
-        candidate = format!("{base}{n}");
-    }
-    let mut tx = state.db.begin().await?;
-    let id = repo::create_group(&mut tx, trimmed, &candidate, "", false).await?;
-    tx.commit().await?;
-    Ok(GroupView {
-        id,
-        name: trimmed.to_string(),
-        prefix: candidate,
-        scene: String::new(),
-        is_temp: false,
-        count: 0,
-        tags: Vec::new(),
-        archived: false,
-    })
-}
-
-/// 重命名分组（E20，前缀/编号不变）。
-#[tauri::command]
-#[specta::specta]
-pub async fn rename_prompt_group(
-    state: State<'_, AppState>,
-    id: i64,
-    name: String,
-) -> AppResult<()> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::InvalidInput("分组名不能为空".into()));
-    }
-    let ok = repo::rename_group(&state.db, id, trimmed).await?;
-    if !ok {
-        return Err(AppError::InvalidInput("分组不存在".into()));
-    }
-    Ok(())
-}
-
-/// 删除分组（E20）：组内 active 提示词快照入废纸篓（清理时回收编号），随后删除分组。
-/// 关联参考图置为未分组、作品快照保留（accepted_works 无外键级联）。
-#[tauri::command]
-#[specta::specta]
-pub async fn delete_prompt_group(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let group = repo::get_group(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("分组不存在".into()))?;
-    let prompts = repo::list_by_group(&state.db, id).await?;
-    let source_label = format!("删除分组「{}」", group.name);
-
-    let mut tx = state.db.begin().await?;
-    // 组内 active 提示词入废纸篓（保留编号快照供清理回收）。
-    for p in &prompts {
-        crate::db::repo::trash::insert(
-            &mut tx,
-            &crate::db::repo::trash::NewTrashItem {
-                entity_type: "prompt".into(),
-                ref_id: Some(p.id),
-                thumb_path: None,
-                prompt_text: None,
-                code: Some(p.code.clone()),
-                title: p.title.clone(),
-                source_label: source_label.clone(),
-                file_paths: Vec::new(),
-            },
-        )
-        .await?;
-    }
-    // 删除分组：级联删 prompts / batch_refs；ref_images.group_id 置空；作品快照保留。
-    repo::delete_group(&mut tx, id).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 合并分组（E20）：`fromId` 并入 `intoId`，编号前缀保留原值不重编。
-#[tauri::command]
-#[specta::specta]
-pub async fn merge_prompt_groups(
-    state: State<'_, AppState>,
-    from_id: i64,
-    into_id: i64,
-) -> AppResult<()> {
-    if from_id == into_id {
-        return Err(AppError::InvalidInput("不能合并到同一分组".into()));
-    }
-    // 两组均须存在。
-    repo::get_group(&state.db, from_id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("源分组不存在".into()))?;
-    repo::get_group(&state.db, into_id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("目标分组不存在".into()))?;
-
-    let mut tx = state.db.begin().await?;
-    repo::merge_into(&mut tx, from_id, into_id).await?;
-    repo::delete_group(&mut tx, from_id).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 批量移动提示词到指定分组（E20 单条 / E36 批量；编号前缀保留原值不重编）。
-#[tauri::command]
-#[specta::specta]
-pub async fn move_prompts_to_group(
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-    group_id: i64,
-) -> AppResult<()> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    repo::get_group(&state.db, group_id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("目标分组不存在".into()))?;
-    let mut tx = state.db.begin().await?;
-    repo::move_prompts(&mut tx, &ids, group_id).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 批量设置收藏（E36）。favorite=true 收藏，false 取消。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_prompts_favorite(
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-    favorite: bool,
-) -> AppResult<()> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let mut tx = state.db.begin().await?;
-    repo::set_favorite_many(&mut tx, &ids, favorite).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 批量删除提示词 → 入废纸篓（E36；编号在清理时回收）。
-#[tauri::command]
-#[specta::specta]
-pub async fn trash_prompts(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
-    for id in ids {
-        if let Some((code, title, _gid)) = repo::set_trash(&state.db, id).await? {
-            let mut tx = state.db.begin().await?;
-            crate::db::repo::trash::insert(
-                &mut tx,
-                &crate::db::repo::trash::NewTrashItem {
-                    entity_type: "prompt".into(),
-                    ref_id: Some(id),
-                    thumb_path: None,
-                    prompt_text: None,
-                    code: Some(code),
-                    title,
-                    source_label: "批量删除".into(),
-                    file_paths: Vec::new(),
-                },
-            )
-            .await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
 }
 
 /// 第一步：解析 txt，构建预览（不落库）。
@@ -619,7 +258,7 @@ pub(crate) async fn build_preview_from_parsed(
             .filter(|t| crate::purpose::is_purpose(t))
             .cloned()
             .collect();
-        let guessed = crate::purpose::infer_purposes(&g.name, &g.scene, &g.tags);
+        let guessed = purpose_candidates(&g.tags, &g.name, &g.scene);
         let purpose_inferred = explicit.is_empty() && !guessed.is_empty();
         let purposes = if explicit.is_empty() {
             guessed
@@ -895,14 +534,12 @@ pub(crate) async fn commit_preview(
             inserted += 1;
         }
 
-        // 分组级标签绑定（V1：entity_type='prompt_group'）。与 UI 用途选择器同一写路径。
+        // 分组级标签绑定（V1：entity_type='prompt_group'）。用途与 txt 里自由写的
+        // `标签: 白底,3C` 恰好共用一张 tags 表，故这里是合并而不是覆盖。
         //
-        // 用途与 txt 里自由写的 `标签: 白底,3C` 恰好共用一张 tags 表，故经 merge_purposes
-        // 合并：先剔掉 tags 里混着的用途拼写，再补上校验过的受控值。**追加已有组时不覆盖**
-        // 组上原有的用途——同前缀二次导入不该把上次标好的用途抹掉。
         // **导入只增不减**：追加进已有组（同前缀二次导入）时，绝不因为这份新 txt 的组名
-        // 不带关键词就把上次标好的用途抹掉。取消用途是提示词库那个选择器的职责
-        // （`set_prompt_group_purposes`），那里用户是明确冲着「改用途」去的。
+        // 不带关键词就把上次标好的用途抹掉。要改用途就在导入预览那一刻改——提示词是
+        // 消耗品，一份 txt 从进库到跑完就那么一次，没有「回头再管理它」这个阶段。
         let purposes = validate_purposes(&pg.purposes)?;
         let mut merged = repo::group_tags(pool, group_id).await?;
         for t in pg.tags.iter().chain(purposes.iter()) {
@@ -940,37 +577,37 @@ mod tests {
     // 补标只解决「从来没标过」：已标过用途的组必须跳过，否则人手动取消掉的用途
     // 会在下一轮补标里复活。
     #[test]
-    fn backfill_skips_groups_that_already_have_a_purpose() {
+    fn purpose_rule_skips_groups_that_already_have_a_purpose() {
         let tagged = vec![crate::purpose::PURPOSE_I2V.to_string()];
         assert!(
-            backfill_candidates(&tagged, "鹿晗-B-Roll素材分镜图", "").is_empty(),
+            purpose_candidates(&tagged, "鹿晗-B-Roll素材分镜图", "").is_empty(),
             "已标过的组不得重复补标"
         );
         // 只有自由标签的组照常补（自由标签与用途是两套东西）。
         let free = vec!["白底".to_string()];
         assert_eq!(
-            backfill_candidates(&free, "鹿晗-B-Roll素材分镜图", ""),
+            purpose_candidates(&free, "鹿晗-B-Roll素材分镜图", ""),
             vec![crate::purpose::PURPOSE_I2V.to_string()]
         );
     }
 
     // 真实组名（用户库里 187 组中的 33 个长这样）必须命中；普通组名不得被误标。
     #[test]
-    fn backfill_matches_real_group_names_only() {
+    fn purpose_rule_matches_real_group_names_only() {
         for name in [
             "梓渝——b-roll图片素材",
             "鹿晗-B-Roll素材分镜图",
             "G-Dragon-B-Roll素材分镜图",
         ] {
             assert_eq!(
-                backfill_candidates(&[], name, ""),
+                purpose_candidates(&[], name, ""),
                 vec![crate::purpose::PURPOSE_I2V.to_string()],
                 "{name} 应命中"
             );
         }
         for name in ["电商主图", "白底商品", "详情页"] {
             assert!(
-                backfill_candidates(&[], name, "").is_empty(),
+                purpose_candidates(&[], name, "").is_empty(),
                 "{name} 不应命中"
             );
         }

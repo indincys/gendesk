@@ -1012,14 +1012,33 @@ a:hover {
   display: grid;
   gap: 12px;
 }
-/* T1：验收缩略图固定 1:1 + cover（覆盖 NatThumb 的自然比例），高度确定消除多列重排。 */
-.rcsq {
+/* 验收齐行（justified）：一行共用行高，每格宽度按各自真实宽高比由 JS 算好后内联。
+   高度与宽度都在渲染前确定，故虚拟化不需要回测任何一行——滚动全程零重排。
+   这也是它取代「统一正方形」的原因：方格会把竖幅裁掉上下、横幅裁掉左右，
+   而验收判的恰恰是构图与边缘。 */
+.rjrow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.rjcard {
+  flex: none;
+}
+/* 行高走 CSS 变量而不是给整行定高：卡片下面还有一行编号/参考图名，
+   把高度压在行上会让那行溢出到下一行的图上。 */
+.rjimg {
+  aspect-ratio: auto;
+  height: var(--rjh);
   overflow: hidden;
 }
-.rcsq .thumbimg {
+.rjimg .thumbimg {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.rjimg .thumbfill {
+  height: 100%;
+  aspect-ratio: auto;
 }
 .rcard {
   position: relative;
@@ -3717,6 +3736,18 @@ a:hover {
   font: 500 10px var(--mono);
   color: var(--t3);
 }
+/* 「首帧原图」角标：尚无成片时显示的是那张图本身，得说清楚这不是片子的一帧。 */
+.vstagetag {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: color-mix(in oklch, var(--bg1) 78%, transparent);
+  border: 1px solid var(--line2);
+  font: 600 10px var(--sans);
+  color: var(--t2);
+}
 .vsec {
   font-size: 10px;
   font-weight: 600;
@@ -4390,4 +4421,49 @@ a:hover {
   padding: 7px 9px;
   overflow-x: auto;
   white-space: pre;
+}
+
+/* ==================== 工单开跑确认卡（提示词组 ↔ 参考图） ==================== */
+/* 一组一块：组头是参数与张数，下面左边参考图、右边这组的提示词。
+   排版刻意贴近生成页那张「已经挂好靠」的图 —— 要核的正是同一件事。 */
+.ikgroup {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--bg1);
+}
+.ikbody {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.ikrefs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.ikref img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  display: block;
+}
+/* 提示词逐条可读：这一栏才是「跑出来会是什么」的依据，不能只给条数。
+   高度封顶 + 内滚动，避免一组 60 条把确认按钮顶出屏幕。 */
+.ikprompts {
+  max-height: 220px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ikprompt {
+  display: flex;
+  gap: 8px;
+  line-height: 1.65;
+  color: var(--t2);
 }

@@ -25,6 +25,9 @@ pub struct CreateBatchInput {
     pub draws: i64,
 }
 
+/// 建批回执。**批次不再是一个可管理的对象**（v0.21.0）：它没有列表、没有切换器、
+/// 没有重命名，也不能「按此配置再来一批」——跑完就退出历史（`retire_resolved_batches`）。
+/// 剩下的只是「这一次点下去产生了什么」，故这个结构只回答那一句。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchView {
@@ -32,14 +35,25 @@ pub struct BatchView {
     pub created_at: i64,
     pub status: String,
     pub task_count: i64,
-    /// 批次生效的生成参数快照（E16 / D1），任务页可回查。
+    /// 批次生效的生成参数快照（E16 / D1）。
     pub params_json: String,
-    /// 批次备注名（E10）；None = 未命名。
-    pub note: Option<String>,
-    /// 首张产出缩略图（E10 批次切换器预览）。
-    pub first_thumb_path: Option<String>,
-    /// 实际请求次数（含重试，E15）：该批次全部任务的 task_attempts 计数。
-    pub request_count: i64,
+}
+
+/// 跑一遍「已了结的批次退出历史」。
+///
+/// 只记日志、不打断调用方：它是每次验收/删除/清废纸篓之后**顺手**做的收尾，
+/// 失败了下一次还会再扫（条件是幂等的），不该让一次验收因此报错。
+pub async fn retire_batches_quietly(pool: &sqlx::SqlitePool) {
+    match repo::retire_resolved_batches(pool).await {
+        Ok(r) if !r.is_empty() => tracing::info!(
+            batches = r.batches,
+            prompts = r.prompts,
+            groups = r.groups,
+            "批次已了结，退出历史（提示词随之消耗）"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "批次退休扫描失败"),
+    }
 }
 
 /// 组合展开创建批次，调度器自动开跑。返回批次视图（含任务总数）。
@@ -85,70 +99,7 @@ pub async fn create_batch(
         status: "running".into(),
         task_count: count,
         params_json: input.params_json.clone(),
-        note: None,
-        first_thumb_path: None,
-        request_count: 0,
     })
-}
-
-/// 批次备注命名（E10）。空串清除备注。
-#[tauri::command]
-#[specta::specta]
-pub async fn rename_batch(
-    state: State<'_, AppState>,
-    batch_id: i64,
-    note: String,
-) -> AppResult<()> {
-    repo::rename_batch(&state.db, batch_id, &note).await?;
-    Ok(())
-}
-
-/// 批次配置快照（E07「按此配置再来一批」）：还原生成页挂靠与参数。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct BatchConfig {
-    /// 参考图 → 提示词组挂靠（仅保留当前仍存在的参考图与分组）。
-    pub refs: Vec<RefMappingInput2>,
-    pub params_json: String,
-}
-
-/// 挂靠输出项（与 RefMappingInput 同形，但用于序列化返回）。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RefMappingInput2 {
-    pub ref_image_id: i64,
-    pub prompt_group_id: i64,
-}
-
-/// 读取某批次的挂靠与参数快照（E07 再来一批）。只返回未删除的参考图与仍存在的分组，
-/// 保证还原到生成页后可直接创建新批次。
-#[tauri::command]
-#[specta::specta]
-pub async fn get_batch_config(state: State<'_, AppState>, batch_id: i64) -> AppResult<BatchConfig> {
-    let params_json: Option<String> =
-        sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
-            .bind(batch_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some(params_json) = params_json else {
-        return Err(AppError::InvalidInput("批次不存在".into()));
-    };
-    let refs: Vec<RefMappingInput2> = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT br.ref_image_id, br.prompt_group_id FROM batch_refs br
-         JOIN ref_images ri ON ri.id = br.ref_image_id AND ri.deleted_at IS NULL
-         JOIN prompt_groups pg ON pg.id = br.prompt_group_id
-         WHERE br.batch_id = ?1",
-    )
-    .bind(batch_id)
-    .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .map(|(ref_image_id, prompt_group_id)| RefMappingInput2 {
-        ref_image_id,
-        prompt_group_id,
-    })
-    .collect();
-    Ok(BatchConfig { refs, params_json })
 }
 
 /// 历史单张生成均值秒数（E31 确认摘要 ETA 估算）；无成功历史返回 None。
@@ -167,58 +118,18 @@ pub async fn estimate_task_seconds(state: State<'_, AppState>) -> AppResult<Opti
     Ok(avg.map(|ms| ms / 1000.0))
 }
 
+/// 在系统文件管理器打开输出根目录 `outputs/`（验收通过的图按 `{批次}/{分组}/` 落在里面）。
+///
+/// 取代了原来那个「打开本批输出目录」——批次已经不是可点的对象，而人还是要能拿到文件。
 #[tauri::command]
 #[specta::specta]
-pub async fn list_batches(state: State<'_, AppState>) -> AppResult<Vec<BatchView>> {
-    let rows = repo::list_batches(&state.db).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for b in rows {
-        let counts = repo::counts_for_batch(&state.db, b.id).await?;
-        let first_thumb_path = repo::batch_first_thumb(&state.db, b.id).await?;
-        let request_count = repo::request_count_for_batch(&state.db, b.id).await?;
-        out.push(BatchView {
-            id: b.id,
-            created_at: b.created_at,
-            status: b.status,
-            task_count: counts.total,
-            params_json: b.params_json,
-            note: b.note,
-            first_thumb_path,
-            request_count,
-        });
-    }
-    Ok(out)
-}
-
-/// 在系统文件管理器打开某批次的输出目录（E15）：`outputs/{batch_id}`。
-/// 目录不存在（尚无通过作品）时先创建，避免打开失败。
-#[tauri::command]
-#[specta::specta]
-pub async fn open_batch_output_dir(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    batch_id: i64,
-) -> AppResult<()> {
+pub async fn open_outputs_dir(state: State<'_, AppState>, app: tauri::AppHandle) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
-    let dir = state.dirs.outputs().join(batch_id.to_string());
+    let dir = state.dirs.outputs();
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| AppError::Io(e.to_string()))
-}
-
-/// 取消批次剩余排队任务（E03）：删除该批次全部 'q' 态任务，重估归档并补发汇总。
-/// 在途（run/retry）任务不受影响，会自行跑完。返回取消数。
-#[tauri::command]
-#[specta::specta]
-pub async fn cancel_batch_pending(state: State<'_, AppState>, batch_id: i64) -> AppResult<i64> {
-    let n = repo::cancel_pending(&state.db, batch_id).await?;
-    if n > 0 {
-        // 剩余若全为终态则归档；补发汇总驱动前端进度/徽章即时更新。
-        let _ = repo::archive_if_all_terminal(&state.db, batch_id).await;
-        state.engine.emit_summary(batch_id).await;
-    }
-    Ok(n)
 }
 
 #[tauri::command]

@@ -36,7 +36,7 @@ export function CommandPalette() {
     }));
     const paused = useEngineStore.getState().paused;
     const actions: PaletteItem[] = [
-      { cat: "操作", label: "导入提示词 .txt", run: () => go("prompts") },
+      { cat: "操作", label: "导入提示词 .txt", run: () => go("generate") },
       {
         cat: "操作",
         label: paused ? "继续队列" : "暂停队列",

@@ -95,6 +95,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     autoSubmitted: false,
     assetPackId: null,
     inAssetLib: false,
+    exportPath: null,
     acceptedAt: NOW - 8000,
     updatedAt: NOW - 600,
     ...over,

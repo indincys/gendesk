@@ -88,19 +88,6 @@ pub fn infer_purposes(group_name: &str, scene: &str, tags: &[String]) -> Vec<Str
     }
 }
 
-/// 合并：保留既有的自由标签，只替换用途标签。
-///
-/// 用途选择器不该顺手抹掉用户在 txt 里写的 `标签: 白底,3C`——那是两套互不相干的东西
-/// 恰好共用一张表。
-pub fn merge_purposes(existing: &[String], purposes: &[String]) -> Vec<String> {
-    existing
-        .iter()
-        .filter(|t| !is_purpose(t))
-        .cloned()
-        .chain(purposes.iter().cloned())
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // 测试断言失败即失败
 mod tests {
@@ -112,39 +99,6 @@ mod tests {
     fn purpose_constant_is_listed() {
         assert!(is_purpose(PURPOSE_I2V), "常量用途必须出现在 all() 中");
         assert!(!is_purpose("随手写的标签"), "自由标签不应被认作受控用途");
-    }
-
-    // 打用途不得抹掉 txt 导入进来的自由标签：两套东西恰好共用一张 tags 表。
-    #[test]
-    fn merge_keeps_free_tags_and_replaces_purposes() {
-        let existing = vec![
-            "白底".to_string(),
-            "3C".to_string(),
-            PURPOSE_I2V.to_string(),
-        ];
-        // 取消用途：自由标签必须原样留下。
-        let merged = merge_purposes(&existing, &[]);
-        assert_eq!(merged, vec!["白底".to_string(), "3C".to_string()]);
-        // 重新打上：不产生重复。
-        let merged = merge_purposes(&existing, &[PURPOSE_I2V.to_string()]);
-        assert_eq!(
-            merged,
-            vec![
-                "白底".to_string(),
-                "3C".to_string(),
-                PURPOSE_I2V.to_string()
-            ],
-            "用途只应出现一次，自由标签顺序不变"
-        );
-    }
-
-    // 组上一个标签都没有时也要能打（全库 tags 表长期为空，这是最常见的起点）。
-    #[test]
-    fn merge_from_empty_existing() {
-        assert_eq!(
-            merge_purposes(&[], &[PURPOSE_I2V.to_string()]),
-            vec![PURPOSE_I2V.to_string()]
-        );
     }
 
     // 关键词预猜的核心用例：用户真实组名带 B-Roll / 分镜 / 首帧，各种分隔符写法都要命中。

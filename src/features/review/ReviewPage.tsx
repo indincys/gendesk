@@ -1,24 +1,29 @@
 import { Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { moveByRow, packJustifiedRows } from "@/features/review/layout";
 import { assetSrc } from "@/lib/img";
-import { type BatchView, type ReviewItemView, commands, unwrap } from "@/lib/ipc";
+import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Check, ChevronDown, Clock, Maximize2, RotateCcw, X } from "lucide-react";
+import { Check, Clock, Maximize2, RotateCcw, X } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-// T1：扁平行模型——聚类模式下先出整宽分组头行，卡片按 cols 攒成等高网格行。
-type Row =
-  | { kind: "header"; key: string; count: number }
-  | { kind: "cards"; items: { it: ReviewItemView; idx: number }[] };
+/** 一张图的宽高比。缺尺寸时用 1（历史任务后端会补齐，这里只兜住补不到的极端情况）。 */
+function ratioOf(it: ReviewItemView): number {
+  const w = it.resultWidth ?? 0;
+  const h = it.resultHeight ?? 0;
+  return w > 0 && h > 0 ? w / h : 1;
+}
 
 // T1：单卡抽为 React.memo 组件——按键/选中/待定变化只重渲变化的 1–2 张，
 // 而非整个网格。所有回调由父级 useCallback 稳定化，保证 memo 生效。
 type ReviewCardProps = {
   item: ReviewItemView;
   idx: number;
+  /** 齐行分配给这张图的宽度（px）。行高由父级统一给，二者构成它的真实比例。 */
+  width: number;
   selected: boolean;
   focused: boolean;
   pending: boolean;
@@ -34,6 +39,7 @@ type ReviewCardProps = {
 const ReviewCard = memo(function ReviewCard({
   item,
   idx,
+  width,
   selected,
   focused,
   pending,
@@ -47,13 +53,15 @@ const ReviewCard = memo(function ReviewCard({
 }: ReviewCardProps) {
   return (
     <div
-      className={cn("rcard", selected && "sel", focused && "focus", pending && "pend")}
+      className={cn("rcard rjcard", selected && "sel", focused && "focus", pending && "pend")}
+      style={{ width }}
       onClick={(e) => onCardClick(idx, e.shiftKey)}
       onDoubleClick={() => onZoom(idx)}
       // T2：指针跟随焦点——悬停即设焦点，令空格/回车作用于鼠标所指卡片而非默认第 0 张。
       onMouseEnter={() => onHover(idx)}
     >
-      <NatThumb path={item.resultThumbPath} className="rcimg rcsq" />
+      {/* 图框铺满这一格：格子本身已按真实宽高比算好，故 cover 不会裁掉任何东西。 */}
+      <NatThumb path={item.resultThumbPath} className="rcimg rjimg" />
       <span className={cn("rck", selected && "on")}>
         <Check className="ic12" />
       </span>
@@ -145,10 +153,9 @@ export function ReviewPage() {
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
   const [compareRef, setCompareRef] = useState(false);
   const [holdRef, setHoldRef] = useState(false);
-  // E29：按批次筛选（null = 全部批次混排）。
-  const [batches, setBatches] = useState<BatchView[]>([]);
-  const [batchFilter, setBatchFilter] = useState<number | null>(null);
-  const [showBatchPicker, setShowBatchPicker] = useState(false);
+  // 齐行排版所需的容器宽度。**只随窗口/侧栏变化**，与图片加载无关——
+  // 用图片自身尺寸去反推布局才会抖，用容器宽度不会。
+  const [measureW, setMeasureW] = useState(1100);
   const [zoom, setZoom] = useState<number | null>(null); // index into items
   const [processed, setProcessed] = useState(0);
   // 「重试 + 微调提示词」目标（E01）：打开编辑框，确认后微调写快照并回队。
@@ -161,25 +168,31 @@ export function ReviewPage() {
 
   const load = useCallback(async () => {
     try {
-      setItems(await unwrap(commands.listPendingReview(batchFilter)));
+      setItems(await unwrap(commands.listPendingReview(null)));
       setSel(new Set());
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [batchFilter]);
+  }, []);
   useEffect(() => {
     void load();
   }, [load]);
-  // 批次列表用于筛选器（仅需展示存在待验收项的批次即可，这里取全部批次）。
+
+  // 容器宽度：齐行的行高由它推出，故必须在渲染前就是对的。
+  // 依赖 items.length 是因为滚动容器只在有待验收项时才挂载（空态是另一棵子树）。
+  const hasItems = items.length > 0;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 容器挂载/卸载随 hasItems 切换，须重挂观察器
   useEffect(() => {
-    void (async () => {
-      try {
-        setBatches(await unwrap(commands.listBatches()));
-      } catch {
-        /* 筛选器可用性非关键，静默 */
-      }
-    })();
-  }, []);
+    const el = parentRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => {
+      const w = e?.contentRect.width;
+      if (w) setMeasureW((cur) => (Math.abs(w - cur) > 1 ? w : cur));
+    });
+    ro.observe(el);
+    setMeasureW(el.clientWidth);
+    return () => ro.disconnect();
+  }, [hasItems]);
 
   const removeIds = (ids: number[]) => {
     setItems((cur) => cur.filter((i) => !ids.includes(i.id)));
@@ -311,41 +324,33 @@ export function ReviewPage() {
     return m;
   }, [displayed, sortMode, clusterKey]);
 
-  // T1：扁平行模型——遍历 displayed，聚类键变化（非 time）先 flush 不满行、再 push 分组头行；
-  // 卡片按 cols 攒成等高网格行。cardRow：卡片全局 index → 所在行号，供焦点滚动。
-  const { rows, cardRow } = useMemo(() => {
-    const rows: Row[] = [];
-    const cardRow: number[] = [];
-    let buf: { it: ReviewItemView; idx: number }[] = [];
-    let curKey: string | null = null;
-    const flush = () => {
-      if (buf.length) {
-        rows.push({ kind: "cards", items: buf });
-        buf = [];
-      }
-    };
-    displayed.forEach((it, idx) => {
-      const ck = clusterKey(it);
-      if (ck !== null && ck !== curKey) {
-        flush();
-        curKey = ck;
-        rows.push({ kind: "header", key: ck, count: clusterCounts.get(ck) ?? 0 });
-      }
-      buf.push({ it, idx });
-      if (buf.length === cols) flush();
-    });
-    flush();
-    rows.forEach((r, ri) => {
-      if (r.kind === "cards") for (const c of r.items) cardRow[c.idx] = ri;
-    });
-    return { rows, cardRow };
-  }, [displayed, cols, clusterKey, clusterCounts]);
+  // 齐行打包走抽出来的纯函数（`layout.ts`，另有测试）：算的是「每张占多宽、每行多高」，
+  // 而验收判的恰恰是构图与边缘，排错一格等于给人看了一张裁过的图。
+  // 容器左右各 14px 内边距，与 .rvscroll 一致。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: measureW 决定行高，必须进依赖
+  const { rows, cardRow } = useMemo(
+    () =>
+      packJustifiedRows(displayed, {
+        width: Math.max(240, measureW - 28),
+        perRow: cols,
+        ratioOf,
+        clusterKey,
+        counts: clusterCounts,
+      }),
+    [displayed, cols, clusterKey, clusterCounts, measureW],
+  );
 
+  // 行高**精确可算**（上面已经算好），故 estimateSize 就是真值：
+  // 虚拟化不必再回头测量任何一行，滚动全程零重排。
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (i) => (rows[i]?.kind === "header" ? 56 : 220),
-    overscan: 8,
+    estimateSize: (i) => {
+      const r = rows[i];
+      if (!r) return 220;
+      return r.kind === "header" ? 56 : r.h + 34; // +34 = 卡片下方编号行 + 行间距
+    },
+    overscan: 6,
   });
 
   // 大图逐张模式键盘
@@ -405,9 +410,9 @@ export function ReviewPage() {
     };
   }, [zoom, retryTarget]);
 
-  // E09：网格模式键盘流（大图/重试框/批次弹层打开时让位）。
+  // E09：网格模式键盘流（大图/重试框打开时让位）。
   useEffect(() => {
-    if (zoom !== null || retryTarget || showBatchPicker) return;
+    if (zoom !== null || retryTarget) return;
     const onKey = (e: KeyboardEvent) => {
       // T2：焦点落在任何交互控件（悬浮按钮 / 每行滑块 / 输入）上时让位给原生行为，
       // 避免 window 处理器与控件双触发、或方向键被滑块吞掉导致网格导航失灵。
@@ -426,12 +431,11 @@ export function ReviewPage() {
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         setFocus((f) => Math.max(0, f - 1));
-      } else if (e.key === "ArrowDown") {
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setFocus((f) => Math.min(n - 1, f + cols));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setFocus((f) => Math.max(0, f - cols));
+        // 齐行下每行张数不固定，故上下移动要走行模型而不是「加减 cols」。
+        // 保持列位：落到目标行里同样的第几张（不够就取最后一张）。
+        setFocus((f) => moveByRow(rows, cardRow, f, e.key === "ArrowDown" ? 1 : -1));
       } else if (e.key === " ") {
         e.preventDefault();
         const it = displayed[focus];
@@ -454,10 +458,10 @@ export function ReviewPage() {
   }, [
     zoom,
     retryTarget,
-    showBatchPicker,
     displayed,
     focus,
-    cols,
+    rows,
+    cardRow,
     sel,
     accept,
     reject,
@@ -523,12 +527,8 @@ export function ReviewPage() {
   const zoomItem = zoom !== null ? displayed[zoom] : undefined;
 
   return (
-    <PageScaffold title="图片验收" caption="网格粗筛 · 大图逐张精审">
+    <PageScaffold title="图片验收" caption="按原图比例排版 · 网格粗筛 · 大图逐张精审">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
-        <button type="button" className="btn sm gho" onClick={() => setShowBatchPicker(true)}>
-          {batchFilter == null ? "全部批次" : `批次 #${batchFilter}`}
-          <ChevronDown className="ic12" />
-        </button>
         <span className="cnt">{items.length} 待验收</span>
         {processed > 0 && <span className="pcap">本批已处理 {processed}</span>}
         {pending.size > 0 && (
@@ -590,7 +590,10 @@ export function ReviewPage() {
             按 Key
           </span>
         </div>
-        <span className="fs11 t3 nowrap">每行</span>
+        {/* 齐行下每行张数随比例浮动，故这里给的是**大小**而不是精确列数。 */}
+        <span className="fs11 t3 nowrap" title="图片显示大小（每行放几张的目标值）">
+          大小
+        </span>
         <input
           type="range"
           min={3}
@@ -655,12 +658,13 @@ export function ReviewPage() {
                       </button>
                     </div>
                   ) : (
-                    <div className="rgrid2" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-                      {row.items.map(({ it, idx }) => (
+                    <div className="rjrow" style={{ "--rjh": `${row.h}px` } as React.CSSProperties}>
+                      {row.items.map(({ it, idx, w }) => (
                         <ReviewCard
                           key={it.id}
                           item={it}
                           idx={idx}
+                          width={w}
                           selected={sel.has(it.id)}
                           focused={idx === focus}
                           pending={pending.has(it.id)}
@@ -811,45 +815,6 @@ export function ReviewPage() {
             </div>
           );
         })()}
-
-      {/* T2：批次筛选迁到共享 Modal（自带 Esc + 捕获阶段拦截），配合网格 keydown 让位守卫杜绝穿透。 */}
-      {showBatchPicker && (
-        <Modal title="按批次筛选" width="w420" onClose={() => setShowBatchPicker(false)}>
-          <div className="mlist">
-            <div
-              className="pickrow"
-              onClick={() => {
-                setBatchFilter(null);
-                setShowBatchPicker(false);
-              }}
-            >
-              <span className={cn("ckb", batchFilter == null && "on")} />
-              <span className="fs12 f1">全部批次</span>
-            </div>
-            {batches.map((b) => (
-              <div
-                key={b.id}
-                className="pickrow"
-                onClick={() => {
-                  setBatchFilter(b.id);
-                  setShowBatchPicker(false);
-                }}
-              >
-                <span className={cn("ckb", b.id === batchFilter && "on")} />
-                <span className="fs12 f1">
-                  批次 #{b.id} · {b.status === "archived" ? "已归档" : "进行中"} · {b.taskCount}{" "}
-                  任务
-                </span>
-              </div>
-            ))}
-            {batches.length === 0 && (
-              <div className="fs12 t3" style={{ padding: 12 }}>
-                暂无批次
-              </div>
-            )}
-          </div>
-        </Modal>
-      )}
 
       {retryTarget && (
         <Modal

@@ -404,6 +404,8 @@ mod tests {
                 group_id: Some(gid),
                 ref_image_id: rid,
                 batch_id: bid,
+                prompt_code: String::new(),
+                group_name: String::new(),
             },
         )
         .await
@@ -428,6 +430,7 @@ mod tests {
                 title: ttitle,
                 source_label: "手动删除".into(),
                 file_paths: Vec::new(),
+                payload_json: None,
             },
         )
         .await

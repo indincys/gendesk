@@ -4,15 +4,17 @@ import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
+import { IntakeConfirmModal } from "@/features/settings/IntakeConfirmModal";
 import { commands, subscribeIntake, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
+import { windowControls } from "@/lib/window";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
 import { usePublishStore } from "@/stores/publish";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { useV2vStore } from "@/stores/v2v";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 /** 应用外壳（执行计划 0.4）：标题栏 + 侧栏 + 主面板容器。 */
@@ -28,6 +30,8 @@ export function AppShell() {
   const refreshV2v = useV2vStore((s) => s.refresh);
   const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
+  // 超阈值工单：在任何页面上都要能当场核对并放行（见下方订阅处的理由）。
+  const [holdJob, setHoldJob] = useState<number | null>(null);
 
   // 加载设置（E13 引导态 / 动效偏好等全局所需）。
   useEffect(() => {
@@ -76,7 +80,13 @@ export function AppShell() {
           toast(`收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`);
         } else if (j.status === "hold") {
           // 超阈值：琥珀而不是红——它不是错误，是在等人表态。
-          toast.warning(`工单「${j.jobId}」${j.message}，去设置页确认`);
+          //
+          // **确认卡当场在这里弹出来**，而不是让人自己走到设置页去找：系统通知只能
+          // 说「有一份工单在等」，说不清「哪个组配了哪几张图」，而那恰恰是要核的东西。
+          // 同时把窗口叫到前面来——投单那一刻人在 Claude Code 里，GenDesk 可能在后台。
+          setHoldJob(j.id);
+          void windowControls.focus();
+          toast.warning(`工单「${j.jobId}」${j.message}，请核对挂靠后确认`);
         } else {
           // 失败必须是红的且带原因：静默失败的工单等于「投了单什么也没发生」。
           toast.error(`工单「${j.jobId}」收录失败：${j.message}`);
@@ -110,6 +120,13 @@ export function AppShell() {
       <CommandPalette />
       <HelpPanel />
       <DailyBrief />
+      {holdJob !== null && (
+        <IntakeConfirmModal
+          jobId={holdJob}
+          onClose={() => setHoldJob(null)}
+          onConfirmed={() => {}}
+        />
+      )}
     </div>
   );
 }

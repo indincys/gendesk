@@ -67,7 +67,7 @@ export function GeneratePage() {
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   // E31：开始生成确认卡（null = 未打开）。
   const [confirm, setConfirm] = useState<null | { avgSec: number | null }>(null);
-  const [modal, setModal] = useState<null | "groups" | "refs">(null);
+  const [modal, setModal] = useState<null | "refs">(null);
   const [starting, setStarting] = useState(false);
   // E14：生成页 txt 导入改走预览确认（取消不落库、不产生临时分组）。
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
@@ -365,21 +365,19 @@ export function GeneratePage() {
             <span className="fw6 fs13">提示词</span>
             {selGroups.length > 0 && <span className="cnt">{selGroups.length} 组</span>}
             <div className="f1" />
-            <button type="button" className="btn sm gho" onClick={importTxt}>
+            <button type="button" className="btn sm" onClick={importTxt}>
               <FileUp className="ic12" />
               导入 .txt
-            </button>
-            <button type="button" className="btn sm" onClick={() => setModal("groups")}>
-              <Plus className="ic12" />
-              选择提示词组
             </button>
           </div>
           <div className="colsc">
             {selGroups.length === 0 ? (
               <div className="empt">
-                <div className="fs13 fw5 t2">尚未选择提示词</div>
-                <div className="fs12 t3 mt4">
-                  从提示词库选择分组，或导入 .txt 作为本批次的临时提示词
+                <div className="fs13 fw5 t2">尚未导入提示词</div>
+                <div className="fs12 t3 mt4" style={{ lineHeight: 1.7 }}>
+                  导入 .txt（或直接拖进来）作为本批提示词
+                  <br />
+                  提示词是消耗品：跑完并验收干净后随批次一起清掉，没有可回头挑选的历史库
                 </div>
               </div>
             ) : (
@@ -850,18 +848,6 @@ export function GeneratePage() {
         </Modal>
       )}
 
-      {modal === "groups" && (
-        <PickGroups
-          groups={groups}
-          selected={selGroupIds}
-          ccOf={ccOf}
-          onClose={() => setModal(null)}
-          onConfirm={(ids) => {
-            setSelGroupIds(ids);
-            setModal(null);
-          }}
-        />
-      )}
       {modal === "refs" && (
         <PickRefs
           // 临时上传只属于本批，不该出现在「从参考图库选择」里（0019）。
@@ -1026,91 +1012,6 @@ function Seg({
         );
       })}
     </div>
-  );
-}
-
-function PickGroups({
-  groups,
-  selected,
-  ccOf,
-  onClose,
-  onConfirm,
-}: {
-  groups: GroupView[];
-  selected: number[];
-  ccOf: (gid: number) => string;
-  onClose: () => void;
-  onConfirm: (ids: number[]) => void;
-}) {
-  const [sel, setSel] = useState<number[]>(selected);
-  // 归档（0016）：跑过批次的组默认折起，避免选择器被历次临时组淹没。已选中的永远可见。
-  const [showArchived, setShowArchived] = useState(false);
-  const toggle = (id: number) =>
-    setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
-  // 打开弹窗时已选中的项恒可见。**取 initial selected 而非实时 sel**：否则取消勾选一个
-  // 已归档项，它会当场从列表消失，想改回来都点不着。
-  const [pinned] = useState(() => new Set(selected));
-  const hidden = groups.filter((g) => g.archived && !pinned.has(g.id));
-  const hiddenIds = new Set(hidden.map((g) => g.id));
-  const visible = showArchived ? groups : groups.filter((g) => !hiddenIds.has(g.id));
-  return (
-    <Modal
-      title="选择提示词组"
-      width="w640"
-      onClose={onClose}
-      headerExtra={
-        hidden.length > 0 ? (
-          <button
-            type="button"
-            className={cn("btn sm gho", showArchived && "on")}
-            onClick={() => setShowArchived((v) => !v)}
-          >
-            {showArchived ? "隐藏已归档" : `显示已归档 · ${hidden.length}`}
-          </button>
-        ) : undefined
-      }
-      footer={
-        <>
-          <span className="fs11 t3">选中分组的全部提示词参与本批生成</span>
-          <div className="f1" />
-          <button type="button" className="btn" onClick={onClose}>
-            取消
-          </button>
-          <button type="button" className="btn pri" onClick={() => onConfirm(sel)}>
-            添加所选
-          </button>
-        </>
-      }
-    >
-      {visible.map((g) => (
-        <div
-          key={g.id}
-          className={cn("gpick", sel.includes(g.id) && "sel")}
-          onClick={() => toggle(g.id)}
-        >
-          <div className="fx ac gap9">
-            <span className={cn("ckb", sel.includes(g.id) && "on")}>
-              <Check className="ic12" />
-            </span>
-            <i className={cn("gdot", ccOf(g.id))} style={{ background: "var(--gc)" }} />
-            <span className="fw5 nowrap">{g.name}</span>
-            <span className="chip">{g.prefix}</span>
-            {g.scene && <span className="bdg b-gray">{g.scene}</span>}
-            {g.isTemp && <span className="bdg b-amber">临时</span>}
-            {g.archived && <span className="bdg b-gray">已归档</span>}
-            <div className="f1" />
-            <span className="t3 fs12 nowrap">{g.count} 条</span>
-          </div>
-        </div>
-      ))}
-      {visible.length === 0 && (
-        <div className="fs12 t3">
-          {groups.length === 0
-            ? "暂无提示词分组，请先在提示词库导入"
-            : "全部分组都已归档 —— 导入新的 .txt，或点右上「显示已归档」取回"}
-        </div>
-      )}
-    </Modal>
   );
 }
 

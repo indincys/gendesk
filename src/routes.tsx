@@ -1,7 +1,6 @@
 import { AssetsPage } from "@/features/assets/AssetsPage";
 import { GeneratePage } from "@/features/generate/GeneratePage";
 import { PlanPage } from "@/features/plan/PlanPage";
-import { PromptsPage } from "@/features/prompts/PromptsPage";
 import { RefsPage } from "@/features/refs/RefsPage";
 import { ReviewPage } from "@/features/review/ReviewPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -11,7 +10,6 @@ import { V2vClipsPage } from "@/features/v2v/V2vClipsPage";
 import { V2vPage } from "@/features/v2v/V2vPage";
 import { WorksPage } from "@/features/works/WorksPage";
 import {
-  AlignLeft,
   CheckCircle2,
   Clapperboard,
   Film,
@@ -34,7 +32,6 @@ export type RouteKey =
   | "v2v"
   | "clips"
   | "library"
-  | "prompts"
   | "refs"
   | "assets"
   | "plan"
@@ -108,14 +105,10 @@ export const ROUTES: readonly RouteDef[] = [
     icon: Grid2x2,
     component: WorksPage,
   },
-  {
-    key: "prompts",
-    label: "提示词库",
-    shortcut: 5,
-    group: "asset",
-    icon: AlignLeft,
-    component: PromptsPage,
-  },
+  // 「提示词库」（原 ⌘5）已整页移除：提示词是消耗品，跑完即随批次一起删掉，
+  // 没有可长期浏览的库。导入仍在生成页内完成，或由 skill 投工单送进来。
+  // **⌘5 就此空着，不把后面的数字往前挪**：重排会把每个人的肌肉记忆一次性作废
+  // （同 v0.15.0 给新页不排数字的理由，代价远大于少一个快捷键）。
   { key: "refs", label: "参考图库", shortcut: 6, group: "asset", icon: Image, component: RefsPage },
   {
     key: "assets",

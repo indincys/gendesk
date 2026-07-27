@@ -1,3 +1,4 @@
+import { IntakeConfirmModal } from "@/features/settings/IntakeConfirmModal";
 import { type IntakeSettings, type JobView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, Check, FolderOpen, PlayCircle, RefreshCw, RotateCcw } from "lucide-react";
@@ -19,6 +20,8 @@ export function IntakeSection() {
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [dir, setDir] = useState<string>("");
   const [scanning, setScanning] = useState(false);
+  // 待确认工单的可视化确认卡（看清提示词组 ↔ 参考图的对应关系再放行）。
+  const [confirming, setConfirming] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     setJobs(await unwrap(commands.listIntakeJobs(20)).catch(() => []));
@@ -59,19 +62,6 @@ export function IntakeSection() {
   const retry = async (id: number) => {
     try {
       await unwrap(commands.retryIntakeJob(id));
-      await refresh();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
-  // 「确认开跑」做的事就是在工单目录里写下 `确认.txt` —— 与你在 Claude Code 里
-  // touch 一下走的是同一段代码，不可能一条路对、另一条路错。
-  const confirm = async (id: number) => {
-    try {
-      const done = await unwrap(commands.confirmIntakeJob(id));
-      const ok = done.find((j) => j.status === "done");
-      toast(ok ? `已开跑 · ${ok.taskCount} 张` : "已确认");
       await refresh();
     } catch (e) {
       toast.error(String(e));
@@ -210,9 +200,9 @@ export function IntakeSection() {
                   <span className="fs11" style={{ color: "var(--wr)" }}>
                     {j.message}（还没导入任何东西）
                   </span>
-                  <button type="button" className="btn sm" onClick={() => void confirm(j.id)}>
+                  <button type="button" className="btn sm" onClick={() => setConfirming(j.id)}>
                     <PlayCircle className="ic12" />
-                    确认开跑
+                    查看并确认
                   </button>
                 </>
               )}
@@ -230,6 +220,14 @@ export function IntakeSection() {
             </div>
           ))}
         </div>
+      )}
+
+      {confirming !== null && (
+        <IntakeConfirmModal
+          jobId={confirming}
+          onClose={() => setConfirming(null)}
+          onConfirmed={() => void refresh()}
+        />
       )}
     </section>
   );

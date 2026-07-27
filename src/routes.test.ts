@@ -2,10 +2,11 @@ import { ROUTES, ROUTE_BY_SHORTCUT } from "@/routes";
 import { describe, expect, it } from "vitest";
 
 describe("routes 注册表", () => {
-  it("11 个页面（原八页 + 资产库/发布计划 + 视频流水线），数字快捷键无重复", () => {
+  it("12 个页面（原八页 + 资产库/发布计划 + 视频流水线/视频成片），数字快捷键无重复", () => {
     // 发布模块 P1 新增两项导航：资产库(⌘9) / 发布计划(⌘0)。
-    // v0.15.0 新增「视频流水线」——十个数字已用尽，它没有数字快捷键，经侧栏与 ⌘K 进。
-    expect(ROUTES).toHaveLength(11);
+    // v0.15.0 新增「视频流水线」、v0.20.0 新增「视频成片」——十个数字已用尽，
+    // 两页都没有数字快捷键，经侧栏与 ⌘K 进。
+    expect(ROUTES).toHaveLength(12);
     const digits = ROUTES.map((r) => r.shortcut)
       .filter((s): s is number => s !== null)
       .sort((a, b) => a - b);
@@ -25,6 +26,8 @@ describe("routes 注册表", () => {
   it("无数字快捷键的页面不进快捷键映射表", () => {
     expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("v2v");
     expect(ROUTES.find((r) => r.key === "v2v")?.shortcut).toBeNull();
+    expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("clips");
+    expect(ROUTES.find((r) => r.key === "clips")?.shortcut).toBeNull();
   });
 
   it("路由键唯一", () => {

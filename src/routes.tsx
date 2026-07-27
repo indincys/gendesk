@@ -7,12 +7,14 @@ import { ReviewPage } from "@/features/review/ReviewPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { TasksPage } from "@/features/tasks/TasksPage";
 import { TrashPage } from "@/features/trash/TrashPage";
+import { V2vClipsPage } from "@/features/v2v/V2vClipsPage";
 import { V2vPage } from "@/features/v2v/V2vPage";
 import { WorksPage } from "@/features/works/WorksPage";
 import {
   AlignLeft,
   CheckCircle2,
   Clapperboard,
+  Film,
   Grid2x2,
   Image,
   Layers,
@@ -30,6 +32,7 @@ export type RouteKey =
   | "tasks"
   | "review"
   | "v2v"
+  | "clips"
   | "library"
   | "prompts"
   | "refs"
@@ -88,6 +91,14 @@ export const ROUTES: readonly RouteDef[] = [
     group: "make",
     icon: Clapperboard,
     component: V2vPage,
+  },
+  {
+    key: "clips",
+    label: "视频成片",
+    shortcut: null,
+    group: "asset",
+    icon: Film,
+    component: V2vClipsPage,
   },
   {
     key: "library",

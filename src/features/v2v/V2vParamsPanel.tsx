@@ -114,6 +114,9 @@ export function V2vParamsPanel({
 
   if (!s) return null;
   const picked = models.find((m) => m.modelVersion === s.modelVersion);
+  // `#[serde(default)]` 让 specta 把它标成可选，但 Rust 那边一定会填 —— 取个局部变量
+  // 收窄类型，而不是在 TS 里再抄一份默认值（那份必然与 Rust 的默认值分叉）。
+  const af = s.autofill;
 
   return (
     <Modal
@@ -249,6 +252,102 @@ export function V2vParamsPanel({
             </span>
           )}
         </div>
+
+        {/* ── 常驻队列（自动补单） ───────────────────────── */}
+        {af && (
+          <>
+            <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+              常驻队列 · 非 VIP 自动补单
+            </div>
+            <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 8 }}>
+              非 VIP 通道实测排在四千多位、要等几小时，而 VIP 同规格贵 5.5 倍 ——
+              买到的只是不排队。所以<b>「等」这件事本身是免费的</b>，只要队列不空着，
+              过夜就能低成本攒下片子。这条队列保持 N 条在跑，完成一条自动补一条；
+              待提交的存量见底时发系统通知，好让你提前安排新的。
+            </div>
+            <div className="fx ac gap8 wrap">
+              <label className="fx ac gap6 fs12">
+                <input
+                  type="checkbox"
+                  checked={af.enabled}
+                  disabled={busy}
+                  onChange={(e) => void save({ autofill: { ...af, enabled: e.target.checked } })}
+                />
+                开启常驻队列
+              </label>
+              <span className="fs11 t3">常驻</span>
+              <input
+                className="inp sm"
+                style={{ width: 64 }}
+                type="number"
+                min={1}
+                max={20}
+                value={af.depth}
+                onChange={(e) => setS({ ...s, autofill: { ...af, depth: Number(e.target.value) } })}
+                onBlur={() => void save({ autofill: af })}
+              />
+              <span className="fs11 t3">条在跑 · 模型</span>
+              <select
+                className="inp sm"
+                style={{ minWidth: 170 }}
+                value={af.modelVersion}
+                disabled={busy}
+                onChange={(e) =>
+                  void save({
+                    autofill: {
+                      ...af,
+                      modelVersion: e.target.value,
+                      duration: null,
+                      videoResolution: "",
+                    },
+                  })
+                }
+              >
+                {models
+                  // VIP 通道不进这个选择器：这条队列的全部前提就是便宜。
+                  // 后端保存时也会拒 —— 选择器不该是唯一的闸门。
+                  .filter((m) => !m.vip)
+                  .map((m) => (
+                    <option key={m.modelVersion} value={m.modelVersion}>
+                      {m.modelVersion}
+                      {m.creditAtMin === null ? "" : `（${m.creditAtMin} 额度起/条）`}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="fx ac gap8 wrap mt6">
+              <span className="fs11 t3">存量低于</span>
+              <input
+                className="inp sm"
+                style={{ width: 64 }}
+                type="number"
+                min={0}
+                value={af.lowWater}
+                onChange={(e) =>
+                  setS({ ...s, autofill: { ...af, lowWater: Number(e.target.value) } })
+                }
+                onBlur={() => void save({ autofill: af })}
+              />
+              <span className="fs11 t3">条时通知 · 每日额度上限</span>
+              <input
+                className="inp sm"
+                style={{ width: 84 }}
+                type="number"
+                min={0}
+                value={af.dailyCredits}
+                onChange={(e) =>
+                  setS({ ...s, autofill: { ...af, dailyCredits: Number(e.target.value) } })
+                }
+                onBlur={() => void save({ autofill: af })}
+              />
+              <span className="fs11 t3">
+                {(af.dailyCredits ?? 0) > 0
+                  ? "（按提交时刻计，不是出片时刻 —— 否则一整天的额度能在任何一条出片之前提交光）"
+                  : "不限 —— 那意味着上限就是账户余额"}
+              </span>
+            </div>
+          </>
+        )}
 
         {/* ── 通道（会话） ─────────────────────────────── */}
         <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>

@@ -1099,6 +1099,14 @@ async v2vQueueStats() : Promise<Result<QueueStats, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async v2vAutofillStatus() : Promise<Result<AutofillStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_autofill_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async v2vAwayDigest() : Promise<Result<AwayDigest, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_away_digest") };
@@ -2257,6 +2265,62 @@ export type AppError =
  */
 { type: "Internal"; message: string }
 /**
+ * 常驻队列配置（`V2vSettings.autofill` 的一部分）。
+ */
+export type AutofillCfg = { 
+/**
+ * 默认关。自动花钱的东西不该装完就在跑。
+ */
+enabled?: boolean; 
+/**
+ * 常驻在跑的条数（补单器自己放行的那些）。
+ */
+depth?: number; 
+/**
+ * 这条队列用的模型。**必须非 VIP**（保存时校验）。
+ */
+modelVersion?: string; duration?: number | null; videoResolution?: string; 
+/**
+ * 待提交存量低于它就发告急通知。
+ */
+lowWater?: number; 
+/**
+ * 每日额度上限（按提交时刻切窗）。`0` 或负数 = 不限。
+ */
+dailyCredits?: number }
+/**
+ * 常驻队列此刻的样子（看板顶部那条 pill 的数据源）。
+ * 
+ * 它要回答的问题只有一个：**这条队列现在是在跑，还是停了，停在哪一步**。
+ * 「开着」不等于「在跑」——没料了、日限满了、余额不够都会让它安静地停下来，
+ * 而一条安静停摆的常驻队列与一条正常运转的在界面上长得一模一样。
+ */
+export type AutofillStatus = { enabled: boolean; depth: number; 
+/**
+ * 补单器自己放出去、此刻在跑的条数。
+ */
+running: number; 
+/**
+ * 待提交存量（有视频提示词的）。
+ */
+stock: number; lowWater: number; 
+/**
+ * 今日（近 24 小时）**已提交**掉的额度与上限。0 上限 = 不限。
+ */
+spentToday: number; dailyCredits: number; modelVersion: string; 
+/**
+ * 单条预估额度；查不到单价为 None。
+ */
+unitCost: number | null; 
+/**
+ * 停下来的原因（补满了就是 None）。
+ */
+blocked: string | null; 
+/**
+ * 配置非法时的原因 —— 有值时这条队列一条都不会跑。
+ */
+error: string | null }
+/**
  * 「你离开的这段时间」发生了什么。
  * 
  * 视频是**过夜跑**的：睡前提交、早上回来。回来那一刻真正要知道的不是「现在有多少条」，
@@ -2386,6 +2450,10 @@ submitCredit: number | null; submitStatus: string | null;
  * 提交时刻用 `first_submitted_at`（见上）。
  */
 createdAt: number; rewroteAt: number | null; finishedAt: number | null; reviewedAt: number | null; 
+/**
+ * 是不是常驻队列（自动补单）替人放行的（0026）。
+ */
+autoSubmitted: boolean; 
 /**
  * 打包进了哪个素材包，以及那个包**现在还在不在**（0025）。
  * 后者才是「未入资产库」筛选的判据：包被退役删除后该条应重新变回待办。
@@ -3349,7 +3417,14 @@ export type StageCounts = { rewrite: number; ready: number; run: number; rev: nu
  * 在 Rust 侧算好而不是让前端 `ready + rev`：这条「什么算待办」的规则会随流水线
  * 演进（将来 fail 也许该催），留在前端就会与后端的判断悄悄分叉。
  */
-actionable: number }
+actionable: number; 
+/**
+ * 成片做完却没入资产库的条数 —— 成片库那一页的徽章。
+ * 
+ * 它是**发布链上唯一一处会无声断掉的地方**：片子出来了、验收过了，然后就停在
+ * 那里，排期永远排不到它，而界面上没有任何东西会提这件事。
+ */
+noAsset: number }
 /**
  * 提交确认卡的全部内容：真实命令行 + 预计额度消耗 + 当前余额。
  */
@@ -3621,7 +3696,11 @@ pollEnabled?: boolean;
  * 还在 `querying` 的任务全判死了。退避轮询让「永远等」的开销低到可以接受
  * （等满一小时后每 10 分钟才问一次）。
  */
-timeoutHours?: number | null }
+timeoutHours?: number | null; 
+/**
+ * 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
+ */
+autofill?: AutofillCfg }
 /**
  * `v2v://tick` —— 轮询器心跳（每轮一发，无论有没有变化）。
  * 

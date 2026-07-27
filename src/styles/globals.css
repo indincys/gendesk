@@ -34,6 +34,7 @@
   --ok: oklch(55% 0.1 155);
   --okbg: oklch(55% 0.1 155 / 0.11);
   --ok2: oklch(42% 0.1 155);
+  --okln: oklch(55% 0.1 155 / 0.4);
   --wr: oklch(58% 0.11 75);
   --wrbg: oklch(70% 0.13 80 / 0.15);
   --wr2: oklch(43% 0.1 70);
@@ -3578,45 +3579,45 @@ a:hover {
   border-bottom: 1px solid var(--line);
 }
 
-/* 已定案的批次：默认收起，不占位。 */
-.vdonehd {
-  padding: 10px 12px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  color: var(--t3);
+/* 工作台清空 —— 已定案的批次整节消失，这里是它留下的那句话。 */
+.vclear {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 22px 16px;
 }
-.vdone {
+.lnk {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--acc);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.lnk:hover {
+  color: var(--acc2);
+}
+
+/* 参数条：提交确认卡顶部与底栏共用。参数是每一批不一样的东西，不该只活在设置页。 */
+.parambar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
-  height: 26px;
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--accln, var(--line));
+  background: var(--accbg);
 }
-.vdone .nm {
-  font-size: 11px;
-  color: var(--t3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
-}
-.vdone .d {
-  width: 6px;
-  height: 6px;
-  border-radius: 99px;
-  background: var(--sg-pass);
+.parambar.foot {
   flex: none;
-}
-.vdone .tl {
-  font-size: 10.5px;
-  color: var(--t3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
+  border-radius: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 7px 12px;
 }
 
 /* 底栏：有选择时是批量动作，没选择时是一句提示。撤销 pill 常驻右侧。 */
@@ -3697,6 +3698,13 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* 竖幅画框。出的片子基本都是 9:16，横幅画框会把它压成中间一条、
+   左右两大块全是黑边 —— 而这一栏只有 268px 宽，浪费不起。 */
+.vstage.pt {
+  height: auto;
+  aspect-ratio: 9 / 16;
+  max-height: 420px;
 }
 .vstageimg {
   width: 100%;
@@ -3791,6 +3799,201 @@ a:hover {
   color: var(--er);
   background: var(--erbg);
   border: 1px solid var(--erln);
+}
+
+/* ── 播放器（自绘控制条） ─────────────────────────────────
+   原生 controls 有两条硬伤：它压着画面下缘（一层暗色渐变，而这一页判的正是色差与
+   形变），且获焦后吃掉空格（这一页的空格是「通过」）。故控制条自绘、放在画面**之外**。 */
+.vplay {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.vplayframe {
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #000;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+.vplayframe.pt {
+  aspect-ratio: 9 / 16;
+  max-height: 420px;
+}
+.vplayframe video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #000;
+  cursor: pointer;
+  outline: none;
+}
+.vplaybar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.vplaybar .ic,
+.vplaybar .sp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 4px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--t2);
+  cursor: pointer;
+  flex: none;
+}
+.vplaybar .sp {
+  font: 500 10px var(--mono);
+}
+.vplaybar .ic:hover,
+.vplaybar .sp:hover {
+  border-color: var(--accln);
+  color: var(--t1);
+}
+.vplaybar .tk {
+  flex: 1;
+  min-width: 24px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--inset);
+  cursor: pointer;
+  overflow: hidden;
+}
+.vplaybar .tk > div {
+  height: 100%;
+  background: var(--acc);
+}
+.vplaybar .tm {
+  font: 400 9.5px var(--mono);
+  color: var(--t3);
+  flex: none;
+  white-space: nowrap;
+}
+.vplay.dk .vplayframe {
+  border-color: var(--rd-line);
+  flex: 1;
+}
+.vplay.dk .vplaybar .ic,
+.vplay.dk .vplaybar .sp {
+  background: oklch(100% 0 0 / 0.06);
+  border-color: var(--rd-line);
+  color: var(--rd-t2);
+}
+.vplay.dk .vplaybar .tk {
+  background: oklch(100% 0 0 / 0.14);
+}
+.vplay.dk .vplaybar .tm {
+  color: var(--rd-t3);
+}
+
+/* 常驻队列 pill —— 「开着」与「在跑」是两回事，停因必须写在脸上。 */
+.autopill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 99px;
+  border: 1px solid var(--okln);
+  background: var(--okbg);
+  color: var(--ok2);
+  font-size: 10.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.autopill .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 99px;
+  background: currentcolor;
+}
+.autopill.idle {
+  border-color: var(--wrln);
+  background: var(--wrbg);
+  color: var(--wr2);
+}
+.autopill.bad {
+  border-color: var(--erln);
+  background: var(--erbg);
+  color: var(--er);
+}
+
+/* ── 视频成片库 ─────────────────────────────────────────── */
+.clipgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
+.clipcard {
+  border-radius: 9px;
+  padding: 5px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+.clipcard:hover {
+  background: var(--sub);
+}
+.clipcard.cur {
+  border-color: var(--accln);
+  background: var(--accbg);
+}
+.clipcard.sel {
+  border-color: var(--acc);
+}
+.clipcard .th {
+  position: relative;
+  aspect-ratio: 9 / 16;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.clipcard .th img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.clipcard .th .vbox {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+}
+.clipcard .tag {
+  position: absolute;
+  bottom: 5px;
+  left: 5px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+}
+.clipcard .tag.wr {
+  background: var(--wrbg);
+  color: var(--wr2);
+}
+.clipcard .tag.ok {
+  background: var(--okbg);
+  color: var(--ok2);
 }
 
 /* ── 全屏看片流（暗场，沿用图片精审的 --rd-*） ─────────── */
@@ -3894,6 +4097,21 @@ a:hover {
   height: 100%;
   object-fit: contain;
   display: block;
+}
+/* 看片流里的播放器铺满舞台，但**画框自己不再画边**（外层 .vrevstage 已经有了），
+   控制条留在画面下方的留白里 —— 那是它该在的地方，不是压在画面上。 */
+.vrevstage .vplay {
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px 8px;
+  gap: 7px;
+}
+.vrevstage .vplayframe {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
 }
 .vrevcode {
   position: absolute;

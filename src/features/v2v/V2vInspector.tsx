@@ -1,3 +1,4 @@
+import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, STAGE_META, fmtClock, fmtDur } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
 import { cn } from "@/lib/utils";
@@ -70,23 +71,27 @@ export function V2vInspector({
         {c.batchId == null ? "无批次" : `#${c.batchId}`} · {c.groupName || "未分组"}
       </div>
 
-      <div className="vstage mt8">
-        {showFirstFrame ? (
-          frame ? (
+      {/* 小窗默认 9:16 竖幅 —— 出的片子基本都是竖版，横幅画框会把它压成中间一条，
+          左右两大块全是黑边，而这一栏的宽度本来就只有 268px，浪费不起。 */}
+      {showFirstFrame ? (
+        <div className="vstage pt mt8">
+          {frame ? (
             <img src={frame} alt="首帧原图" className="vstageimg" />
           ) : (
             <span className="vstagenote">首帧原图不可用</span>
-          )
-        ) : video ? (
-          // 循环 + 静音自动播放：验收判的是「动起来之后还对不对」，
-          // 每条都要手点播放会让一次 46 条的验收多出 46 次点击。
-          <video className="vstageimg" src={video} controls loop autoPlay muted />
-        ) : (
+          )}
+        </div>
+      ) : video ? (
+        // 循环 + 静音自动播放：验收判的是「动起来之后还对不对」，
+        // 每条都要手点播放会让一次 46 条的验收多出 46 次点击。
+        <V2vVideo className="mt8" src={video} fps={c.fps} portrait videoKey={c.id} />
+      ) : (
+        <div className="vstage pt mt8">
           <span className="vstagenote">
             {row.stage === "run" ? "尚无成片 · 生成中" : "尚无成片"}
           </span>
-        )}
-      </div>
+        </div>
+      )}
       {(c.width != null || c.durationSec != null) && !showFirstFrame && (
         <div className="fs10 t3 mt5">
           {c.width}×{c.height}

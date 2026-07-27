@@ -24,13 +24,35 @@ export const STAGE_META: Record<Stage, { label: string; fg: string; bg: string; 
 
 export const STAGE_ORDER: Stage[] = ["rewrite", "ready", "run", "rev", "pass", "rej", "fail"];
 
+/**
+ * 「还在制」的阶段 —— 工作台只管这些。
+ *
+ * `pass` 与 `rej` 都已经定案：前者去成片库，后者是一个已经做完的决定。把它们留在
+ * 工作台上，「这里还剩多少活」这个问题就再也答不准了 —— 实测 18 条验收通过的片子
+ * 一直挂在看板上，人得先在心里把它们减掉才能看出真正的待办。
+ *
+ * `fail` 算在制：它等着人决定重跑还是继续等，那是活。
+ */
+export const LIVE_STAGES: Stage[] = ["rewrite", "ready", "run", "rev", "fail"];
+
+export function isLive(stage: Stage): boolean {
+  return stage !== "pass" && stage !== "rej";
+}
+
 /** 阶段筛选片。`need` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
 export type StageFilter = Stage | "need" | "all";
 
+/**
+ * 工作台的阶段筛选片。
+ *
+ * **没有「成片」**：验收通过的视频归成片库那一页，它们已经不是流水线的事了。
+ * 「未通过」留着当逃生舱 —— 那些条目不该变得无处可寻，只是不该默认占位。
+ */
 export const STAGE_CHIPS: { key: StageFilter; label: string }[] = [
   { key: "need", label: "需要我" },
-  { key: "all", label: "全部" },
-  ...STAGE_ORDER.map((s) => ({ key: s as StageFilter, label: STAGE_META[s].label })),
+  { key: "all", label: "全部在制" },
+  ...LIVE_STAGES.map((s) => ({ key: s as StageFilter, label: STAGE_META[s].label })),
+  { key: "rej", label: STAGE_META.rej.label },
 ];
 
 /**
@@ -39,7 +61,7 @@ export const STAGE_CHIPS: { key: StageFilter; label: string }[] = [
  * 单看阶段回答不了「这批里有没有出事」：18 条幽灵单和 18 条正常排队在「已提交」列里
  * 长得一模一样，而它们的处置完全相反（一个直接重跑不花钱，一个必须继续等否则重复扣费）。
  */
-export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "noasset";
+export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "noasset" | "auto";
 
 export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = [
   {
@@ -55,8 +77,9 @@ export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = 
   { key: "slow", label: "等待异常", title: "已超同批在跑条目中位等待时长的 3 倍。" },
   { key: "rerun", label: "重跑过", title: "尝试次数 > 1，即同一张图已经花过不止一份额度。" },
   { key: "vip", label: "vip 通道", title: "同规格贵 5.5 倍，买到的只是不排队。" },
-  { key: "noasset", label: "未入资产库", title: "成片做完却没打包，发布链在这里断掉且毫无声响。" },
+  { key: "auto", label: "常驻队列", title: "由自动补单放行的条目，不是你手动提交的。" },
 ];
+// `noasset` 只对成片有意义，而成片不在工作台 —— 它的筛选片在成片库那一页。
 
 export const SORTS = {
   batch: "批次倒序",
@@ -238,6 +261,7 @@ export function deriveRows(
     if (slow) signals.add("slow");
     if (c.attempt > 1) signals.add("rerun");
     if (modelFull?.endsWith("_vip")) signals.add("vip");
+    if (c.autoSubmitted) signals.add("auto");
     if (stage === "pass" && !c.inAssetLib) signals.add("noasset");
 
     let situation: string;
@@ -294,9 +318,15 @@ export function deriveRows(
   });
 }
 
-/** 阶段筛选是否命中。`need` = 人能立刻动手的三种（放行 / 判定 / 处置异常）。 */
+/**
+ * 阶段筛选是否命中。
+ *
+ * - `need` = 人能立刻动手的三种（放行 / 判定 / 处置异常）。
+ * - `all` = **全部在制**，不含已定案的 pass / rej。工作台回答的是「还剩多少活」，
+ *   把做完的算进去，这个数就再也不准了。要看成片去成片库，要看毙掉的选「未通过」。
+ */
 export function matchStage(stage: Stage, filter: StageFilter): boolean {
-  if (filter === "all") return true;
+  if (filter === "all") return isLive(stage);
   if (filter === "need") return stage === "ready" || stage === "rev" || stage === "fail";
   return stage === filter;
 }
@@ -342,7 +372,14 @@ export interface Section {
   createdAt: number;
 }
 
-/** 按批次分节。批次倒序（最近一批在最上），无批次的历史条目垫底。 */
+/**
+ * 按批次分节。批次倒序（最近一批在最上），无批次的历史条目垫底。
+ *
+ * **全部定案的批次整节消失**，不是折叠成一行 —— 一行也是行，几十批做完之后
+ * 那些「已定案」的条目会把真正在跑的那两批挤到屏幕外面去。它们不会丢：
+ * 成片在成片库，毙掉的选「未通过」筛选片还能翻出来（那时 `rows` 非空，这一节
+ * 就会重新出现）。
+ */
 export function buildSections(all: Row[], visible: Row[]): Section[] {
   const groups = new Map<string, Row[]>();
   for (const r of all) {
@@ -361,6 +398,11 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
 
   const out: Section[] = [];
   for (const [key, rows] of groups) {
+    const visRows = visByKey.get(key) ?? [];
+    const done = rows.every((r) => !isLive(r.stage));
+    // 定案了、当前筛选下又一条都不显示 → 整节不出现。
+    // 第二个条件是逃生舱：显式筛「未通过」时这一节会重新出现，条目不会变得无处可寻。
+    if (done && visRows.length === 0) continue;
     const batchId = key === "none" ? null : Number(key);
     const mix = new Map<Stage, number>();
     for (const r of rows) mix.set(r.stage, (mix.get(r.stage) ?? 0) + 1);
@@ -376,12 +418,12 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
       batchId,
       title: sectionTitle(rows),
       all: rows,
-      rows: visByKey.get(key) ?? [],
+      rows: visRows,
       seg,
       legend: STAGE_ORDER.filter((s) => mix.has(s))
         .map((s) => `${STAGE_META[s].label} ${mix.get(s)}`)
         .join(" · "),
-      done: rows.every((r) => r.stage === "pass" || r.stage === "rej"),
+      done,
       createdAt: Math.max(...rows.map((r) => r.clip.createdAt)),
     });
   }

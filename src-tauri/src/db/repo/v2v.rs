@@ -61,6 +61,8 @@ pub struct ClipRow {
     pub finished_at: Option<i64>,
     /// 人工定态（通过/不通过）时刻。
     pub reviewed_at: Option<i64>,
+    /// 这一条是补单器放行的还是人放行的（0026）。
+    pub auto_submitted: i64,
     /// 打包进资产库时留下的素材包 id（0025）。
     pub asset_pack_id: Option<i64>,
     /// 那个素材包**现在还在不在**（包被退役删除后应回落成「尚未入库」）。
@@ -82,7 +84,8 @@ const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
         c.submitted_at, c.gen_status, c.queue_idx, c.polled_at, c.benefit_type,
         c.first_submitted_at, c.submit_credit, c.submit_status,
-        c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at, c.asset_pack_id,
+        c.created_at, c.rewrote_at, c.finished_at, c.reviewed_at,
+        c.auto_submitted, c.asset_pack_id,
         EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id) AS in_asset_lib,
         c.updated_at,
         COALESCE(p.code,'') AS prompt_code,
@@ -300,6 +303,42 @@ pub async fn mark_polled(
         .bind(now)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// 记一次**整表扫描**（`list_task`）的观测结果。
+///
+/// 与 [`mark_polled`] 的差别全在 `COALESCE`：扫描回体里 `queue_info` 恒缺席，
+/// 而 `queue_idx` 是幽灵单判定的两个信号之一 —— 把已经问到过的位次覆盖成 NULL，
+/// 等于亲手抹掉「这条确实进过队列」的证据，下一轮就可能把它误判成幽灵单。
+/// 同理 `credit_count` 与 `benefit_type` 只增不抹。
+///
+/// **计费在扫描里就落库**（实测：排队中的条目在 `list_task` 里已带 `credit_count`）。
+/// 早前那句「只有出片那一刻才有回执」是从 `query_result` 一条路径上归纳的，
+/// 而钱在提交那一刻就扣掉了 —— 越早记下来，「这批到底花了多少」越早答得准。
+pub async fn mark_swept(
+    pool: &SqlitePool,
+    id: i64,
+    gen_status: &str,
+    credit_count: Option<i64>,
+    benefit_type: Option<&str>,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE v2v_clips
+            SET gen_status=?2,
+                credit_count=COALESCE(credit_count, ?3),
+                benefit_type=COALESCE(benefit_type, ?4),
+                polled_at=?5
+          WHERE id=?1",
+    )
+    .bind(id)
+    .bind(gen_status)
+    .bind(credit_count)
+    .bind(benefit_type)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -555,9 +594,12 @@ pub async fn finish_histogram(
 
 /// 额度消耗台账（一行一阶段）。
 ///
-/// **消耗只认 `credit_count`**，那是即梦在出片时随结果回的实际扣费；提交时我们并不知道
-/// 这一条会花多少（同一模型不同时长不同价），所以「预估」在这里是编的。
-/// 没出片的条目自然没有这一列 —— 那也是真相：钱花没花，只有出片那一刻才有回执。
+/// **消耗只认 `credit_count`**，那是即梦给的实际扣费回执，不是我们按单价表算出来的估值。
+///
+/// 0026 起它在**整表扫描**里就落库（实测排队中的条目在 `list_task` 里已带
+/// `credit_count`），不必等到出片 —— 钱本来就是在提交那一刻扣的。故在跑（run）的条目
+/// 现在也会带着自己的账出现在这份台账里，归入「未定论」那一档：它确实花掉了，
+/// 只是还不知道值不值。
 #[derive(Debug, Clone, FromRow)]
 pub struct CreditRow {
     pub stage: String,
@@ -580,6 +622,102 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     let (n,): (i64,) = sqlx::query_as(
         "SELECT COALESCE(SUM(credit_count),0) FROM v2v_clips
           WHERE credit_count IS NOT NULL AND finished_at >= ?1",
+    )
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 成片做完却没入资产库的条数（成片库徽章）。
+///
+/// 判据是 `EXISTS`（那个包**现在**还在不在）而不是 `asset_pack_id IS NOT NULL`：
+/// 包被退役删除之后，这条成片应当自动回落成待办 —— 问的是「现在库里有没有」，
+/// 不是「历史上打过包没有」。
+pub async fn count_pass_without_pack(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM v2v_clips c
+          WHERE c.stage='pass'
+            AND NOT EXISTS(SELECT 1 FROM asset_packs a WHERE a.id = c.asset_pack_id)",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 补单器自己放出去、此刻还在跑的条数（0026）。
+///
+/// **只数它自己的**：人手动提交的一批不该顶掉补单器的深度配额，否则手动跑 20 条时
+/// 常驻队列就静悄悄停摆了，而「常年保持有任务在排队」正是它存在的全部理由。
+pub async fn count_auto_running(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND auto_submitted=1")
+            .fetch_one(pool)
+            .await?;
+    Ok(n)
+}
+
+/// 补单器能碰的条目：待提交、有视频提示词、且**没人给它指定过模型**。
+///
+/// 最后一条是硬边界。补单器会把自己的廉价参数写进它挑中的条目 —— 若它捡走一条用户
+/// （或 skill）特意设了 `seedance2.0_vip / 1080p` 的片子，那份选择会被静悄悄降级，
+/// 而人要到出片时才看得出来。指定过参数 = 一个深思熟虑的决定，常驻队列不碰它。
+const AUTOFILL_POOL: &str = "stage='ready'
+      AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''
+      AND (model_version IS NULL OR TRIM(model_version) = '')";
+
+/// 可供补单的存量条数。
+///
+/// 待改写的不算 —— 那些还等着 skill 写回，补单器碰不到它们。这个数正是「告急」
+/// 那条通知要报的东西：它见底就意味着常驻队列即将断流，而补起来要人去写提示词。
+pub async fn count_autofill_pool(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM v2v_clips WHERE {AUTOFILL_POOL}"
+    ))
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// 挑 `limit` 条来补单。**先进先出**（按 id）：排最久的先走，
+/// 免得后进来的一直插队，让最早那批永远轮不到。
+pub async fn pick_autofill(pool: &SqlitePool, limit: i64) -> Result<Vec<i64>, sqlx::Error> {
+    let rows: Vec<(i64,)> = sqlx::query_as(&format!(
+        "SELECT id FROM v2v_clips WHERE {AUTOFILL_POOL} ORDER BY id LIMIT ?1"
+    ))
+    .bind(limit.max(0))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// 打上「补单器放行」的标记。**必须在提交之前**打：提交成功那一刻就已经扣钱了，
+/// 事后再标会在进程恰好被杀时留下一条认不出主人的在跑条目。
+pub async fn mark_auto(pool: &SqlitePool, ids: &[i64], now: i64) -> Result<i64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "UPDATE v2v_clips SET auto_submitted=1, updated_at=? WHERE stage='ready' AND id IN ({holes})"
+    );
+    let mut q = sqlx::query(&sql).bind(now);
+    for i in ids {
+        q = q.bind(*i);
+    }
+    Ok(q.execute(pool).await?.rows_affected() as i64)
+}
+
+/// `since` 之后**提交**掉的额度（按提交回执与首次提交时刻）。
+///
+/// 与 [`credit_since`] 是两个问题：那条按 `finished_at` 切，答的是「今天出的片花了多少」；
+/// 这条按 `first_submitted_at` 切，答的是「今天已经花出去多少」。
+/// 自动补单的日限必须用后者 —— 用前者的话，补单器可以在任何一条出片之前把一整天的
+/// 额度提交光，而那个上限从头到尾都不会触发。
+pub async fn credit_submitted_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(COALESCE(credit_count, submit_credit)),0) FROM v2v_clips
+          WHERE first_submitted_at IS NOT NULL AND first_submitted_at >= ?1",
     )
     .bind(since)
     .fetch_one(pool)
@@ -818,6 +956,84 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    // 常驻队列绝不碰「有人指定过模型」的条目。
+    //
+    // 它会把自己的廉价参数写进挑中的条目 —— 捡走一条特意设了 vip / 1080p 的片子，
+    // 那份选择会被静悄悄降级，而人要到出片时才看得出来（那时钱已经花完了）。
+    #[tokio::test]
+    async fn autofill_never_touches_a_clip_someone_configured() {
+        let (pool, _d) = test_pool().await;
+        for w in 1..=3 {
+            seed_work(&pool, w).await;
+            enqueue_one(&pool, w).await;
+        }
+        let ids: Vec<i64> = list_by_stages(&pool, &["rewrite"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        for id in &ids {
+            let mut tx = pool.begin().await.unwrap();
+            apply_rewrite(&mut tx, *id, "视频提示词", None, None, None, 200)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        assert_eq!(count_autofill_pool(&pool).await.unwrap(), 3);
+
+        // 有人给第二条挑了 vip 通道 —— 从此它不在补单器的候选里。
+        let second = ids[1];
+        set_params(
+            &pool,
+            &[second],
+            Some("seedance2.0_vip"),
+            Some(4),
+            Some("1080p"),
+            300,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count_autofill_pool(&pool).await.unwrap(), 2);
+        let picked = pick_autofill(&pool, 10).await.unwrap();
+        assert!(
+            !picked.contains(&second),
+            "指定过参数的条目不得被补单器捡走"
+        );
+        assert_eq!(picked, vec![ids[0], ids[2]], "其余按 id 先进先出");
+    }
+
+    // 深度只数补单器自己放出去的：人手动跑 20 条时，常驻队列不该静悄悄停摆。
+    #[tokio::test]
+    async fn autofill_depth_counts_only_its_own_submissions() {
+        let (pool, _d) = test_pool().await;
+        for w in 1..=2 {
+            seed_work(&pool, w).await;
+            enqueue_one(&pool, w).await;
+        }
+        let ids: Vec<i64> = list_by_stages(&pool, &["rewrite"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        for id in &ids {
+            let mut tx = pool.begin().await.unwrap();
+            apply_rewrite(&mut tx, *id, "p", None, None, None, 200)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        // 一条补单器放的、一条人手动放的，都在跑。
+        mark_auto(&pool, &[ids[0]], 300).await.unwrap();
+        for id in &ids {
+            mark_submitted(&pool, *id, &SubmitReceipt::healthy("s", 8), 400)
+                .await
+                .unwrap();
+        }
+        assert_eq!(count_auto_running(&pool).await.unwrap(), 1);
     }
 
     // 撤销的核心不变量：整份写回，成片路径与扣费回执一并复原。

@@ -145,6 +145,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::v2v_credit,
             commands::v2v::v2v_credit_stats,
             commands::v2v::v2v_queue_stats,
+            commands::v2v::v2v_autofill_status,
             commands::v2v::v2v_away_digest,
             commands::v2v::v2v_mark_seen,
             commands::v2v::v2v_handoff_status,

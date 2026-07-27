@@ -808,6 +808,74 @@ pub async fn submit(
     })
 }
 
+/// `list_task` 里的一条。
+///
+/// 载荷与 `query_result` 的形状**几乎一致**，故直接复用 [`parse_query`] —— 两个解析器
+/// 迟早分叉，而分叉的表现是「同一个任务在两条路径上被读成两种状态」。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskBrief {
+    pub submit_id: String,
+    pub q: QueryResult,
+}
+
+/// 一次 `list_task` 最多能拿回多少条。CLI 默认 20，我们按在跑条数翻页。
+pub const LIST_PAGE: i64 = 100;
+
+/// 列出账号下的任务（一次进程调用拿回**一整页**的状态）。
+///
+/// ## 为什么这是比「每条单查 + 退避」更好的机制
+///
+/// 即梦 CLI 没有任何推送（无 watch / stream / webhook / subscribe，`--poll=N` 只是把
+/// 1 秒一次的轮询搬进子进程），所以「事件驱动」在这条链路上做不到；能做的是**把问一次
+/// 的代价从 O(条数) 降到 O(1)**。原来 19 条在跑就要起 19 个 `query_result` 进程，
+/// 退避只能把频率压下去（代价是出片延迟最长 10 分钟才被发现）。而 `list_task` 一次
+/// 就把全部在跑任务的 `gen_status` / `credit_count` / `benefit_type` / 视频元数据一起
+/// 给回来 —— 于是进程数与条数脱钩，频率反而可以**调高**，出片延迟从十分钟降到半分钟。
+///
+/// ## 两个字段这里拿不到，必须知道
+///
+/// - **没有 `queue_info`**（实测：排队中的条目只有 submit_id / prompt / gen_status /
+///   fail_reason / commerce_info）。故幽灵单判定不能只靠这里的 `credit_count` 缺席 ——
+///   要判死之前必须回落 `query_result` 拿队列位次确认（见 `runner::settle`）。
+/// - **没有 `result_json.videos[].path`**：这里没下载动作。出片的条目仍要单发一次
+///   `query_result --download_dir` 才能落盘。
+pub async fn list_tasks(
+    bin: &str,
+    limit: i64,
+    offset: i64,
+    log: &Activity,
+) -> AppResult<Vec<TaskBrief>> {
+    let argv = vec![
+        resolve_bin(bin)?,
+        "list_task".to_string(),
+        format!("--limit={limit}"),
+        format!("--offset={offset}"),
+    ];
+    Ok(parse_list(&extract_json(
+        &run(argv, log, None, false).await?,
+    )?))
+}
+
+/// 解析 `list_task` 的 JSON 数组。非数组（CLI 改了输出）回空列表，由调用方回落单条查询。
+pub fn parse_list(v: &serde_json::Value) -> Vec<TaskBrief> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let submit_id = item
+                        .get("submit_id")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())?;
+                    Some(TaskBrief {
+                        submit_id: submit_id.to_string(),
+                        q: parse_query(item),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 查一条任务；`download_dir` 非空则同时把成片下载到该目录。
 pub async fn query(
     bin: &str,
@@ -1203,6 +1271,62 @@ mod tests {
             Some("dreamina_seedance_20_fast_5s")
         );
         assert_eq!(q.credit_count, Some(44), "commerce_info 里的扣费也要认");
+    }
+
+    // `list_task` 一次回一整页 —— 这是「用一个进程问到全部在跑任务」的全部依据。
+    // 取样是 2026-07-27 实跑 `dreamina list_task --limit=3` 的回体形状。
+    #[test]
+    fn list_payload_yields_one_brief_per_task() {
+        let raw = r#"[
+          { "submit_id": "7278dbb1", "gen_task_type": "image2video", "gen_status": "success",
+            "fail_reason": "",
+            "result_json": { "images": [], "videos": [
+              { "fps": 24, "width": 720, "height": 1280, "format": "mp4", "duration": 4.042 }] },
+            "commerce_info": { "credit_count": 44,
+              "triplets": [{ "benefit_type": "dreamina_seedance_20_fast_5s" }] } },
+          { "submit_id": "c4a2fbe1", "gen_status": "querying", "fail_reason": "",
+            "commerce_info": { "credit_count": 40,
+              "triplets": [{ "benefit_type": "dreamina_video_seedance_15_pro" }] } }
+        ]"#;
+        let list = parse_list(&extract_json(raw).unwrap());
+        assert_eq!(list.len(), 2);
+        let done = &list[0];
+        assert_eq!(done.submit_id, "7278dbb1");
+        assert_eq!(classify_status(&done.q.gen_status), Outcome::Done);
+        assert_eq!(done.q.width, Some(720));
+        assert_eq!(done.q.duration_sec, Some(4.042));
+        assert_eq!(done.q.credit_count, Some(44));
+        assert_eq!(
+            done.q.benefit_type.as_deref(),
+            Some("dreamina_seedance_20_fast_5s")
+        );
+        // **出片条目在这里拿不到本地路径**（list_task 不做下载）。落盘仍须单发一次
+        // `query_result --download_dir`，这条断言就是那个流程的存在理由。
+        assert!(
+            done.q.video_path.is_none(),
+            "list_task 没有下载动作，不该出现本地路径"
+        );
+
+        let queued = &list[1];
+        assert_eq!(classify_status(&queued.q.gen_status), Outcome::Running);
+        assert_eq!(
+            queued.q.credit_count,
+            Some(40),
+            "排队中的条目在 list_task 里也带计费 —— 它是「不是幽灵单」的证据"
+        );
+        assert!(
+            queued.q.queue_idx.is_none(),
+            "list_task 不回传 queue_info：幽灵判定不能只凭这一条路径"
+        );
+    }
+
+    // CLI 哪天把输出换成对象/报错文本，解析要回空而不是 panic ——
+    // 调用方据此回落到单条查询，而不是让整个轮询循环挂掉。
+    #[test]
+    fn non_array_list_payload_degrades_to_empty() {
+        assert!(parse_list(&serde_json::json!({"error": "not logged in"})).is_empty());
+        // 没有 submit_id 的条目直接跳过：认不出主人的状态对我们毫无用处。
+        assert!(parse_list(&serde_json::json!([{"gen_status": "success"}])).is_empty());
     }
 
     // 单数 `triplet` 实测是空壳。空 benefit_type 不该被当成「型号是空字符串」显示出来。

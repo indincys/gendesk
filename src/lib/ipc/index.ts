@@ -113,6 +113,8 @@ export type {
   CreditStats,
   EffectiveParams,
   QueueStats,
+  AutofillCfg,
+  AutofillStatus,
   AwayDigest,
   HandoffStatus,
   V2vAction,

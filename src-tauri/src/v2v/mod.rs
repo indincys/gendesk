@@ -23,6 +23,7 @@
 //! 一起，运镜语言与时长必须统一，跨组混一个包改写风格会飘。
 
 pub mod activity;
+pub mod autofill;
 pub mod dreamina;
 pub mod events;
 pub mod handoff;

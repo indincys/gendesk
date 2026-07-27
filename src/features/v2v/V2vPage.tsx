@@ -1,6 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { V2vInspector } from "@/features/v2v/V2vInspector";
 import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
+import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
 import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
 import { V2vQueuePanel } from "@/features/v2v/V2vQueuePanel";
 import { V2vReviewFlow } from "@/features/v2v/V2vReviewFlow";
@@ -20,12 +21,14 @@ import {
   fmtAgo,
   fmtDur,
   fmtSpan,
+  isLive,
   matchQuery,
   matchStage,
   sortRows,
 } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
 import {
+  type AutofillStatus,
   type AwayDigest,
   type ClipView,
   type CreditStats,
@@ -46,6 +49,7 @@ import { useUiStore } from "@/stores/ui";
 import {
   Activity,
   Clapperboard,
+  Film,
   FolderOpen,
   RefreshCw,
   ScrollText,
@@ -83,6 +87,7 @@ export function V2vPage() {
   const [credit, setCredit] = useState<CreditStats | null>(null);
   const [queue, setQueue] = useState<QueueStats | null>(null);
   const [handoff, setHandoff] = useState<HandoffStatus | null>(null);
+  const [auto, setAuto] = useState<AutofillStatus | null>(null);
   const [digest, setDigest] = useState<AwayDigest | null>(null);
   const [tick, setTick] = useState<V2vTick | null>(null);
   const [progress, setProgress] = useState<Record<number, string>>({});
@@ -97,7 +102,6 @@ export function V2vPage() {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cur, setCur] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [doneOpen, setDoneOpen] = useState<Set<string>>(new Set());
 
   // ── 界面态 ───────────────────────────────────────────
   const [inspector, setInspector] = useState(true);
@@ -110,6 +114,12 @@ export function V2vPage() {
   const [cmdPreview, setCmdPreview] = useState<{ ids: number[]; data: SubmitPreview } | null>(null);
   const [assetPick, setAssetPick] = useState<number[] | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [paramBar, setParamBar] = useState(false);
+  const [bulk, setBulk] = useState<Params>({
+    modelVersion: "",
+    duration: null,
+    videoResolution: "",
+  });
   const [busy, setBusy] = useState(false);
   /** 撤销令牌由 Rust 造，前端只当信封（见 `V2vAction` 的注释）。 */
   const [undo, setUndo] = useState<{ label: string; entries: V2vUndoEntry[] } | null>(null);
@@ -129,6 +139,10 @@ export function V2vPage() {
     }
     void unwrap(commands.v2vQueueStats())
       .then(setQueue)
+      .catch(() => {});
+    // 常驻队列的状态跟着每次事件刷新：它会在无人操作时自己变（补单、被日限挡住）。
+    void unwrap(commands.v2vAutofillStatus())
+      .then(setAuto)
       .catch(() => {});
   }, []);
 
@@ -197,15 +211,15 @@ export function V2vPage() {
   }, [rows, stage, signals, sort, query]);
 
   const sections = useMemo(() => buildSections(rows, visible), [rows, visible]);
-  const active = useMemo(() => sections.filter((s) => !s.done), [sections]);
-  const settled = useMemo(() => sections.filter((s) => s.done), [sections]);
 
   const stageCount = useCallback(
     (k: StageFilter) => rows.filter((r) => matchStage(r.stage, k)).length,
     [rows],
   );
+  // 信号只数**在制**的：成片已经去了成片库，把它们算进「重跑过 12 条」这种数字里，
+  // 点下去却一条都筛不出来 —— 一个点了没反应的筛选片比没有更糟。
   const signalCount = useCallback(
-    (k: SignalKey) => rows.filter((r) => r.signals.has(k)).length,
+    (k: SignalKey) => rows.filter((r) => isLive(r.stage) && r.signals.has(k)).length,
     [rows],
   );
 
@@ -235,6 +249,13 @@ export function V2vPage() {
   const selected = useMemo(() => rows.filter((r) => sel.has(r.clip.id)), [rows, sel]);
   const selStages = useMemo(() => new Set(selected.map((r) => r.stage)), [selected]);
   const onlyStage: Stage | null = selStages.size === 1 ? ([...selStages][0] ?? null) : null;
+  // 只有还没花钱的两列改参数才有意义：已提交的改了不会重新生效，
+  // 却会让详情栏显示的参数与那条视频实际用的对不上。
+  const editableParams = useMemo(
+    () =>
+      selected.filter((r) => r.stage === "ready" || r.stage === "rewrite").map((r) => r.clip.id),
+    [selected],
+  );
 
   // ── 动作 ─────────────────────────────────────────────
   const guard = useCallback(async (fn: () => Promise<void>) => {
@@ -344,6 +365,33 @@ export function V2vPage() {
         setCmdPreview({ ids: ready, data: await unwrap(commands.previewV2vCommands(ready)) });
       }),
     [guard, byId],
+  );
+
+  /**
+   * 把一套参数写进指定条目。
+   *
+   * `refreshPreview` 在提交确认卡里为真 —— 改完参数必须**当场重取命令行与预估额度**，
+   * 否则那张卡会继续摆着上一套参数算出来的数字，而人正要照着它按下确认。
+   */
+  const applyParams = useCallback(
+    (ids: number[], p: Params, refreshPreview: boolean) =>
+      guard(async () => {
+        if (ids.length === 0) return;
+        const n = await unwrap(
+          commands.setV2vClipParams(
+            ids,
+            p.modelVersion.trim() === "" ? null : p.modelVersion.trim(),
+            p.duration,
+            p.videoResolution.trim() === "" ? null : p.videoResolution.trim(),
+          ),
+        );
+        toast.success(n > 0 ? `已改写 ${n} 条的生成参数` : "没有可改参数的条目（已提交的改不动）");
+        await load();
+        if (refreshPreview) {
+          setCmdPreview({ ids, data: await unwrap(commands.previewV2vCommands(ids)) });
+        }
+      }),
+    [guard, load],
   );
 
   const doSubmit = useCallback(() => {
@@ -612,6 +660,8 @@ export function V2vPage() {
           passRate={passRate}
           stale={false}
           staleSecs={null}
+          auto={auto}
+          passCount={0}
           onObserve={() => setShowObserve(true)}
           onLog={() => setShowLog(true)}
           onParams={() => setShowParams(true)}
@@ -655,6 +705,8 @@ export function V2vPage() {
         passRate={passRate}
         stale={stale}
         staleSecs={staleSecs}
+        auto={auto}
+        passCount={passN}
         onObserve={() => setShowObserve(true)}
         onLog={() => setShowLog(true)}
         onParams={() => setShowParams(true)}
@@ -805,7 +857,7 @@ export function V2vPage() {
           </div>
 
           <div className="sc f1" style={{ minHeight: 0 }}>
-            {active.map((s) => (
+            {sections.map((s) => (
               <SectionBlock
                 key={s.key}
                 s={s}
@@ -852,65 +904,60 @@ export function V2vPage() {
                 onRewriteGroup={(ids) => void requeue(ids, "rewrite")}
               />
             ))}
-            {active.length === 0 && (
-              <div className="fs11 t3" style={{ padding: "18px 14px" }}>
-                当前筛选下没有进行中的批次。
+            {sections.length === 0 && (
+              <div className="vclear">
+                <div className="fs13 fw5 t2">工作台已清空</div>
+                <div className="fs11 t3" style={{ lineHeight: 1.8, maxWidth: 460 }}>
+                  当前筛选下没有还在制的批次 —— 全部定案的批次会**整节消失**，不再折叠占位。
+                  {passN > 0 && (
+                    <>
+                      {" "}
+                      {passN} 条成片在
+                      <button
+                        type="button"
+                        className="lnk"
+                        onClick={() => useUiStore.getState().go("clips")}
+                      >
+                        视频成片
+                      </button>
+                      页。
+                    </>
+                  )}
+                </div>
               </div>
             )}
-
-            {settled.length > 0 && <div className="vdonehd">已定案的批次 · 自动收起，不再占位</div>}
-            {settled.map((s) => {
-              const open = doneOpen.has(s.key);
-              const passed = s.all.filter((r) => r.stage === "pass").length;
-              const inLib = s.all.filter((r) => r.clip.inAssetLib).length;
-              const toggleDone = () =>
-                setDoneOpen((c) => {
-                  const n = new Set(c);
-                  if (n.has(s.key)) n.delete(s.key);
-                  else n.add(s.key);
-                  return n;
-                });
-              return (
-                <div key={s.key}>
-                  <div
-                    className="vdone"
-                    onClick={toggleDone}
-                    onKeyDown={(e) => e.key === "Enter" && toggleDone()}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <span className="cr">{open ? "▾" : "▸"}</span>
-                    <span className="pid">{s.batchId == null ? "历史" : `#${s.batchId}`}</span>
-                    <span className="nm">{s.title}</span>
-                    <span className="d" />
-                    <span className="tl">
-                      {s.all.length}/{s.all.length} 已定案 · {passed} 成片 · {inLib} 已入资产库
-                    </span>
-                  </div>
-                  {open &&
-                    s.all.map((r) => (
-                      <ClipRow
-                        key={r.clip.id}
-                        r={r}
-                        cur={r.clip.id === curId}
-                        checked={sel.has(r.clip.id)}
-                        status={progress[r.clip.id] ?? r.clip.genStatus ?? ""}
-                        onPick={() => setCur(r.clip.id)}
-                        onCheck={() =>
-                          setSel((old) => {
-                            const n = new Set(old);
-                            if (n.has(r.clip.id)) n.delete(r.clip.id);
-                            else n.add(r.clip.id);
-                            return n;
-                          })
-                        }
-                      />
-                    ))}
-                </div>
-              );
-            })}
             <div style={{ height: 12 }} />
           </div>
+
+          {/* 参数条：选中还没提交的条目时才出现，就地整批改。
+              参数是**每一批不一样**的东西，放进全局设置等于每换一批都去设置页改一次。 */}
+          {paramBar && editableParams.length > 0 && (
+            <div className="parambar foot">
+              <span className="fs11 fw6 t3 nowrap">改这 {editableParams.length} 条的参数</span>
+              <V2vParamPicker
+                models={models}
+                value={bulk}
+                onChange={setBulk}
+                disabled={busy}
+                compact
+              />
+              <div className="f1" />
+              <button
+                type="button"
+                className="btn xs pri"
+                disabled={busy}
+                onClick={() => {
+                  void applyParams(editableParams, bulk, false);
+                  setParamBar(false);
+                }}
+              >
+                应用
+              </button>
+              <button type="button" className="btn xs gho" onClick={() => setParamBar(false)}>
+                收起
+              </button>
+            </div>
+          )}
 
           {/* 底栏：有选择时是批量动作，没选择时是一句提示 + 撤销 */}
           <div className="vfoot">
@@ -1000,6 +1047,17 @@ export function V2vPage() {
                 >
                   退回改写 <span className="kh">E</span>
                 </button>
+                {editableParams.length > 0 && (
+                  <button
+                    type="button"
+                    className={cn("btn xs", paramBar && "pri")}
+                    onClick={() => setParamBar((v) => !v)}
+                    title="改这几条的模型/时长/分辨率（只动还没提交的，已提交的改了也不会重新生效）"
+                  >
+                    <SlidersHorizontal className="ic12" />
+                    参数 {editableParams.length}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="btn xs gho dng"
@@ -1089,7 +1147,10 @@ export function V2vPage() {
       {cmdPreview && (
         <SubmitConfirm
           preview={cmdPreview.data}
+          ids={cmdPreview.ids}
+          models={models}
           busy={busy}
+          onApplyParams={(p) => applyParams(cmdPreview.ids, p, true)}
           onClose={() => setCmdPreview(null)}
           onConfirm={doSubmit}
         />
@@ -1175,6 +1236,8 @@ function V2vHeader({
   passRate,
   stale,
   staleSecs,
+  auto,
+  passCount,
   onObserve,
   onLog,
   onParams,
@@ -1186,6 +1249,8 @@ function V2vHeader({
   passRate: number | null;
   stale: boolean;
   staleSecs: number | null;
+  auto: AutofillStatus | null;
+  passCount: number;
   onObserve: () => void;
   onLog: () => void;
   onParams: () => void;
@@ -1217,12 +1282,24 @@ function V2vHeader({
           {fmtDur(staleSecs)} 未出片
         </span>
       )}
+      <AutofillPill auto={auto} onOpen={onParams} />
       <span className="fs11 t3 nowrap">
         余额 <b className="mono t1">{balance ?? "—"}</b> · 今日{" "}
         <b className="mono t1">{spentDay ?? 0}</b> · 通过率{" "}
         <b className="mono t1">{passRate == null ? "—" : `${passRate}%`}</b>
       </span>
       <div className="f1" />
+      {passCount > 0 && (
+        <button
+          type="button"
+          className="btn xs gho"
+          onClick={() => useUiStore.getState().go("clips")}
+          title="验收通过的视频已经不是流水线的事了，它们在成片库那一页"
+        >
+          <Film className="ic12" />
+          成片 {passCount}
+        </button>
+      )}
       <button type="button" className="btn xs gho" onClick={onObserve}>
         <Activity className="ic12" />
         观测 ⌥1
@@ -1236,6 +1313,35 @@ function V2vHeader({
         参数 ⌥3
       </button>
     </div>
+  );
+}
+
+/**
+ * 常驻队列的 pill。
+ *
+ * 它要答的是**「开着」与「在跑」的差别** —— 没料了、日限满了、余额不够都会让这条
+ * 队列安静地停下来，而一条停摆的常驻队列与一条正常运转的在界面上长得一模一样。
+ * 所以停因必须写在脸上，而不是等人去翻日志。
+ */
+function AutofillPill({ auto, onOpen }: { auto: AutofillStatus | null; onOpen: () => void }) {
+  if (!auto?.enabled) return null;
+  const bad = auto.error != null;
+  const idle = auto.running < auto.depth;
+  return (
+    <button
+      type="button"
+      className={cn("autopill", bad && "bad", !bad && idle && "idle")}
+      onClick={onOpen}
+      title={
+        auto.error ??
+        `常驻的非 VIP 队列：保持 ${auto.depth} 条在跑，完成一条补一条。` +
+          `今日已提交 ${auto.spentToday}${auto.dailyCredits > 0 ? `/${auto.dailyCredits}` : ""} 额度。`
+      }
+    >
+      <span className="dot" />
+      常驻 {auto.running}/{auto.depth}
+      {bad ? " · 配置有误" : auto.blocked ? ` · ${auto.blocked}` : ` · 存量 ${auto.stock}`}
+    </button>
   );
 }
 
@@ -1518,19 +1624,35 @@ function toneClass(t: Row["situationTone"]): string {
   return t === "er" ? "terr" : t === "wr" ? "wr2" : t === "acc" ? "acc2" : "t3";
 }
 
-/** 提交确认卡：真实命令行 + 这一下要花多少额度，全摆在按钮之前。 */
+/**
+ * 提交确认卡：真实命令行 + 这一下要花多少额度 + **就地改参数**，全摆在按钮之前。
+ *
+ * 参数编辑放在这里而不是设置页，是因为「提交前」正是唯一一个人一定会看的时刻，
+ * 也是唯一一个改了还来得及的时刻 —— 提交即扣费，之后再改只影响下一批。
+ * 改完当场重算这一批要花多少：模型之间差 5.5 倍，那个数字必须随选择一起变，
+ * 否则「改了参数」与「这一下花多少钱」还是两件对不上的事。
+ */
 function SubmitConfirm({
   preview,
+  ids,
+  models,
   busy,
+  onApplyParams,
   onClose,
   onConfirm,
 }: {
   preview: SubmitPreview;
+  ids: number[];
+  models: ModelInfo[];
   busy: boolean;
+  /** 把参数写进这一批条目并重取预览。 */
+  onApplyParams: (p: Params) => void;
   onClose: () => void;
   onConfirm: () => void;
 }) {
   const short = preview.estimatedCredits;
+  const [p, setP] = useState<Params>({ modelVersion: "", duration: null, videoResolution: "" });
+  const [dirty, setDirty] = useState(false);
   return (
     <Modal
       title="确认提交到即梦"
@@ -1548,7 +1670,13 @@ function SubmitConfirm({
           <button type="button" className="btn sm gho" onClick={onClose}>
             取消
           </button>
-          <button type="button" className="btn sm pri" disabled={busy} onClick={onConfirm}>
+          <button
+            type="button"
+            className="btn sm pri"
+            disabled={busy || dirty}
+            title={dirty ? "参数改了还没应用 —— 先点「应用到这 N 条」" : undefined}
+            onClick={onConfirm}
+          >
             <Send className="ic12" />
             确认提交
           </button>
@@ -1556,6 +1684,31 @@ function SubmitConfirm({
       }
     >
       <div style={{ padding: 4 }}>
+        {/* 参数条放在最上面：它是这张卡里唯一还能改的东西，而下面那串命令行是它的结果。 */}
+        <div className="parambar mb8">
+          <span className="fs11 fw6 t3 nowrap">这一批的参数</span>
+          <V2vParamPicker
+            models={models}
+            value={p}
+            disabled={busy}
+            onChange={(v) => {
+              setP(v);
+              setDirty(true);
+            }}
+          />
+          <div className="f1" />
+          <button
+            type="button"
+            className={cn("btn xs", dirty && "pri")}
+            disabled={busy || !dirty}
+            onClick={() => {
+              onApplyParams(p);
+              setDirty(false);
+            }}
+          >
+            应用到这 {ids.length} 条
+          </button>
+        </div>
         <div className="costbar mb8">
           <div className="fs12">
             <b>{preview.commands.length}</b> 条 · 预计消耗{" "}

@@ -1,3 +1,4 @@
+import { V2vVideo } from "@/features/v2v/V2vVideo";
 import type { Row } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
 import { cn } from "@/lib/utils";
@@ -116,7 +117,7 @@ export function V2vReviewFlow({
             {video ? (
               // key 绑 clip id：不换 key 的话切下一条时 <video> 会复用同一个元素，
               // 播放头停在上一条的位置，看着像「这条没动」。
-              <video key={c.id} src={video} controls loop autoPlay muted />
+              <V2vVideo src={video} fps={c.fps} dark videoKey={c.id} />
             ) : (
               <span className="vrevnote">这一条没有成片文件</span>
             )}

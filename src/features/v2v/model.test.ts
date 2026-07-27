@@ -92,6 +92,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     rewroteAt: NOW - 7000,
     finishedAt: NOW - 600,
     reviewedAt: null,
+    autoSubmitted: false,
     assetPackId: null,
     inAssetLib: false,
     acceptedAt: NOW - 8000,
@@ -293,6 +294,18 @@ describe("筛选", () => {
     expect(matchStage("pass", "need")).toBe(false);
   });
 
+  // 工作台回答的是「还剩多少活」。把已经定案的算进去，这个数就再也不准了 ——
+  // 实测 18 条验收通过的片子一直挂在看板上，人得先在心里把它们减掉才看得出待办。
+  it("「全部」= 全部在制，不含成片与未通过", () => {
+    expect(matchStage("rewrite", "all")).toBe(true);
+    expect(matchStage("run", "all")).toBe(true);
+    expect(matchStage("fail", "all")).toBe(true);
+    expect(matchStage("pass", "all")).toBe(false);
+    expect(matchStage("rej", "all")).toBe(false);
+    // 但显式点「未通过」还是能看到它们 —— 不是删掉，是不默认占位。
+    expect(matchStage("rej", "rej")).toBe(true);
+  });
+
   it("搜索一次覆盖编号/组名/提示词/submit_id —— 人并不知道自己记住的是哪一处", () => {
     const [r] = derive([clip()]);
     if (!r) throw new Error("fixture");
@@ -305,21 +318,40 @@ describe("筛选", () => {
 });
 
 describe("分节", () => {
-  it("按批次倒序，全部落在 pass/rej 的批次判为已定案", () => {
+  // v0.20.0 起语义变了：已定案的批次不再折叠成一行，而是**整节消失**。
+  // 折叠一行也是一行 —— 几十批做完之后，那些「已定案」的行会把真正在跑的两批
+  // 挤到屏幕外面去，而工作台要答的恰恰是「还剩多少活」。
+  it("按批次倒序；全部落在 pass/rej 的批次整节消失", () => {
     const rows = derive([
       clip({ id: 1, batchId: 31, stage: "rev" }),
       clip({ id: 2, batchId: 30, stage: "pass" }),
       clip({ id: 3, batchId: 30, stage: "rej" }),
     ]);
-    const secs = buildSections(rows, rows);
-    expect(secs.map((s) => s.batchId)).toEqual([31, 30]);
+    // 工作台的可见集不含已定案的两态（`matchStage(_, "all")` 只放行在制）。
+    const visible = rows.filter((r) => matchStage(r.stage, "all"));
+    const secs = buildSections(rows, visible);
+    expect(secs.map((s) => s.batchId)).toEqual([31]);
     expect(secs[0]?.done).toBe(false);
-    expect(secs[1]?.done).toBe(true);
+  });
+
+  it("但显式筛「未通过」时那一节要回来 —— 定案的条目不该变得无处可寻", () => {
+    const rows = derive([
+      clip({ id: 1, batchId: 31, stage: "rev" }),
+      clip({ id: 2, batchId: 30, stage: "rej" }),
+    ]);
+    const visible = rows.filter((r) => matchStage(r.stage, "rej"));
+    const secs = buildSections(rows, visible);
+    // 30 回来了（它有命中的行）；31 仍在（它还有活），只是这一屏里没有它的行。
+    // 「还有活的批次一直在」是刻意的：那条分段条正是「这一批做到哪了」的答案，
+    // 不该因为换了个筛选就消失。
+    expect(secs.map((s) => s.batchId)).toEqual([31, 30]);
+    expect(secs.find((s) => s.batchId === 30)?.done).toBe(true);
+    expect(secs.find((s) => s.batchId === 31)?.rows).toHaveLength(0);
   });
 
   it("无批次的历史条目垫底，不占最新那一节的位置", () => {
     const rows = derive([
-      clip({ id: 1, batchId: null, stage: "pass" }),
+      clip({ id: 1, batchId: null, stage: "rewrite" }),
       clip({ id: 2, batchId: 12, stage: "rev" }),
     ]);
     expect(buildSections(rows, rows).map((s) => s.batchId)).toEqual([12, null]);

@@ -19,6 +19,8 @@ export function Sidebar() {
   const pubBadges = usePublishStore((s) => s.badges);
   // 视频流水线徽章只数「人能立刻处理的」（待提交 + 待验收），规则在 Rust 侧算。
   const v2vN = useV2vStore((s) => s.counts.actionable);
+  // 成片库徽章数「做完却没入资产库」的 —— 发布链上唯一一处会无声断掉的地方。
+  const clipsN = useV2vStore((s) => s.counts.noAsset);
   const version = useAppVersion();
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
@@ -43,9 +45,11 @@ export function Sidebar() {
               ? { cls: "nb-amb", n: planN, spin: false }
               : r.key === "v2v" && v2vN > 0
                 ? { cls: "nb-amb", n: v2vN, spin: false }
-                : r.key === "trash" && badges.trash > 0
-                  ? { cls: "", n: badges.trash, spin: false }
-                  : null;
+                : r.key === "clips" && clipsN > 0
+                  ? { cls: "nb-amb", n: clipsN, spin: false }
+                  : r.key === "trash" && badges.trash > 0
+                    ? { cls: "", n: badges.trash, spin: false }
+                    : null;
     return (
       <div
         className={cn("nv", route === r.key && "on")}

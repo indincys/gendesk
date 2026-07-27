@@ -22,6 +22,7 @@ const EMPTY: StageCounts = {
   rej: 0,
   fail: 0,
   actionable: 0,
+  noAsset: 0,
 };
 
 export const useV2vStore = create<V2vState>((set, get) => ({

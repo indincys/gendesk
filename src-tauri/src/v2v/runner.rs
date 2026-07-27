@@ -1344,6 +1344,172 @@ mod tests {
         }
     }
 
+    /// 一个带 v2v 表的临时库 + 一条走到 `ready` 的 clip。
+    ///
+    /// 这几条测试要跑的是**放行链路本身**（闸门、队列、失败归属），而不是 CLI ——
+    /// 故 `bin` 一律给一个不存在的路径：`dreamina::resolve_bin` 会在花掉任何钱之前
+    /// 就失败，于是提交那一步的错误分支被完整走一遍，而且绝不会真的发出请求。
+    const NO_SUCH_BIN: &str = "/nonexistent/dreamina-for-tests";
+
+    async fn seed_ready(pool: &SqlitePool, n: i64) -> Vec<i64> {
+        for w in 1..=n {
+            sqlx::query(
+                "INSERT INTO accepted_works (id,image_path,thumb_path,prompt_text,accepted_at,prompt_code,group_name)
+                 VALUES (?1,'/img.jpg','/thumb.jpg','原文',100,'GG-0001','g')",
+            )
+            .bind(w)
+            .execute(pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO v2v_clips (work_id, group_name, stage, source_prompt, variable_part,
+                                        video_prompt, created_at, updated_at)
+                 VALUES (?1,'g','ready','原文','',  '视频提示词', 100, 100)",
+            )
+            .bind(w)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        repo::list_by_stages(pool, &["ready"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    fn opts() -> GenOpts {
+        GenOpts {
+            model_version: Some("seedance2.0fast".into()),
+            duration: Some(4),
+            video_resolution: Some("720p".into()),
+            session: None,
+        }
+    }
+
+    // 这一版的核心行为：**放行 9 条 ≠ 发出去 9 条**。
+    //
+    // 事故就是这么来的 —— 9 条一起砸向即梦，即梦只跑得下 1 条，其余 8 条回来
+    // `ExceedConcurrencyLimit` 被判死进「处理异常」。闸门必须在**发出去之前**生效。
+    #[tokio::test]
+    async fn releasing_a_batch_sends_only_what_fits_and_queues_the_rest() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 9).await;
+        let log = Activity::silent();
+
+        let sum = release_and_submit(&pool, NO_SUCH_BIN, &ids, &opts(), 1, &log)
+            .await
+            .unwrap();
+
+        // 只动了 1 条（CLI 不存在 → 它提交失败），其余 8 条一条都没被碰过。
+        assert_eq!(sum.submitted, 0, "假 CLI 发不出去");
+        assert_eq!(sum.failed, 1, "闸门只放行了一条，所以只有一条会失败");
+        assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 8);
+        assert_eq!(sum.queued, 8);
+
+        // 发不出去的绝不能卡在 `run`：认领了就要对它负责到底，
+        // 否则它要等下次启动的孤儿恢复才回得来。
+        assert!(repo::list_by_stages(&pool, &["run"])
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repo::list_by_stages(&pool, &["fail"]).await.unwrap().len(),
+            1
+        );
+    }
+
+    // 位子被占满时一条都不发 —— 包括「占位的是别人放行的」这种情况。
+    #[tokio::test]
+    async fn a_full_pipe_sends_nothing_but_still_queues_everything() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        let log = Activity::silent();
+        // 先让一条进 `run`（模拟已经在即梦手上的那一条）。
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::healthy("busy", 8),
+            400,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(free_slots(&pool, 1).await.unwrap(), 0);
+        let sum = release_and_submit(&pool, NO_SUCH_BIN, &ids[1..], &opts(), 1, &log)
+            .await
+            .unwrap();
+        assert_eq!(
+            (sum.submitted, sum.failed),
+            (0, 0),
+            "一条都不发，也不算失败"
+        );
+        assert_eq!(sum.queued, 2, "两条原样排着，等那一条出片");
+
+        // 空位为 0 时 drain 直接返回，不去动库里任何一行。
+        let again = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+            .await
+            .unwrap();
+        assert_eq!(again.submitted + again.failed, 0);
+        assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 2);
+    }
+
+    // 存量修复：升级前被并发上限误判成 fail 的条目要能自己回到队列。
+    //
+    // 只改新逻辑不管存量，等于让这个 bug 的后果留在原地 —— 用户那 8 条会一直
+    // 躺在「处理异常」，而它们从未扣费。
+    #[tokio::test]
+    async fn old_rejects_are_healed_back_into_the_queue_but_billed_ones_are_left_alone() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        let log = Activity::silent();
+
+        // ① 典型受害者：被并发上限拒掉、没有任何计费回执。
+        repo::mark_submitted(&pool, ids[0], &dreamina::SubmitReceipt::bare("a"), 400)
+            .await
+            .unwrap();
+        // ② 同样的错误原文，但**扣过钱** —— 那是另一回事，交给人判断。
+        repo::mark_submitted(
+            &pool,
+            ids[1],
+            &dreamina::SubmitReceipt::healthy("b", 8),
+            400,
+        )
+        .await
+        .unwrap();
+        // ③ 真失败：内容不合规。碰它就等于把一条坏片子塞回队列无限重投。
+        repo::mark_submitted(&pool, ids[2], &dreamina::SubmitReceipt::bare("c"), 400)
+            .await
+            .unwrap();
+        let reject = "api error: ret=1310, message=ExceedConcurrencyLimit, logid=x";
+        repo::mark_failed(&pool, ids[0], "provider", reject, 500)
+            .await
+            .unwrap();
+        repo::mark_failed(&pool, ids[1], "provider", reject, 500)
+            .await
+            .unwrap();
+        repo::mark_failed(&pool, ids[2], "provider", "content policy violation", 500)
+            .await
+            .unwrap();
+
+        assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 1);
+        assert_eq!(
+            repo::pick_submit_queued(&pool, 9).await.unwrap(),
+            vec![ids[0]]
+        );
+        let still_failed: Vec<i64> = repo::list_by_stages(&pool, &["fail"])
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(still_failed, vec![ids[1], ids[2]]);
+
+        // 幂等：再跑一遍没有第二个受害者（启动时每次都会跑）。
+        assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 0);
+    }
+
     // 在跑上限：配置值与实测值取小，实测值只降不升。
     //
     // **整条链路写在一个测试里**是有意的：`OBSERVED_LIMIT` 是进程级静态量，拆成几个

@@ -1349,13 +1349,17 @@ export function V2vPage() {
           autofillOn={auto?.enabled === true}
           busy={busy}
           onClose={() => setSwitching(null)}
-          onConfirm={(p, abandon) =>
-            void switchChannel(
-              switching.map((r) => r.clip.id),
-              p,
-              abandon,
-            )
-          }
+          // 「改投并去提交」在这里串，而不是塞进 `switchChannel` 里 ——
+          // 它要调 `openSubmit`，而那个 hook 定义在 `switchChannel` 之后（依赖 `byId`）。
+          // 接的是**提交确认卡**而不是直接放行：提交即扣费且不可撤回，而这张卡通篇在说
+          // 「换通道免费」，在它后面直接放行等于让人在一张写着「不花钱」的卡上花掉钱。
+          onConfirm={(p, abandon, andSubmit) => {
+            const ids = switching.map((r) => r.clip.id);
+            const holding = switching.filter((r) => r.action === "submit").map((r) => r.clip.id);
+            void switchChannel(ids, p, abandon).then(() => {
+              if (andSubmit && holding.length > 0) void openSubmit(holding);
+            });
+          }}
         />
       )}
 
@@ -2338,9 +2342,19 @@ function ChannelSwitchModal({
   autofillOn: boolean;
   busy: boolean;
   onClose: () => void;
-  onConfirm: (p: ChannelParams, abandon: boolean) => void;
+  onConfirm: (p: ChannelParams, abandon: boolean, andSubmit: boolean) => void;
 }) {
-  // 三堆，代价各不相同。
+  // ── 按「换完之后会怎样」分堆 ────────────────────────────
+  //
+  // 这张卡原来只按「花不花钱」分，于是它答得出「换通道免费」，却答不出人真正在问的
+  // 那句：**换完它就自己跑起来了吗**。而答案逐堆完全不同 —— 已放行的换完自动接着排、
+  // 待放行的还要点确认提交、待改写的连提示词都还没有，怎么换都发不出去。
+  //
+  // 少了这一层，一个人选中 6 条待改写换了通道，会得到一个「已改投 6 条」的成功提示，
+  // 然后盯着一个永远不会自己动的列表。
+  const queued = rows.filter((r) => r.action === "queued"); // 已放行，在本地排队
+  const holding = rows.filter((r) => r.action === "submit"); // 待放行，等人点确认
+  const noPrompt = rows.filter((r) => r.stage === "rewrite"); // 还没有视频提示词
   const free = rows.filter((r) => r.stage === "ready" || r.stage === "rewrite");
   const live = rows.filter((r) => r.stage === "run");
   const paid = live.filter((r) => r.clip.billed);
@@ -2397,11 +2411,37 @@ function ChannelSwitchModal({
                   videoResolution: p.videoResolution,
                 },
                 abandon,
+                false,
               );
             }}
           >
             改投 {willMove} 条
           </button>
+          {/* 「换完就发」——人换通道多半就是这个意思。但它接的是**提交确认卡**而不是
+              直接放行：提交即扣费且不可撤回，而这张卡通篇在说「换通道免费」，
+              在它上面挂一个会安静扣钱的按钮是最坏的一种连贯。
+              只在确实有东西可发时出现（待放行、且已经有视频提示词）。 */}
+          {holding.length > 0 && (
+            <button
+              type="button"
+              className="btn sm pri"
+              disabled={busy || target == null}
+              onClick={() => {
+                if (!target || p.duration == null) return;
+                onConfirm(
+                  {
+                    modelVersion: p.modelVersion,
+                    duration: p.duration,
+                    videoResolution: p.videoResolution,
+                  },
+                  abandon,
+                  true,
+                );
+              }}
+            >
+              改投并去提交 {holding.length} 条
+            </button>
+          )}
         </>
       }
     >
@@ -2447,12 +2487,37 @@ function ChannelSwitchModal({
           </div>
         )}
 
+        {/* 「换完之后会怎样」——这是人点这个按钮时真正在问的问题，而它逐堆答案完全不同。
+            放在花钱那一段**之前**：先答「它会不会跑起来」，再答「要花多少」。 */}
+        <div className="costbar mb8">
+          <div className="fs11 fw6 t3">换完之后</div>
+          {queued.length > 0 && (
+            <div className="fs12">
+              <b>{queued.length} 条已放行的 → 直接排到新通道上，什么都不用再点</b>
+              ，出空位自动发。它们带着原来的放行时刻插队，不会被罚到队尾。
+            </div>
+          )}
+          {holding.length > 0 && (
+            <div className="fs12">
+              <b>{holding.length} 条待放行的 → 仍然停在「等你点确认提交」</b>
+              。用下面那个「改投并去提交」可以换完直接进确认卡（那一步才扣费）。
+            </div>
+          )}
+          {noPrompt.length > 0 && (
+            <div className="fs12 wr2" style={{ lineHeight: 1.8 }}>
+              <b>{noPrompt.length} 条待改写的 → 换完还是发不出去</b>
+              ：它们连视频提示词都还没有，而即梦要的就是提示词。得先去 Claude Code / Codex 里跑
+              v2v-rewrite 把提示词写回来，那之后才谈得上提交。 换通道这一步对它们仍然有效 ——
+              只是生效要等到提交那一刻。
+            </div>
+          )}
+        </div>
+
         <div className="costbar mb8">
           {free.length > 0 && (
             <div className="fs12">
-              <b>{free.length} 条还在本地队列 / 待放行</b> —— 即梦对它们一无所知，
-              <b>一分钱没扣</b>，换通道免费。已放行的会带着原来的放行时刻插进新通道的队，
-              不会被罚到队尾。
+              <b>{free.length} 条还在本地队列 / 待放行 / 待改写</b> —— 即梦对它们一无所知，
+              <b>一分钱没扣</b>，换通道免费。
             </div>
           )}
           {live.length > 0 && (

@@ -433,12 +433,6 @@ a:hover {
   gap: 1px;
   margin: 5px 0 5px 11px;
 }
-/* 两个维度之间唯一的分隔。比一整个卡框轻，而它要说的事完全一样：下面换了一维。 */
-.navsep {
-  height: 1px;
-  background: var(--line);
-  margin: 6px 10px 5px;
-}
 .navrow {
   min-height: 26px;
   display: flex;
@@ -3396,6 +3390,15 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 语气色要在这里再写一遍：`.wr2` / `.acc2` 是 (0,1,0)，压不过上面那条 `.vfact .v`
+   (0,2,0) —— 挂上去也是**不生效**的（「上次查询 40 分钟前」标琥珀那一处一直是黑的，
+   没人发现是因为它只是个提醒）。额度那一格现在靠颜色分主次，再漏就不是小事了。 */
+.vfact .v.wr2 {
+  color: var(--wr2);
+}
+.vfact .v.acc2 {
+  color: var(--acc2);
+}
 .vprompt {
   font-size: 10.5px;
   line-height: 1.55;
@@ -3428,7 +3431,7 @@ a:hover {
 
 /* ==================== 工作台三栏 + 底坞 ====================
  *
- * 预览（这一条长什么样）｜ 账与历程（这一条花没花钱、走到哪了）｜ 列表（这一屏有哪些）。
+ * 预览（这一条长什么样）｜ 账与进度（这一条花没花钱、走到哪了）｜ 列表（这一屏有哪些）。
  * 底坞把「这一条」与「这一档」的动作分成两组 —— 此前它们混在同一排，唯一的区别是
  * 按钮上那个数字，而那正是最容易看漏的东西。
  *
@@ -3534,7 +3537,7 @@ a:hover {
   min-height: 22px;
 }
 
-/* ── 中栏：这一条的账与历程 ───────────────────────────── */
+/* ── 中栏：这一条的账与进度 ───────────────────────────── */
 .vled {
   flex: 1.16;
   min-width: 400px;
@@ -3697,46 +3700,21 @@ a:hover {
   color: var(--er);
 }
 
-/* 这一条的账：左边一个大额度数 + 右边八格。
-   左边那块从前是一张有色底的卡（蓝 / 琥珀）。同样的理由拆掉了：**数字本身**就带色，
-   底色只是把同一件事又说了一遍，代价是中栏第二块颜色遮罩。区隔改由一条竖线承担。 */
-.vacct {
-  display: flex;
-  gap: 11px;
-  align-items: stretch;
-  margin-top: 5px;
-}
-.vacct .big {
-  width: 96px;
-  flex: none;
-  padding: 2px 11px 2px 2px;
-  border-right: 1px solid var(--line2);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  justify-content: center;
-}
-.vacct .big .n {
-  font: 600 26px / 1 var(--mono);
-  color: var(--acc2);
-}
-.vacct .big.paid .n {
-  color: var(--wr2);
-}
-.vacct .big .k {
-  font-size: 10.5px;
-  color: var(--acc2);
-}
-.vacct .big.paid .k {
-  color: var(--wr2);
-}
-.vacct .vfacts {
-  flex: 1;
-  min-width: 0;
+/* 这一条的账：九格等大，额度是其中之一。
+   它从前是左边一整块 96px 宽的大数字（先是有色底卡，后来只剩竖线）。那个体量买到的
+   信息量与旁边一格完全一样（一个数 + 一个标签），代价却是把中栏最靠上的位置占掉
+   三分之一 —— 于是「走的哪条队」「排在第几」这些同样要读的事被挤到了下面。
+   主次改由**颜色**承担：`.hero` 那一格字大半档并带强调色（预估=蓝，已扣=琥珀）。 */
+.vfact .v.hero {
+  font-size: 13.5px;
+  font-weight: 700;
+  font-family: var(--mono);
 }
 
-/* 历程：done / now / soon 三态。未来那几步画出来但压淡 —— 一条待改写的条目
-   光看「入队 09:14」答不出「后面还有几步、下一步归谁」。 */
+/* 进度：done / now / soon 三态。未来那几步画出来但压淡 —— 一条缺词的条目
+   光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
+   **走完的一步是一枚勾，不是一个带色的圆点**：圆点分四种颜色时「蓝点和琥珀点差在哪」
+   没有答案（它们都只是「走过了」），而一枚勾不需要图例。剩下的色只描述例外。 */
 .vtl {
   display: flex;
   flex-direction: column;
@@ -3763,10 +3741,37 @@ a:hover {
   margin-top: 4px;
   background: var(--line2);
 }
+/* 阶段性完成的那一枚勾。默认绿（`t-ok`）—— 只有「判了不通过」那一步是灰的：
+   它确实走完了，但把它画成绿勾等于说这是个好结果。 */
+.vtlrow .rail .ck {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 99px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: var(--sg-pass);
+}
+.vtlrow .rail .ck.t-dim {
+  background: oklch(80% 0.008 260);
+}
+.vtlrow .rail .ck.t-er {
+  background: var(--er);
+}
 .vtlrow .rail .ln {
   flex: 1;
   width: 1.5px;
   background: var(--line);
+}
+/* 走完那一段的连线也是绿的 —— 一条从上往下变淡的线本身就是进度条。 */
+.vtlrow.done .ln {
+  background: color-mix(in oklch, var(--sg-pass) 45%, var(--line));
 }
 .vtlrow .bd {
   flex: 1;
@@ -3930,20 +3935,71 @@ a:hover {
   font: 600 12px var(--mono);
   color: var(--t3);
 }
-.sortbtn {
-  border: none;
-  background: none;
-  font: inherit;
-  font-size: 10.5px;
-  color: var(--t3);
+/* 通道快捷筛选条 —— 挨着被它筛的那张表。
+   固定三格（`topChannels`，与顶栏那排状态灯同一份）：格数会变的筛选器等于每天要
+   重认一次位置，而认错一次的代价是看错一条队的占用。选中态靠**实心**，
+   不靠边框加投影 —— 它就在列表栏头下面，比栏头还重就把主次弄反了。 */
+.chq {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chq::-webkit-scrollbar {
+  display: none;
+}
+.chqi {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--panel);
   cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 5px;
+  font-family: inherit;
   white-space: nowrap;
 }
-.sortbtn:hover {
-  background: var(--inset);
+.chqi:hover {
+  border-color: color-mix(in oklch, var(--tone, var(--acc)) 45%, var(--line));
+}
+.chqi > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  flex: none;
+  background: var(--tone, var(--acc));
+}
+.chqi .nm {
+  font-size: 11px;
+  font-weight: 500;
   color: var(--t2);
+}
+.chqi .n {
+  font: 600 10.5px var(--mono);
+  color: var(--t3);
+}
+.chqi.on {
+  background: var(--tone, var(--acc));
+  border-color: transparent;
+}
+.chqi.on > i {
+  background: #fff;
+  opacity: 0.85;
+}
+.chqi.on .nm,
+.chqi.on .n {
+  color: #fff;
+}
+/* 一条已经没有在制条目的通道压淡但**不禁用**：它仍然回答「这条队清空了」。 */
+.chqi.zero {
+  opacity: 0.55;
 }
 .vlistall {
   height: 30px;
@@ -4203,7 +4259,10 @@ a:hover {
   cursor: pointer;
 }
 /* 呼吸而不是常亮：一个静止的绿点与一个卡死的轮询器长得一模一样，
-   而这排灯的全部意义就是「远端此刻真的在替我干活」。 */
+   而这排灯的全部意义就是「远端此刻真的在替我干活」。
+   三格常驻之后这盏灯还多担了一件事：**格数不再变**，所以「这条通道在不在动」
+   全靠它 —— 故在跑的那一格给足对比（大一档 + 一圈会呼吸的光晕），
+   而闲着的那两格必须一眼就看得出是静的。 */
 .chpill .dot {
   width: 6px;
   height: 6px;
@@ -4211,7 +4270,26 @@ a:hover {
   background: var(--ok);
   flex: none;
   align-self: center;
-  animation: brth 1.9s ease-in-out infinite;
+}
+.chpill.live .dot {
+  width: 7px;
+  height: 7px;
+  background: var(--ok);
+  box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent);
+  animation: chbrth 1.8s ease-in-out infinite;
+}
+/* 光晕向外扩散再收回。只动 box-shadow 与自身透明度，不动 transform ——
+   胶囊里那几个数字是等宽对齐的，让灯改变行内尺寸会让整条随呼吸抖。 */
+@keyframes chbrth {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 55%, transparent);
+  }
+  50% {
+    opacity: 0.75;
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--ok) 0%, transparent);
+  }
 }
 .chpill .nm {
   font-size: 11px;
@@ -4245,9 +4323,18 @@ a:hover {
 }
 /* 远端没在跑、只剩本地压着队：灯不该继续绿着呼吸（那是「在动」的信号），
    改成与本地队列同色的静止黄点 —— 一眼看出这条通道是在等空位，不是在生成。 */
-.chpill.idle .dot {
+.chpill.hold .dot {
   background: var(--ch-local);
-  animation: none;
+}
+/* 两头都空着的那一格。常驻三格之后这是个常态，所以它要明确地「灭」着，
+   而不是借用别的状态的颜色。 */
+.chpill.idle .dot {
+  background: var(--line2);
+}
+/* 当前正筛着这条通道 —— 与列表顶上那枚快捷片同时亮，两处指的是同一件事。 */
+.chpill.on {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 2px var(--accbg);
 }
 
 /* ── 视频成片库 ─────────────────────────────────────────── */

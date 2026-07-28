@@ -3,12 +3,12 @@ import {
   type Filter,
   type NextAction,
   type Row,
-  type SortKey,
   WORKBENCH_ACTIONS,
   buildChannels,
   deriveRows,
   matchFilter,
-  sortRows,
+  rankRows,
+  topChannels,
 } from "@/features/v2v/model";
 import {
   type ActivityEntry,
@@ -87,10 +87,25 @@ interface V2vState {
   // ── 筛选与选择（UI 态） ─────────────────────────────
   /** **一次只有一个**（见 `Filter` 的注释）—— 动作与通道是两个维度，不做交集。 */
   filter: Filter;
-  sort: SortKey;
+  /**
+   * 上一次选过的**动作**档。
+   *
+   * 通道筛选的入口现在是顶栏那排灯与列表顶上那排快捷片（侧栏只剩流程六档），
+   * 而两维互斥 —— 所以按通道筛完之后必须有一条路走回来。再点一次那枚通道片就回到
+   * 这一档：不必去侧栏找「刚才我在哪一档」，也不必凭空多一枚「全部」按钮
+   * （它答不出「全部什么」）。
+   */
+  lastAction: NextAction;
   sel: Set<number>;
+  /**
+   * 「按住 Shift 选一段」的锚点 —— 上一次**单独**点中的那一行。
+   *
+   * 不用 `cur`：光标会被 ↑↓ 推着走，那样一段的起点会跟着键盘漂，选出来的范围与
+   * 人以为的对不上。锚点只在明确点了某一行（或勾了某一行）时才移动。
+   */
+  anchor: number | null;
   cur: number | null;
-  /** 中栏（这一条的账与历程）开着没有。窄屏下它是抽屉。 */
+  /** 中栏（这一条的账与进度）开着没有。窄屏下它是抽屉。 */
   ledgerOpen: boolean;
 
   // ── 动作 ───────────────────────────────────────────
@@ -102,9 +117,11 @@ interface V2vState {
   reloadHandoff: () => Promise<void>;
   reloadEff: () => Promise<void>;
   setFilter: (f: Filter) => void;
-  setSort: (s: SortKey) => void;
+  /** 通道快捷片：点已选中的那一枚回到上一次的动作档（见 `lastAction`）。 */
+  toggleChannel: (key: string) => void;
   setCur: (id: number | null) => void;
   setSel: (fn: (cur: Set<number>) => Set<number>) => void;
+  setAnchor: (id: number | null) => void;
   clearSel: () => void;
   toggleLedger: () => void;
 }
@@ -144,11 +161,12 @@ export const useV2vStore = create<V2vState>((set, get) => ({
   // 占位值，`enter()` 拿到数据后按 `WORKBENCH_ACTIONS` 的序落到第一个有条目的档，
   // 与旧的「一进来看到等你动手的」同义，且不会出现「默认档是空的」。
   filter: { kind: "action", key: "review" },
-  sort: "wait",
+  lastAction: "review",
   sel: new Set(),
+  anchor: null,
   cur: null,
   /**
-   * 中栏（账与历程）默认开着，**除非窗口窄到摆不下三栏**。
+   * 中栏（账与进度）默认开着，**除非窗口窄到摆不下三栏**。
    *
    * 三栏最小宽加起来约 1400px，而应用最小宽是 1140 —— 窄于 1400 时中栏由 CSS 变成
    * 一层覆盖在预览上的抽屉（见 globals.css 的 media query）。默认开着的话，
@@ -223,7 +241,7 @@ export const useV2vStore = create<V2vState>((set, get) => ({
     const rows = selectRows(get());
     if (!rows.some((r) => matchFilter(r, get().filter))) {
       const first = WORKBENCH_ACTIONS.find((a) => rows.some((r) => r.action === a));
-      if (first) set({ filter: { kind: "action", key: first } });
+      if (first) set({ filter: { kind: "action", key: first }, lastAction: first });
     }
 
     const un = await subscribeV2v({
@@ -264,13 +282,25 @@ export const useV2vStore = create<V2vState>((set, get) => ({
     };
   },
 
-  // 换筛选就把光标与勾选清掉：它们指向的条目多半已经不在这一屏里了，
+  // 换筛选就把光标、勾选与锚点清掉：它们指向的条目多半已经不在这一屏里了，
   // 留着会让底坞按钮作用在一批看不见的条目上。
-  setFilter: (filter) => set({ filter, cur: null, sel: new Set() }),
-  setSort: (sort) => set({ sort }),
+  setFilter: (filter) =>
+    set({
+      filter,
+      ...(filter.kind === "action" ? { lastAction: filter.key } : {}),
+      cur: null,
+      sel: new Set(),
+      anchor: null,
+    }),
+  toggleChannel: (key) => {
+    const s = get();
+    const on = s.filter.kind === "channel" && s.filter.key === key;
+    s.setFilter(on ? { kind: "action", key: s.lastAction } : { kind: "channel", key });
+  },
   setCur: (cur) => set({ cur }),
   setSel: (fn) => set((c) => ({ sel: fn(c.sel) })),
-  clearSel: () => set({ sel: new Set() }),
+  setAnchor: (anchor) => set({ anchor }),
+  clearSel: () => set({ sel: new Set(), anchor: null }),
   toggleLedger: () => set((c) => ({ ledgerOpen: !c.ledgerOpen })),
 }));
 
@@ -323,6 +353,22 @@ export function selectChannels(s: V2vState): Channel[] {
   return channels;
 }
 
+let topMemo: { key: Channel[]; top: Channel[] } | null = null;
+
+/**
+ * 顶栏那排状态灯与列表顶上那排快捷筛选片读的**同一份**前三通道。
+ *
+ * 两处显示不同的三条通道，比只有一处更糟：人会以为它们是两组不同的东西，
+ * 然后花时间去找那个并不存在的区别。
+ */
+export function selectTopChannels(s: V2vState): Channel[] {
+  const channels = selectChannels(s);
+  if (topMemo && topMemo.key === channels) return topMemo.top;
+  const top = topChannels(channels);
+  topMemo = { key: channels, top };
+  return top;
+}
+
 let countsMemo: { key: Row[]; counts: Record<NextAction, number> } | null = null;
 
 /**
@@ -349,7 +395,7 @@ let visibleMemo: { key: unknown[]; rows: Row[] } | null = null;
 /**
  * 当前这一屏（一个筛选，不是交集），已排序。
  *
- * 也要记忆：`Array.filter` + `sortRows` 每次都产出新数组，而 Zustand 的选择器按
+ * 也要记忆：`Array.filter` + `rankRows` 每次都产出新数组，而 Zustand 的选择器按
  * `Object.is` 比较 —— 不记忆的话每一次心跳（6 秒一发）都会让整张表重渲染一遍，
  * 而重渲染会把正在播放的 `<video>` 也一起顶掉。
  *
@@ -358,7 +404,7 @@ let visibleMemo: { key: unknown[]; rows: Row[] } | null = null;
  */
 export function selectVisible(s: V2vState): Row[] {
   const all = selectRows(s);
-  const key = [all, s.filter.kind, s.filter.key, s.sort];
+  const key = [all, s.filter.kind, s.filter.key];
   if (
     visibleMemo &&
     visibleMemo.key.length === key.length &&
@@ -366,10 +412,7 @@ export function selectVisible(s: V2vState): Row[] {
   ) {
     return visibleMemo.rows;
   }
-  const rows = sortRows(
-    all.filter((r) => matchFilter(r, s.filter)),
-    s.sort,
-  );
+  const rows = rankRows(all.filter((r) => matchFilter(r, s.filter)));
   visibleMemo = { key, rows };
   return rows;
 }

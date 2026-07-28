@@ -39,17 +39,24 @@ export type NextAction = "rewrite" | "submit" | "review" | "fix" | "queued" | "w
 /**
  * 每一档的显示元数据。
  *
- * `note` 是侧栏那张动作卡上的副行 —— 它回答的不是「这是什么」（标签已经说了），
- * 而是**「拿它怎么办，代价是什么」**。所以每一句都必须是恒真的事实：
- * 「多半是幽灵单」「出片中位 21 分钟」这类要看数据才成立的话一律不写进常量，
- * 那是行内 `situation` 的活（它读得到那一条的字段）。
+ * ## 标签是**流程上的位置**，两个字
+ *
+ * 异常 / 缺词 / 就绪 / 远端 / 队列 / 验收 —— 一条视频从入队到交付会依次经过它们，
+ * 所以侧栏那一列读下来就是这条流水线本身。旧标签（「处理异常」「去改写」「待放行」
+ * 「机器手里」）混着动词、状态与拟人，长短还差一倍：在一列两位数计数旁边，
+ * 参差的标签会让人以为它们不是同一级的东西。
+ *
+ * `note` 不再常驻显示（侧栏是全应用最挤的一列），它是那一行的 `title=`：
+ * 回答的不是「这是什么」（标签已经说了），而是**「拿它怎么办，代价是什么」**。
+ * 所以每一句都必须是恒真的事实：「多半是幽灵单」「出片中位 21 分钟」这类要看数据
+ * 才成立的话一律不写进常量，那是行内 `situation` 的活（它读得到那一条的字段）。
  */
 export const ACTION_META: Record<
   NextAction,
   { label: string; note: string; fg: string; dot: string }
 > = {
   fix: {
-    label: "处理异常",
+    label: "异常",
     // 这一档里混着代价完全相反的两类，而它们长得一模一样 —— 所以这句话只说
     // 「先看花没花钱」，不替其中任何一类下结论。
     note: "重跑前先看花没花钱：没扣过的免费，扣过的是第二份钱",
@@ -57,34 +64,36 @@ export const ACTION_META: Record<
     dot: "var(--sg-fail)",
   },
   rewrite: {
-    label: "去改写",
+    // 「缺词」= 缺的是视频提示词。它比「去改写」准：卡住的不是某个动作没做，
+    // 而是这一条还没有词可用 —— 而写词的地方不在 GenDesk 里。
+    label: "缺词",
     note: "工单已物化，去 Claude Code / Codex 跑 v2v-rewrite",
     fg: "var(--acc2)",
     dot: "var(--sg-rewrite)",
   },
   submit: {
-    label: "待放行",
-    note: "还没花钱 —— 派发那一刻才扣",
+    label: "就绪",
+    note: "词齐了、就差提交 —— 还没花钱，派发那一刻才扣",
     fg: "var(--acc2)",
     dot: "var(--sg-ready)",
   },
   review: {
-    label: "待验收",
+    label: "验收",
     note: "出片了，等你判过还是毙",
     fg: "var(--st-rev)",
     dot: "var(--sg-rev)",
   },
   queued: {
-    label: "排队中",
-    // 与「待放行」的分别就是这句话：人已经点过了，不必再点第二次。
+    // 与「就绪」的分别就是这句话：人已经点过了，不必再点第二次。
+    label: "队列",
     note: "已放行 · 在等这条通道的空位，出一条自动补一条",
     fg: "var(--t3)",
     dot: "var(--sg-ready)",
   },
   wait: {
-    // 「机器手里」而不是「等即梦」：这一档存在的意义是与上面四档形成对照 ——
-    // 那四档卡在人身上，这一档不用管。具体是谁在跑，副行里点名。
-    label: "机器手里",
+    // 「远端」= 东西在即梦那边。这一档存在的意义是与前面几档形成对照 ——
+    // 那几档卡在人身上，这一档不用管。
+    label: "远端",
     note: "在即梦手上，出片会自动取回",
     fg: "var(--t3)",
     dot: "var(--sg-run)",
@@ -92,14 +101,22 @@ export const ACTION_META: Record<
   done: { label: "已定案", note: "", fg: "var(--t3)", dot: "var(--sg-pass)" },
 };
 
-/** 六档在制动作 + 已定案。顺序 = 「离人最近的排最前」，节头摘要也照这个序。 */
+/**
+ * 六档在制动作 + 已定案，**按流程顺序**：异常 → 缺词 → 就绪 → 远端 → 队列 → 验收。
+ *
+ * 侧栏、摘要卡的动作构成、底坞的作用域判定三处都照这个序，所以它同时是
+ * 「默认落在哪一档」的顺序（`enter()` 取第一个不为空的）。
+ *
+ * 异常排在最前不是流程位置而是优先级：那一档里躺着的是已经花过钱、
+ * 或者正准备第二次花钱的条目。
+ */
 export const ACTION_ORDER: NextAction[] = [
   "fix",
   "rewrite",
   "submit",
-  "review",
-  "queued",
   "wait",
+  "queued",
+  "review",
   "done",
 ];
 
@@ -200,12 +217,26 @@ export const WORKBENCH_ACTIONS: NextAction[] = ACTION_ORDER.filter((a) => a !== 
  */
 export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "auto";
 
-export const SORTS = {
-  wait: "已等最久",
-  credit: "额度最高",
-  attempt: "重跑最多",
-} as const;
-export type SortKey = keyof typeof SORTS;
+/**
+ * 列表的排序 —— **只有一种，没有开关**。
+ *
+ * 从前这里是三档（已等最久 / 额度最高 / 重跑最多）加一个栏头上的循环按钮。那个按钮
+ * 去掉了：三档里只有「已等最久」真的被用过，另外两档存在的唯一后果是有人不小心点了
+ * 一下、此后一直看着一个自己没意识到的顺序。
+ *
+ * 现在的顺序是 `rankRows`：**在跑的排最前，然后等得最久的**。它同时解决了另一件事 ——
+ * 顶栏点一条通道灯进来时，「这条队上现在正在生成的是哪几条」必须是第一眼看到的东西，
+ * 而那正是点那盏灯的理由。按动作筛的一屏里全体动作相同，这一层是恒等式，不改变什么。
+ */
+const RANK: Record<NextAction, number> = {
+  wait: 0,
+  queued: 1,
+  fix: 2,
+  review: 3,
+  submit: 4,
+  rewrite: 5,
+  done: 6,
+};
 
 /** 「等待异常」的判据倍数。中位数的 3 倍 —— 单条慢不算事，慢出一个数量级才是。 */
 const SLOW_FACTOR = 3;
@@ -299,7 +330,7 @@ export function fmtSpan(sec: number): string {
   return m === 0 ? `${h} 小时` : `${h} 小时 ${m} 分`;
 }
 
-/** unix 秒 → 「09:14」。历程条用。 */
+/** unix 秒 → 「09:14」。进度条用。 */
 export function fmtClock(t: number): string {
   const d = new Date(t * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -602,6 +633,42 @@ export function matchFilter(r: Row, f: Filter): boolean {
     : (r.modelFull ?? "") === f.key && isLive(r.stage);
 }
 
+/**
+ * 即梦**收下过**这一单没有 —— 「从流水线删掉」这件事唯一要问的问题。
+ *
+ * 删除是真删行（`repo::remove` 是 `DELETE FROM v2v_clips`，没有废纸篓也没有撤销令牌），
+ * 所以这条判据决定的不是能不能删，而是**删掉会丢什么**：
+ *
+ * - 没收下过 → 丢的只是这一条的改写提示词与尝试记录。人自己刚决定「这张图不做视频了」，
+ *   那本来就是要丢的东西。
+ * - 收下过 → 即梦那边可能还在跑、钱可能已经扣了，而删掉之后我们再也认不出那一单：
+ *   片子取不回来，额度也退不了。这一类必须在确认卡上把话说完。
+ *
+ * 判据分三层，一层比一层弱：
+ * 1. `clip.billed` —— Rust 读五处证据得出的结论，扣过费就一定被收下过。
+ * 2. **幽灵单**是反例：即梦给了 submit_id，但从未入队、从未计费 —— 等于没收。
+ *    这也正是它能免费重跑的原因，两处判据必须同源。
+ * 3. 其余情况看有没有 submit_id：有回执就是收下了。
+ *
+ * `submit_timeout` 单列（`removalRisk` 里的 `"unknown"`）：CLI 在超时被杀之前可能已经
+ * 下过单，而 submit_id 随进程一起没了 —— 这一类我们**不知道**，不能当成「没收下过」
+ * 顺手删掉。
+ */
+export function remoteAccepted(r: Row): boolean {
+  if (r.clip.billed) return true;
+  if (r.phantomLive || (r.stage === "fail" && r.clip.errorType === "phantom")) return false;
+  return (r.clip.submitId ?? "").trim() !== "";
+}
+
+/** 删这一条的代价：即梦没收过（免费）· 收过（丢单丢钱）· 不知道收没收。 */
+export type RemovalRisk = "free" | "held" | "unknown";
+
+export function removalRisk(r: Row): RemovalRisk {
+  if (remoteAccepted(r)) return "held";
+  if (r.stage === "fail" && r.clip.errorType === "submit_timeout") return "unknown";
+  return "free";
+}
+
 /** 当前筛选的「脸」—— 标题、一句话、以及它那个颜色。 */
 export interface FilterFace {
   label: string;
@@ -649,12 +716,11 @@ export function filterFace(f: Filter, channels: Channel[]): FilterFace {
   return { label: c.label, sub: c.headline, tone: c.tone, color: "", mood: c.headlineTone };
 }
 
-export function sortRows(rows: Row[], sort: SortKey): Row[] {
-  const out = [...rows];
-  if (sort === "wait") out.sort((a, b) => b.waitSecs - a.waitSecs);
-  else if (sort === "credit") out.sort((a, b) => (b.credit ?? -1) - (a.credit ?? -1));
-  else if (sort === "attempt") out.sort((a, b) => b.clip.attempt - a.clip.attempt);
-  return out;
+/** 在跑的排最前，然后等得最久的；再同则按 id 定死（否则每次重渲染顺序会漂）。 */
+export function rankRows(rows: Row[]): Row[] {
+  return [...rows].sort(
+    (a, b) => RANK[a.action] - RANK[b.action] || b.waitSecs - a.waitSecs || a.clip.id - b.clip.id,
+  );
 }
 
 /** 一条即梦通道。侧栏那张通道卡的一行，也是行左轨与摘要卡堆叠条的配色来源。 */
@@ -715,6 +781,13 @@ function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   if (counts.review > 0) parts.push(`${counts.review} 条等你验收`);
   if (counts.queued > 0) parts.push(`${counts.queued} 条在本地排队`);
   if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦跑`);
+  // 已定案的那几条必须报出来，否则这句话与旁边那个计数**加不起来**：摘要卡右边写的是
+  // 在制条数（8），这里的「共 13 条」后面却只列得出 8 条的去向 —— 差出来的 5 条
+  // 没有任何一处交代，而它们就在这条通道的历史里躺着。
+  //
+  // `parts` 为空（全定案）时不加：那一支走的是下面那句「已全部定案」，
+  // 再补一个「13 条已定案」等于同一件事说两遍。
+  if (counts.done > 0 && parts.length > 0) parts.push(`另 ${counts.done} 条已定案`);
   const headlineTone: Channel["headlineTone"] =
     counts.fix > 0 ? "er" : counts.rewrite + counts.submit + counts.review > 0 ? "acc" : "t3";
   const headline =
@@ -815,6 +888,30 @@ export function buildChannels(
   return out;
 }
 
+/** 快捷通道位数。顶栏灯与列表筛选条**同为三格**，且必须是同一批通道。 */
+export const TOP_CHANNELS = 3;
+
+/**
+ * 用得最多的前三条通道 —— 顶栏那排状态灯与列表顶上那排快捷筛选**共用这一份**。
+ *
+ * ## 为什么是「常驻前三」而不是「此刻在动的全部」
+ *
+ * 从前顶栏只显示 `running > 0 || queued > 0` 的通道，于是那排灯的**格数会变**：
+ * 一条通道跑完最后一单就整格消失，下一次提交又冒出来。人靠位置记东西 ——
+ * 「左边第二格是 2.0Mini」在这种排布下一天要重学好几次，而它每次重学的代价是
+ * 看错一条队的占用。固定三格之后位置是稳的，「有没有在动」交给灯本身回答。
+ *
+ * ## 排序：先看还有多少活，再看历史上用得多不多
+ *
+ * `live`（还没走完的条数）优先 —— 那是现在能动手的量；同档再按这条通道上的总条数，
+ * 于是常用通道即便此刻闲着也留在原位。两级都同时按名字定死，避免每次重渲染漂移。
+ */
+export function topChannels(channels: Channel[], n: number = TOP_CHANNELS): Channel[] {
+  return [...channels]
+    .sort((a, b) => b.live - a.live || b.rows.length - a.rows.length || a.key.localeCompare(b.key))
+    .slice(0, n);
+}
+
 /**
  * 侧栏通道行的副行 —— 只说**这条队此刻堵没堵**，或**它贵在哪**。
  *
@@ -912,7 +1009,7 @@ export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
   };
 }
 
-/** 历程上的一步。`now` 恒有且只有一步 —— 它就是「现在卡在哪」。 */
+/** 进度上的一步。`now` 恒有且只有一步 —— 它就是「现在卡在哪」。 */
 export type TrailState = "done" | "now" | "soon";
 
 export interface TrailStep {
@@ -923,6 +1020,12 @@ export interface TrailStep {
   /** 副行：`now` 那一步写「所以现在该干嘛」，`done` 那一步写回执一类的证据。 */
   sub: string;
   state: TrailState;
+  /**
+   * 这一步的颜色。**走完的一步一律 `ok`**（界面上是一枚绿勾）——
+   * 「走到过这里」是一件只有成立与不成立的事，给它分四种颜色等于让人去猜
+   * 蓝勾和琥珀勾差在哪。剩下三种色只描述例外：`er` 出事了、`rev` 等你判、
+   * `dim` 还没轮到（或这条路已经不会再走下去，比如判了不通过）。
+   */
   tone: "ok" | "acc" | "rev" | "er" | "dim";
 }
 
@@ -930,7 +1033,7 @@ export interface TrailStep {
  * 这一条走过与将要走的路。
  *
  * 与旧版（只有四个时刻、发生过才有颜色）的差别是**把未来也画出来**：
- * 一条待改写的条目，光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
+ * 一条缺词的条目，光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
  * 三态里 `now` 那一步带一句「所以现在该干嘛」，其余留白 —— 没发生的事不编时间。
  */
 export function trailOf(row: Row): TrailStep[] {
@@ -952,16 +1055,19 @@ export function trailOf(row: Row): TrailStep[] {
       ? {
           key: "rewrite",
           at: fmtClock(c.rewroteAt),
-          what: "改写结果写回 · 进待放行",
+          what: "改写结果写回 · 进就绪",
           sub: "",
           state: "done",
-          tone: "acc",
+          tone: "ok",
         }
       : {
           key: "rewrite",
           at: "—",
           what: "等 skill 写回改写结果",
-          sub: st === "rewrite" ? "工单已物化，去 Claude Code / Codex 跑 v2v-rewrite" : "",
+          // 「去 Claude Code 跑 v2v-rewrite」不写在这儿：那句话在这一屏上已经由
+          // 摘要卡的副行说过一次，而底坞那两个按钮就是它的动作。同一条指令在
+          // 一屏里出现四遍，读到第二遍时人就不再读了。
+          sub: "",
           state: st === "rewrite" ? "now" : "soon",
           tone: st === "rewrite" ? "acc" : "dim",
         },
@@ -977,7 +1083,7 @@ export function trailOf(row: Row): TrailStep[] {
           // 恰恰是对账时第一个要问的。写进回执这一行，不必再有那个筛选片。
           sub: `${c.submitId ?? "回执里没有 submit_id"}${c.autoSubmitted ? " · 常驻队列放行" : ""}`,
           state: "done",
-          tone: "acc",
+          tone: "ok",
         }
       : {
           key: "submit",
@@ -1012,10 +1118,10 @@ export function trailOf(row: Row): TrailStep[] {
       ? {
           key: "finish",
           at: fmtClock(c.finishedAt),
-          what: `出片落盘${c.width != null ? ` ${c.width}×${c.height}` : ""} · 进待验收`,
+          what: `出片落盘${c.width != null ? ` ${c.width}×${c.height}` : ""} · 进验收`,
           sub: "",
           state: "done",
-          tone: "rev",
+          tone: "ok",
         }
       : {
           key: "finish",

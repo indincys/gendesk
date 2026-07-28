@@ -5,7 +5,6 @@ import {
   type Row,
   type SliceSummary,
   type TrailStep,
-  fmtAgo,
   fmtClock,
   fmtDur,
   trailOf,
@@ -16,7 +15,7 @@ import { Activity, FolderOpen, ScrollText, SlidersHorizontal } from "lucide-reac
 import { type CSSProperties, useMemo, useState } from "react";
 
 /**
- * 工作台中栏 —— 「这一条的账与历程」。
+ * 工作台中栏 —— 「这一条的账与进度」。
  *
  * 存在的理由是那句反复出现的怀疑：**这条到底花没花钱、走的哪条队、等了多久**。
  * 原来只能开弹窗一条一条看，而看片流里每秒就要判一条 —— 弹窗会把节奏整个打断。
@@ -26,7 +25,7 @@ import { type CSSProperties, useMemo, useState } from "react";
  * 1. **摘要卡** —— 先答「这一屏是个什么局面」（这一档 × 这条通道有多少条、花了多少）。
  * 2. **方向性提示** —— 只在处置方向会搞反时出现（超时该等、幽灵该重跑，反了就是钱）。
  * 3. **这一条的账** —— 花了多少、走的什么规格、排在第几。
- * 4. **历程** —— 走到哪一步了，下一步归谁。
+ * 4. **进度** —— 走到哪一步了，下一步归谁。
  * 5. **这一条的日志** —— 机器刚才替它做了什么。
  * 6. **提示词 / 失败原文** —— 要读全文时才往下翻。
  */
@@ -38,7 +37,6 @@ export function V2vLedger({
   handoff,
   rewriteTotal,
   activity,
-  now,
   badGroup,
   busy,
   onRewriteGroup,
@@ -61,7 +59,6 @@ export function V2vLedger({
    */
   rewriteTotal: number;
   activity: ActivityEntry[];
-  now: number;
   /** 这条通道上毙得最狠的那个组（≥3 条不通过才报）。 */
   badGroup: { name: string; rejected: number; ids: number[] } | null;
   busy: boolean;
@@ -74,7 +71,7 @@ export function V2vLedger({
   return (
     <div className="vled">
       <div className="vledhd">
-        <span className="fs13 fw6">这一条的账与历程</span>
+        <span className="fs13 fw6">这一条的账与进度</span>
         <div className="f1" />
         {/* 三个面板入口。原型这一格是空的 —— 而观测（排产要看的排队趋势与额度分账）、
             执行日志、默认参数都得有个够得着的地方，且 ⌥1/2/3 得有个能被看见的出处。 */}
@@ -109,7 +106,6 @@ export function V2vLedger({
           filter={filter}
           handoff={handoff}
           rewriteTotal={rewriteTotal}
-          now={now}
           badGroup={badGroup}
           busy={busy}
           onRewriteGroup={onRewriteGroup}
@@ -118,7 +114,7 @@ export function V2vLedger({
 
         {row == null ? (
           <div className="fs11 t3" style={{ padding: "18px 2px", lineHeight: 1.8 }}>
-            右边点一条，看它的账与历程。
+            右边点一条，看它的账与进度。
             <br />
             ↑↓ 换条 · ⌥\ 收起本栏。
           </div>
@@ -149,7 +145,6 @@ function SliceCard({
   filter,
   handoff,
   rewriteTotal,
-  now,
   badGroup,
   busy,
   onRewriteGroup,
@@ -160,7 +155,6 @@ function SliceCard({
   filter: Filter;
   handoff: HandoffStatus | null;
   rewriteTotal: number;
-  now: number;
   badGroup: { name: string; rejected: number; ids: number[] } | null;
   busy: boolean;
   onRewriteGroup: (ids: number[]) => void;
@@ -260,25 +254,21 @@ function SliceCard({
         </div>
       )}
 
-      {/* 交接对账。两个按钮在底坞，这里说的是**它们对不对得上**：
-          工单里 N 条、流水线里 M 条，差出来的那几条永远不会被改写。 */}
-      {isRewrite && (
+      {/* 交接对账 —— **只在对不上或写不出去时出现**。
+          从前这里常驻一句「工单已写到交接目录（2 组 · 2 条）· 上次收录 30 分钟前」外加
+          一个「打开交接目录」按钮。那句话在一切正常时不改变任何决定，而按钮在底坞里
+          原样有一个；两者合起来把这一档最要紧的那条例外（工单里 N 条、流水线里 M 条
+          对不上，差出来的那几条永远不会被改写）挤成了同一段落里的一小截。
+          现在这一格空着就是「对得上」。 */}
+      {isRewrite && (err != null || mismatch) && (
         <div className={cn("hoff", err && "er")}>
           {err ? (
             <>工单没能写出去：{err} —— 先确认交接目录还在、可写。</>
           ) : (
-            <>
-              工单已写到交接目录
-              {handoff && `（${handoff.groups} 组 · ${handoff.items} 条）`}
-              {handoff?.lastIngestAt != null && ` · 上次收录 ${fmtAgo(now - handoff.lastIngestAt)}`}
-              {mismatch && (
-                <span className="wr2">
-                  {" "}
-                  工单里 {handoff?.items} 条、流水线里 {rewriteTotal} 条待改写 ——
-                  点「收录改写结果」对一次账。
-                </span>
-              )}
-            </>
+            <span className="wr2">
+              工单里 {handoff?.items} 条、流水线里 {rewriteTotal} 条缺词 ——
+              点「收录改写结果」对一次账。
+            </span>
           )}
           <button type="button" className="btn xs gho" onClick={onOpenHandoff}>
             <FolderOpen className="ic12" />
@@ -307,7 +297,7 @@ function SliceCard({
   );
 }
 
-/** 这一条自己的账 / 历程 / 日志 / 原文。 */
+/** 这一条自己的账 / 进度 / 日志 / 原文。 */
 function ClipLedger({
   row,
   activity,
@@ -326,7 +316,7 @@ function ClipLedger({
    *
    * 它是这一栏里最长的一块（视频提示词是一整段叙事），而**判片时不看它** ——
    * 要看它的时候人是在查「为什么出成这样」，那是少数几次。摊开摆着的代价是
-   * 历程与日志被推到折叠线以下，于是每选一条都要先滚一屏。
+   * 进度与日志被推到折叠线以下，于是每选一条都要先滚一屏。
    *
    * 状态**不随换条复位**：开着它多半是因为正在逐条对提示词，那时每换一条都要
    * 重点一次展开，等于把这个开关变成一次性的。
@@ -341,54 +331,68 @@ function ClipLedger({
       {hint && <div className={cn("vhint", hint.tone)}>{hint.text}</div>}
 
       <div className="vsec">这一条的账</div>
-      <div className="vacct">
-        <div className={cn("big", c.billed && "paid")}>
-          <span className="n">{credit == null ? "—" : credit}</span>
-          <span className="k">{c.billed ? "额度 · 已扣" : "额度 · 预估"}</span>
-        </div>
-        <div className="vfacts">
-          <Fact k="通道（我们发的）" v={row.modelFull ?? "跟随 CLI 默认"} />
-          <Fact
-            k="规格"
-            v={
-              row.resolution && row.duration
-                ? `${row.resolution} · ${row.duration}s`
-                : (row.resolution ?? "CLI 默认")
-            }
-          />
-          <Fact k="计费型号（回执）" v={c.benefitType ?? "—"} />
-          <Fact k="submit_id" v={c.submitId ?? "—"} />
-          {/* 两种位次的标签必须说清是谁的队 —— 本地排第 3 和即梦排第 4485 是完全不同的
-              两件事，混成一个「第 N 位」会让人以为快轮到了。 */}
-          <Fact
-            k={row.action === "queued" ? "本地队列" : "即梦队列"}
-            v={row.queuePos == null ? "—" : `第 ${row.queuePos} 位`}
-          />
-          {/* 还没提交出去的只有「什么时候进的队」可说 —— 那时「已等」按定义是 0，
-              摆一个 0 出来会被读成「刚刚才排上」。 */}
-          <Fact
-            k={row.waitSecs === 0 ? "入队" : "已等"}
-            v={row.waitSecs === 0 ? fmtClock(c.createdAt) : fmtDur(row.waitSecs)}
-          />
-          <Fact
-            k="上次查询"
-            v={row.polledAgo == null ? "—" : `${fmtDur(row.polledAgo)}前`}
-            tone={row.polledAgo != null && row.polledAgo > 1800 ? "wr" : undefined}
-          />
-          <Fact
-            k="尝试"
-            v={`第 ${Math.max(1, c.attempt)} 次`}
-            tone={c.attempt > 1 ? "wr" : undefined}
-          />
-        </div>
+      {/* 额度与其它七格**平级**。
+          它从前是左边一整块 84px 宽的大数字。那个体量买到的信息量与旁边一格完全一样
+          （一个数 + 一个标签），代价却是把这一栏最靠上的位置占掉三分之一，
+          于是「走的哪条队」「排在第几」这些同样要读的事被挤到了下面。
+          现在靠**颜色**分主次：预估用蓝（还能改主意），已扣用琥珀（钱已经出去了）。 */}
+      <div className="vfacts mt5">
+        <Fact
+          k={c.billed ? "额度 · 已扣" : "额度 · 预估"}
+          v={credit == null ? "—" : String(credit)}
+          tone={c.billed ? "wr" : "acc"}
+          strong
+        />
+        <Fact k="通道（我们发的）" v={row.modelFull ?? "跟随 CLI 默认"} />
+        <Fact
+          k="规格"
+          v={
+            row.resolution && row.duration
+              ? `${row.resolution} · ${row.duration}s`
+              : (row.resolution ?? "CLI 默认")
+          }
+        />
+        <Fact k="计费型号（回执）" v={c.benefitType ?? "—"} />
+        <Fact k="submit_id" v={c.submitId ?? "—"} />
+        {/* 两种位次的标签必须说清是谁的队 —— 本地排第 3 和即梦排第 4485 是完全不同的
+            两件事，混成一个「第 N 位」会让人以为快轮到了。 */}
+        <Fact
+          k={row.action === "queued" ? "本地队列" : "即梦队列"}
+          v={row.queuePos == null ? "—" : `第 ${row.queuePos} 位`}
+        />
+        {/* 还没提交出去的只有「什么时候进的队」可说 —— 那时「已等」按定义是 0，
+            摆一个 0 出来会被读成「刚刚才排上」。 */}
+        <Fact
+          k={row.waitSecs === 0 ? "入队" : "已等"}
+          v={row.waitSecs === 0 ? fmtClock(c.createdAt) : fmtDur(row.waitSecs)}
+        />
+        <Fact
+          k="上次查询"
+          v={row.polledAgo == null ? "—" : `${fmtDur(row.polledAgo)}前`}
+          tone={row.polledAgo != null && row.polledAgo > 1800 ? "wr" : undefined}
+        />
+        <Fact
+          k="尝试"
+          v={`第 ${Math.max(1, c.attempt)} 次`}
+          tone={c.attempt > 1 ? "wr" : undefined}
+        />
       </div>
 
-      <div className="vsec">历程</div>
+      {/* 「进度」而不是「历程」：这一列要答的是「走到哪儿了、还剩几步」，
+          而「历程」听着像一份读完才有用的流水账。
+          走完的一步是一枚**绿勾**，不是一个带色的圆点 —— 圆点分四种颜色时，
+          「蓝点和琥珀点差在哪」这个问题没有答案（它们都只是「走过了」）；
+          一枚勾则不需要图例。剩下的颜色只描述例外：红=出事了，空心=还没轮到。 */}
+      <div className="vsec">进度</div>
       <div className="vtl">
         {steps.map((s, i) => (
           <div key={s.key} className={cn("vtlrow", s.state)}>
             <div className="rail">
-              <span className={cn("dot", TONE_CLASS[s.tone])} />
+              {s.state === "done" ? (
+                <span className={cn("ck", TONE_CLASS[s.tone])}>✓</span>
+              ) : (
+                <span className={cn("dot", TONE_CLASS[s.tone])} />
+              )}
               {i < steps.length - 1 && <span className="ln" />}
             </div>
             <div className="bd">
@@ -454,7 +458,7 @@ function ClipLedger({
 }
 
 /**
- * 历程色点的类名。
+ * 进度节点的类名。
  *
  * 写成一张显式的表而不是 `` `t-${tone}` `` —— `classnames.test.ts` 的反向检查
  * （「定义了的 class 必须有人用」）扫的是源码里的字面量，模板拼出来的类名它看不见，
@@ -483,11 +487,25 @@ function fmtLogClock(unix: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function Fact({ k, v, tone }: { k: string; v: string; tone?: "wr" | undefined }) {
+/** 一格账。`strong` 的那格靠字号与颜色（不是靠体积）把自己顶出来。 */
+function Fact({
+  k,
+  v,
+  tone,
+  strong,
+}: {
+  k: string;
+  v: string;
+  tone?: "wr" | "acc" | undefined;
+  strong?: boolean;
+}) {
   return (
     <div className="vfact">
       <div className="k">{k}</div>
-      <div className={cn("v", tone === "wr" && "wr2")} title={v}>
+      <div
+        className={cn("v", strong && "hero", tone === "wr" && "wr2", tone === "acc" && "acc2")}
+        title={v}
+      >
         {v}
       </div>
     </div>

@@ -1,6 +1,6 @@
-import { type NextAction, type Row, WORKBENCH_ACTIONS } from "@/features/v2v/model";
+import { type NextAction, type Row, WORKBENCH_ACTIONS, removalRisk } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
-import { FolderOpen, RefreshCw, Send } from "lucide-react";
+import { FolderOpen, RefreshCw, Send, Trash2 } from "lucide-react";
 
 /**
  * 底坞 —— 动作全在这一条上，分成**这一条**与**这一屏**两组。
@@ -12,7 +12,7 @@ import { FolderOpen, RefreshCw, Send } from "lucide-react";
  *
  * ## 两组按钮都按**行**派生，不按筛选派生
  *
- * 「处理异常」这一档里就混着代价完全相反的几种：幽灵单重跑不花钱，超时重跑是第二份钱，
+ * 「异常」这一档里就混着代价完全相反的几种：幽灵单重跑不花钱，超时重跑是第二份钱，
  * 提交超时连花没花都不知道。一套按钮套在整屏上必然对其中一类说错话，所以「这一条」
  * 读的是行本身（`row.signals` / `clip.billed` / `errorType`），与详情栏那几句提示同源。
  *
@@ -39,6 +39,8 @@ export interface DockHandlers {
   onPollNow: () => void;
   onSwitchChannel: (ids: number[]) => void;
   onEditParams: (ids: number[]) => void;
+  /** 从流水线删掉（不想给这张图做视频了）。图本身与作品记录不受影响。 */
+  onRemove: (ids: number[]) => void;
   onUndo: () => void;
 }
 
@@ -129,6 +131,22 @@ export function V2vDock({
       >
         改参数
       </button>
+      {/* 批量删除只在**明确勾了几条**时出现。
+          按「整屏」算的话，站在「远端 83 条」那一屏上会有一个「删除这 83 条」——
+          而它旁边那几个按钮全都是按整屏算的，于是这一个会被当成同一类东西点下去。
+          逐条删在左边那一组里，任何时候都在。 */}
+      {sel.size > 0 && (
+        <button
+          type="button"
+          className="btn sm dngo"
+          disabled={busy}
+          title="从流水线删掉这几条（图与作品记录不受影响）。删之前会说清哪几条即梦已经收下过。"
+          onClick={() => h.onRemove(ids)}
+        >
+          <Trash2 className="ic12" />
+          删除选中 {scope.length} 条
+        </button>
+      )}
 
       <div className="f1" />
       {undoLabel ? (
@@ -144,12 +162,12 @@ export function V2vDock({
         // 比不写这条提示更伤。混着几种动作时按光标那一条报，因为这些键判的就是它。
         <span className="fs11 t3 nowrap ohide">
           {ids.length === 0
-            ? "↑↓ 换条 · ⌥\\ 账与历程"
+            ? "↑↓ 换条 · ⌥\\ 账与进度"
             : (only ?? row?.action) === "review"
               ? "↑↓ 换条 · 空格 通过 · X 不通过 · ⏎ 全屏看片"
               : (only ?? row?.action) === "submit"
                 ? "↑↓ 换条 · ⌘⏎ 确认提交 · F 对照首帧"
-                : "↑↓ 换条 · ⌥\\ 账与历程 · ⌥1/2/3 观测·日志·参数"}
+                : "↑↓ 换条 · ⌥\\ 账与进度 · ⌥1/2/3 观测·日志·参数"}
         </span>
       )}
     </div>
@@ -172,17 +190,43 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
       type="button"
       className="btn sm gho"
       disabled={busy}
-      title="清掉视频提示词，退回待改写让 skill 重写"
+      title="清掉视频提示词，退回缺词让 skill 重写"
       onClick={() => h.onRequeueRewrite(one)}
     >
       退回改写 <span className="kh">E</span>
     </button>
   );
+  /**
+   * 删除**任何阶段、任何通道的条目都摆得出来** —— 「这张图我不想做视频了」这个决定
+   * 与它此刻走到哪儿无关，而在此之前它只能靠一条不存在的入口完成（命令一直在
+   * Rust 里，前端没有出口）。
+   *
+   * 代价不在按钮上判，在确认卡上说：即梦没收下过的删掉只丢一段改写提示词；
+   * 收下过的删掉就再也认不出那一单（片子取不回来、额度也退不了）。判据单点在
+   * `removalRisk`，确认卡在 `V2vPage`。
+   */
+  const del = (
+    <button
+      key="del"
+      type="button"
+      className={cn("btn sm", removalRisk(row) === "free" ? "gho" : "dngo")}
+      disabled={busy}
+      title={
+        removalRisk(row) === "free"
+          ? "从流水线删掉这一条（图与作品记录不受影响，只是不再给它做视频）"
+          : "即梦收下过这一单 —— 删掉就再也认不出它了。点一下会先说清楚。"
+      }
+      onClick={() => h.onRemove(one)}
+    >
+      <Trash2 className="ic12" />
+      删除
+    </button>
+  );
 
   if (action === "rewrite") {
     // 这一步只可能由人在 Claude Code / Codex 里推动，GenDesk 这边工单早已备好 ——
-    // 所以「这一条」上没有任何真的动作，与其摆一个点了没反应的按钮，不如说清楚。
-    return <span className="fs11 t3 nowrap">等 skill 写回改写结果 · 动作在右边这一档</span>;
+    // 所以除了「不做了」之外，这一条上没有别的真动作。
+    return del;
   }
 
   if (action === "submit") {
@@ -199,6 +243,7 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
           <span className="kh">⌘⏎</span>
         </button>
         {back}
+        {del}
       </>
     );
   }
@@ -216,6 +261,7 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
           撤回放行
         </button>
         {back}
+        {del}
       </>
     );
   }
@@ -249,6 +295,7 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
           重跑 <span className="kh">R</span>
         </button>
         {back}
+        {del}
       </>
     );
   }
@@ -288,6 +335,7 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
           {phantom ? "免费重跑" : "重跑"} <span className="kh">R</span>
         </button>
         {back}
+        {del}
       </>
     );
   }
@@ -310,6 +358,7 @@ function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers
         重跑 <span className="kh">R</span>
       </button>
       {back}
+      {del}
     </>
   );
 }

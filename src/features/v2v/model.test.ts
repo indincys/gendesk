@@ -1,4 +1,5 @@
 import {
+  ACTION_META,
   CHANNEL_TONES,
   MINE,
   type NextAction,
@@ -9,7 +10,10 @@ import {
   filterFace,
   matchFilter,
   nextAction,
+  rankRows,
+  removalRisk,
   sliceSummary,
+  topChannels,
   trailOf,
 } from "@/features/v2v/model";
 import type { ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
@@ -620,9 +624,14 @@ describe("筛选", () => {
 describe("筛选的身份（filterFace）", () => {
   it("按动作筛：标题是档名，副行是「拿它怎么办」", () => {
     const face = filterFace({ kind: "action", key: "review" }, []);
-    expect(face.label).toBe("待验收");
+    // 档名从「待验收」改成「验收」（v0.24.0 修订）：六档统一成两个字的流程位置
+    // （异常 / 缺词 / 就绪 / 远端 / 队列 / 验收），侧栏那一列读下来就是流水线本身。
+    // 断言跟着改的是**这一个字符串**，不是这条测试要守的规则 —— 规则仍是
+    // 「档名 = ACTION_META.label，副行 = 那句『拿它怎么办』」。
+    expect(face.label).toBe(ACTION_META.review.label);
+    expect(face.label).toBe("验收");
     expect(face.sub).toContain("判");
-    // 待验收是琥珀档：语气色不能跟蓝色的「待放行」混成一种。
+    // 验收是琥珀档：语气色不能跟蓝色的「就绪」混成一种。
     expect(face.mood).toBe("rev");
     expect(face.tone).toBeNull();
   });
@@ -949,7 +958,7 @@ describe("这一屏的账（sliceSummary）", () => {
   });
 });
 
-describe("历程（trailOf）", () => {
+describe("进度（trailOf）", () => {
   /** 没发生的事一律留白。编一个时间出来，等于让「它到底跑没跑」永远问不清。 */
   it("没发生的步骤时间是「—」，且恒有且只有一步是「现在」", () => {
     const [r] = derive([
@@ -967,8 +976,15 @@ describe("历程（trailOf）", () => {
     expect(steps.filter((s) => s.state === "now")).toHaveLength(1);
     expect(steps.find((s) => s.state === "now")?.key).toBe("rewrite");
     for (const s of steps.filter((x) => x.state !== "done")) expect(s.at).toBe("—");
-    // 「现在」那一步必须说出所以现在该干嘛，否则画个点没有意义。
-    expect(steps.find((s) => s.state === "now")?.sub).toContain("v2v-rewrite");
+    // 这里原来断言的是「『现在』那一步必须说出所以现在该干嘛」，具体到缺词档上就是
+    // 这条副行里得有「v2v-rewrite」。**前提被推翻了**（v0.24.0 修订）：那句指令在
+    // 缺词那一屏上同时出现在四处（摘要卡副行、进度副行、列表每一行的 situation、
+    // 底坞左侧的说明），而底坞那两个按钮本身就是它的动作。一条指令在一屏里说四遍，
+    // 读到第二遍时人就不再读了 —— 于是它只留在摘要卡副行那一处，进度这一步留白。
+    //
+    // 改成断言相反的行为：进度不复述屏级指令。恒有且只有一步是「现在」、没发生的
+    // 步骤不编时间 —— 这两条本来就是这个测试要守的东西，一个字没动。
+    expect(steps.find((s) => s.state === "now")?.sub).toBe("");
   });
 
   it("判死之后不画「等你判定」—— 一个永远走不到的未来比不画更误导", () => {
@@ -1012,6 +1028,134 @@ describe("历程（trailOf）", () => {
     expect(last?.state).toBe("now");
     expect(last?.tone).toBe("er");
     expect(last?.sub).toBe("未交付到输出目录");
+  });
+});
+
+/**
+ * 删掉一条的代价（`removalRisk`）。
+ *
+ * 删除是 `DELETE FROM v2v_clips`：没有废纸篓、没有撤销令牌。这一层唯一的活儿是分清
+ * 「删掉只丢一段提示词」与「删掉就再也认不出那一单」——后者意味着片子取不回来、
+ * 额度也退不了，而两者在界面上长得一模一样。
+ */
+describe("删除的代价（removalRisk）", () => {
+  it("从没提交出去的一律免费：缺词 · 就绪 · 本地队列", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rewrite", videoPrompt: null, submitId: null, rewroteAt: null }),
+      clip({ id: 2, stage: "ready", submitId: null }),
+      clip({ id: 3, stage: "ready", submitId: null, submitQueuedAt: NOW - 60 }),
+    ]);
+    for (const r of rows) expect(removalRisk(r)).toBe("free");
+  });
+
+  /**
+   * 幽灵单是唯一一类「有 submit_id 却等于没被收下」的条目：即梦给了单号，却从未入队、
+   * 从未计费。这与它能**免费重跑**是同一个事实，两处判据必须同源 —— 一处说「重跑
+   * 不花钱」另一处说「删掉会丢一单已付费的」，人只会认为其中一个坏了。
+   */
+  it("幽灵单不算被收下 —— 与「免费重跑」同一个事实", () => {
+    const [live] = derive([clip({ stage: "run", videoPath: null, phantomSuspect: true })]);
+    const [dead] = derive([
+      clip({ stage: "fail", errorType: "phantom", videoPath: null, submitId: "sub-9" }),
+    ]);
+    if (!live || !dead) throw new Error("fixture");
+    expect(removalRisk(live)).toBe("free");
+    expect(removalRisk(dead)).toBe("free");
+  });
+
+  it("扣过费的、以及在跑且有回执的，都算即梦收下过", () => {
+    const [billed] = derive([clip({ stage: "rev", billed: true, creditCount: 8 })]);
+    const [running] = derive([
+      clip({ stage: "run", videoPath: null, submitId: "sub-3", queueIdx: 4485 }),
+    ]);
+    if (!billed || !running) throw new Error("fixture");
+    expect(removalRisk(billed)).toBe("held");
+    expect(removalRisk(running)).toBe("held");
+  });
+
+  /**
+   * 提交时 CLI 被超时杀掉：单可能已经下出去了，而 submit_id 随进程一起没了。
+   * 「问不出话」不等于「没花钱」—— 把它并进 `free` 会让一次对不上账的删除
+   * 悄悄发生在最需要留证据的那一类条目上。
+   */
+  it("提交超时是「不知道」，不并进「免费」", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "submit_timeout", submitId: null, videoPath: null }),
+    ]);
+    if (!r) throw new Error("fixture");
+    expect(removalRisk(r)).toBe("unknown");
+  });
+});
+
+/**
+ * 列表顺序（`rankRows`）。排序开关删掉之后只剩这一种，所以它必须同时满足两件事：
+ * 点通道灯进来时在跑的排最前，按动作筛时与旧的「已等最久」等价。
+ */
+describe("列表顺序（rankRows）", () => {
+  it("在跑的排最前，然后等得最久的", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "ready", submitId: null }),
+      clip({ id: 2, stage: "run", videoPath: null, firstSubmittedAt: NOW - 300 }),
+      clip({ id: 3, stage: "ready", submitId: null, submitQueuedAt: NOW - 60 }),
+      clip({ id: 4, stage: "rev", firstSubmittedAt: NOW - 9000 }),
+    ]);
+    expect(rankRows(rows).map((r) => r.clip.id)).toEqual([2, 3, 4, 1]);
+  });
+
+  it("按动作筛的一屏里全体动作相同，于是退化成「已等最久」", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rev", firstSubmittedAt: NOW - 100 }),
+      clip({ id: 2, stage: "rev", firstSubmittedAt: NOW - 9000 }),
+      clip({ id: 3, stage: "rev", firstSubmittedAt: NOW - 500 }),
+    ]);
+    expect(rankRows(rows).map((r) => r.clip.id)).toEqual([2, 3, 1]);
+  });
+
+  it("不改原数组 —— 调用方拿的是记忆过的那一份", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rev", firstSubmittedAt: NOW - 100 }),
+      clip({ id: 2, stage: "run", videoPath: null, firstSubmittedAt: NOW - 50 }),
+    ]);
+    const before = rows.map((r) => r.clip.id);
+    rankRows(rows);
+    expect(rows.map((r) => r.clip.id)).toEqual(before);
+  });
+});
+
+/**
+ * 顶栏那排状态灯与列表顶上那排快捷片读的是**同一份**前三通道。两处各排各的话，
+ * 人会以为它们是两组不同的东西，然后去找那个并不存在的区别。
+ */
+describe("快捷通道（topChannels）", () => {
+  it("最多三条，按还没走完的条数排", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "a", stage: "rev" }),
+      clip({ id: 2, modelVersion: "a", stage: "rev" }),
+      clip({ id: 3, modelVersion: "b", stage: "rev" }),
+      clip({ id: 4, modelVersion: "c", stage: "rev" }),
+      clip({ id: 5, modelVersion: "c", stage: "rev" }),
+      clip({ id: 6, modelVersion: "c", stage: "rev" }),
+      clip({ id: 7, modelVersion: "d", stage: "rev" }),
+    ]);
+    expect(topChannels(buildChannels(rows, MODELS)).map((c) => c.key)).toEqual(["c", "a", "b"]);
+  });
+
+  /**
+   * 常用通道即便此刻闲着也留在原位 —— 这排灯是**常驻**的，格数会变的话人每天要重认
+   * 一次位置，而认错一次的代价是看错一条队的占用。
+   */
+  it("在制条数打平时按这条通道上的总条数排，闲着的不被挤掉", () => {
+    const rows = derive([
+      // a：历史上跑过 3 条，此刻全定案了。
+      clip({ id: 1, modelVersion: "a", stage: "pass" }),
+      clip({ id: 2, modelVersion: "a", stage: "pass" }),
+      clip({ id: 3, modelVersion: "a", stage: "rej" }),
+      // b：只有一条，也已经定案。
+      clip({ id: 4, modelVersion: "b", stage: "pass" }),
+    ]);
+    const top = topChannels(buildChannels(rows, MODELS));
+    expect(top.map((c) => c.key)).toEqual(["a", "b"]);
+    expect(top[0]?.live).toBe(0);
   });
 });
 

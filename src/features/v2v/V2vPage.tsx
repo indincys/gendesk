@@ -1,7 +1,7 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { type DockHandlers, V2vDock } from "@/features/v2v/V2vDock";
 import { V2vLedger, worstGroup } from "@/features/v2v/V2vLedger";
-import { V2vList } from "@/features/v2v/V2vList";
+import { type PickMode, V2vList } from "@/features/v2v/V2vList";
 import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
 import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
 import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
@@ -11,12 +11,11 @@ import { V2vCreditDaily, V2vQueueTrend } from "@/features/v2v/V2vQueueTrend";
 import { V2vReviewFlow } from "@/features/v2v/V2vReviewFlow";
 import {
   type Row,
-  SORTS,
-  type SortKey,
   carryParams,
   creditPerSec,
   filterFace,
   fmtAgo,
+  removalRisk,
   sliceSummary,
 } from "@/features/v2v/model";
 import {
@@ -31,7 +30,7 @@ import {
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
-import { selectChannels, selectVisible, useV2vStore } from "@/stores/v2v";
+import { selectChannels, selectTopChannels, selectVisible, useV2vStore } from "@/stores/v2v";
 import { Clapperboard, RefreshCw, Send } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -47,7 +46,7 @@ import { toast } from "sonner";
  *    两者**叠加**：动作答「拿它怎么办」，通道答「它排在哪条队上」，正交。
  * 2. **通道状态灯 / 刷新 / 余额搬进顶栏**（`V2vTitleChrome`）。它们回答的都是
  *    「远端此刻是什么状况」，与页里那三栏不是一回事。
- * 3. **三栏 + 底坞**：预览 ｜ 这一条的账与历程 ｜ 列表；底坞把「这一条」与「这一档」
+ * 3. **三栏 + 底坞**：预览 ｜ 这一条的账与进度 ｜ 列表；底坞把「这一条」与「这一档」
  *    的动作分成两组 —— 此前它们混在同一排，唯一的区别是按钮上那个数字。
  *
  * ## 仍然成立的老判断
@@ -60,8 +59,66 @@ import { toast } from "sonner";
  * ## 键盘
  *
  * ↑/↓（或 ←/→、J/K）换条 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
- * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 账与历程栏 · ⌥1/2/3 观测/日志/参数。
+ * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 账与进度栏 · ⌥1/2/3 观测/日志/参数。
  */
+
+/**
+ * 删除确认 —— 这张卡唯一的活儿是把**代价**说完。
+ *
+ * 「不想给这张图做视频了」在任何阶段、任何通道上都是一个合法的决定，所以按钮不设限；
+ * 但删除是真删行（无废纸篓、无撤销），而这批条目里可能混着即梦已经收下、
+ * 甚至已经扣过费的那几条 —— 它们删掉之后就再也认不出来：片子取不回来，额度也退不了。
+ *
+ * 所以卡上分三类报数（判据单点 `removalRisk`）：
+ * - **没收下过**：只丢一段改写提示词。这一类是这个功能的常态。
+ * - **收下过**：即梦那边可能还在跑，钱可能已经出去了。红。
+ * - **不知道**（提交时 CLI 超时被杀、submit_id 随进程没了）：与上面同等对待 ——
+ *   「问不出话」不等于「没花钱」。
+ */
+function RemoveConfirm({
+  rows,
+  onConfirm,
+  onClose,
+}: {
+  rows: Row[];
+  onConfirm: (rows: Row[]) => void;
+  onClose: () => void;
+}) {
+  const held = rows.filter((r) => removalRisk(r) === "held");
+  const unknown = rows.filter((r) => removalRisk(r) === "unknown");
+  const risky = held.length + unknown.length;
+  const credit = held.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0);
+  const one = rows.length === 1 ? rows[0] : null;
+
+  return (
+    <ConfirmModal
+      title={
+        one
+          ? `从流水线删掉 ${one.clip.promptCode}`
+          : `从流水线删掉 ${rows.length} 条${risky > 0 ? ` · 其中 ${risky} 条即梦收下过` : ""}`
+      }
+      desc={[
+        "删掉之后这张图不再走视频流水线（图本身与作品记录不受影响，只是不会再自动回到这里）。",
+        rows.length - risky > 0
+          ? `其中 ${rows.length - risky} 条即梦从未收下过 —— 丢的只是已经写好的视频提示词。`
+          : "",
+        held.length > 0
+          ? `${held.length} 条即梦已经收下${credit > 0 ? `、已扣 ${credit} 额度` : ""}：删掉之后我们再也认不出那几单，片子取不回来，额度也退不了。想换条队重跑的话用「换通道」。`
+          : "",
+        unknown.length > 0
+          ? `${unknown.length} 条提交时 CLI 超时被杀，我们没拿到 submit_id —— 单可能已经下出去并扣了费，删掉就永远对不上账了。`
+          : "",
+        "这一步没有废纸篓、也撤销不了。",
+      ]
+        .filter((s) => s !== "")
+        .join(" ")}
+      confirmLabel={risky > 0 ? "仍要删除" : "删除"}
+      danger={risky > 0}
+      onConfirm={() => onConfirm(rows)}
+      onClose={onClose}
+    />
+  );
+}
 
 /**
  * 换通道要写下去的一套参数。
@@ -89,19 +146,21 @@ export function V2vPage() {
   const coarseNow = useV2vStore((s) => s.coarseNow);
 
   const filter = useV2vStore((s) => s.filter);
-  const sort = useV2vStore((s) => s.sort);
   const sel = useV2vStore((s) => s.sel);
+  const anchor = useV2vStore((s) => s.anchor);
   const cur = useV2vStore((s) => s.cur);
   const ledgerOpen = useV2vStore((s) => s.ledgerOpen);
-  // 换档由侧栏那张动作卡负责（`V2vNavCards`），页里不再有第二个入口。
-  const setSort = useV2vStore((s) => s.setSort);
+  // 换流程档由侧栏负责（`V2vNavCards`），换通道由列表顶上那排快捷片负责。
+  const toggleChannel = useV2vStore((s) => s.toggleChannel);
   const setCur = useV2vStore((s) => s.setCur);
   const setSel = useV2vStore((s) => s.setSel);
+  const setAnchor = useV2vStore((s) => s.setAnchor);
   const clearSel = useV2vStore((s) => s.clearSel);
   const toggleLedger = useV2vStore((s) => s.toggleLedger);
 
   const visible = useV2vStore(selectVisible);
   const channels = useV2vStore(selectChannels);
+  const topCh = useV2vStore(selectTopChannels);
 
   // ── 界面态 ───────────────────────────────────────────
   const [screen, setScreen] = useState<"list" | "review">("list");
@@ -126,6 +185,14 @@ export function V2vPage() {
     credit: number;
     advanceFrom?: number;
   } | null>(null);
+  /**
+   * 删除前的确认。**每一次删除都过这张卡**，无论代价大小。
+   *
+   * `remove_v2v_clips` 是 `DELETE FROM v2v_clips` —— 没有废纸篓、没有撤销令牌，
+   * 而它带走的东西里有一段花过时间的改写提示词。同一张图不会自己再回到流水线里
+   * （入队发生在图片验收通过那一刻，已经过去了），所以这一下不可逆。
+   */
+  const [confirmRemove, setConfirmRemove] = useState<Row[] | null>(null);
   const [busy, setBusy] = useState(false);
   /** 撤销令牌由 Rust 造，前端只当信封（见 `V2vAction` 的注释）。 */
   const [undo, setUndo] = useState<{ label: string; entries: V2vUndoEntry[] } | null>(null);
@@ -333,7 +400,7 @@ export function V2vPage() {
           return c?.clip.stage === "ready" && c.clip.submitQueuedAt == null;
         });
         if (ready.length === 0) {
-          toast("请先选中「待放行」的条目（排队中的已经放行过了，不必再点）");
+          toast("请先选中「就绪」的条目（已经在队列里的放行过了，不必再点）");
           return;
         }
         setCmdPreview({ ids: ready, data: await unwrap(commands.previewV2vCommands(ready)) });
@@ -428,6 +495,33 @@ export function V2vPage() {
         await reload();
       }),
     [guard, reload, clearSel],
+  );
+
+  /** 删除的入口 —— 只负责把要删的那几行摆上确认卡，一条都不动。 */
+  const askRemove = useCallback(
+    (ids: number[]) => {
+      const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => r != null);
+      if (rows.length > 0) setConfirmRemove(rows);
+    },
+    [byId],
+  );
+
+  /** 从流水线删掉。作用域里有一条即梦收下过，整张卡就换成危险语气。 */
+  const doRemove = useCallback(
+    (rows: Row[]) =>
+      guard(async () => {
+        const ids = rows.map((r) => r.clip.id);
+        // 先把光标挪走再删：删完那一行就不在 `visible` 里了，而光标落空时画面会跳回
+        // 第一条 —— 逐条清理时那意味着每删一条都要重新滚回原来的位置。
+        const from = rows.length === 1 ? rows[0]?.clip.id : undefined;
+        if (from != null) advance(from);
+        const n = await unwrap(commands.removeV2vClips(ids));
+        toast(n > 0 ? `已从流水线删除 ${n} 条（图与作品记录仍在）` : "这些条目已经不在流水线里了");
+        setConfirmRemove(null);
+        clearSel();
+        await reload();
+      }),
+    [guard, reload, clearSel, advance],
   );
 
   const doUndo = useCallback(() => {
@@ -527,11 +621,23 @@ export function V2vPage() {
       // 速查面板开着时整页让路：那时按 X 是想关面板，不是想毙一条视频。
       if (useUiStore.getState().helpOpen) return;
       if (e.metaKey || e.ctrlKey) {
+        // 弹层开着时整页让路：那时 ⌘A 是想选中弹层里的文字，⌘⏎ 是想确认那张卡。
+        if (modalOpen || confirmRerun != null || confirmRemove != null) return;
         // ⌘⏎ 确认提交：勾选的待提交条目，或（没勾时）当前光标那一条。
         if (e.key === "Enter") {
           e.preventDefault();
           const ids = sel.size > 0 ? [...sel] : curId != null ? [curId] : [];
           void openSubmit(ids);
+          return;
+        }
+        // ⌘A 全选这一屏。再按一次全清 —— 「全选」按钮就是这么行为的，
+        // 两个入口给同一个开关不同的语义会让人不敢按第二次。
+        if (e.key === "a" || e.key === "A") {
+          e.preventDefault();
+          setSel((old) => {
+            const allIn = visible.length > 0 && visible.every((r) => old.has(r.clip.id));
+            return allIn ? new Set<number>() : new Set(visible.map((r) => r.clip.id));
+          });
         }
         return;
       }
@@ -552,13 +658,25 @@ export function V2vPage() {
         }
         return;
       }
-      if (modalOpen || confirmRerun != null) return;
+      if (modalOpen || confirmRerun != null || confirmRemove != null) return;
 
       if (e.key === "Escape") {
         if (screen === "review") {
           e.preventDefault();
           setScreen("list");
+        } else if (sel.size > 0) {
+          // 勾了一批之后没有别的路把它们放下 —— 而底坞那几个批量按钮全都跟着勾选走，
+          // 忘了清就会作用在一批人以为早就不选了的条目上。
+          e.preventDefault();
+          clearSel();
         }
+        return;
+      }
+      // 删除走确认卡（`confirmRemove`），所以这个键不会当场删掉任何东西。
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        const ids = sel.size > 0 ? [...sel] : curId != null ? [curId] : [];
+        askRemove(ids);
         return;
       }
       if (e.key === "Enter") {
@@ -619,9 +737,14 @@ export function V2vPage() {
     screen,
     modalOpen,
     confirmRerun,
+    confirmRemove,
     move,
     judgeCurrent,
     doUndo,
+    askRemove,
+    clearSel,
+    setSel,
+    visible,
     curRow,
     curId,
     sel,
@@ -647,8 +770,42 @@ export function V2vPage() {
       setSwitching(ids.map((id) => byId.get(id)).filter((r): r is Row => r != null)),
     onEditParams: (ids) =>
       setEditing(ids.map((id) => byId.get(id)).filter((r): r is Row => r != null)),
+    onRemove: askRemove,
     onUndo: doUndo,
   };
+
+  /**
+   * 点一行 —— 三种含义由修饰键决定，与文件管理器一致。
+   *
+   * 平点移光标（**不动勾选**：那是另一套状态，跟着光标走会让每次换条都把批量作用域
+   * 改一遍）· ⌘/Ctrl 点把这一条加进/移出勾选 · ⇧ 点选锚点到这一条的一整段。
+   * 锚点是上一次平点或勾选的那一行（不是光标 —— 光标会被 ↑↓ 推着走）。
+   */
+  const pick = useCallback(
+    (id: number, mode: PickMode) => {
+      if (mode === "range") {
+        const a = visible.findIndex((r) => r.clip.id === (anchor ?? curId ?? id));
+        const b = visible.findIndex((r) => r.clip.id === id);
+        if (a >= 0 && b >= 0) {
+          const seg = visible.slice(Math.min(a, b), Math.max(a, b) + 1).map((r) => r.clip.id);
+          setSel(() => new Set(seg));
+        }
+        setCur(id);
+        return;
+      }
+      if (mode === "toggle") {
+        setSel((old) => {
+          const n = new Set(old);
+          if (n.has(id)) n.delete(id);
+          else n.add(id);
+          return n;
+        });
+      }
+      setAnchor(id);
+      setCur(id);
+    },
+    [visible, anchor, curId, setSel, setCur, setAnchor],
+  );
 
   const panels = (
     <>
@@ -710,7 +867,6 @@ export function V2vPage() {
             handoff={handoff}
             rewriteTotal={rewriteN}
             activity={activity}
-            now={coarseNow}
             badGroup={badGroup}
             busy={busy}
             onRewriteGroup={(ids) => void requeue(ids, "rewrite")}
@@ -723,24 +879,22 @@ export function V2vPage() {
         <V2vList
           rows={visible}
           channels={channels}
+          top={topCh}
           filter={filter}
           face={face}
           curId={curId}
           sel={sel}
-          sort={sort}
-          onSort={() => {
-            const ks = Object.keys(SORTS) as SortKey[];
-            setSort(ks[(ks.indexOf(sort) + 1) % ks.length] ?? "wait");
-          }}
-          onPick={setCur}
-          onCheck={(id) =>
+          onChannel={toggleChannel}
+          onPick={pick}
+          onCheck={(id) => {
+            setAnchor(id);
             setSel((old) => {
               const n = new Set(old);
               if (n.has(id)) n.delete(id);
               else n.add(id);
               return n;
-            })
-          }
+            });
+          }}
           onToggleAll={() =>
             setSel((old) => {
               const allIn = visible.length > 0 && visible.every((r) => old.has(r.clip.id));
@@ -825,6 +979,14 @@ export function V2vPage() {
               if (andSubmit && holding.length > 0) void openSubmit(holding);
             });
           }}
+        />
+      )}
+
+      {confirmRemove && (
+        <RemoveConfirm
+          rows={confirmRemove}
+          onConfirm={doRemove}
+          onClose={() => setConfirmRemove(null)}
         />
       )}
 
@@ -1196,12 +1358,12 @@ function ChannelSwitchModal({
   //
   // 这张卡原来只按「花不花钱」分，于是它答得出「换通道免费」，却答不出人真正在问的
   // 那句：**换完它就自己跑起来了吗**。而答案逐堆完全不同 —— 已放行的换完自动接着排、
-  // 待放行的还要点确认提交、待改写的连提示词都还没有，怎么换都发不出去。
+  // 就绪的还要点确认提交、缺词的连提示词都还没有，怎么换都发不出去。
   //
-  // 少了这一层，一个人选中 6 条待改写换了通道，会得到一个「已改投 6 条」的成功提示，
+  // 少了这一层，一个人选中 6 条缺词的换了通道，会得到一个「已改投 6 条」的成功提示，
   // 然后盯着一个永远不会自己动的列表。
   const queued = rows.filter((r) => r.action === "queued"); // 已放行，在本地排队
-  const holding = rows.filter((r) => r.action === "submit"); // 待放行，等人点确认
+  const holding = rows.filter((r) => r.action === "submit"); // 就绪，等人点确认
   const noPrompt = rows.filter((r) => r.stage === "rewrite"); // 还没有视频提示词
   const free = rows.filter((r) => r.stage === "ready" || r.stage === "rewrite");
   const live = rows.filter((r) => r.stage === "run");
@@ -1268,7 +1430,7 @@ function ChannelSwitchModal({
           {/* 「换完就发」——人换通道多半就是这个意思。但它接的是**提交确认卡**而不是
               直接放行：提交即扣费且不可撤回，而这张卡通篇在说「换通道免费」，
               在它上面挂一个会安静扣钱的按钮是最坏的一种连贯。
-              只在确实有东西可发时出现（待放行、且已经有视频提示词）。 */}
+              只在确实有东西可发时出现（就绪、且已经有视频提示词）。 */}
           {holding.length > 0 && (
             <button
               type="button"
@@ -1347,13 +1509,13 @@ function ChannelSwitchModal({
           )}
           {holding.length > 0 && (
             <div className="fs12">
-              <b>{holding.length} 条待放行的 → 仍然停在「等你点确认提交」</b>
+              <b>{holding.length} 条就绪的 → 仍然停在「等你点确认提交」</b>
               。用下面那个「改投并去提交」可以换完直接进确认卡（那一步才扣费）。
             </div>
           )}
           {noPrompt.length > 0 && (
             <div className="fs12 wr2" style={{ lineHeight: 1.8 }}>
-              <b>{noPrompt.length} 条待改写的 → 换完还是发不出去</b>
+              <b>{noPrompt.length} 条缺词的 → 换完还是发不出去</b>
               ：它们连视频提示词都还没有，而即梦要的就是提示词。得先去 Claude Code / Codex 里跑
               v2v-rewrite 把提示词写回来，那之后才谈得上提交。 换通道这一步对它们仍然有效 ——
               只是生效要等到提交那一刻。
@@ -1364,7 +1526,7 @@ function ChannelSwitchModal({
         <div className="costbar mb8">
           {free.length > 0 && (
             <div className="fs12">
-              <b>{free.length} 条还在本地队列 / 待放行 / 待改写</b> —— 即梦对它们一无所知，
+              <b>{free.length} 条还在本地队列 / 就绪 / 缺词</b> —— 即梦对它们一无所知，
               <b>一分钱没扣</b>，换通道免费。
             </div>
           )}

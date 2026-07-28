@@ -2498,7 +2498,10 @@ export type ClipQueueTrail = {
  */
 points: QueuePoint[]; 
 /**
- * 最近一小时的排队速度（位/小时）。测不出来时为 None —— **不编 0**。
+ * **入队到此刻**的整体排队速度（位/小时）。测不出来时为 None —— **不编 0**。
+ * 
+ * 口径是全程而不是近一小时（见 `queue_trend::overall_rate`）：旁边那条曲线画的
+ * 就是全程，配一个只覆盖右端一小截的速度会让两者读起来互相矛盾。
  */
 ratePerHour: number | null; 
 /**

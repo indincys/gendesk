@@ -496,7 +496,10 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
 pub struct ClipQueueTrail {
     /// 采样点，按时间正序。少于 2 个点时画不出斜率，界面据此只显示当前位次。
     pub points: Vec<QueuePoint>,
-    /// 最近一小时的排队速度（位/小时）。测不出来时为 None —— **不编 0**。
+    /// **入队到此刻**的整体排队速度（位/小时）。测不出来时为 None —— **不编 0**。
+    ///
+    /// 口径是全程而不是近一小时（见 `queue_trend::overall_rate`）：旁边那条曲线画的
+    /// 就是全程，配一个只覆盖右端一小截的速度会让两者读起来互相矛盾。
     pub rate_per_hour: Option<f64>,
     /// 按上面那个速度估算，这一条还要排多久（秒）。
     pub eta_secs: Option<i64>,
@@ -602,9 +605,9 @@ pub async fn v2v_queue_trend(
                     queue_idx: r.queue_idx,
                 })
                 .collect();
-            // 速度取**这一条自己**的最近一小时，不用全局中位数：详情栏那句话说的是
+            // 速度取**这一条自己**的全程，不用全局中位数：详情栏那句话说的是
             // 「这一条还要等多久」，而它排在队列的哪一段，前面的消化速度可以与别人不同。
-            let rate = qt::recent_rate(&pts, now, 3600);
+            let rate = qt::overall_rate(&pts);
             let eta = mine
                 .last()
                 .zip(rate)

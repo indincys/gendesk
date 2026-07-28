@@ -13,8 +13,17 @@ import { cn } from "@/lib/utils";
  *
  * ## 没有成片时显示**首帧原图**，不摆空占位
  *
- * 待改写 / 待放行 / 已提交这几个阶段，人在这一栏要做的事都要看那张图：判断改写出来的
+ * 缺词 / 就绪 / 远端这几个阶段，人在这一栏要做的事都要看那张图：判断改写出来的
  * 运镜配不配得上它、决定要不要放行。一块「尚无成片」的灰板既没有信息，又占掉整栏。
+ *
+ * ## 读的是 `imagePath` 而不是 `thumbPath`
+ *
+ * `accepted_works.thumb_path` 是长边 512px、JPEG q80 的缩略图 —— 它是给一屏几十格的
+ * 网格用的，放进这一整栏就是一张糊图，而这一栏存在的全部理由是**看清细节**
+ * （判色差与形变）。`image_path` 是这张图的原始像素，同一张图，只是没被缩过。
+ *
+ * 它与生成质量无关：提交给即梦的一直是 `clip.image_path`（`runner` → `dreamina::submit`
+ * 的 `--image=`），从来不是缩略图。这里换的只是**显示**读哪一份。
  */
 export function V2vPreview({
   row,
@@ -46,7 +55,8 @@ export function V2vPreview({
   const c = row.clip;
   const meta = STAGE_META[row.stage];
   const video = assetSrc(c.videoPath);
-  const frame = assetSrc(c.thumbPath);
+  // 原图，不是缩略图（见文件头）。
+  const frame = assetSrc(c.imagePath);
   // 有片子时默认放片子（那时要判的是「动起来之后还对不对」）；没片子就只能是首帧。
   const asFrame = (showFrame || !video) && !!frame;
 

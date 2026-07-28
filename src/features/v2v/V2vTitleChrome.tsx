@@ -1,7 +1,7 @@
-import { fmtAgo, fmtSpan } from "@/features/v2v/model";
+import { type Channel, fmtAgo, fmtSpan } from "@/features/v2v/model";
 import { type AutofillStatus, type QueueStats, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { useV2vStore } from "@/stores/v2v";
+import { selectTopChannels, useV2vStore } from "@/stores/v2v";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -29,7 +29,7 @@ export function V2vTitleChrome() {
   return (
     <>
       <span className="tsep" />
-      {/* 通道灯的条数不定，故单独装进一条可横滚的带子（`.chstrip`）——
+      {/* 三格固定，但通道名长短不一，故仍装进一条可横滚的带子（`.chstrip`）——
           刷新与余额留在带子外面：它们尺寸固定、且任何时候都得够得着。 */}
       <div className="chstrip">
         <ChannelPills queue={queue} auto={auto} />
@@ -144,11 +144,14 @@ function RefreshButton({ now }: { now: number }) {
  * 2. **本地还压着多少条同通道的**。「本地队列」只数已放行、随时会自己发出去的那些；
  *    还等着人点确认的另算（写在 title 里）—— 两者的下一步动作完全不同。
  *
- * ## 一条通道一个胶囊，闲着的一律不出现
+ * ## 常驻三格，闲着的**不消失**
  *
- * 显示判据是「这条通道上还有没有没走完的事」= 远端在跑 **或** 本地压着队。两者都为 0
- * 的通道在日常里纯是噪音。顶栏位置有限，留给真的还有账要算的那几条 ——
- * 要**全部**通道（含闲着的）看侧栏那张通道卡，它列的是全集。
+ * 从前的判据是「远端在跑 **或** 本地压着队」，于是这排灯的格数会变：一条通道跑完
+ * 最后一单就整格消失，下一次提交又冒出来。人是靠位置记东西的 ——「左边第二格是
+ * 2.0Mini」在那种排布下一天要重学好几次，而每次重学的代价是看错一条队的占用。
+ *
+ * 现在固定是**用得最多的三条**（`topChannels`，与列表顶上那排快捷片同一份），
+ * 「有没有在动」交给灯本身回答：绿灯在呼吸 = 即梦此刻真的在替你生成。
  *
  * ## 排版：数字带色，标签不带
  *
@@ -164,78 +167,115 @@ function ChannelPills({
   queue: QueueStats | null;
   auto: AutofillStatus | null;
 }) {
-  // 点通道灯 = 把工作台筛到那条通道（此时按动作的那一维自动让位 —— 一次只有一个
-  // 筛选，见 `Filter`）。
+  // 点通道灯 = 把工作台筛到那条通道，且**在跑的那几条排在最前**（`rankRows`，
+  // 恒定顺序不需要再切一次排序）—— 点这盏灯的理由就是「这条队上现在正在生成什么」。
+  // 再点一次回到刚才那一档（两维互斥，见 `Filter`）。
   //
   // 它原来点开的是参数面板 —— 而人点一条状态灯时想的是「这条队上都有些什么」，
   // 不是「我要改默认参数」。两者都还在，只是各归各的入口（参数在中栏栏头 ⌥3）。
-  const setFilter = useV2vStore((s) => s.setFilter);
-  const channels = (queue?.channels ?? []).filter((c) => c.running > 0 || c.queued > 0);
-  if (channels.length === 0) return null;
+  const toggleChannel = useV2vStore((s) => s.toggleChannel);
+  const filter = useV2vStore((s) => s.filter);
+  const top = useV2vStore(selectTopChannels);
+  const stats = queue?.channels ?? [];
+  if (top.length === 0) return null;
 
   return (
     <>
-      {channels.map((c) => {
-        const queueing = c.frontQueueIdx != null && c.frontQueueIdx > 0;
-        const live = c.running > 0;
-        // 常驻队列只写进悬停说明，**不另占一格**：它是「谁放行的」这条元信息，
-        // 与「这条通道现在什么状况」不是一个问题，挤在同一排会把后者稀释掉。
-        const mine = auto?.enabled === true && c.autofill;
-        return (
-          <button
-            key={c.modelVersion || "(default)"}
-            type="button"
-            className={cn("chpill", !live && "idle")}
-            onClick={() => setFilter({ kind: "channel", key: c.modelVersion })}
-            title={[
-              `${c.label} 通道（${c.modelVersion || "设置里没指定型号，实际通道由 CLI 挑"}）。`,
-              "即梦按模型通道各排各的队 —— 这条排满了，别的通道照样发得出去。",
-              queueing
-                ? `\n远端：最靠前那一单排在第 ${c.frontQueueIdx} 位。`
-                : live
-                  ? `\n远端：${c.running} 条在生成中（还没问到排队位次）。`
-                  : "\n远端：这条通道上暂时没有在跑的任务。",
-              c.oldestWait > 0 ? `最久那条已等 ${fmtSpan(c.oldestWait)}。` : "",
-              `\n本地：${c.queued} 条已放行、正等这条通道的空位（出一条自动补一条，不必再点提交）`,
-              c.ready > 0 ? `；另有 ${c.ready} 条还等着你点「确认提交」。` : "。",
-              `\n同时在跑上限 ${c.limit} 条`,
-              c.observedLimit != null
-                ? "（本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收）。"
-                : "（可在参数面板里调整）。",
-              mine
-                ? `\n常驻队列配在这条通道上：目标 ${auto?.depth} 条在跑，其中 ${c.autoRunning} 条是它放的。${
-                    auto?.blocked ? `当前停在「${auto.blocked}」。` : ""
-                  }`
-                : "",
-              "\n\n点一下把工作台筛到这条通道。",
-            ].join("")}
-          >
-            <span className="dot" />
-            {/* VIP 不另挂标签：`short_label` 已经把它写进名字里（「2.0Fast VIP」），
-                再挂一个「VIP」小牌子就是同一件事说两遍。 */}
-            <span className="nm">{c.label}</span>
-            {queueing ? (
-              <>
-                <span className="k">前方排队</span>
-                <span className="n nque">{c.frontQueueIdx}</span>
-              </>
-            ) : (
-              live && (
-                <>
-                  <span className="k">任务中</span>
-                  <span className="n nrun">{c.running}</span>
-                </>
-              )
-            )}
-            {c.queued > 0 && (
-              <>
-                <span className="k">本地队列</span>
-                <span className="n nloc">{c.queued}</span>
-              </>
-            )}
-          </button>
-        );
-      })}
+      {top.map((ch) => (
+        <ChannelPill
+          key={ch.key || "(default)"}
+          ch={ch}
+          stat={stats.find((s) => s.modelVersion === ch.key)}
+          auto={auto}
+          on={filter.kind === "channel" && filter.key === ch.key}
+          onClick={() => toggleChannel(ch.key)}
+        />
+      ))}
     </>
+  );
+}
+
+function ChannelPill({
+  ch,
+  stat,
+  auto,
+  on,
+  onClick,
+}: {
+  ch: Channel;
+  /** 逐通道实时占用。只有 run/ready 的通道才有 —— 拿不到就只报在制条数。 */
+  stat: QueueStats["channels"][number] | undefined;
+  auto: AutofillStatus | null;
+  on: boolean;
+  onClick: () => void;
+}) {
+  const running = stat?.running ?? 0;
+  const queued = stat?.queued ?? 0;
+  const front = stat?.frontQueueIdx ?? null;
+  const queueing = front != null && front > 0;
+  // 常驻队列只写进悬停说明，**不另占一格**：它是「谁放行的」这条元信息，
+  // 与「这条通道现在什么状况」不是一个问题，挤在同一排会把后者稀释掉。
+  const mine = auto?.enabled === true && stat?.autofill === true;
+
+  return (
+    <button
+      type="button"
+      className={cn("chpill", on && "on", running > 0 ? "live" : queued > 0 ? "hold" : "idle")}
+      onClick={onClick}
+      title={[
+        `${ch.label} 通道（${ch.key || "设置里没指定型号，实际通道由 CLI 挑"}）。`,
+        "即梦按模型通道各排各的队 —— 这条排满了，别的通道照样发得出去。",
+        queueing
+          ? `\n远端：最靠前那一单排在第 ${front} 位。`
+          : running > 0
+            ? `\n远端：${running} 条在生成中（还没问到排队位次）。`
+            : "\n远端：这条通道上暂时没有在跑的任务。",
+        stat != null && stat.oldestWait > 0 ? `最久那条已等 ${fmtSpan(stat.oldestWait)}。` : "",
+        `\n本地：${queued} 条已放行、正等这条通道的空位（出一条自动补一条，不必再点提交）`,
+        stat != null && stat.ready > 0 ? `；另有 ${stat.ready} 条还等着你点「确认提交」。` : "。",
+        `\n这条通道上还没走完的共 ${ch.live} 条。`,
+        stat != null ? `\n同时在跑上限 ${stat.limit} 条` : "",
+        stat == null
+          ? ""
+          : stat.observedLimit != null
+            ? "（本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收）。"
+            : "（可在参数面板里调整）。",
+        mine
+          ? `\n常驻队列配在这条通道上：目标 ${auto?.depth} 条在跑，其中 ${stat?.autoRunning ?? 0} 条是它放的。${
+              auto?.blocked ? `当前停在「${auto.blocked}」。` : ""
+            }`
+          : "",
+        on ? "\n\n再点一次回到刚才那一档。" : "\n\n点一下只看这条通道，在跑的排最前。",
+      ].join("")}
+    >
+      <span className="dot" />
+      {/* VIP 不另挂标签：`short_label` 已经把它写进名字里（「2.0Fast VIP」），
+          再挂一个「VIP」小牌子就是同一件事说两遍。 */}
+      <span className="nm">{ch.label}</span>
+      {queueing ? (
+        <>
+          <span className="k">前方排队</span>
+          <span className="n nque">{front}</span>
+        </>
+      ) : running > 0 ? (
+        <>
+          <span className="k">任务中</span>
+          <span className="n nrun">{running}</span>
+        </>
+      ) : queued === 0 ? (
+        // 远端与本地都空着的那一格必须仍说点什么，否则一枚只剩通道名的胶囊
+        // 看着像是坏了。在制条数回答的正是「这条队还留着多少活」。
+        <>
+          <span className="k">在制</span>
+          <span className="n">{ch.live}</span>
+        </>
+      ) : null}
+      {queued > 0 && (
+        <>
+          <span className="k">本地队列</span>
+          <span className="n nloc">{queued}</span>
+        </>
+      )}
+    </button>
   );
 }

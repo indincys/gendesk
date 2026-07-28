@@ -1,12 +1,21 @@
 import {
-  type ActionFilter,
+  ACTION_META,
+  CHANNEL_TONES,
+  MINE,
+  type NextAction,
   type Row,
-  buildSections,
+  WORKBENCH_ACTIONS,
+  buildChannels,
   carryParams,
   deriveRows,
-  matchAction,
-  matchQuery,
+  filterFace,
+  matchFilter,
   nextAction,
+  rankRows,
+  removalRisk,
+  sliceSummary,
+  topChannels,
+  trailOf,
 } from "@/features/v2v/model";
 import type { ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
 import { describe, expect, it } from "vitest";
@@ -134,9 +143,11 @@ describe("本地待发队列（0028）", () => {
     expect(waiting?.situation).toContain("等你点确认提交");
     expect(released?.action).toBe("queued");
     expect(released?.situation).toContain("已放行");
-    // 排队中的**不该**进「需要我」：人已经做过决定了，剩下的是机器的事。
-    expect(matchAction(released as Row, "mine")).toBe(false);
-    expect(matchAction(waiting as Row, "mine")).toBe(true);
+    // 排队中的**不该**算「阻在人身上」：人已经做过决定了，剩下的是机器的事。
+    // （v0.24.0 前这两行写成 `matchAction(_, "mine")`；聚合片去掉后改为直接问 `MINE`
+    //   这个常量 —— 断言的是同一个口径，它仍是 Rust `StageCounts.actionable` 的镜像。）
+    expect(MINE).not.toContain(released?.action);
+    expect(MINE).toContain(waiting?.action);
   });
 
   it("本地位次严格照放行时刻算，与后端取用顺序同源", () => {
@@ -512,31 +523,28 @@ describe("下一步动作", () => {
     if (!ghost) throw new Error("fixture");
     expect(ghost.phantomLive).toBe(true);
     expect(ghost.action).toBe("fix");
-    expect(matchAction(ghost, "mine")).toBe(true);
-    expect(matchAction(ghost, "wait")).toBe(false);
+    expect(MINE).toContain(ghost.action);
+    expect(matchFilter(ghost, { action: "wait", channel: null })).toBe(false);
   });
 });
 
 describe("筛选", () => {
-  const only = (rows: Row[], f: ActionFilter) => rows.filter((r) => matchAction(r, f));
+  const only = (rows: Row[], action: NextAction) =>
+    rows.filter((r) => matchFilter(r, { action, channel: null }));
 
   /**
-   * 用户报的原症：21 条待改写时，界面同时显示「需要我 0」「待改写 21」「无待办」。
+   * v0.24.0 起筛选片就是动作本身，`mine` / `all` / `rej` 三个聚合片随主轴搬进侧栏一起
+   * 去掉了（侧栏那张卡一屏摆出六档连同计数，聚合片能答的问题直接读六个数就是了）。
    *
-   * 那 21 条**恰恰卡在人身上** —— GenDesk 已经把工单物化好，在等人去 Claude Code
-   * 里跑改写。把这一步排除在「需要我」之外，等于让全流水线最大的一处阻塞显示为 0。
+   * 但 `MINE` 这个常量**留着**，因为它不只服务那个筛选片：`bindings.ts` 里写明它是
+   * Rust `StageCounts.actionable` 的前端镜像（侧栏「视频流水线」那个徽章的口径），
+   * 两处必须一起改。这条断言看的就是那个口径。
+   *
+   * 用户报过的原症：21 条待改写时界面同时显示「需要我 0」「待改写 21」「无待办」。
+   * 那 21 条**恰恰卡在人身上** —— GenDesk 已经把工单物化好，在等人去 Claude Code 里
+   * 跑改写。把这一步排除在外，等于让全流水线最大的一处阻塞显示为 0。
    */
-  it("待改写算「需要我」—— 21 条待改写时这个数是 21，不是 0", () => {
-    const rows = derive(
-      Array.from({ length: 21 }, (_, i) =>
-        clip({ id: i + 1, stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
-      ),
-    );
-    expect(only(rows, "mine")).toHaveLength(21);
-    expect(only(rows, "rewrite")).toHaveLength(21);
-  });
-
-  it("「需要我」= 改写 / 放行 / 验收 / 处理异常，不含机器在跑的", () => {
+  it("「阻在人身上」= 改写 / 放行 / 验收 / 处理异常，不含机器在跑的", () => {
     const rows = derive([
       clip({ id: 1, stage: "ready", videoPath: null, submitId: null }),
       clip({ id: 2, stage: "rev" }),
@@ -545,12 +553,11 @@ describe("筛选", () => {
       clip({ id: 5, stage: "run", videoPath: null, submitCredit: 8, firstSubmittedAt: NOW - 60 }),
       clip({ id: 6, stage: "pass" }),
     ]);
-    expect(only(rows, "mine").map((r) => r.clip.id)).toEqual([1, 2, 3, 4]);
+    expect(MINE).toContain("rewrite");
+    expect(rows.filter((r) => MINE.includes(r.action)).map((r) => r.clip.id)).toEqual([1, 2, 3, 4]);
   });
 
-  // 工作台回答的是「还剩多少活」。把已经定案的算进去，这个数就再也不准了 ——
-  // 实测 18 条验收通过的片子一直挂在看板上，人得先在心里把它们减掉才看得出待办。
-  it("「全部」= 全部在制，不含成片与未通过；但显式筛「未通过」仍能翻出来", () => {
+  it("筛一档就只出那一档 —— 已定案的两态一档都不占", () => {
     const rows = derive([
       clip({ id: 1, stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
       clip({ id: 2, stage: "run", videoPath: null, submitCredit: 8, firstSubmittedAt: NOW - 60 }),
@@ -558,8 +565,11 @@ describe("筛选", () => {
       clip({ id: 4, stage: "pass" }),
       clip({ id: 5, stage: "rej" }),
     ]);
-    expect(only(rows, "all").map((r) => r.clip.id)).toEqual([1, 2, 3]);
-    expect(only(rows, "rej").map((r) => r.clip.id)).toEqual([5]);
+    expect(only(rows, "rewrite").map((r) => r.clip.id)).toEqual([1]);
+    expect(only(rows, "wait").map((r) => r.clip.id)).toEqual([2]);
+    expect(only(rows, "fix").map((r) => r.clip.id)).toEqual([3]);
+    // pass 与 rej 都归 done，而侧栏那张卡没有这一档 —— 它们不再占工作台的位置。
+    expect(only(rows, "done").map((r) => r.clip.id)).toEqual([4, 5]);
   });
 
   it("待改写那句既点名动作也点名工具 —— 否则没人知道该去哪儿干什么", () => {
@@ -570,92 +580,177 @@ describe("筛选", () => {
     expect(r?.situation).not.toContain("物化");
   });
 
-  it("搜索一次覆盖编号/组名/提示词/submit_id —— 人并不知道自己记住的是哪一处", () => {
-    const [r] = derive([clip()]);
-    if (!r) throw new Error("fixture");
-    expect(matchQuery(r, "br31")).toBe(true);
-    expect(matchQuery(r, "冬季手袋")).toBe(true);
-    expect(matchQuery(r, "推近")).toBe(true);
-    expect(matchQuery(r, "sub-1")).toBe(true);
-    expect(matchQuery(r, "不存在的东西")).toBe(false);
+  /**
+   * 按通道筛时**已定案的不进来**。
+   *
+   * 工作台整页回答的是「还剩多少活」，六档动作里本来就没有「已定案」那一格。通道
+   * 这一维要是把 pass/rej 放进来，同一个界面会按你选的维度给出两种「在制」的定义，
+   * 而多出来的那些条目一个也动不了（成片在成片页、毙掉的成片在废纸篓）。
+   */
+  it("按通道筛只出在制的 —— 已通过 / 已毙掉的不占这一屏", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "pass" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rej" }),
+      clip({ id: 4, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
+    ]);
+    // 筛选是**交集**（v0.24.0 修订）：这一屏 = 验收档 ∩ 2.0Fast 通道。
+    // pass/rej 从定义上进不来 —— `action` 恒是六档在制之一。
+    const f = { action: "review", channel: "seedance2.0fast" } as const;
+    expect(rows.filter((r) => matchFilter(r, f)).map((r) => r.clip.id)).toEqual([1]);
+  });
+
+  /**
+   * 侧栏那一行的数字与点进去看到的条数**必须是同一个数**。
+   *
+   * 写 `rows.length`（83）而点进去躺着 61 条时，没有人会认为是「另外 22 条已定案」——
+   * 只会认为其中一个坏了。故 `Channel.live` 与 `matchFilter` 是同一条判据的两种读法。
+   */
+  it("通道行的计数 = 点进去会看到的条数", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "pass" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rej" }),
+    ]);
+    const ch = buildChannels(rows, MODELS).find((c) => c.key === "seedance2.0fast");
+    expect(ch?.rows).toHaveLength(3);
+    expect(ch?.live).toBe(1);
+    // `live` 数的是这条队上**没走完的全部**（跨档），故它等于「把六档逐个叠上这条通道
+    // 之后命中的条数之和」。快捷片上写的是分面计数（只算当前那一档），两者不是一个数
+    // —— `live` 只用来给三格排位次，位置不该随着换档跳。
+    const acrossActions = WORKBENCH_ACTIONS.reduce(
+      (n, action) =>
+        n + rows.filter((r) => matchFilter(r, { action, channel: "seedance2.0fast" })).length,
+      0,
+    );
+    expect(acrossActions).toBe(ch?.live);
   });
 });
 
-describe("分节", () => {
+/**
+ * 筛选的「脸」—— 列表栏头 / 摘要卡 / 底坞三处读的是同一份，故它们必然同名同色。
+ */
+describe("筛选的身份（filterFace）", () => {
+  it("只筛动作时：标题是档名，副行是「拿它怎么办」", () => {
+    const face = filterFace({ action: "review", channel: null }, []);
+    // 档名从「待验收」改成「验收」（v0.24.0 修订）：六档统一成两个字的流程位置
+    // （异常 / 缺词 / 就绪 / 远端 / 队列 / 验收），侧栏那一列读下来就是流水线本身。
+    // 断言跟着改的是**这一个字符串**，不是这条测试要守的规则 —— 规则仍是
+    // 「档名 = ACTION_META.label，副行 = 那句『拿它怎么办』」。
+    expect(face.label).toBe(ACTION_META.review.label);
+    expect(face.label).toBe("验收");
+    expect(face.sub).toContain("判");
+    // 验收是琥珀档：语气色不能跟蓝色的「就绪」混成一种。
+    expect(face.mood).toBe("rev");
+    expect(face.color).toBe(ACTION_META.review.dot);
+  });
+
+  /**
+   * 叠上通道之后**颜色仍取动作的**：一屏只该有一个主色，而主轴是流程。
+   * 通道的身份由标题后半截和列表顶上那枚亮着的片子承担。
+   */
+  it("叠上通道：标题带上通道名，颜色与语气仍跟着动作走", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "fail", videoPath: null }),
+    ]);
+    const chs = buildChannels(rows, MODELS);
+    const face = filterFace({ action: "review", channel: "seedance2.0fast" }, chs);
+    expect(face.label).toBe("验收 · 2.0Fast");
+    expect(face.sub).toContain("2.0Fast");
+    expect(face.color).toBe(ACTION_META.review.dot);
+    expect(face.mood).toBe("rev");
+  });
+
+  /**
+   * 最后一条走完之后通道会从清单里消失，而筛选还钉着它。此时说实话并指出出路，
+   * **不回落到某条别的通道上** —— 那会让人以为自己看的还是刚才那条队。
+   */
+  it("通道空掉之后不冒充别的通道，并指出怎么退出来", () => {
+    const face = filterFace({ action: "review", channel: "seedance2.0mini" }, []);
+    expect(face.label).toBe("验收 · 2.0Mini");
+    expect(face.sub).toContain("没有条目");
+    expect(face.sub).toContain("再点一次");
+  });
+});
+
+describe("通道", () => {
   /**
    * 分组维度从批次改成了**通道**（0032）。
    *
-   * 即梦按模型通道各排各的队，而一个批次的条目会分散到不同通道上 —— 于是按批次分节时
-   * 每一个节内数字都不指向任何真实的队列，「全选本节」选出来的也是一堆跨通道的条目，
+   * 即梦按模型通道各排各的队，而一个批次的条目会分散到不同通道上 —— 于是按批次分组时
+   * 每一个组内数字都不指向任何真实的队列，「全选本组」选出来的也是一堆跨通道的条目，
    * 对它们做批量动作（尤其是换通道）根本不成立。
    */
-  it("按通道分节：同通道归一节，跨通道拆开", () => {
+  it("按通道归拢：同通道归一条，跨通道拆开", () => {
     const rows = derive([
       clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
       clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
       clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rev" }),
     ]);
-    const secs = buildSections(rows, rows, MODELS);
-    expect(new Set(secs.map((s) => s.key))).toEqual(
+    const chs = buildChannels(rows, MODELS);
+    expect(new Set(chs.map((c) => c.key))).toEqual(
       new Set(["seedance2.0fast", "seedance2.0fast_vip"]),
     );
-    expect(secs.find((s) => s.key === "seedance2.0fast")?.all).toHaveLength(2);
+    expect(chs.find((c) => c.key === "seedance2.0fast")?.rows).toHaveLength(2);
     // 简写来自 Rust 下发的 `ModelInfo.label`，不在前端另判一次后缀。
-    expect(secs.find((s) => s.key === "seedance2.0fast_vip")?.label).toBe("2.0Fast VIP");
-    expect(secs.find((s) => s.key === "seedance2.0fast_vip")?.vip).toBe(true);
+    expect(chs.find((c) => c.key === "seedance2.0fast_vip")?.label).toBe("2.0Fast VIP");
+    expect(chs.find((c) => c.key === "seedance2.0fast_vip")?.vip).toBe(true);
   });
 
   /**
-   * 没写 `model_version` 的条目归**默认通道**那一节 —— 那本来就是它们会走的通道
-   * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径）。另设一个「未定通道」节
-   * 会把同一条真实队列在界面上劈成两半，而「全选本节 → 换通道」就只换得到一半。
+   * 没写 `model_version` 的条目归**默认通道** —— 那本来就是它们会走的通道
+   * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径）。另设一个「未定通道」
+   * 会把同一条真实队列在界面上劈成两半，而「整条通道改投」就只换得到一半。
    */
-  it("没写 model_version 的条目与默认通道的条目落在同一节", () => {
+  it("没写 model_version 的条目与默认通道的条目落在同一条", () => {
     const rows = derive([
       clip({ id: 1, modelVersion: null, stage: "rewrite" }),
       clip({ id: 2, modelVersion: "seedance2.0fast", stage: "rev" }),
     ]);
-    const secs = buildSections(rows, rows, MODELS);
-    expect(secs).toHaveLength(1);
-    expect(secs[0]?.key).toBe("seedance2.0fast");
-    expect(secs[0]?.all).toHaveLength(2);
+    const chs = buildChannels(rows, MODELS);
+    expect(chs).toHaveLength(1);
+    expect(chs[0]?.key).toBe("seedance2.0fast");
+    expect(chs[0]?.rows).toHaveLength(2);
   });
 
-  // v0.20.0 起语义就是：已定案的不再折叠成一行，而是**整节消失**。
-  // 折叠一行也是一行 —— 做完几十条之后，那些「已定案」的行会把真正在跑的挤到屏幕
-  // 外面去，而工作台要答的恰恰是「还剩多少活」。
-  it("全部落在 pass/rej 的通道整节消失", () => {
+  /**
+   * **这两条断言的前提在 v0.24.0 被推翻，故与旧版相反。**
+   *
+   * 旧版这里产出的是**分节**，而节是内容容器：一个只写着「当前筛选下没有条目」的空壳
+   * 节头不回答任何问题，只会把真正命中的那一节挤下去 —— 所以当时「空节整节消失」
+   * （连同「全部定案的节消失」）是对的。
+   *
+   * 现在同一份数据产出的是**侧栏那张通道筛选卡**，规则必须反过来：一个把「你正要切
+   * 过去的那条通道」藏起来的筛选器，等于让人没法从「2.0Fast 这一档一条都没有」走到
+   * 「2.0Mini 有 9 条」，而那正是打开这张卡要做的事。故 `buildChannels` 根本不收
+   * `visible` —— 可见性由调用方按 (动作 × 通道) 自己算，与「有哪几条通道」无关。
+   */
+  it("全部定案的通道仍然列得出来，只是标成已定案", () => {
     const rows = derive([
       clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
       clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "pass" }),
       clip({ id: 3, modelVersion: "seedance2.0fast_vip", stage: "rej" }),
     ]);
-    // 工作台的可见集不含已定案的两态（`matchAction(_, "all")` 只放行在制）。
-    const visible = rows.filter((r) => matchAction(r, "all"));
-    const secs = buildSections(rows, visible, MODELS);
-    expect(secs.map((s) => s.key)).toEqual(["seedance2.0fast"]);
-    expect(secs[0]?.done).toBe(false);
+    const chs = buildChannels(rows, MODELS);
+    expect(new Set(chs.map((c) => c.key))).toEqual(
+      new Set(["seedance2.0fast", "seedance2.0fast_vip"]),
+    );
+    expect(chs.find((c) => c.key === "seedance2.0fast_vip")?.done).toBe(true);
+    expect(chs.find((c) => c.key === "seedance2.0fast")?.done).toBe(false);
   });
 
-  /**
-   * v0.22.0 起这条语义反转了：**当前筛选下一条都不显示的整节消失**，无论它是否还有活。
-   *
-   * 旧规则只砍已定案的空节，于是筛「处理异常」时会留下一排只写着「当前筛选下没有
-   * 条目」的空壳节头 —— 用户那句「筛选项随便选一个都会保留每一个分组」说的就是它。
-   */
-  it("当前筛选下没有可见行的通道整节消失 —— 哪怕它还有活", () => {
+  it("当前动作筛选下一条都没有的通道**也要列出来** —— 否则切不过去", () => {
     const rows = derive([
       clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
-      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rej" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rewrite" }),
     ]);
-    const secs = buildSections(
-      rows,
-      rows.filter((r) => matchAction(r, "rej")),
-      MODELS,
-    );
-    // 只剩 vip（它有命中的行）。2.0fast 还有活，但这一屏里它一行都没有。
-    expect(secs.map((s) => s.key)).toEqual(["seedance2.0fast_vip"]);
-    expect(secs[0]?.done).toBe(true);
+    // 人正筛着「去改写」：2.0Fast 这一档确实一条都没有，但它必须还在卡上，
+    // 否则就没有任何一处能告诉人「另一条队上有 1 条待验收」。
+    const chs = buildChannels(rows, MODELS);
+    expect(chs).toHaveLength(2);
+    expect(chs.find((c) => c.key === "seedance2.0fast")?.counts.rewrite).toBe(0);
+    expect(chs.find((c) => c.key === "seedance2.0fast")?.counts.review).toBe(1);
   });
 
   /**
@@ -680,15 +775,88 @@ describe("分节", () => {
         submitCredit: 44,
       }),
     ]);
-    expect(buildSections(rows, rows, MODELS).map((s) => s.key)).toEqual([
+    expect(buildChannels(rows, MODELS).map((c) => c.key)).toEqual([
       "seedance2.0fast_vip",
       "seedance2.0fast",
     ]);
   });
 
-  // 节头摘要取代了那条无图例的分段条 —— 用户问「每个分组这些进度条是什么意思」，
+  /**
+   * 配色**按名字序**定，不按显示顺序定。
+   *
+   * 显示顺序会随「哪条还在跑」实时漂移，而同一条通道在侧栏、行左轨、摘要卡堆叠条
+   * 三处必须同色 —— 颜色跟着状态漂的话，「蓝色那条是谁」每隔几分钟就有一个新答案。
+   */
+  it("通道配色按名字序定死，不随「谁在跑」漂移", () => {
+    const busyFast = derive([
+      clip({
+        id: 1,
+        modelVersion: "seedance2.0fast",
+        stage: "run",
+        videoPath: null,
+        firstSubmittedAt: NOW - 100,
+        submitCredit: 8,
+      }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
+    ]);
+    const busyVip = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({
+        id: 2,
+        modelVersion: "seedance2.0fast_vip",
+        stage: "run",
+        videoPath: null,
+        firstSubmittedAt: NOW - 100,
+        submitCredit: 44,
+      }),
+    ]);
+    const toneOf = (rows: Row[], key: string) =>
+      buildChannels(rows, MODELS).find((c) => c.key === key)?.tone;
+    // 两次的显示顺序正好相反（在跑的那条排前面），配色却必须一样。
+    expect(buildChannels(busyFast, MODELS)[0]?.key).toBe("seedance2.0fast");
+    expect(buildChannels(busyVip, MODELS)[0]?.key).toBe("seedance2.0fast_vip");
+    expect(toneOf(busyFast, "seedance2.0fast")).toBe(toneOf(busyVip, "seedance2.0fast"));
+    expect(toneOf(busyFast, "seedance2.0fast_vip")).toBe(toneOf(busyVip, "seedance2.0fast_vip"));
+    // 两条通道不能撞色，否则堆叠条上分不出谁是谁。
+    expect(toneOf(busyFast, "seedance2.0fast")).not.toBe(toneOf(busyFast, "seedance2.0fast_vip"));
+    for (const c of buildChannels(busyFast, MODELS)) {
+      expect(c.tone).toBeGreaterThanOrEqual(0);
+      expect(c.tone).toBeLessThan(CHANNEL_TONES);
+    }
+  });
+
+  /**
+   * 副行只说**此刻堵没堵**或**贵在哪**。「并发已满」排在 vip 前面：前者是此刻会改变
+   * 决策的事（新单发不出去，该换条队），后者是一条恒真的成本提醒 —— 恒真的那句什么
+   * 时候看都还在，会变的那句错过就没了。
+   */
+  it("副行：满了先说满，其次才说 vip 贵", () => {
+    const rows = derive([clip({ id: 1, modelVersion: "seedance2.0fast_vip", stage: "rev" })]);
+    const stat = {
+      modelVersion: "seedance2.0fast_vip",
+      label: "2.0Fast VIP",
+      vip: true,
+      running: 1,
+      limit: 1,
+      observedLimit: null,
+      queued: 6,
+      ready: 0,
+      frontQueueIdx: null,
+      oldestWait: 0,
+      autoRunning: 0,
+      autofill: false,
+    };
+    expect(buildChannels(rows, MODELS, [stat])[0]?.note).toBe("并发已满 · 6 条在本地等空位");
+    expect(buildChannels(rows, MODELS, [{ ...stat, queued: 0 }])[0]?.note).toBe(
+      "贵 5.5 倍 · 买到的只是不排队",
+    );
+    // 拿不到实时占用就不写副行 —— 编一句「并发 0 / 1」出来会说反。
+    expect(buildChannels(rows, MODELS)[0]?.note).toBe("贵 5.5 倍 · 买到的只是不排队");
+  });
+
+  // 摘要取代了那条无图例的分段条 —— 用户问「每个分组这些进度条是什么意思」，
   // 而它唯一的图例是 title tooltip，即：没人答得上来。
-  it("节头摘要例外在前 —— 被截断时先没的必须是常态，不是例外", () => {
+  it("摘要例外在前 —— 被截断时先没的必须是常态，不是例外", () => {
     const rows = derive([
       clip({
         id: 1,
@@ -701,38 +869,283 @@ describe("分节", () => {
       clip({ id: 3, stage: "ready", videoPath: null, submitId: null }),
       clip({ id: 4, stage: "fail", errorType: "timeout", videoPath: null }),
     ]);
-    const sec = buildSections(rows, rows, MODELS)[0];
-    // 「这一批 N 条」那个前缀去掉了（0032）：一节是一条通道，里面的条目来自若干个批次。
-    expect(sec?.headline).toBe("共 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦跑");
-    expect(sec?.headlineTone).toBe("er");
+    const ch = buildChannels(rows, MODELS)[0];
+    // 「这一批 N 条」那个前缀去掉了（0032）：一条通道里的条目来自若干个批次。
+    expect(ch?.headline).toBe("共 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦跑");
+    expect(ch?.headlineTone).toBe("er");
   });
 
   it("全定案的通道摘要直说定案，不假装还有活", () => {
     const rows = derive([clip({ id: 1, stage: "pass" }), clip({ id: 2, stage: "rej" })]);
-    const sec = buildSections(rows, rows, MODELS)[0];
-    expect(sec?.headline).toBe("共 2 条 · 已全部定案");
-    expect(sec?.headlineTone).toBe("t3");
-    expect(sec?.counts.done).toBe(2);
+    const ch = buildChannels(rows, MODELS)[0];
+    expect(ch?.headline).toBe("共 2 条 · 已全部定案");
+    expect(ch?.headlineTone).toBe("t3");
+    expect(ch?.counts.done).toBe(2);
   });
 
-  it("分节标题取组名；混多组时只列前两个", () => {
+  it("通道标题取组名；混多组时只列前两个", () => {
     const rows = derive([
       clip({ id: 1, groupName: "甲组" }),
       clip({ id: 2, groupName: "乙组" }),
       clip({ id: 3, groupName: "丙组" }),
     ]);
-    expect(buildSections(rows, rows, MODELS)[0]?.title).toBe("甲组 · 乙组 等 3 组");
+    expect(buildChannels(rows, MODELS)[0]?.title).toBe("甲组 · 乙组 等 3 组");
+  });
+});
+
+describe("这一屏的账（sliceSummary）", () => {
+  /**
+   * 已扣与未扣**必须分开报**。合成一个数会把「已经花掉的」和「打算花的」混成一笔
+   * 糊涂账 —— 而人看这一格恰恰是为了决定「还要不要再花」。
+   */
+  it("已扣与未计费分开算，混合时标出来", () => {
+    const rows = derive([
+      // 已扣：回执 8，`billed` 由 Rust 下发。
+      clip({
+        id: 1,
+        stage: "run",
+        videoPath: null,
+        creditCount: 8,
+        billed: true,
+        firstSubmittedAt: NOW - 600,
+      }),
+      // 未扣：还等着放行，只有预估（2 额度/秒 × 4 秒）。
+      clip({ id: 2, stage: "ready", videoPath: null, submitId: null }),
+    ]);
+    const s = sliceSummary(rows, buildChannels(rows, MODELS));
+    expect(s.count).toBe(2);
+    expect(s.billed).toBe(8);
+    expect(s.unbilled).toBe(8);
+    expect(s.mixed).toBe(true);
+    expect(s.unpriced).toBe(0);
+    // 「最久已等」按首次提交算，没提交过的不参与。
+    expect(s.oldestWait).toBe(600);
   });
 
-  it("筛选只影响列出来的行，节头摘要仍按全貌算 —— 否则「这条队做到哪了」当场失真", () => {
-    const rows = derive([clip({ id: 1, stage: "rev" }), clip({ id: 2, stage: "pass" })]);
-    const visible = rows.filter((r) => r.stage === "rev");
-    const sec = buildSections(rows, visible, MODELS)[0];
-    expect(sec?.rows).toHaveLength(1);
-    expect(sec?.all).toHaveLength(2);
-    // 摘要说的是这条通道的全貌（2 条），不是这一屏筛出来的 1 条。
-    expect(sec?.headline).toBe("共 2 条 · 1 条等你验收");
-    expect(sec?.counts.done).toBe(1);
+  it("查不到单价的条目单独计数，不并进任何一边（界面据此显示「≥」）", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "ready", videoPath: null, submitId: null, videoResolution: "4k" }),
+    ]);
+    const s = sliceSummary(rows, buildChannels(rows, MODELS));
+    expect(s.unpriced).toBe(1);
+    expect(s.billed + s.unbilled).toBe(0);
+  });
+
+  it("通道构成只列这一屏真的有的通道", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rewrite" }),
+    ]);
+    const chs = buildChannels(rows, MODELS);
+    const s = sliceSummary(
+      rows.filter((r) => r.action === "review"),
+      chs,
+    );
+    expect(s.channels.map((c) => c.key)).toEqual(["seedance2.0fast"]);
+    expect(s.channels[0]?.n).toBe(1);
+    // 配色与通道卡同源，不在这里另算一遍。
+    expect(s.channels[0]?.tone).toBe(chs.find((c) => c.key === "seedance2.0fast")?.tone);
+  });
+});
+
+describe("进度（trailOf）", () => {
+  /** 没发生的事一律留白。编一个时间出来，等于让「它到底跑没跑」永远问不清。 */
+  it("没发生的步骤时间是「—」，且恒有且只有一步是「现在」", () => {
+    const [r] = derive([
+      clip({
+        stage: "rewrite",
+        videoPrompt: null,
+        videoPath: null,
+        submitId: null,
+        rewroteAt: null,
+        finishedAt: null,
+      }),
+    ]);
+    if (!r) throw new Error("fixture");
+    const steps = trailOf(r);
+    expect(steps.filter((s) => s.state === "now")).toHaveLength(1);
+    expect(steps.find((s) => s.state === "now")?.key).toBe("rewrite");
+    for (const s of steps.filter((x) => x.state !== "done")) expect(s.at).toBe("—");
+    // 这里原来断言的是「『现在』那一步必须说出所以现在该干嘛」，具体到缺词档上就是
+    // 这条副行里得有「v2v-rewrite」。**前提被推翻了**（v0.24.0 修订）：那句指令在
+    // 缺词那一屏上同时出现在四处（摘要卡副行、进度副行、列表每一行的 situation、
+    // 底坞左侧的说明），而底坞那两个按钮本身就是它的动作。一条指令在一屏里说四遍，
+    // 读到第二遍时人就不再读了 —— 于是它只留在摘要卡副行那一处，进度这一步留白。
+    //
+    // 改成断言相反的行为：进度不复述屏级指令。恒有且只有一步是「现在」、没发生的
+    // 步骤不编时间 —— 这两条本来就是这个测试要守的东西，一个字没动。
+    expect(steps.find((s) => s.state === "now")?.sub).toBe("");
+  });
+
+  it("判死之后不画「等你判定」—— 一个永远走不到的未来比不画更误导", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "timeout", videoPath: null, finishedAt: NOW - 60 }),
+    ]);
+    if (!r) throw new Error("fixture");
+    const steps = trailOf(r);
+    expect(steps.map((s) => s.key)).toEqual(["accept", "rewrite", "submit", "finish"]);
+    expect(steps.at(-1)?.state).toBe("now");
+    expect(steps.at(-1)?.tone).toBe("er");
+  });
+
+  /**
+   * 「这一单是谁下的」是对账时第一个要问的。此前它只能靠「常驻队列」那个筛选片才看得
+   * 出来，而那个筛选片随主轴搬进侧栏一起去掉了 —— 故写进提交那一步的回执行里。
+   */
+  it("常驻队列放行的条目在提交那一步点名，不必再靠一个筛选片", () => {
+    const [r] = derive([
+      clip({
+        stage: "run",
+        videoPath: null,
+        submitId: "sub-42",
+        autoSubmitted: true,
+        submitCredit: 8,
+        firstSubmittedAt: NOW - 300,
+      }),
+    ]);
+    if (!r) throw new Error("fixture");
+    const submit = trailOf(r).find((s) => s.key === "submit");
+    expect(submit?.state).toBe("done");
+    expect(submit?.what).toContain("回执计费 8");
+    expect(submit?.sub).toBe("sub-42 · 常驻队列放行");
+  });
+
+  /** 拷贝失败不回滚验收，所以「通过了却没落地」是真实会出现、且必须说出口的状态。 */
+  it("验收通过但没交付时，最后一步仍停在「现在」并标红", () => {
+    const [r] = derive([clip({ stage: "pass", reviewedAt: NOW - 30, exportPath: null })]);
+    if (!r) throw new Error("fixture");
+    const last = trailOf(r).at(-1);
+    expect(last?.state).toBe("now");
+    expect(last?.tone).toBe("er");
+    expect(last?.sub).toBe("未交付到输出目录");
+  });
+});
+
+/**
+ * 删掉一条的代价（`removalRisk`）。
+ *
+ * 删除是 `DELETE FROM v2v_clips`：没有废纸篓、没有撤销令牌。这一层唯一的活儿是分清
+ * 「删掉只丢一段提示词」与「删掉就再也认不出那一单」——后者意味着片子取不回来、
+ * 额度也退不了，而两者在界面上长得一模一样。
+ */
+describe("删除的代价（removalRisk）", () => {
+  it("从没提交出去的一律免费：缺词 · 就绪 · 本地队列", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rewrite", videoPrompt: null, submitId: null, rewroteAt: null }),
+      clip({ id: 2, stage: "ready", submitId: null }),
+      clip({ id: 3, stage: "ready", submitId: null, submitQueuedAt: NOW - 60 }),
+    ]);
+    for (const r of rows) expect(removalRisk(r)).toBe("free");
+  });
+
+  /**
+   * 幽灵单是唯一一类「有 submit_id 却等于没被收下」的条目：即梦给了单号，却从未入队、
+   * 从未计费。这与它能**免费重跑**是同一个事实，两处判据必须同源 —— 一处说「重跑
+   * 不花钱」另一处说「删掉会丢一单已付费的」，人只会认为其中一个坏了。
+   */
+  it("幽灵单不算被收下 —— 与「免费重跑」同一个事实", () => {
+    const [live] = derive([clip({ stage: "run", videoPath: null, phantomSuspect: true })]);
+    const [dead] = derive([
+      clip({ stage: "fail", errorType: "phantom", videoPath: null, submitId: "sub-9" }),
+    ]);
+    if (!live || !dead) throw new Error("fixture");
+    expect(removalRisk(live)).toBe("free");
+    expect(removalRisk(dead)).toBe("free");
+  });
+
+  it("扣过费的、以及在跑且有回执的，都算即梦收下过", () => {
+    const [billed] = derive([clip({ stage: "rev", billed: true, creditCount: 8 })]);
+    const [running] = derive([
+      clip({ stage: "run", videoPath: null, submitId: "sub-3", queueIdx: 4485 }),
+    ]);
+    if (!billed || !running) throw new Error("fixture");
+    expect(removalRisk(billed)).toBe("held");
+    expect(removalRisk(running)).toBe("held");
+  });
+
+  /**
+   * 提交时 CLI 被超时杀掉：单可能已经下出去了，而 submit_id 随进程一起没了。
+   * 「问不出话」不等于「没花钱」—— 把它并进 `free` 会让一次对不上账的删除
+   * 悄悄发生在最需要留证据的那一类条目上。
+   */
+  it("提交超时是「不知道」，不并进「免费」", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "submit_timeout", submitId: null, videoPath: null }),
+    ]);
+    if (!r) throw new Error("fixture");
+    expect(removalRisk(r)).toBe("unknown");
+  });
+});
+
+/**
+ * 列表顺序（`rankRows`）。排序开关删掉之后只剩这一种，所以它必须同时满足两件事：
+ * 点通道灯进来时在跑的排最前，按动作筛时与旧的「已等最久」等价。
+ */
+describe("列表顺序（rankRows）", () => {
+  it("在跑的排最前，然后等得最久的", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "ready", submitId: null }),
+      clip({ id: 2, stage: "run", videoPath: null, firstSubmittedAt: NOW - 300 }),
+      clip({ id: 3, stage: "ready", submitId: null, submitQueuedAt: NOW - 60 }),
+      clip({ id: 4, stage: "rev", firstSubmittedAt: NOW - 9000 }),
+    ]);
+    expect(rankRows(rows).map((r) => r.clip.id)).toEqual([2, 3, 4, 1]);
+  });
+
+  it("按动作筛的一屏里全体动作相同，于是退化成「已等最久」", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rev", firstSubmittedAt: NOW - 100 }),
+      clip({ id: 2, stage: "rev", firstSubmittedAt: NOW - 9000 }),
+      clip({ id: 3, stage: "rev", firstSubmittedAt: NOW - 500 }),
+    ]);
+    expect(rankRows(rows).map((r) => r.clip.id)).toEqual([2, 3, 1]);
+  });
+
+  it("不改原数组 —— 调用方拿的是记忆过的那一份", () => {
+    const rows = derive([
+      clip({ id: 1, stage: "rev", firstSubmittedAt: NOW - 100 }),
+      clip({ id: 2, stage: "run", videoPath: null, firstSubmittedAt: NOW - 50 }),
+    ]);
+    const before = rows.map((r) => r.clip.id);
+    rankRows(rows);
+    expect(rows.map((r) => r.clip.id)).toEqual(before);
+  });
+});
+
+/**
+ * 顶栏那排状态灯与列表顶上那排快捷片读的是**同一份**前三通道。两处各排各的话，
+ * 人会以为它们是两组不同的东西，然后去找那个并不存在的区别。
+ */
+describe("快捷通道（topChannels）", () => {
+  it("最多三条，按还没走完的条数排", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "a", stage: "rev" }),
+      clip({ id: 2, modelVersion: "a", stage: "rev" }),
+      clip({ id: 3, modelVersion: "b", stage: "rev" }),
+      clip({ id: 4, modelVersion: "c", stage: "rev" }),
+      clip({ id: 5, modelVersion: "c", stage: "rev" }),
+      clip({ id: 6, modelVersion: "c", stage: "rev" }),
+      clip({ id: 7, modelVersion: "d", stage: "rev" }),
+    ]);
+    expect(topChannels(buildChannels(rows, MODELS)).map((c) => c.key)).toEqual(["c", "a", "b"]);
+  });
+
+  /**
+   * 常用通道即便此刻闲着也留在原位 —— 这排灯是**常驻**的，格数会变的话人每天要重认
+   * 一次位置，而认错一次的代价是看错一条队的占用。
+   */
+  it("在制条数打平时按这条通道上的总条数排，闲着的不被挤掉", () => {
+    const rows = derive([
+      // a：历史上跑过 3 条，此刻全定案了。
+      clip({ id: 1, modelVersion: "a", stage: "pass" }),
+      clip({ id: 2, modelVersion: "a", stage: "pass" }),
+      clip({ id: 3, modelVersion: "a", stage: "rej" }),
+      // b：只有一条，也已经定案。
+      clip({ id: 4, modelVersion: "b", stage: "pass" }),
+    ]);
+    const top = topChannels(buildChannels(rows, MODELS));
+    expect(top.map((c) => c.key)).toEqual(["a", "b"]);
+    expect(top[0]?.live).toBe(0);
   });
 });
 

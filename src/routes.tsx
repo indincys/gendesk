@@ -9,19 +9,6 @@ import { TrashPage } from "@/features/trash/TrashPage";
 import { V2vClipsPage } from "@/features/v2v/V2vClipsPage";
 import { V2vPage } from "@/features/v2v/V2vPage";
 import { WorksPage } from "@/features/works/WorksPage";
-import {
-  CheckCircle2,
-  Clapperboard,
-  Film,
-  Grid2x2,
-  Image,
-  Layers,
-  ListChecks,
-  Send,
-  Settings2,
-  Sparkles,
-  Trash2,
-} from "lucide-react";
 import type { ComponentType } from "react";
 
 /** 页面路由键 —— 顺序即快捷键序（⌘1–8 制作/资产，⌘9 资产库，⌘0 发布计划）。 */
@@ -40,18 +27,23 @@ export type RouteKey =
 
 export type NavGroup = "make" | "asset" | "publish" | "system";
 
+/**
+ * 一条路由。
+ *
+ * **没有 `icon`**：侧栏的行内图标在 v0.24.0 去掉了（新侧栏是纯文字 + 分组色轨），
+ * 而全仓只有侧栏读过那个字段 —— 留一个没人读的字段，等于让下一个人以为哪儿还在画图标。
+ */
 export interface RouteDef {
   key: RouteKey;
   label: string;
   /**
-   * ⌘/Ctrl+N 数字；`null` = 无数字快捷键（十个数字已用尽，新页经侧栏与 ⌘K 进）。
+   * ⌘/Ctrl+N 数字；`null` = 无数字快捷键（十个数字已用尽，新页只能从侧栏进）。
    *
    * 不为了给新页腾位而重排既有数字：那会把每个人的肌肉记忆一次性作废，
    * 代价远大于「少一个快捷键」。
    */
   shortcut: number | null;
   group: NavGroup;
-  icon: ComponentType<{ className?: string }>;
   component: ComponentType;
 }
 
@@ -62,7 +54,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "图片生成",
     shortcut: 1,
     group: "make",
-    icon: Sparkles,
     component: GeneratePage,
   },
   {
@@ -70,7 +61,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "任务队列",
     shortcut: 2,
     group: "make",
-    icon: ListChecks,
     component: TasksPage,
   },
   {
@@ -78,7 +68,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "图片验收",
     shortcut: 3,
     group: "make",
-    icon: CheckCircle2,
     component: ReviewPage,
   },
   {
@@ -86,7 +75,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "视频流水线",
     shortcut: null,
     group: "make",
-    icon: Clapperboard,
     component: V2vPage,
   },
   {
@@ -94,7 +82,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "视频成片",
     shortcut: null,
     group: "asset",
-    icon: Film,
     component: V2vClipsPage,
   },
   {
@@ -102,20 +89,18 @@ export const ROUTES: readonly RouteDef[] = [
     label: "作品库",
     shortcut: 4,
     group: "asset",
-    icon: Grid2x2,
     component: WorksPage,
   },
   // 「提示词库」（原 ⌘5）已整页移除：提示词是消耗品，跑完即随批次一起删掉，
   // 没有可长期浏览的库。导入仍在生成页内完成，或由 skill 投工单送进来。
   // **⌘5 就此空着，不把后面的数字往前挪**：重排会把每个人的肌肉记忆一次性作废
   // （同 v0.15.0 给新页不排数字的理由，代价远大于少一个快捷键）。
-  { key: "refs", label: "参考图库", shortcut: 6, group: "asset", icon: Image, component: RefsPage },
+  { key: "refs", label: "参考图库", shortcut: 6, group: "asset", component: RefsPage },
   {
     key: "assets",
     label: "资产库",
     shortcut: 9,
     group: "asset",
-    icon: Layers,
     component: AssetsPage,
   },
   {
@@ -123,7 +108,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "发布计划",
     shortcut: 0,
     group: "publish",
-    icon: Send,
     component: PlanPage,
   },
   {
@@ -131,7 +115,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "废纸篓",
     shortcut: 7,
     group: "system",
-    icon: Trash2,
     component: TrashPage,
   },
   {
@@ -139,7 +122,6 @@ export const ROUTES: readonly RouteDef[] = [
     label: "设置",
     shortcut: 8,
     group: "system",
-    icon: Settings2,
     component: SettingsPage,
   },
 ] as const;

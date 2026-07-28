@@ -105,16 +105,28 @@ pub fn hourly_rates(samples: &[Sample]) -> Vec<HourRate> {
     out
 }
 
-/// 最近 `window_secs` 内的排队速度（详情栏那句「近 1 小时 −312 位/时」）。
+/// **入队到此刻**的整体排队速度（详情栏那条轨迹旁边的那句话）。
 ///
-/// 与 [`hourly_rates`] 分开：那个是按整点归桶的趋势图，这个是「此刻多快」，
-/// 窗口跟着 now 滑动，两者在小时边界上必然给出不同的数字 —— 这不是分叉，是两个问题。
-pub fn recent_rate(samples: &[Sample], now: i64, window_secs: i64) -> Option<f64> {
-    let cut = now - window_secs;
-    let recent: Vec<Sample> = samples.iter().copied().filter(|s| s.at >= cut).collect();
-    let mut votes: Vec<f64> = Vec::new();
-    let mut sorted = recent;
+/// 从「近 1 小时的滑动窗口」换成全程（v0.24.0）。理由是这两个数回答的不是同一个问题，
+/// 而详情栏那条轨迹画的自始至终是**全程**：曲线从第一个采样点铺到最后一个，旁边却配着
+/// 一个只覆盖右端一小截的速度 —— 于是「已前进 3200 位」与「近 1 小时 40 位/时」并排
+/// 出现，两个都对，合起来读却像在说队列刚刚停住了。
+///
+/// 非 VIP 通道十分钟才采一个点，一小时窗口里往往只有五六个点；赶上一段没在跑的空档，
+/// 那个窗口甚至一个点都没有 —— 那时旧口径给的是 `None`，界面上那句话整个消失，
+/// 而人正盯着一条明明在往下走的曲线。全程速度只要有两个点就答得出来，
+/// 且与曲线是同一段观测。
+///
+/// 代价写在这里：它平掉了「这一小时突然变快」这种局部变化。要看那个去观测面板
+/// （[`hourly_rates`] 逐小时归桶），那才是它该在的地方。
+///
+/// 每条 clip 取**首尾两点**算一段斜率，再跨 clip 取中位数；位次回升的那一段整条丢掉
+/// （规则 1）：首尾之差为负意味着这一单中途被重排过，拿它当负速度会让界面说
+/// 「队列在变长」。
+pub fn overall_rate(samples: &[Sample]) -> Option<f64> {
+    let mut sorted: Vec<Sample> = samples.to_vec();
     sorted.sort_by_key(|s| (s.clip_id, s.at));
+    let mut votes: Vec<f64> = Vec::new();
     let mut i = 0;
     while i < sorted.len() {
         let clip = sorted[i].clip_id;
@@ -241,7 +253,7 @@ mod tests {
             hourly_rates(&[s(1, 0, 100), s(1, 0, 90)]).is_empty(),
             "同一秒的两个点，时间差为 0"
         );
-        assert!(recent_rate(&[], 1000, 3600).is_none());
+        assert!(overall_rate(&[]).is_none());
     }
 
     // ETA 在「队列没动」时必须没有答案，而不是一个无穷大或者 0。
@@ -253,22 +265,44 @@ mod tests {
         assert_eq!(eta_secs(1200, 1200.0), Some(3600));
     }
 
-    // 滑动窗口只看最近这一段：几小时前那段慢速不该把「此刻很快」拖下来。
+    // 全程速度覆盖**整条轨迹**，而详情栏画的曲线也是整条 —— 两者必须是同一段观测。
+    // 这里那段远古慢速正是滑动窗口会丢掉、而全程口径必须算进去的部分。
     #[test]
-    fn recent_rate_ignores_what_happened_before_the_window() {
+    fn overall_rate_spans_the_whole_trail_not_just_the_tail() {
         let now = 100_000;
         let samples = vec![
-            // 远古：极慢
             s(1, now - 20_000, 9000),
             s(1, now - 19_000, 8990),
-            // 窗口内：很快
             s(1, now - 1_800, 5000),
             s(1, now, 3000),
         ];
-        let r = recent_rate(&samples, now, 3600).unwrap();
+        // 首尾：20000 秒消化 6000 位 → 1080 位/时。
+        let r = overall_rate(&samples).unwrap();
+        assert!((r - 1080.0).abs() < 1.0, "全程 = 首尾两点的斜率：{r}");
+        // 同一份数据只看尾巴那 1800 秒是 4000 位/时 —— 两个数都对，回答的不是同一个
+        // 问题，而旁边那条曲线画的是全程，所以配它的必须是全程那个。
+        assert!(overall_rate(&samples[2..]).unwrap() > 3900.0);
+    }
+
+    // 采样稀疏时全程口径仍答得出话，而这正是换口径的理由：非 VIP 十分钟一采，
+    // 赶上一段没在跑的空档，「近一小时」那个窗口里可能一个点都没有 —— 那时旧口径
+    // 交回 None，界面上那句话整个消失，而人正盯着一条明明在往下走的曲线。
+    #[test]
+    fn overall_rate_still_answers_when_nothing_was_sampled_recently() {
+        let now = 100_000;
+        // 两个点都落在一小时窗口之外（最近的一个也是 30000 秒前）。
+        let samples = vec![s(1, now - 40_000, 5000), s(1, now - 30_000, 3000)];
+        assert!(overall_rate(&samples).is_some(), "全程仍有两个点，答得出来");
+        assert!(overall_rate(&[s(1, 0, 4485)]).is_none(), "单点算不出斜率");
+        assert!(overall_rate(&[]).is_none());
+    }
+
+    // 位次回升整条丢掉：重排过的那一单不该被读成「队列在变长」。
+    #[test]
+    fn overall_rate_drops_a_trail_whose_position_went_back_up() {
         assert!(
-            (r - 4000.0).abs() < 1.0,
-            "1800 秒消化 2000 位 → 4000 位/时：{r}"
+            overall_rate(&[s(1, 0, 1000), s(1, 3600, 4000)]).is_none(),
+            "首尾之差为负 = 中途被重排，没有可用的速度"
         );
     }
 }

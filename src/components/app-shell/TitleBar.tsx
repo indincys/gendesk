@@ -1,16 +1,25 @@
+import { V2vTitleChrome } from "@/features/v2v/V2vTitleChrome";
 import { commands, unwrap } from "@/lib/ipc";
 import { windowControls } from "@/lib/window";
+import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
-import { modKeyLabel, useUiStore } from "@/stores/ui";
-import { Search } from "lucide-react";
+import { useUiStore } from "@/stores/ui";
 
-/** 44px 自绘标题栏（执行计划 0.4）。macOS 用原生交通灯（Overlay），Windows 自绘窗控。 */
+/**
+ * 44px 自绘标题栏（执行计划 0.4）。macOS 用原生交通灯（Overlay），Windows 自绘窗控。
+ *
+ * v0.24.0 起它多了两件事：
+ *
+ * - **副标题跟着页面走**（「视频流水线 · 本地」）。原来固定写「图片生产 · 本地」，
+ *   那是产品的自我介绍，看第二遍就没有信息了；写当前页名反而让这一条永远有用。
+ * - **留一段给当前页的读数**（`V2vTitleChrome`：通道状态灯 / 刷新 / 余额）。
+ *   它们回答的是「远端此刻是什么状况」，而页头装不下 —— 那一屏要留给看片。
+ */
 export function TitleBar() {
   const platform = useUiStore((s) => s.platform);
-  const openPalette = useUiStore((s) => s.openPalette);
+  const route = useUiStore((s) => s.route);
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
-  const mod = modKeyLabel(platform);
   const isMac = platform === "mac";
   const isWin = platform === "win";
 
@@ -34,8 +43,10 @@ export function TitleBar() {
           </svg>
         </span>
         <span className="fw6 fs13 nowrap">GenDesk</span>
-        <span className="t3 fs11 nowrap">图片生产 · 本地</span>
+        <span className="t3 fs11 nowrap">{ROUTE_BY_KEY[route].label} · 本地</span>
       </div>
+
+      {route === "v2v" && <V2vTitleChrome />}
 
       <div className="f1" />
 
@@ -49,12 +60,6 @@ export function TitleBar() {
           {updateVersion ? `v${updateVersion} ` : ""}已就绪 · 重启安装
         </button>
       )}
-
-      <button type="button" className="tbtn" onClick={openPalette}>
-        <Search className="ic12" />
-        跳转
-        <span className="kbd">{mod} K</span>
-      </button>
 
       {isWin && (
         <div className="fx ac noshrink">

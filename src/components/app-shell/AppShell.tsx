@@ -1,4 +1,3 @@
-import { CommandPalette } from "@/components/CommandPalette";
 import { DailyBrief } from "@/components/DailyBrief";
 import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
@@ -27,7 +26,7 @@ export function AppShell() {
   const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
   const refreshPubBadges = usePublishStore((s) => s.refreshBadges);
   const initV2v = useV2vStore((s) => s.init);
-  const refreshV2v = useV2vStore((s) => s.refresh);
+  const refreshV2v = useV2vStore((s) => s.refreshCounts);
   const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
   // 超阈值工单：在任何页面上都要能当场核对并放行（见下方订阅处的理由）。
@@ -120,7 +119,6 @@ export function AppShell() {
           <Onboarding />
         </div>
       </div>
-      <CommandPalette />
       <HelpPanel />
       <DailyBrief />
       {holdJob !== null && (

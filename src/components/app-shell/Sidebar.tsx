@@ -1,18 +1,37 @@
+import { V2vNavCards } from "@/features/v2v/V2vNavCards";
 import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
-import { ROUTES, type RouteDef } from "@/routes";
+import { type NavGroup, ROUTES, type RouteDef } from "@/routes";
 import { navBadges, useEngineStore } from "@/stores/engine";
 import { usePublishStore } from "@/stores/publish";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { useV2vStore } from "@/stores/v2v";
-import { Search } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 
-/** 212px 侧栏导航（执行计划 0.4）。制作 / 资产两组 + 底部废纸篓/设置。 */
+/**
+ * 246px 侧栏导航（v0.24.0 按 Claude Design 原型重做）。
+ *
+ * 三处与旧版的差别，各自有理由：
+ *
+ * 1. **没有行内图标**。十一条路由里有八条的图标是同义反复（「废纸篓」旁边一个垃圾桶），
+ *    而剩下三条（Clapperboard / Film / Layers）反倒得靠标签才认得出。去掉之后
+ *    分组色轨承担辨识，一眼扫的是三块颜色而不是十一个灰色小图形。
+ * 2. **顶端那个搜索按钮没了**。它开的是 ⌘K 命令面板，而那整个面板在 v0.24.0 删掉了
+ *    （跳转在这一列里，操作在各自的页面上，第二入口没人用）。
+ * 3. **视频流水线选中时，下面展开筛选列**（`V2vNavCards`）。主轴与通道从页里
+ *    搬到这儿，工作台那一屏才腾得出地方给大预览。
+ */
+
+/** 分组头 —— 色条 + 组名，组内还有一条同色左轨。 */
+const GROUPS: { key: NavGroup; label: string }[] = [
+  { key: "make", label: "制作" },
+  { key: "asset", label: "资产" },
+  { key: "publish", label: "发布" },
+];
+
 export function Sidebar() {
   const route = useUiStore((s) => s.route);
   const go = useUiStore((s) => s.go);
-  const openPalette = useUiStore((s) => s.openPalette);
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
@@ -25,30 +44,26 @@ export function Sidebar() {
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
 
-  const make = ROUTES.filter((r) => r.group === "make");
-  const asset = ROUTES.filter((r) => r.group === "asset");
-  const publish = ROUTES.filter((r) => r.group === "publish");
-  const system = ROUTES.filter((r) => r.group === "system");
-
   const NavItem = ({ r }: { r: RouteDef }) => {
-    const Icon = r.icon;
     const assetsN = pubBadges.unclaimed + pubBadges.warn;
     const planN = pubBadges.pendingSheets + pubBadges.pendingReconcile;
     const badge =
       r.key === "tasks" && badges.running > 0
-        ? { cls: "nb-run", n: badges.running, spin: true }
+        ? { cls: "nb-run", n: `${badges.running}`, spin: true }
         : r.key === "review" && badges.review > 0
-          ? { cls: "nb-amb", n: badges.review, spin: false }
+          ? { cls: "nb-amb", n: `${badges.review}`, spin: false }
           : r.key === "assets" && assetsN > 0
-            ? { cls: "nb-amb", n: assetsN, spin: false }
+            ? { cls: "nb-amb", n: `${assetsN}`, spin: false }
             : r.key === "plan" && planN > 0
-              ? { cls: "nb-amb", n: planN, spin: false }
+              ? { cls: "nb-amb", n: `${planN}`, spin: false }
               : r.key === "v2v" && v2vN > 0
-                ? { cls: "nb-amb", n: v2vN, spin: false }
-                : r.key === "clips" && clipsN > 0
-                  ? { cls: "nb-amb", n: clipsN, spin: false }
+                ? { cls: "nb-amb", n: `${v2vN}`, spin: false }
+                : // 成片这一格写成一句话而不是一个数：「4」答不出「4 个什么」，
+                  // 而它说的恰恰是一件需要人动手补的事（拷贝失败不回滚验收）。
+                  r.key === "clips" && clipsN > 0
+                  ? { cls: "nb-amb", n: `${clipsN} 条未交付`, spin: false }
                   : r.key === "trash" && badges.trash > 0
-                    ? { cls: "", n: badges.trash, spin: false }
+                    ? { cls: "", n: `${badges.trash}`, spin: false }
                     : null;
     return (
       <div
@@ -58,7 +73,6 @@ export function Sidebar() {
         role="button"
         tabIndex={0}
       >
-        <Icon className="ic" />
         <span className="f1">{r.label}</span>
         {badge && (
           <span className={cn("nbdg", badge.cls)}>
@@ -78,36 +92,32 @@ export function Sidebar() {
 
   return (
     <div className="side">
-      <button type="button" className="sbtn" onClick={openPalette}>
-        <Search className="ic12" />
-        <span className="f1" style={{ textAlign: "left" }}>
-          搜索或跳转…
-        </span>
-        <span className="kbd">{mod} K</span>
-      </button>
-
-      <div className="nsec">制作</div>
-      {make.map((r) => (
-        <NavItem key={r.key} r={r} />
-      ))}
-
-      <div className="nsec">资产</div>
-      {asset.map((r) => (
-        <NavItem key={r.key} r={r} />
-      ))}
-
-      <div className="nsec">发布</div>
-      {publish.map((r) => (
-        <NavItem key={r.key} r={r} />
+      {GROUPS.map((g) => (
+        <div key={g.key}>
+          <div className={cn("nsec", g.key)}>
+            <span className="bar" />
+            {g.label}
+          </div>
+          <div className={cn("ngrp", g.key)}>
+            {ROUTES.filter((r) => r.group === g.key).map((r) => (
+              <div key={r.key}>
+                <NavItem r={r} />
+                {/* 筛选列挂在「视频流水线」这一行下面而不是列表末尾：它筛的是那一页，
+                    离得远就成了两件看不出关系的东西。 */}
+                {r.key === "v2v" && route === "v2v" && <V2vNavCards />}
+              </div>
+            ))}
+          </div>
+        </div>
       ))}
 
       <div className="f1" />
 
-      {/* 底部批次进度小卡占位（M2 引擎接入后由 batch://summary 驱动）。 */}
-
-      {system.map((r) => (
-        <NavItem key={r.key} r={r} />
-      ))}
+      <div className="nsys">
+        {ROUTES.filter((r) => r.group === "system").map((r) => (
+          <NavItem key={r.key} r={r} />
+        ))}
+      </div>
 
       <div className="sfoot">
         GenDesk{version ? ` v${version}` : ""} · 本地

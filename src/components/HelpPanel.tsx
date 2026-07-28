@@ -10,7 +10,6 @@ export function HelpPanel() {
   const mod = modKeyLabel(platform);
 
   const globalKeys: [string, string][] = [
-    [`${mod}K`, "命令面板"],
     [`${mod}/`, "本速查面板"],
     ["?", "本速查面板"],
     // 这两条必须挨着列：它们长得像一对，做的却是完全不同的两件事，

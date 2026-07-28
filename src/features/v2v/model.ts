@@ -1,4 +1,4 @@
-import type { ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
+import type { ChannelStat, ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
 
 /**
  * 视频流水线的**派生模型**（纯函数，不碰 React、不碰 IPC）。
@@ -36,24 +36,87 @@ export function isLive(stage: Stage): boolean {
  */
 export type NextAction = "rewrite" | "submit" | "review" | "fix" | "queued" | "wait" | "done";
 
-export const ACTION_META: Record<NextAction, { label: string; fg: string; dot: string }> = {
-  fix: { label: "处理异常", fg: "var(--er)", dot: "var(--sg-fail)" },
-  rewrite: { label: "去改写", fg: "var(--acc2)", dot: "var(--sg-rewrite)" },
-  submit: { label: "待放行", fg: "var(--acc2)", dot: "var(--sg-ready)" },
-  review: { label: "待验收", fg: "var(--st-rev)", dot: "var(--sg-rev)" },
-  queued: { label: "排队中", fg: "var(--t3)", dot: "var(--sg-ready)" },
-  wait: { label: "等即梦", fg: "var(--t3)", dot: "var(--sg-run)" },
-  done: { label: "已定案", fg: "var(--t3)", dot: "var(--sg-pass)" },
+/**
+ * 每一档的显示元数据。
+ *
+ * ## 标签是**流程上的位置**，两个字
+ *
+ * 异常 / 缺词 / 就绪 / 远端 / 队列 / 验收 —— 一条视频从入队到交付会依次经过它们，
+ * 所以侧栏那一列读下来就是这条流水线本身。旧标签（「处理异常」「去改写」「待放行」
+ * 「机器手里」）混着动词、状态与拟人，长短还差一倍：在一列两位数计数旁边，
+ * 参差的标签会让人以为它们不是同一级的东西。
+ *
+ * `note` 不再常驻显示（侧栏是全应用最挤的一列），它是那一行的 `title=`：
+ * 回答的不是「这是什么」（标签已经说了），而是**「拿它怎么办，代价是什么」**。
+ * 所以每一句都必须是恒真的事实：「多半是幽灵单」「出片中位 21 分钟」这类要看数据
+ * 才成立的话一律不写进常量，那是行内 `situation` 的活（它读得到那一条的字段）。
+ */
+export const ACTION_META: Record<
+  NextAction,
+  { label: string; note: string; fg: string; dot: string }
+> = {
+  fix: {
+    label: "异常",
+    // 这一档里混着代价完全相反的两类，而它们长得一模一样 —— 所以这句话只说
+    // 「先看花没花钱」，不替其中任何一类下结论。
+    note: "重跑前先看花没花钱：没扣过的免费，扣过的是第二份钱",
+    fg: "var(--er)",
+    dot: "var(--sg-fail)",
+  },
+  rewrite: {
+    // 「缺词」= 缺的是视频提示词。它比「去改写」准：卡住的不是某个动作没做，
+    // 而是这一条还没有词可用 —— 而写词的地方不在 GenDesk 里。
+    label: "缺词",
+    note: "工单已物化，去 Claude Code / Codex 跑 v2v-rewrite",
+    fg: "var(--acc2)",
+    dot: "var(--sg-rewrite)",
+  },
+  submit: {
+    label: "就绪",
+    note: "词齐了、就差提交 —— 还没花钱，派发那一刻才扣",
+    fg: "var(--acc2)",
+    dot: "var(--sg-ready)",
+  },
+  review: {
+    label: "验收",
+    note: "出片了，等你判过还是毙",
+    fg: "var(--st-rev)",
+    dot: "var(--sg-rev)",
+  },
+  queued: {
+    // 与「就绪」的分别就是这句话：人已经点过了，不必再点第二次。
+    label: "队列",
+    note: "已放行 · 在等这条通道的空位，出一条自动补一条",
+    fg: "var(--t3)",
+    dot: "var(--sg-ready)",
+  },
+  wait: {
+    // 「远端」= 东西在即梦那边。这一档存在的意义是与前面几档形成对照 ——
+    // 那几档卡在人身上，这一档不用管。
+    label: "远端",
+    note: "在即梦手上，出片会自动取回",
+    fg: "var(--t3)",
+    dot: "var(--sg-run)",
+  },
+  done: { label: "已定案", note: "", fg: "var(--t3)", dot: "var(--sg-pass)" },
 };
 
-/** 六档在制动作 + 已定案。顺序 = 「离人最近的排最前」，节头摘要也照这个序。 */
+/**
+ * 六档在制动作 + 已定案，**按流程顺序**：异常 → 缺词 → 就绪 → 远端 → 队列 → 验收。
+ *
+ * 侧栏、摘要卡的动作构成、底坞的作用域判定三处都照这个序，所以它同时是
+ * 「默认落在哪一档」的顺序（`enter()` 取第一个不为空的）。
+ *
+ * 异常排在最前不是流程位置而是优先级：那一档里躺着的是已经花过钱、
+ * 或者正准备第二次花钱的条目。
+ */
 export const ACTION_ORDER: NextAction[] = [
   "fix",
   "rewrite",
   "submit",
-  "review",
-  "queued",
   "wait",
+  "queued",
+  "review",
   "done",
 ];
 
@@ -110,23 +173,38 @@ export function channelOf(c: ClipView, eff: EffectiveParams | null): string {
   return own !== "" ? own : (eff?.modelVersion ?? "");
 }
 
-/** 动作筛选片。`mine` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
-export type ActionFilter = NextAction | "mine" | "all" | "rej";
+/**
+ * 工作台的筛选：**动作 × 通道的交集**，两维各有各的控件。
+ *
+ * ## 为什么是交集
+ *
+ * 「2.0Fast 上这 12 条等着放行」是这一页最常问的一句话，而它只有交集答得出来。
+ *
+ * 单选试过一版，问题不在语义而在**控件长在哪**：那时两维摞在侧栏同一列里，
+ * 九行里任何两行的高亮长得一模一样，人读到的是「选了两样东西」，读不出「其中一样
+ * 在缩小另一样」。现在动作在侧栏（流程导航）、通道在列表顶上（就贴着被它筛的那张表），
+ * 两个控件从位置到形状都不一样，「这一屏是这两个条件叠出来的」不必解释。
+ *
+ * ## 交集不许把数字变成谎话
+ *
+ * 交集最容易出的错是「侧栏写 12，点进去 3 条」。所以两处计数都是**分面计数**：
+ * 每个数字都按**另一维当前的选择**算，于是它恒等于「点它之后会看到的条数」——
+ * 侧栏那六个数按当前通道算，通道片那三个数按当前动作算。判据单点 `matchFilter`。
+ */
+export interface Filter {
+  /** 流程档。**恒有一个** —— 工作台整页回答的就是「这一档还剩多少活」。 */
+  action: NextAction;
+  /** 通道。`null` = 不按通道筛（看这一档的全部）。 */
+  channel: string | null;
+}
 
 /**
- * 工作台的筛选片。
+ * 侧栏动作卡的六行。
  *
- * **没有「成片」**：验收通过的视频归成片库那一页，它们已经不是流水线的事了。
- * 「未通过」留着当逃生舱 —— 那些条目不该变得无处可寻，只是不该默认占位。
+ * **没有「已定案」**：`pass` 归成片库那一页，`rej` 的成片已经进了废纸篓 ——
+ * 两者都不是「还剩多少活」的一部分，摆进来只会把真正的待办往下挤。
  */
-export const ACTION_CHIPS: { key: ActionFilter; label: string }[] = [
-  { key: "mine", label: "需要我" },
-  { key: "all", label: "全部在制" },
-  ...MINE.map((a) => ({ key: a as ActionFilter, label: ACTION_META[a].label })),
-  { key: "queued", label: ACTION_META.queued.label },
-  { key: "wait", label: ACTION_META.wait.label },
-  { key: "rej", label: STAGE_META.rej.label },
-];
+export const WORKBENCH_ACTIONS: NextAction[] = ACTION_ORDER.filter((a) => a !== "done");
 
 /**
  * 信号 = 与阶段正交的**例外**。
@@ -134,31 +212,35 @@ export const ACTION_CHIPS: { key: ActionFilter; label: string }[] = [
  * 单看阶段回答不了「这批里有没有出事」：18 条幽灵单和 18 条正常排队在「已提交」列里
  * 长得一模一样，而它们的处置完全相反（一个直接重跑不花钱，一个必须继续等否则重复扣费）。
  */
+/**
+ * 信号仍然逐行算，只是**不再有一排筛选片**（v0.24.0，主轴搬进侧栏时一并去掉）。
+ *
+ * 它们没有变成装饰：`phantom`/`timeout` 决定 `nextAction` 把这一条送进「处理异常」，
+ * 六个信号全部参与 `situation` 与详情栏那几句方向性提示，底坞的按钮组也读它们
+ * 决定该摆「免费重跑」还是「继续等待」。少的只是「按信号筛一屏」这个入口。
+ */
 export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "auto";
 
-export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = [
-  {
-    key: "phantom",
-    label: "幽灵单",
-    title: "即梦接了单却从未入队、从未计费（无队列位次 + 无扣费回执）。重跑不花钱。",
-  },
-  {
-    key: "timeout",
-    label: "超时",
-    title: "只是我们这边不等了 —— 额度已扣、即梦那边还在跑。该点「继续等待」而不是重跑。",
-  },
-  { key: "slow", label: "等待异常", title: "已超同通道在跑条目中位等待时长的 3 倍。" },
-  { key: "rerun", label: "重跑过", title: "尝试次数 > 1，即同一张图已经花过不止一份额度。" },
-  { key: "vip", label: "vip 通道", title: "同规格贵 5.5 倍，买到的只是不排队。" },
-  { key: "auto", label: "常驻队列", title: "由自动补单放行的条目，不是你手动提交的。" },
-];
-
-export const SORTS = {
-  wait: "已等最久",
-  credit: "额度最高",
-  attempt: "重跑最多",
-} as const;
-export type SortKey = keyof typeof SORTS;
+/**
+ * 列表的排序 —— **只有一种，没有开关**。
+ *
+ * 从前这里是三档（已等最久 / 额度最高 / 重跑最多）加一个栏头上的循环按钮。那个按钮
+ * 去掉了：三档里只有「已等最久」真的被用过，另外两档存在的唯一后果是有人不小心点了
+ * 一下、此后一直看着一个自己没意识到的顺序。
+ *
+ * 现在的顺序是 `rankRows`：**在跑的排最前，然后等得最久的**。它同时解决了另一件事 ——
+ * 顶栏点一条通道灯进来时，「这条队上现在正在生成的是哪几条」必须是第一眼看到的东西，
+ * 而那正是点那盏灯的理由。按动作筛的一屏里全体动作相同，这一层是恒等式，不改变什么。
+ */
+const RANK: Record<NextAction, number> = {
+  wait: 0,
+  queued: 1,
+  fix: 2,
+  review: 3,
+  submit: 4,
+  rewrite: 5,
+  done: 6,
+};
 
 /** 「等待异常」的判据倍数。中位数的 3 倍 —— 单条慢不算事，慢出一个数量级才是。 */
 const SLOW_FACTOR = 3;
@@ -252,7 +334,7 @@ export function fmtSpan(sec: number): string {
   return m === 0 ? `${h} 小时` : `${h} 小时 ${m} 分`;
 }
 
-/** unix 秒 → 「09:14」。历程条用。 */
+/** unix 秒 → 「09:14」。进度条用。 */
 export function fmtClock(t: number): string {
   const d = new Date(t * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -539,82 +621,162 @@ export function deriveRows(
 }
 
 /**
- * 动作筛选是否命中。
+ * 筛选是否命中 —— 动作与通道的**交集**。
  *
- * - `mine` = 阻在人身上的四档（改写 / 放行 / 判定 / 处置异常）。
- * - `all` = **全部在制**，不含已定案的 pass / rej。工作台回答的是「还剩多少活」，
- *   把做完的算进去，这个数就再也不准了。要看成片去成片库，要看毙掉的选「未通过」。
- * - `rej` 不是动作，是逃生舱。
+ * 收 `Row` 而不是 `Stage`：幽灵判定要看队列位次与扣费回执，那是整行的事 ——
+ * 一条 `run` 的幽灵单归「异常」，而单看阶段只看得出它在跑。
  *
- * 收 `Row` 而不是 `Stage`：幽灵判定要看队列位次与扣费回执，那是整行的事。
+ * 「已定案」不必在这里额外拦：六档动作里本来就没有那一格（`WORKBENCH_ACTIONS`），
+ * 而 `action` 恒是其中之一，故 pass/rej 从定义上就进不来。
+ *
+ * 这是**唯一**的判据。两处分面计数（侧栏六个数、通道片三个数）也调它，
+ * 所以「数字」与「点进去看到的条目」不可能分叉。
  */
-export function matchAction(r: Row, filter: ActionFilter): boolean {
-  if (filter === "all") return isLive(r.stage);
-  if (filter === "mine") return MINE.includes(r.action);
-  if (filter === "rej") return r.stage === "rej";
-  return r.action === filter;
+export function matchFilter(r: Row, f: Filter): boolean {
+  if (r.action !== f.action) return false;
+  return f.channel == null || (r.modelFull ?? "") === f.channel;
 }
 
 /**
- * 搜索：编号 / 组名 / 视频提示词 / 生图提示词 / submit_id / 通道 一次覆盖。
+ * 即梦**收下过**这一单没有 —— 「从流水线删掉」这件事唯一要问的问题。
  *
- * 批次号不在里面（0032）：它在界面上已经一处都不显示了，留一个搜得到却看不见的
- * 维度，只会让「搜 46 出来一堆不相干的东西」变成一个查不出原因的怪事。
+ * 删除是真删行（`repo::remove` 是 `DELETE FROM v2v_clips`，没有废纸篓也没有撤销令牌），
+ * 所以这条判据决定的不是能不能删，而是**删掉会丢什么**：
+ *
+ * - 没收下过 → 丢的只是这一条的改写提示词与尝试记录。人自己刚决定「这张图不做视频了」，
+ *   那本来就是要丢的东西。
+ * - 收下过 → 即梦那边可能还在跑、钱可能已经扣了，而删掉之后我们再也认不出那一单：
+ *   片子取不回来，额度也退不了。这一类必须在确认卡上把话说完。
+ *
+ * 判据分三层，一层比一层弱：
+ * 1. `clip.billed` —— Rust 读五处证据得出的结论，扣过费就一定被收下过。
+ * 2. **幽灵单**是反例：即梦给了 submit_id，但从未入队、从未计费 —— 等于没收。
+ *    这也正是它能免费重跑的原因，两处判据必须同源。
+ * 3. 其余情况看有没有 submit_id：有回执就是收下了。
+ *
+ * `submit_timeout` 单列（`removalRisk` 里的 `"unknown"`）：CLI 在超时被杀之前可能已经
+ * 下过单，而 submit_id 随进程一起没了 —— 这一类我们**不知道**，不能当成「没收下过」
+ * 顺手删掉。
  */
-export function matchQuery(r: Row, q: string): boolean {
-  if (q === "") return true;
-  const needle = q.toLowerCase();
-  const c = r.clip;
-  return (
-    c.promptCode.toLowerCase().includes(needle) ||
-    c.groupName.toLowerCase().includes(needle) ||
-    (c.videoPrompt ?? "").toLowerCase().includes(needle) ||
-    c.sourcePrompt.toLowerCase().includes(needle) ||
-    (c.submitId ?? "").toLowerCase().includes(needle) ||
-    r.modelShort.toLowerCase().includes(needle)
+export function remoteAccepted(r: Row): boolean {
+  if (r.clip.billed) return true;
+  if (r.phantomLive || (r.stage === "fail" && r.clip.errorType === "phantom")) return false;
+  return (r.clip.submitId ?? "").trim() !== "";
+}
+
+/** 删这一条的代价：即梦没收过（免费）· 收过（丢单丢钱）· 不知道收没收。 */
+export type RemovalRisk = "free" | "held" | "unknown";
+
+export function removalRisk(r: Row): RemovalRisk {
+  if (remoteAccepted(r)) return "held";
+  if (r.stage === "fail" && r.clip.errorType === "submit_timeout") return "unknown";
+  return "free";
+}
+
+/** 当前筛选的「脸」—— 标题、一句话、以及它那个颜色。 */
+export interface FilterFace {
+  /** 「验收」，或叠了通道时的「验收 · 2.0Fast」。 */
+  label: string;
+  /** 副标题：这一档「拿它怎么办」；叠了通道时前面加一句它被缩到了哪条队上。 */
+  sub: string;
+  /** 动作的色，取自 `ACTION_META.dot` —— 主轴恒是动作，故颜色永远跟着它走。 */
+  color: string;
+  /** 语气：决定标题与计数用哪支强调色。 */
+  mood: "er" | "rev" | "acc" | "t3";
+}
+
+/**
+ * 筛选 → 它在三处（列表栏头 / 摘要卡 / 底坞）要显示的同一套身份。
+ *
+ * 单点在这里，是因为这三处**必须同色同名**：栏头写「验收」而摘要卡写别的颜色时，
+ * 人第一反应是自己点错了。
+ *
+ * 叠了通道时颜色**仍取动作的**：一屏只该有一个主色，而主轴是流程
+ * （侧栏那六档才是这一页的骨架）。通道是缩小范围的第二个条件，它的身份由标题里
+ * 那半截名字和列表顶上那枚亮着的片子承担。
+ */
+export function filterFace(f: Filter, channels: Channel[]): FilterFace {
+  const m = ACTION_META[f.action];
+  const mood: FilterFace["mood"] =
+    m.fg === "var(--er)"
+      ? "er"
+      : m.fg === "var(--st-rev)"
+        ? "rev"
+        : m.fg === "var(--t3)"
+          ? "t3"
+          : "acc";
+  if (f.channel == null) return { label: m.label, sub: m.note, color: m.dot, mood };
+  // 通道会在最后一条走完之后从清单里消失，而筛选还指着它。此时说实话，
+  // 不回落到某条别的通道上 —— 那会让人以为自己看的是刚才那条队。
+  const c = channels.find((x) => x.key === f.channel);
+  const name = c?.label ?? (f.channel === "" ? "CLI 默认" : shortModel(f.channel));
+  return {
+    label: `${m.label} · ${name}`,
+    sub:
+      c == null
+        ? "这条通道上已经没有条目了 —— 再点一次那枚片子看全部"
+        : `只看 ${name} 这条队 · ${m.note}`,
+    color: m.dot,
+    mood,
+  };
+}
+
+/** 在跑的排最前，然后等得最久的；再同则按 id 定死（否则每次重渲染顺序会漂）。 */
+export function rankRows(rows: Row[]): Row[] {
+  return [...rows].sort(
+    (a, b) => RANK[a.action] - RANK[b.action] || b.waitSecs - a.waitSecs || a.clip.id - b.clip.id,
   );
 }
 
-export function sortRows(rows: Row[], sort: SortKey): Row[] {
-  const out = [...rows];
-  if (sort === "wait") out.sort((a, b) => b.waitSecs - a.waitSecs);
-  else if (sort === "credit") out.sort((a, b) => (b.credit ?? -1) - (a.credit ?? -1));
-  else if (sort === "attempt") out.sort((a, b) => b.clip.attempt - a.clip.attempt);
-  return out;
-}
-
-/** 一节（= 一条即梦通道）。 */
-export interface Section {
+/** 一条即梦通道。侧栏那张通道卡的一行，也是行左轨与摘要卡堆叠条的配色来源。 */
+export interface Channel {
   /** 通道全名（`model_version`）。空串 = 设置里也没写默认型号，走 CLI 默认。 */
   key: string;
-  /** 通道简写（`ModelInfo.label`，随模型清单从 Rust 下发）。节头那个 chip 显示它。 */
+  /** 通道简写（`ModelInfo.label`，随模型清单从 Rust 下发）。 */
   label: string;
   vip: boolean;
+  /**
+   * 配色序号 0..`CHANNEL_TONES-1`。
+   *
+   * 按**通道名排序后的下标**取，不按显示顺序取 —— 显示顺序会随「哪条还在跑」漂移，
+   * 而一条通道在侧栏、行左轨、堆叠条三处必须同色；颜色跟着状态变的话，
+   * 「蓝色那条是谁」这个问题每隔几分钟就有一个新答案。
+   */
+  tone: number;
   /** 这条通道上涉及的提示词组名 —— 回答「这条队上跑的是哪几组」。 */
   title: string;
-  /** 本通道全部条目（不受筛选影响）—— 摘要与「已定案」判定要看全貌。 */
-  all: Row[];
-  /** 当前筛选下这条通道还剩哪些行。 */
+  /** 本通道全部条目（不受任何筛选影响）—— 含已定案的，`worstGroup` 要数毙掉的那些。 */
   rows: Row[];
-  /** 按下一步动作分桶。节内动作按钮据此显示，组件不必再数一遍。 */
+  /**
+   * 还没走完的条数 = `rows.length - counts.done`。
+   *
+   * 侧栏那一行显示的就是它，而**不是** `rows.length`：点进去看到的是 `matchFilter`
+   * 筛出来的在制条目，两个数字必须是同一个数 —— 侧栏写 83、列表里躺着 61 的话，
+   * 没人会认为是「另外 22 条已定案」，只会认为其中一个坏了。
+   */
+  live: number;
+  /** 按下一步动作分桶（含 `done`）。 */
   counts: Record<NextAction, number>;
-  /** 一句人话的节头摘要。例外在前 —— 被截断时先没的必须是常态。 */
+  /** 侧栏那一行的副行：这条队此刻的占用状况，或它贵在哪。没什么可说时为空串。 */
+  note: string;
+  /** 一句人话的全貌摘要（挂在侧栏那一行的 `title=` 上）。例外在前。 */
   headline: string;
   headlineTone: "er" | "acc" | "t3";
   /** 已定案 = 全部落在 pass/rej，没有任何一条还需要人或机器动。 */
   done: boolean;
-  createdAt: number;
 }
 
+/** 通道配色轮转档数。与 `globals.css` 里的 `--chn-0..3` 一一对应。 */
+export const CHANNEL_TONES = 4;
+
 /**
- * 节头摘要。
+ * 摘要（`headline`）。
  *
- * 取代原来那条 104px 的阶段混合分段条 —— 它唯一的图例是 `title=` tooltip，
- * 于是「这些进度条是什么意思」成了一个没人答得上来的问题。一句话既自带图例，
- * 又能直接说出数字。
+ * 一句话既自带图例又直接说出数字 —— 它取代过一条无图例的分段条，
+ * 而那条分段条唯一的图例是 `title=` tooltip，即：没人答得上来。
  *
- * 「这一批 N 条」那个前缀去掉了（0032）：一节现在是一条通道，而通道里的条目来自
- * 若干个批次，「这一批」会直接把人指错方向。总数由第一句的语义承担。
+ * 「这一批 N 条」那个前缀去掉了（0032）：一条通道里的条目来自若干个批次，
+ * 「这一批」会直接把人指错方向。总数由第一句的语义承担。
  */
 function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   const parts: string[] = [];
@@ -624,7 +786,14 @@ function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   if (counts.review > 0) parts.push(`${counts.review} 条等你验收`);
   if (counts.queued > 0) parts.push(`${counts.queued} 条在本地排队`);
   if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦跑`);
-  const headlineTone: Section["headlineTone"] =
+  // 已定案的那几条必须报出来，否则这句话与旁边那个计数**加不起来**：摘要卡右边写的是
+  // 在制条数（8），这里的「共 13 条」后面却只列得出 8 条的去向 —— 差出来的 5 条
+  // 没有任何一处交代，而它们就在这条通道的历史里躺着。
+  //
+  // `parts` 为空（全定案）时不加：那一支走的是下面那句「已全部定案」，
+  // 再补一个「13 条已定案」等于同一件事说两遍。
+  if (counts.done > 0 && parts.length > 0) parts.push(`另 ${counts.done} 条已定案`);
+  const headlineTone: Channel["headlineTone"] =
     counts.fix > 0 ? "er" : counts.rewrite + counts.submit + counts.review > 0 ? "acc" : "t3";
   const headline =
     parts.length === 0
@@ -634,32 +803,41 @@ function headlineOf(all: Row[], counts: Record<NextAction, number>) {
 }
 
 /**
- * 按**通道**分节（0032）。
+ * 按**通道**归拢（0032 起的分组维度，v0.24.0 起从「分节」变成「侧栏筛选器」）。
  *
- * ## 为什么不再按批次
+ * ## 为什么维度是通道
  *
  * 即梦按模型通道各排各的队，一条通道排满与另一条能不能发**毫无关系**。而一个批次的
- * 条目会分散到不同通道上 —— 于是「按批次分节」下的每一个节内数字都不指向任何真实的
- * 队列：「本批已出 0/49」的分子分母跨着几条互不相干的队，「全选本节」选出来的是一堆
- * 跨通道的条目，对它们做的任何批量动作（尤其是换通道）都不成立。
+ * 条目会分散到不同通道上 —— 按批次分组时每一个组内数字都不指向任何真实的队列：
+ * 「本批已出 0/49」的分子分母跨着几条互不相干的队，对它们做的任何批量动作
+ * （尤其是换通道）都不成立。按通道分之后，一条 = 一条队 = 一个可以整体处置的单位。
  *
- * 按通道分之后，一节 = 一条队 = 一个可以整体处置的单位：节内的「还剩多少活」是真的，
- * 「全选本节 → 换通道」也是一个完整动作。
+ * 没写 `model_version` 的条目归**默认通道**那一条 —— 那本来就是它们会走的通道
+ * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径），另设一个「未定」组反而会把
+ * 同一条真实队列在界面上劈成两半。
  *
- * 没写 `model_version` 的条目归**默认通道**那一节 —— 那本来就是它们会走的通道
- * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径），另设一个「未定」节反而会把
- * 同一条队拆成两半。
+ * ## 与「分节」时代唯一的规则差异：空的通道**不消失**
+ *
+ * 分节时代有一条规则是「当前筛选下一行都不显示的整节消失」—— 那是对的，因为节是
+ * **内容容器**：一个只写着「当前筛选下没有条目」的空壳节头不回答任何问题，只会把真正
+ * 命中的那一节挤下去。
+ *
+ * 但这里产出的是**筛选器**，规则必须反过来：只要这条通道上还有条目，它就得列出来。
+ * 一个把「你正要切过去的那条通道」藏起来的筛选器，等于让人没法从「2.0Fast 一条都没有」
+ * 走到「2.0Mini 有 9 条」—— 而那正是打开这张卡要做的事。故这里只收 `all`，
+ * 不收 `visible`：可见性是调用方按 (动作 × 通道) 自己算的，与「有哪几条通道」无关。
  *
  * ## 排序：还在动的排前面
  *
- * 远端在跑 > 本地压着队 > 其余，同档按条数多的在前。批次曾经有一个天然的时间序
- * （id 倒序），通道没有 —— 通道之间唯一有意义的先后是「哪条还有账要算」。
- *
- * **当前筛选下一条都不显示的通道整节消失**，无论它是否还有活。旧规则只砍「已定案」的
- * 空节，于是筛「处理异常」时会留下一排只写着「当前筛选下没有条目」的空壳节头，
- * 把真正的三条待办推到屏幕外面。
+ * 远端在跑 > 本地压着队 > 其余，同档按条数多的在前。通道之间没有批次那样天然的
+ * 时间序，唯一有意义的先后是「哪条还有账要算」。
  */
-export function buildSections(all: Row[], visible: Row[], models: ModelInfo[] = []): Section[] {
+export function buildChannels(
+  all: Row[],
+  models: ModelInfo[] = [],
+  /** 逐通道的实时占用（`QueueStats.channels`）—— 只用来写那句副行，缺了就不写。 */
+  stats: readonly ChannelStat[] = [],
+): Channel[] {
   const groups = new Map<string, Row[]>();
   for (const r of all) {
     const key = r.modelFull ?? "";
@@ -667,19 +845,16 @@ export function buildSections(all: Row[], visible: Row[], models: ModelInfo[] = 
     if (bucket) bucket.push(r);
     else groups.set(key, [r]);
   }
-  const visByKey = new Map<string, Row[]>();
-  for (const r of visible) {
-    const key = r.modelFull ?? "";
-    const bucket = visByKey.get(key);
-    if (bucket) bucket.push(r);
-    else visByKey.set(key, [r]);
-  }
 
-  const out: Section[] = [];
+  // 配色按**名字序**定死（见 `Channel.tone` 的注释）：显示顺序会随状态漂移，颜色不能跟着漂。
+  const toneOf = new Map(
+    [...groups.keys()].sort((a, b) => a.localeCompare(b)).map((k, i) => [k, i % CHANNEL_TONES]),
+  );
+
+  const out: Channel[] = [];
   for (const [key, rows] of groups) {
-    const visRows = visByKey.get(key) ?? [];
-    if (visRows.length === 0) continue;
     const info = models.find((m) => m.modelVersion === key);
+    const vip = info?.vip ?? false;
     const counts = Object.fromEntries(ACTION_ORDER.map((a) => [a, 0])) as Record<
       NextAction,
       number
@@ -691,37 +866,81 @@ export function buildSections(all: Row[], visible: Row[], models: ModelInfo[] = 
       // 那说明库里存着一个已经从清单里下架的型号，此时行内的 `modelShort` 用的也是
       // 同一条回落，两处必须一致。
       label: info?.label ?? (key === "" ? "CLI 默认" : shortModel(key)),
-      vip: info?.vip ?? false,
-      title: sectionTitle(rows),
-      all: rows,
-      rows: visRows,
+      vip,
+      tone: toneOf.get(key) ?? 0,
+      title: channelTitle(rows),
+      rows,
+      live: rows.length - counts.done,
       counts,
+      note: channelNote(
+        vip,
+        stats.find((s) => s.modelVersion === key),
+      ),
       ...headlineOf(rows, counts),
       done: rows.every((r) => !isLive(r.stage)),
-      createdAt: Math.max(...rows.map((r) => r.clip.createdAt)),
     });
   }
-  // 还在动的排前面：远端在跑 > 本地压着队 > 其余；同档按条数多的在前，再同则按名字
-  // 定死顺序（否则每次重渲染的节序会随 Map 插入序漂移）。
-  const rank = (s: Section) => (s.counts.wait > 0 ? 0 : s.counts.queued > 0 ? 1 : 2);
+  // 还在动的排前面；同档按条数多的在前，再同则按名字定死顺序（否则每次重渲染的
+  // 顺序会随 Map 插入序漂移）。
+  const rank = (c: Channel) => (c.counts.wait > 0 ? 0 : c.counts.queued > 0 ? 1 : 2);
   out.sort(
     (a, b) =>
       rank(a) - rank(b) ||
       b.counts.wait + b.counts.queued - (a.counts.wait + a.counts.queued) ||
-      b.all.length - a.all.length ||
+      b.rows.length - a.rows.length ||
       a.key.localeCompare(b.key),
   );
   return out;
 }
 
+/** 快捷通道位数。顶栏灯与列表筛选条**同为三格**，且必须是同一批通道。 */
+export const TOP_CHANNELS = 3;
+
 /**
- * 分节标题 = 这条通道上涉及的提示词组名。
+ * 用得最多的前三条通道 —— 顶栏那排状态灯与列表顶上那排快捷筛选**共用这一份**。
+ *
+ * ## 为什么是「常驻前三」而不是「此刻在动的全部」
+ *
+ * 从前顶栏只显示 `running > 0 || queued > 0` 的通道，于是那排灯的**格数会变**：
+ * 一条通道跑完最后一单就整格消失，下一次提交又冒出来。人靠位置记东西 ——
+ * 「左边第二格是 2.0Mini」在这种排布下一天要重学好几次，而它每次重学的代价是
+ * 看错一条队的占用。固定三格之后位置是稳的，「有没有在动」交给灯本身回答。
+ *
+ * ## 排序：先看还有多少活，再看历史上用得多不多
+ *
+ * `live`（还没走完的条数）优先 —— 那是现在能动手的量；同档再按这条通道上的总条数，
+ * 于是常用通道即便此刻闲着也留在原位。两级都同时按名字定死，避免每次重渲染漂移。
+ */
+export function topChannels(channels: Channel[], n: number = TOP_CHANNELS): Channel[] {
+  return [...channels]
+    .sort((a, b) => b.live - a.live || b.rows.length - a.rows.length || a.key.localeCompare(b.key))
+    .slice(0, n);
+}
+
+/**
+ * 侧栏通道行的副行 —— 只说**这条队此刻堵没堵**，或**它贵在哪**。
+ *
+ * 「并发已满」排在 vip 前面：前者是此刻会改变决策的事（新单发不出去，该换条队），
+ * 后者是一条恒真的成本提醒。恒真的那句什么时候看都还在，会变的那句错过就没了。
+ */
+function channelNote(vip: boolean, s: ChannelStat | undefined): string {
+  if (s && s.queued > 0 && s.running >= s.limit) {
+    return `并发已满 · ${s.queued} 条在本地等空位`;
+  }
+  if (vip) return "贵 5.5 倍 · 买到的只是不排队";
+  if (s && s.running > 0) return `并发 ${s.running} / ${s.limit}`;
+  if (s && s.queued > 0) return `${s.queued} 条在本地排队`;
+  return "";
+}
+
+/**
+ * 通道标题 = 这条通道上涉及的提示词组名。
  *
  * 组名是人给这批片子起的名（一份 txt = 一个组），而通道本身只是一条队 ——
  * 光看「2.0Fast」答不出「这条队上跑的是什么」。混多个组时只列前两个 ——
  * 铺满整行的组名反而什么都读不出来（同作品库分节的处置）。
  */
-function sectionTitle(rows: Row[]): string {
+function channelTitle(rows: Row[]): string {
   const names: string[] = [];
   for (const r of rows) {
     const n = r.clip.groupName.trim();
@@ -730,4 +949,204 @@ function sectionTitle(rows: Row[]): string {
   if (names.length === 0) return "未分组";
   if (names.length <= 2) return names.join(" · ");
   return `${names.slice(0, 2).join(" · ")} 等 ${names.length} 组`;
+}
+
+/** 当前 (动作 × 通道) 这一屏的账 —— 摘要卡那三个小格与通道构成条。 */
+export interface SliceSummary {
+  count: number;
+  /** 已经真的扣掉的额度合计（`clip.billed` 为准，与「重跑要不要再花一份钱」同源）。 */
+  billed: number;
+  /** 还没花的那部分（预估）。 */
+  unbilled: number;
+  /** 两者都不为 0 —— 此时摆一个合计数会把「已经花掉的」和「打算花的」混成一笔糊涂账。 */
+  mixed: boolean;
+  /** 查不到单价、没能计入的条数。界面据此显示「≥」，绝不摆一个编出来的数字。 */
+  unpriced: number;
+  /** 这一屏里等得最久的那条（秒）。0 = 没有一条在等。 */
+  oldestWait: number;
+  /**
+   * 通道构成（堆叠条 + chips）。顺序与 `buildChannels` 一致。
+   *
+   * **只有这一种构成**：筛选改成交集之后，一屏恒是**一个动作**，所以「这一屏分成哪几种
+   * 动作」是个恒等式，画出来是一整条纯色。这里唯一还值得问的是「这一档分散在哪几条队上」。
+   * （叠了通道时它同样退化成一条，故调用方那时整块不画。）
+   */
+  channels: { key: string; label: string; tone: number; n: number }[];
+}
+
+export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
+  let billed = 0;
+  let unbilled = 0;
+  let unpriced = 0;
+  let oldestWait = 0;
+  for (const r of rows) {
+    const amount = r.credit ?? r.estimate;
+    if (amount == null) unpriced += 1;
+    else if (r.clip.billed) billed += amount;
+    else unbilled += amount;
+    if (r.waitSecs > oldestWait) oldestWait = r.waitSecs;
+  }
+  const n = new Map<string, number>();
+  for (const r of rows) {
+    const k = r.modelFull ?? "";
+    n.set(k, (n.get(k) ?? 0) + 1);
+  }
+  return {
+    count: rows.length,
+    billed,
+    unbilled,
+    mixed: billed > 0 && unbilled > 0,
+    unpriced,
+    oldestWait,
+    channels: channels
+      .filter((c) => (n.get(c.key) ?? 0) > 0)
+      .map((c) => ({ key: c.key, label: c.label, tone: c.tone, n: n.get(c.key) ?? 0 })),
+  };
+}
+
+/** 进度上的一步。`now` 恒有且只有一步 —— 它就是「现在卡在哪」。 */
+export type TrailState = "done" | "now" | "soon";
+
+export interface TrailStep {
+  key: string;
+  /** 「09:14」，没发生过就是「—」。**绝不编时间**。 */
+  at: string;
+  what: string;
+  /** 副行：`now` 那一步写「所以现在该干嘛」，`done` 那一步写回执一类的证据。 */
+  sub: string;
+  state: TrailState;
+  /**
+   * 这一步的颜色。**走完的一步一律 `ok`**（界面上是一枚绿勾）——
+   * 「走到过这里」是一件只有成立与不成立的事，给它分四种颜色等于让人去猜
+   * 蓝勾和琥珀勾差在哪。剩下三种色只描述例外：`er` 出事了、`rev` 等你判、
+   * `dim` 还没轮到（或这条路已经不会再走下去，比如判了不通过）。
+   */
+  tone: "ok" | "acc" | "rev" | "er" | "dim";
+}
+
+/**
+ * 这一条走过与将要走的路。
+ *
+ * 与旧版（只有四个时刻、发生过才有颜色）的差别是**把未来也画出来**：
+ * 一条缺词的条目，光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
+ * 三态里 `now` 那一步带一句「所以现在该干嘛」，其余留白 —— 没发生的事不编时间。
+ */
+export function trailOf(row: Row): TrailStep[] {
+  const c = row.clip;
+  const st = row.stage;
+  const out: TrailStep[] = [
+    {
+      key: "accept",
+      at: fmtClock(c.createdAt),
+      what: "图片验收通过 · 自动入队待改写",
+      sub: "",
+      state: "done",
+      tone: "ok",
+    },
+  ];
+
+  out.push(
+    c.rewroteAt != null
+      ? {
+          key: "rewrite",
+          at: fmtClock(c.rewroteAt),
+          what: "改写结果写回 · 进就绪",
+          sub: "",
+          state: "done",
+          tone: "ok",
+        }
+      : {
+          key: "rewrite",
+          at: "—",
+          what: "等 skill 写回改写结果",
+          // 「去 Claude Code 跑 v2v-rewrite」不写在这儿：那句话在这一屏上已经由
+          // 摘要卡的副行说过一次，而底坞那两个按钮就是它的动作。同一条指令在
+          // 一屏里出现四遍，读到第二遍时人就不再读了。
+          sub: "",
+          state: st === "rewrite" ? "now" : "soon",
+          tone: st === "rewrite" ? "acc" : "dim",
+        },
+  );
+
+  out.push(
+    c.firstSubmittedAt != null
+      ? {
+          key: "submit",
+          at: fmtClock(c.firstSubmittedAt),
+          what: `提交到即梦${c.submitCredit != null ? ` · 回执计费 ${c.submitCredit}` : " · 回执未带计费"}`,
+          // 常驻队列放行的条目此前只能靠一个筛选片才看得出来 —— 而「这一单是谁下的」
+          // 恰恰是对账时第一个要问的。写进回执这一行，不必再有那个筛选片。
+          sub: `${c.submitId ?? "回执里没有 submit_id"}${c.autoSubmitted ? " · 常驻队列放行" : ""}`,
+          state: "done",
+          tone: "ok",
+        }
+      : {
+          key: "submit",
+          at: "—",
+          what: row.action === "queued" ? "已放行 · 等这条通道的空位" : "等你放行提交",
+          sub:
+            st !== "ready"
+              ? ""
+              : row.action === "queued"
+                ? "出一条自动补一条，不必再点确认"
+                : "选好通道按 ⌘⏎ 确认提交 —— 那一刻才扣费",
+          state: st === "ready" ? "now" : "soon",
+          tone: st === "ready" ? "acc" : "dim",
+        },
+  );
+
+  if (st === "fail") {
+    // 判死之后没有「等你判定」那一步 —— 画一个永远不会走到的未来，比不画更误导。
+    out.push({
+      key: "finish",
+      at: c.finishedAt == null ? "—" : fmtClock(c.finishedAt),
+      what: c.errorType === "timeout" ? "判超时 · 提交单仍有效" : `判死 · ${c.errorType ?? "失败"}`,
+      sub: row.situation,
+      state: "now",
+      tone: "er",
+    });
+    return out;
+  }
+
+  out.push(
+    c.finishedAt != null
+      ? {
+          key: "finish",
+          at: fmtClock(c.finishedAt),
+          what: `出片落盘${c.width != null ? ` ${c.width}×${c.height}` : ""} · 进验收`,
+          sub: "",
+          state: "done",
+          tone: "ok",
+        }
+      : {
+          key: "finish",
+          at: "—",
+          what: "等即梦出片",
+          sub: st === "run" ? row.situation : "",
+          state: st === "run" ? "now" : "soon",
+          tone: st === "run" ? "acc" : "dim",
+        },
+  );
+
+  out.push(
+    c.reviewedAt != null
+      ? {
+          key: "review",
+          at: fmtClock(c.reviewedAt),
+          what: st === "pass" ? "验收通过" : "验收不通过 · 成片进废纸篓",
+          // 拷贝失败不回滚验收，所以「通过了却没落地」是一个真实会出现的状态。
+          sub: st === "pass" && !delivered(c) ? "未交付到输出目录" : "",
+          state: st === "pass" && !delivered(c) ? "now" : "done",
+          tone: st === "pass" ? (delivered(c) ? "ok" : "er") : "dim",
+        }
+      : {
+          key: "review",
+          at: "—",
+          what: "等你判定",
+          sub: st === "rev" ? "空格 通过 · X 不通过 · R 重跑" : "",
+          state: st === "rev" ? "now" : "soon",
+          tone: st === "rev" ? "rev" : "dim",
+        },
+  );
+  return out;
 }

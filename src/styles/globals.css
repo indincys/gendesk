@@ -50,6 +50,16 @@
   --ch-run: oklch(51% 0.13 155);
   --ch-local: oklch(53% 0.13 72);
 
+  /* 通道配色轮转（`model.ts` 的 `CHANNEL_TONES` = 4，两处必须一样多）。
+     同一条即梦通道在侧栏那张卡、列表行左轨、摘要卡堆叠条三处**必须同色** ——
+     色号由 `buildChannels` 按通道名序一处下发，界面只按 `data-tone` 取。
+     四个色相拉开（蓝 / 绿 / 紫 / 橙），亮度统一压在 52–56%：这些色要么是 3px 宽的
+     竖条、要么是 5px 的圆点，再浅一档就分不出彼此了。 */
+  --chn-0: oklch(55% 0.17 257);
+  --chn-1: oklch(53% 0.12 155);
+  --chn-2: oklch(54% 0.17 300);
+  --chn-3: oklch(56% 0.12 62);
+
   /* 视频流水线七态：文字色（在浅底上要读得清）与分段条色（在 6px 高的色带上要分得开）。
      两套值不是重复 —— 同一个绿在 11px 文字上要压暗才够对比度，在色带上要提亮才认得出。 */
   --st-run: oklch(52% 0.15 255);
@@ -195,6 +205,11 @@ a:hover {
   gap: 12px;
   padding: 0 14px;
   flex: none;
+  /* 顶栏里装着一串**条数不定**的通道状态灯。不设 min-width:0 的话它们会把整条
+     标题栏顶宽，于是 1140px（应用最小宽）下整页横向滚动 —— 而横滚的第一个受害者
+     是右边那个 ⌘K，它会直接跑到屏幕外面去。 */
+  min-width: 0;
+  overflow: hidden;
 }
 .app.win .tbar {
   padding-right: 0;
@@ -244,31 +259,34 @@ a:hover {
   font-family: inherit;
   animation: pop 0.3s;
 }
+/* 顶栏那颗余额 —— 中性配色（它不是一个待办，只是一个读数），且不可点。 */
+.pill.bal {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--t3);
+  cursor: default;
+  animation: none;
+  box-shadow: var(--sh1);
+  flex: none;
+  white-space: nowrap;
+}
+.pill.bal b {
+  font: 600 12px var(--mono);
+  color: var(--t1);
+}
+/* 顶栏分隔：把「应用是谁」与「这一页此刻什么状况」分开。 */
+.tsep {
+  width: 1px;
+  height: 16px;
+  background: var(--line2);
+  flex: none;
+}
 .pdot {
   width: 6px;
   height: 6px;
   border-radius: 99px;
   background: var(--acc);
   animation: blk 2s infinite;
-}
-.tbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 28px;
-  padding: 0 9px;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: var(--t3);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  transition: background 0.12s, color 0.12s;
-}
-.tbtn:hover {
-  background: oklch(93% 0.006 258 / 0.8);
-  color: var(--t2);
 }
 .shell {
   flex: 1;
@@ -278,40 +296,78 @@ a:hover {
   gap: 2px;
 }
 .side {
-  width: 212px;
+  width: 246px;
   flex: none;
   display: flex;
   flex-direction: column;
   padding: 2px 8px 2px 4px;
   min-height: 0;
+  overflow: auto;
 }
-.sbtn {
+/* 通道配色的取色器。`data-tone` 由 `buildChannels` 下发，用到色的地方一律读 `--tone`
+   —— 每一处各写一遍 `[data-tone="0"] { background: … }` 的话，加第五条通道要改三处。 */
+[data-tone="0"] {
+  --tone: var(--chn-0);
+}
+[data-tone="1"] {
+  --tone: var(--chn-1);
+}
+[data-tone="2"] {
+  --tone: var(--chn-2);
+}
+[data-tone="3"] {
+  --tone: var(--chn-3);
+}
+/* 分组头 + 组内左轨。
+   行内图标去掉之后，三块颜色（制作蓝 / 资产绿 / 发布琥珀）承担辨识 ——
+   扫一眼看的是三段颜色，而不是十一个长得差不多的灰色小图形。 */
+.nsec {
+  font: 600 10.5px var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--t3);
+  padding: 11px 8px 6px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: oklch(100% 0 0 / 0.55);
-  color: var(--t3);
-  font-size: 12px;
-  padding: 0 9px;
-  cursor: pointer;
-  box-shadow: var(--sh1);
-  transition: color 0.12s, background 0.12s;
-  font-family: inherit;
-  margin-bottom: 6px;
+  gap: 7px;
 }
-.sbtn:hover {
-  color: var(--t2);
-  background: #fff;
+.nsec .bar {
+  width: 3px;
+  height: 11px;
+  border-radius: 2px;
+  flex: none;
+  background: var(--acc);
 }
-.nsec {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
+.nsec.asset .bar {
+  background: var(--ok);
+}
+.nsec.publish .bar {
+  background: var(--wr);
+}
+.ngrp {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: 1px;
+  padding-left: 9px;
+  border-left: 2px solid oklch(58% 0.18 257 / 0.14);
+}
+.ngrp.asset {
+  border-left-color: oklch(55% 0.1 155 / 0.16);
+}
+.ngrp.publish {
+  border-left-color: oklch(58% 0.11 75 / 0.18);
+}
+/* 废纸篓 / 设置沉在最底下，不属于任何一组，也不带色轨。 */
+.nsys {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 8px;
+}
+.nsys .nv {
+  height: 26px;
+  font-size: 12.5px;
   color: var(--t3);
-  padding: 12px 8px 5px;
 }
 .nv {
   display: flex;
@@ -361,6 +417,96 @@ a:hover {
 .nb-amb {
   color: oklch(45% 0.1 70);
   background: var(--wrbg);
+}
+/* ── 侧栏筛选列（视频流水线选中时展开） ─────────────────────
+   **一次只选一个**：上半截按动作，下半截按通道，中间一条细线分隔。
+   两维之间不做交集（判据单点 `matchFilter`），所以这里也不该有任何暗示
+   「这两行可以一起亮」的容器 —— 从前那两张带边框带标题的卡正是那个暗示。
+
+   卡框、卡头、每行的副行说明**全部去掉**：侧栏是全应用最挤的一列，246px 里已经
+   压着十一条路由。说明文字搬进了 `title=`（要用时才读的东西，常驻摆着只会把
+   九行筛选撑成一屏半），身份改由**一枚带色胶囊**承担 —— 一行只剩「是什么」和
+   「有几条」两件事。 */
+.navfl {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 5px 0 5px 11px;
+}
+.navrow {
+  position: relative;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+}
+.navrow:hover {
+  background: oklch(93.5% 0.006 258 / 0.6);
+}
+/**
+ * 选中靠**多一根色条 + 一层底**，不靠「让另外五行褪色」。
+ *
+ * 上一版是「选中的胶囊变实心、其余留 12% 淡底、计数为 0 的整行再压到 50% 不透明度」——
+ * 于是六行里通常有四五行是灰的，一眼扫过去这一列像是坏了一半。而这一列是**流程本身**，
+ * 每一档的颜色是它的身份（异常红 / 缺词灰蓝 / 就绪蓝 / 验收琥珀…），身份不该随着
+ * 「我此刻在看哪一档」忽明忽暗。
+ *
+ * 所以：**胶囊的颜色在任何状态下都一样**，选中的那一行左边多一根 3px 实色条、
+ * 底色略深、字加粗。计数为 0 只让**那个数字**淡下去 —— 0 是它自己要说的话。
+ */
+.navrow::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--tone, var(--acc));
+  opacity: 0;
+}
+.navrow.on::before {
+  opacity: 1;
+}
+.navrow.on {
+  background: color-mix(in oklch, var(--tone, var(--acc)) 11%, transparent);
+}
+/* 一枚带色胶囊 = 这一档的身份。色由 `--tone` 下发（`ACTION_META.dot` 经内联 style）。
+   **不随选中态变** —— 见上面那段。 */
+.navrow .fpill {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 9px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: color-mix(in oklch, var(--tone, var(--acc)) 17%, transparent);
+  color: color-mix(in oklch, var(--tone, var(--acc)) 82%, black);
+}
+.navrow.on .fpill {
+  font-weight: 600;
+}
+.navrow .n {
+  font: 600 11px var(--mono);
+  color: var(--t3);
+  flex: none;
+}
+.navrow.on .n {
+  color: color-mix(in oklch, var(--tone, var(--acc)) 72%, black);
+}
+/* 计数为 0：**只有数字**淡下去，胶囊的颜色一律常驻。 */
+.navrow.zero .n {
+  opacity: 0.4;
 }
 .sfoot {
   font-size: 10.5px;
@@ -1416,6 +1562,16 @@ a:hover {
   white-space: nowrap;
   cursor: pointer;
 }
+/* 预览栏那个编号是这一屏的主语，不是一个角标 —— 去掉徽章壳，只留字。 */
+.pid.big {
+  font: 600 13.5px var(--mono);
+  letter-spacing: -0.01em;
+  color: var(--t1);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+}
 /* 任务3：参考图库瀑布流，缩略图按自然比例展示。 */
 .fgrid {
   column-width: 150px;
@@ -1873,9 +2029,6 @@ a:hover {
   animation: fin 0.13s;
   padding: 0 20px;
 }
-.ovtop {
-  align-items: flex-start;
-}
 .mdl {
   background: #fff;
   border-radius: 13px;
@@ -1990,63 +2143,6 @@ a:hover {
   border-color: var(--accln);
   background: var(--accbg);
   box-shadow: 0 0 0 1px var(--accln);
-}
-.plt {
-  width: 600px;
-  max-width: 92vw;
-  background: #fff;
-  border-radius: 13px;
-  border: 1px solid var(--line);
-  box-shadow: var(--sh3);
-  margin-top: 14vh;
-  overflow: hidden;
-  animation: pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
-}
-.plin {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 15px;
-  height: 46px;
-  border-bottom: 1px solid var(--line);
-  color: var(--t3);
-}
-.plinp {
-  flex: 1;
-  border: none;
-  outline: none;
-  font-size: 13.5px;
-  font-family: inherit;
-  color: var(--t1);
-  background: transparent;
-  height: 100%;
-}
-.pllist {
-  max-height: 320px;
-  overflow: auto;
-  padding: 6px;
-}
-.pltit {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 36px;
-  padding: 0 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 12.5px;
-}
-.pltit:hover {
-  background: var(--sub);
-}
-.pltit.on {
-  background: var(--accbg);
-}
-.plcat {
-  font-size: 11px;
-  color: var(--t3);
-  width: 52px;
-  flex: none;
 }
 .bigempty {
   display: flex;
@@ -3067,23 +3163,17 @@ a:hover {
   min-width: 220px;
 }
 
-/* ==================== 视频流水线（v0.22.0：按「下一步动作」组织） ====================
+/* ==================== 视频流水线 ====================
  *
- * 表格按批次分节，筛选轴是「下一步该干什么」而不是阶段 —— 阶段名就写在每一条脸上，
- * 是最不缺的信息；缺的是「所以我现在该干嘛」。
+ * 主轴（下一步动作）与通道在**侧栏**（`.navcard`），远端读数在**顶栏**
+ * （`.chpill` / `.refbtn`），页里是三栏工作台（`.vwb`）。
  *
- * **七列定宽**（v0.22.0 从九列收窄）。宽度预算是硬约束而不是审美：1140px 最小窗
- * 减去侧栏 212、shell padding 20、边框、268px 详情栏、10px 滚动条、24px 行内边距，
- * 只剩约 601px 给轨道与间隙。原来九列最小要 716px —— 于是「情况」列**一直**被裁掉
- * 且无处可滚。删掉的两列都是重复信息：「阶段」由情况那句话与色点代替，
- * 「即梦」对非 run 行恒为 —，对 run 行的同一事实已在情况里。
- *
- * 每列宽度由**内容的最坏情况**定，不是平均值：
- * 编号 82（BR31-0140 ·2）· 模型 72（2.0fast_vip）· 已等 62（2h31m）· 额度 44（三位数）·
- * 情况自适应且最先被截断（故例外必须排在常态前面）。
+ * 下面这一段（`.vhd` / `.vfilt` / `.vfoot` / `.vinsp` / `.vstage` / `.vfact` …）
+ * 现在**由成片页（`V2vClipsPage`）使用**，工作台自己的形制在更下面的 `.vwb` 一节。
+ * 两边共用是有意的：那是同一套「页头 / 筛选行 / 底栏 / 右侧详情」的骨架。
  */
 
-/* 页头：标题 + 心跳 + 余额/通过率 + 三个面板入口。 */
+/* 页头：标题 + 筛选 + 右侧按钮。 */
 .vhd {
   height: 46px;
   flex: none;
@@ -3093,46 +3183,6 @@ a:hover {
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
 }
-/* 超 2 小时没出片 —— 琥珀而不是红：任务没丢，只是值得看一眼。 */
-.vstalepill {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--wr2);
-  background: var(--wrbg);
-  border-radius: 99px;
-  padding: 3px 8px;
-  white-space: nowrap;
-}
-
-/* 开屏战报：只在确实离开过、且确实发生过事时出现。 */
-.vbanner {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 14px;
-  background: var(--accbg);
-  border-bottom: 1px solid var(--accln);
-  flex-wrap: wrap;
-}
-.vbanner .ttl {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--acc2);
-  white-space: nowrap;
-}
-.vbanner .it {
-  font-size: 11px;
-  color: var(--t2);
-  white-space: nowrap;
-}
-.vbanner .it b {
-  font-family: var(--mono);
-}
-
-/* 两条筛选行：阶段（主轴）与信号（正交的例外轴）。 */
 .vfilt {
   flex: none;
   display: flex;
@@ -3141,9 +3191,6 @@ a:hover {
   padding: 6px 14px 5px;
   border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
-}
-.vfilt.sig {
-  padding: 5px 14px 6px;
 }
 .vfilt .lb {
   font-size: 10px;
@@ -3188,101 +3235,6 @@ a:hover {
   font: 500 10.5px var(--mono);
   opacity: 0.7;
 }
-.vsig {
-  height: 23px;
-  padding: 0 8px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: #fff;
-  color: var(--t3);
-  font-size: 11px;
-  font-family: inherit;
-  white-space: nowrap;
-  cursor: pointer;
-  flex: none;
-}
-.vsig .n {
-  font-family: var(--mono);
-  opacity: 0.7;
-}
-.vsig.on {
-  background: var(--erbg);
-  color: var(--er);
-  border-color: var(--erln);
-  font-weight: 600;
-}
-/* 计数为 0 的信号压淡但**不禁用**：它仍然回答「这一类现在没有」，而那是好消息。 */
-.vsig.zero {
-  opacity: 0.5;
-}
-
-/**
- * 表体滚动容器。
- *
- * v0.19.0–v0.21.0 这里写的是 `className="sc"`，而 `.sc` **从来没有定义过**（它只存在于
- * `docs/prototype/prototype.dc.html`）—— 于是这个 div 只有 flex:1、没有 overflow，
- * 内容溢出后被上游 `.ohide` / `.main{overflow:hidden}` 裁掉：没有滚动条、没有滚轮目标，
- * 第一屏之后的行物理上够不着。`src/styles/classnames.test.ts` 现在守住这一类。
- *
- * 表头与分节头都 sticky 在**容器内部**。表头留在容器外面时，那条 10px 的经典滚动条
- * （`::-webkit-scrollbar`）只吃表体的宽度，同一套 grid 模板于是算出两组列位 ——
- * 那正是「列的数据都对不齐」。
- */
-.vtbody {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  /* 表头高度的**单一来源**：`.vgrid.th` 的 height 与 `.vsect` 的 top 都读它。
-     两处各写一个 27px 的话，改一处就错位，而错位只在滚到一半时才看得见。 */
-  --vhdh: 27px;
-  scrollbar-gutter: stable;
-}
-
-/**
- * 表格。模板只写一次 —— 表头与数据行分开写模板时，改一列要改两处，
- * 而漏改的那一处只在最后一列错位时才被发现（`.vrowh`/`.vrow` 曾经就是这样）。
- * 同 `.tgrid`（任务页）/`.sgrid`（资产页）的形制。
- */
-.vgrid {
-  display: grid;
-  grid-template-columns: 22px 26px 82px 72px 62px 44px minmax(150px, 1fr);
-  align-items: center;
-  column-gap: 8px;
-  padding: 0 12px;
-  /* 低于此宽由 `.vtbody` 横向滚动接手，而不是把「情况」列裁掉
-     （同 `.klist`/`.kline` 在 v0.11.0 的处置）。 */
-  min-width: 530px;
-}
-.vgrid.th {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  height: var(--vhdh);
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--t3);
-  border-bottom: 1px solid var(--line);
-  background: #fff;
-}
-.vgrid.tr {
-  height: 32px;
-  font-size: 12px;
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
-  text-align: left;
-}
-.vgrid.tr:hover {
-  background: var(--sub);
-}
-.vgrid.tr.sel {
-  background: oklch(58% 0.18 257 / 0.05);
-}
-/* 光标行左侧那道 2px 竖条：一次 46 条判定时，「我在哪一条」必须一眼可见，
-   而单靠背景色在快速移动时看不清。 */
-.vgrid.tr.cur {
-  background: var(--accbg);
-  box-shadow: inset 2px 0 0 var(--acc);
-}
 .vbox {
   display: inline-block;
   width: 13px;
@@ -3300,163 +3252,6 @@ a:hover {
   background: var(--acc);
   border-color: var(--acc);
 }
-.vrth {
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  object-fit: cover;
-  background: var(--inset);
-  display: block;
-}
-/* 「情况 · 下一步」单元格：动作色点 + 那句话。色点吸进这一格而不是独占一列 ——
-   独占要 72px，恰恰是这一列被裁掉的那部分宽度。 */
-.vsit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  min-width: 0;
-}
-.vsit .d {
-  width: 6px;
-  height: 6px;
-  border-radius: 99px;
-  flex: none;
-}
-.vmodel {
-  font: 500 10px var(--mono);
-  color: var(--t2);
-  background: var(--inset);
-  border-radius: 5px;
-  padding: 2px 5px;
-  white-space: nowrap;
-  justify-self: start;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-/* vip 通道标琥珀：同规格贵 5.5 倍，买到的只是不排队 —— 那必须一眼看得出来。 */
-.vmodel.vip {
-  color: var(--wr2);
-  background: var(--wrbg);
-}
-
-/* 分节头（一个批次一节）。sticky 让滚到一半时仍答得出「这是哪一批」。
-   停在**表头下方**（top = 表头高度）而不是 top:0，否则两者会重叠在同一条线上。 */
-.vsect {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  background: var(--sub);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
-  position: sticky;
-  top: var(--vhdh);
-  z-index: 2;
-  min-width: 530px;
-}
-.vsect .cr {
-  color: var(--t3);
-  font-size: 9px;
-  width: 8px;
-  flex: none;
-}
-.vsect .nm {
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
-}
-/**
- * 节头摘要，一句人话。
- *
- * 取代 v0.19.0 那条 104px 的阶段混合分段条 —— 它唯一的图例是 `title=` tooltip，
- * 于是「每个分组这些进度条是什么意思」成了一个没人答得上来的问题。
- * 一句话既自带图例，又能直接说出数字。
- */
-.vsect .tl {
-  font-size: 11px;
-  color: var(--t3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-}
-.vsect .tl.er {
-  color: var(--er);
-  font-weight: 500;
-}
-.vsect .tl.acc {
-  color: var(--acc2);
-}
-
-/* 连续毙掉三条以上的提醒 —— 那时该退回改写整组，而不是一条条重跑（每次都要再花钱）。 */
-.vnote {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 12px 5px 28px;
-  background: var(--wrbg);
-  border-bottom: 1px solid var(--line);
-  font-size: 11px;
-  color: var(--wr2);
-  line-height: 1.5;
-}
-/**
- * 「去改写」召唤 —— 全流水线最大的一处阻塞。
- *
- * 待改写只可能由人推动（去 Claude Code / Codex 跑 v2v-rewrite），而 GenDesk 这边
- * 工单已经物化好、什么都不缺。**不可关闭**：一个可关掉的 CTA 会立刻退化回
- * 「21 条躺在那里没人知道该干嘛」那个状态。
- */
-.vcall {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 14px;
-  background: var(--accbg);
-  border-bottom: 1px solid var(--accln);
-  flex-wrap: wrap;
-}
-.vcall.er {
-  background: var(--erbg);
-  border-bottom-color: var(--erln);
-}
-.vcall .ttl {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--acc2);
-  white-space: nowrap;
-}
-.vcall.er .ttl {
-  color: var(--er);
-}
-.vcall .ds {
-  font-size: 11px;
-  color: var(--t2);
-  line-height: 1.5;
-  min-width: 0;
-}
-.vcall .pth {
-  font: 500 10.5px var(--mono);
-  color: var(--t3);
-  user-select: text;
-}
-
-/* 工作台清空 —— 已定案的批次整节消失，这里是它留下的那句话。 */
-.vclear {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 22px 16px;
-}
 .lnk {
   background: none;
   border: 0;
@@ -3471,7 +3266,8 @@ a:hover {
   color: var(--acc2);
 }
 
-/* 参数条：提交确认卡顶部与底栏共用。参数是每一批不一样的东西，不该只活在设置页。 */
+/* 参数条：提交确认卡 / 换通道卡 / 「改参数」卡共用。
+   参数是每一批不一样的东西（模型之间差 5.5 倍），不该只活在设置页。 */
 .parambar {
   display: flex;
   align-items: center;
@@ -3482,15 +3278,6 @@ a:hover {
   border: 1px solid var(--accln, var(--line));
   background: var(--accbg);
 }
-.parambar.foot {
-  flex: none;
-  border-radius: 0;
-  border: 0;
-  border-top: 1px solid var(--line);
-  padding: 7px 12px;
-}
-
-/* 底栏：有选择时是批量动作，没选择时是一句提示。撤销 pill 常驻右侧。 */
 .vfoot {
   flex: none;
   display: flex;
@@ -3576,34 +3363,29 @@ a:hover {
   aspect-ratio: 9 / 16;
   max-height: 420px;
 }
-.vstageimg {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-  background: #000;
-}
 .vstagenote {
   font: 500 10px var(--mono);
   color: var(--t3);
 }
-/* 「首帧原图」角标：尚无成片时显示的是那张图本身，得说清楚这不是片子的一帧。 */
-.vstagetag {
-  position: absolute;
-  left: 6px;
-  top: 6px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: color-mix(in oklch, var(--panel) 78%, transparent);
-  border: 1px solid var(--line2);
-  font: 600 10px inherit;
-  color: var(--t2);
-}
+/* 小节头。工作台那一栏里它右侧还挂一个链接（「⌥2 全部日志」），故用 flex。 */
 .vsec {
   font-size: 10px;
   font-weight: 600;
   color: var(--t3);
   margin-top: 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.vsec .lnk {
+  margin-left: auto;
+  font-size: 10px;
+  text-decoration: none;
+  color: var(--t3);
+}
+.vsec .lnk:hover {
+  color: var(--acc2);
+  text-decoration: underline;
 }
 .vfacts {
   display: grid;
@@ -3629,29 +3411,14 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.vtrail {
-  display: flex;
-  gap: 7px;
-  align-items: flex-start;
-  padding: 3px 0;
+/* 语气色要在这里再写一遍：`.wr2` / `.acc2` 是 (0,1,0)，压不过上面那条 `.vfact .v`
+   (0,2,0) —— 挂上去也是**不生效**的（「上次查询 40 分钟前」标琥珀那一处一直是黑的，
+   没人发现是因为它只是个提醒）。额度那一格现在靠颜色分主次，再漏就不是小事了。 */
+.vfact .v.wr2 {
+  color: var(--wr2);
 }
-.vtrail .dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 99px;
-  flex: none;
-  margin-top: 5px;
-}
-.vtrail .at {
-  font: 400 9.5px var(--mono);
-  color: var(--t3);
-  flex: none;
-  width: 38px;
-}
-.vtrail .what {
-  font-size: 10.5px;
-  color: var(--t2);
-  line-height: 1.5;
+.vfact .v.acc2 {
+  color: var(--acc2);
 }
 .vprompt {
   font-size: 10.5px;
@@ -3681,6 +3448,719 @@ a:hover {
   color: var(--er);
   background: var(--erbg);
   border: 1px solid var(--erln);
+}
+
+/* ==================== 工作台三栏 + 底坞 ====================
+ *
+ * 预览（这一条长什么样）｜ 账与进度（这一条花没花钱、走到哪了）｜ 列表（这一屏有哪些）。
+ * 底坞把「这一条」与「这一档」的动作分成两组 —— 此前它们混在同一排，唯一的区别是
+ * 按钮上那个数字，而那正是最容易看漏的东西。
+ *
+ * **宽度**：应用最小宽仍是 1140px（`.app`）。三栏在那个宽度下摆不开，故 1400px 以下
+ * 中栏收成抽屉（见本节末尾的 media query）—— 而不是把窗口最小宽抬到 1580px，
+ * 那会让 1440×900 的笔记本从此一直横向滚动。
+ */
+.vwb {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+.vwbrow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* ── 左栏：预览 ─────────────────────────────────────── */
+.vpv {
+  flex: 1.02;
+  min-width: 392px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+/* 中栏收起时把腾出来的地方全给预览 —— 这一页真正费眼睛的事是看片。 */
+.vwb.noled .vpv {
+  flex: 1.8;
+}
+.vpvhd {
+  height: 50px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.vpvbody {
+  flex: 1;
+  min-height: 0;
+  margin: 14px 16px 16px;
+  border-radius: 12px;
+  background: var(--rd-bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 12px 13px 8px;
+  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.06);
+}
+.vpvimg {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.vpvimg img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid oklch(100% 0 0 / 0.14);
+  display: block;
+}
+.vpvempty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 24px;
+}
+.vpvnote {
+  font: 500 10px var(--mono);
+  letter-spacing: 0.06em;
+  color: oklch(100% 0 0 / 0.45);
+}
+.vpvhint {
+  font-size: 10.5px;
+  line-height: 1.6;
+  text-align: center;
+  max-width: 300px;
+  color: oklch(100% 0 0 / 0.34);
+}
+.vpvmeta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  margin-top: 6px;
+  border-top: 1px solid oklch(100% 0 0 / 0.1);
+  font: 400 10px var(--mono);
+  color: oklch(100% 0 0 / 0.4);
+  min-height: 22px;
+}
+
+/* ── 中栏：这一条的账与进度 ───────────────────────────── */
+.vled {
+  flex: 1.16;
+  min-width: 400px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.vledhd {
+  height: 50px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.vledbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 13px 16px 18px;
+}
+
+/* 摘要卡：这一屏是个什么局面。
+   **不再是一块有色底**：那层底色面积最大、信息量最小 —— 它说的事（这一档什么语气）
+   标题、色点、计数三处都已经在说，而它把中栏最靠上的一屏整个染了一遍。现在语气落在
+   **字**上（`--mood`），卡的边界交给一条分隔线。 */
+.vsum {
+  padding: 0 2px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-bottom: 1px solid var(--line2);
+}
+/* 语气 → 强调色。四档与 `filterFace` 的 `mood` 一一对应。 */
+.vsum[data-mood="acc"] {
+  --mood: var(--acc2);
+}
+.vsum[data-mood="rev"] {
+  --mood: var(--wr2);
+}
+.vsum[data-mood="er"] {
+  --mood: var(--er);
+}
+.vsum[data-mood="t3"] {
+  --mood: var(--t2);
+}
+.vsum .hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* 色点取的是**这一档 / 这条通道自己的色**（`--tone`），与侧栏胶囊、行左轨同源；
+   语气色（`--mood`）另说一件事：它给标题与计数定调。两者常常不同 ——
+   「排队中」的点是蓝的（那是它的身份色），语气却是灰的（没什么要你做）。 */
+.vsum .hd .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  flex: none;
+  background: var(--tone, var(--acc));
+}
+.vsum .hd .ttl {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: none;
+  color: var(--mood, var(--t1));
+}
+.vsum .hd .sub {
+  font-size: 11px;
+  color: var(--t3);
+  min-width: 0;
+}
+.vsum .hd .n {
+  font: 600 13px var(--mono);
+  flex: none;
+  color: var(--mood, var(--t1));
+}
+.vsum .tiles {
+  display: flex;
+  gap: 8px;
+}
+.vsum .tile {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px 7px;
+  border-radius: 8px;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vsum .tile .k {
+  font-size: 9.5px;
+  color: var(--t3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vsum .tile .v {
+  font: 600 12px var(--mono);
+}
+.vsum .comp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 构成条：一段一类，宽度按条数。按动作筛时画的是通道构成，按通道筛时画的是动作构成
+   （另一维在那种情况下是恒等式，画出来是一整条纯色）。它自带图例（下面那排 chip），
+   所以不需要 tooltip —— 一条只能靠 title 才读得懂的进度条等于没人读得懂。 */
+.vsum .bar {
+  height: 7px;
+  border-radius: 99px;
+  overflow: hidden;
+  display: flex;
+  gap: 1px;
+  background: var(--inset);
+}
+.vsum .bar > span {
+  background: var(--tone, var(--acc));
+}
+.vsum .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 19px;
+  padding: 0 8px;
+  border-radius: 99px;
+  font: 500 10px var(--mono);
+  background: color-mix(in oklch, var(--tone, var(--acc)) 12%, transparent);
+  color: color-mix(in oklch, var(--tone, var(--acc)) 80%, black);
+}
+.cchip i {
+  width: 5px;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--tone, var(--acc));
+}
+/* 交接对账 / 整组毙掉的提醒：一句话 + 一个按钮，横在摘要卡底部。 */
+.vsum .hoff {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--t2);
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.vsum .hoff.er {
+  color: var(--er);
+}
+
+/* 这一条的账：九格等大，额度是其中之一。
+   它从前是左边一整块 96px 宽的大数字（先是有色底卡，后来只剩竖线）。那个体量买到的
+   信息量与旁边一格完全一样（一个数 + 一个标签），代价却是把中栏最靠上的位置占掉
+   三分之一 —— 于是「走的哪条队」「排在第几」这些同样要读的事被挤到了下面。
+   主次改由**颜色**承担：`.hero` 那一格字大半档并带强调色（预估=蓝，已扣=琥珀）。 */
+.vfact .v.hero {
+  font-size: 13.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+}
+/**
+ * Bento 栅格：六列，每格占几列由 `Fact` 的 `span` 决定。
+ *
+ * 九格等分（`.vfacts` 那种 1fr 1fr）时，「第 1 次」「4h58m」这类三四个字符的值各占
+ * 半行，把中栏最靠上的一屏撑掉一半 —— 于是进度和日志每选一条都要先滚一屏。
+ * 按内容定档之后同样九格只占四行，且窄的那几格并排读起来本来就更顺
+ * （额度 · 已等 · 上次查询是一组要对着看的数）。
+ *
+ * 内边距也比 `.vfacts` 紧一档：格子多了，每格省 2px 就是省一整行。
+ */
+.vbento {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+.vbento .vfact {
+  padding: 4px 7px;
+}
+
+/* 进度：done / now / soon 三态。未来那几步画出来但压淡 —— 一条缺词的条目
+   光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
+   **走完的一步是一枚勾，不是一个带色的圆点**：圆点分四种颜色时「蓝点和琥珀点差在哪」
+   没有答案（它们都只是「走过了」），而一枚勾不需要图例。剩下的色只描述例外。 */
+.vtl {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+}
+.vtlrow {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  min-height: 30px;
+}
+.vtlrow .rail {
+  width: 10px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.vtlrow .rail .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  flex: none;
+  margin-top: 4px;
+  background: var(--line2);
+}
+/* 阶段性完成的那一枚勾。默认绿（`t-ok`）—— 只有「判了不通过」那一步是灰的：
+   它确实走完了，但把它画成绿勾等于说这是个好结果。 */
+.vtlrow .rail .ck {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 99px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: var(--sg-pass);
+}
+.vtlrow .rail .ck.t-dim {
+  background: oklch(80% 0.008 260);
+}
+.vtlrow .rail .ck.t-er {
+  background: var(--er);
+}
+.vtlrow .rail .ln {
+  flex: 1;
+  width: 1.5px;
+  background: var(--line);
+}
+/* 走完那一段的连线也是绿的 —— 一条从上往下变淡的线本身就是进度条。 */
+.vtlrow.done .ln {
+  background: color-mix(in oklch, var(--sg-pass) 45%, var(--line));
+}
+.vtlrow .bd {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vtlrow .bd .hd {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+.vtlrow .at {
+  font: 500 10.5px var(--mono);
+  color: var(--t3);
+  min-width: 36px;
+  flex: none;
+}
+.vtlrow .what {
+  font-size: 11.5px;
+  color: var(--t2);
+  line-height: 1.5;
+}
+.vtlrow .sub {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--t3);
+  padding-left: 45px;
+}
+.vtlrow.now .what {
+  color: var(--t1);
+  font-weight: 600;
+}
+.vtlrow.now .at {
+  color: var(--t2);
+}
+.vtlrow.soon .at,
+.vtlrow.soon .what {
+  color: oklch(70% 0.012 262);
+}
+.vtlrow .dot.t-ok {
+  background: var(--sg-pass);
+}
+.vtlrow .dot.t-acc {
+  background: var(--acc);
+}
+.vtlrow .dot.t-rev {
+  background: var(--sg-rev);
+}
+.vtlrow .dot.t-er {
+  background: var(--er);
+}
+.vtlrow .dot.t-dim {
+  background: oklch(88% 0.006 260);
+}
+.vtlrow.now .dot {
+  box-shadow: 0 0 0 3px oklch(58% 0.18 257 / 0.16);
+}
+
+/* 这一条的日志。执行日志是进程内的环形缓冲（500 条、重启即清空），
+   所以老条目在这里空着是常态 —— 空态那句话必须把这件事说出来。 */
+.vlog {
+  margin-top: 4px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.vlog .none {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--t3);
+  padding: 9px 11px;
+  background: var(--sub);
+}
+.vlog .lrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  padding: 5px 10px 5px 0;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+.vlog .lrow:last-child {
+  border-bottom: none;
+}
+.vlog .lrow .rail {
+  width: 3px;
+  align-self: stretch;
+  flex: none;
+  background: oklch(88% 0.006 260);
+}
+.vlog .lrow.warn {
+  background: var(--wrbg);
+}
+.vlog .lrow.warn .rail {
+  background: var(--wr);
+}
+.vlog .lrow.error {
+  background: var(--erbg);
+}
+.vlog .lrow.error .rail {
+  background: var(--er);
+}
+.vlog .at {
+  font: 500 10px var(--mono);
+  color: var(--t3);
+  flex: none;
+}
+.vlog .tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  min-width: 40px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font: 600 9.5px var(--mono);
+  background: var(--inset);
+  color: var(--t3);
+  flex: none;
+}
+.vlog .msg {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--t2);
+  user-select: text;
+}
+
+/* ── 右栏：列表 ─────────────────────────────────────── */
+.vlist {
+  width: 314px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: oklch(99.2% 0.002 255);
+}
+.vlisthd {
+  height: 50px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+/* 与侧栏那枚胶囊、行左轨、摘要卡的点同色（`--tone` 由动作或通道下发）。 */
+.vlisthd .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  flex: none;
+  background: var(--tone, var(--acc));
+}
+.vlisthd .n {
+  font: 600 12px var(--mono);
+  color: var(--t3);
+}
+/* 通道快捷筛选条 —— 挨着被它筛的那张表。
+   固定三格（`topChannels`，与顶栏那排状态灯同一份）：格数会变的筛选器等于每天要
+   重认一次位置，而认错一次的代价是看错一条队的占用。选中态靠**实心**，
+   不靠边框加投影 —— 它就在列表栏头下面，比栏头还重就把主次弄反了。 */
+.chq {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chq::-webkit-scrollbar {
+  display: none;
+}
+.chqi {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.chqi:hover {
+  border-color: color-mix(in oklch, var(--tone, var(--acc)) 45%, var(--line));
+}
+.chqi > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  flex: none;
+  background: var(--tone, var(--acc));
+}
+.chqi .nm {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t2);
+}
+.chqi .n {
+  font: 600 10.5px var(--mono);
+  color: var(--t3);
+}
+.chqi.on {
+  background: var(--tone, var(--acc));
+  border-color: transparent;
+}
+.chqi.on > i {
+  background: #fff;
+  opacity: 0.85;
+}
+.chqi.on .nm,
+.chqi.on .n {
+  color: #fff;
+}
+/* 一条已经没有在制条目的通道压淡但**不禁用**：它仍然回答「这条队清空了」。 */
+.chqi.zero {
+  opacity: 0.55;
+}
+.vlistall {
+  height: 30px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--sub);
+  cursor: pointer;
+}
+.vlistbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.vlistempty {
+  font-size: 11px;
+  line-height: 1.9;
+  color: var(--t3);
+  padding: 22px 16px;
+  text-align: center;
+}
+.vlrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 6px 12px 6px 0;
+  cursor: pointer;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.vlrow:hover {
+  background: var(--sub);
+}
+.vlrow.sel {
+  background: oklch(58% 0.18 257 / 0.05);
+}
+/* 光标行：一次 46 条判定时「我在哪一条」必须一眼可见，单靠背景色在快速移动时看不清。 */
+.vlrow.cur {
+  background: var(--accbg);
+}
+.vlrow .rail {
+  width: 3px;
+  align-self: stretch;
+  flex: none;
+  background: var(--tone, var(--line2));
+}
+.vlrow .bd {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.vlrow .code {
+  font: 500 12px var(--mono);
+  color: var(--t1);
+}
+.vlrow.cur .code {
+  font-weight: 600;
+  color: var(--acc2);
+}
+.vlrow .sub {
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vlrow .tail {
+  font: 500 10.5px var(--mono);
+  color: var(--t3);
+  flex: none;
+}
+
+/* ── 底坞 ───────────────────────────────────────────── */
+.vdock {
+  flex: none;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, oklch(99.2% 0.002 255), oklch(97.4% 0.003 255));
+  flex-wrap: wrap;
+}
+.vdock .gl {
+  font: 600 9.5px var(--mono);
+  letter-spacing: 0.07em;
+  color: var(--t3);
+  flex: none;
+}
+.vdock .sep {
+  width: 1px;
+  height: 24px;
+  background: var(--line2);
+  flex: none;
+  margin: 0 4px;
+}
+
+/* 窄屏：中栏收成抽屉，覆盖在预览之上。
+   ⌥\ 的语义两边一致（开/关这一栏），差别只在它是并排还是浮起来 —— 这样人不必先
+   分辨自己在哪个宽度上，才知道那个键会做什么。 */
+@media (max-width: 1399px) {
+  .vwbrow {
+    position: relative;
+  }
+  .vled {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 314px;
+    width: 420px;
+    z-index: 5;
+    background: var(--panel);
+    border-left: 1px solid var(--line2);
+    box-shadow: var(--sh3);
+  }
 }
 
 /* ── 播放器（自绘控制条） ─────────────────────────────────
@@ -3789,8 +4269,24 @@ a:hover {
      通道名要认           → 11px 粗体、深字色
      「前方排队」这类标签   → 10px 淡灰，只是给数字贴个名
    底色保持中性：整条染一个色会把三层压成一层，扫一眼什么都抓不住。颜色只落在数字上。 */
+/* 通道状态灯的带子。通道条数不定（实测能到五六条），所以给它一个明确的收缩顺序：
+   先让它自己压缩，压不动了在**带子内部**横滚 —— 而不是把标题栏顶宽让整页横滚。 */
+.chstrip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 1px;
+}
+.chstrip::-webkit-scrollbar {
+  display: none;
+}
 .chpill {
   display: inline-flex;
+  flex: none;
   align-items: baseline;
   gap: 5px;
   padding: 2px 9px 3px;
@@ -3802,7 +4298,10 @@ a:hover {
   cursor: pointer;
 }
 /* 呼吸而不是常亮：一个静止的绿点与一个卡死的轮询器长得一模一样，
-   而这排灯的全部意义就是「远端此刻真的在替我干活」。 */
+   而这排灯的全部意义就是「远端此刻真的在替我干活」。
+   三格常驻之后这盏灯还多担了一件事：**格数不再变**，所以「这条通道在不在动」
+   全靠它 —— 故在跑的那一格给足对比（大一档 + 一圈会呼吸的光晕），
+   而闲着的那两格必须一眼就看得出是静的。 */
 .chpill .dot {
   width: 6px;
   height: 6px;
@@ -3810,7 +4309,35 @@ a:hover {
   background: var(--ok);
   flex: none;
   align-self: center;
-  animation: brth 1.9s ease-in-out infinite;
+}
+.chpill.live .dot {
+  width: 7px;
+  height: 7px;
+  background: var(--ok);
+  /* 光晕是**静态**的（不参与动画），它只负责把这盏灯做得比另外两格显眼。 */
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ok) 20%, transparent);
+  animation: chbrth 1.6s ease-in-out infinite;
+}
+/**
+ * 呼吸只动 `opacity` 与 `transform` —— **绝不动 box-shadow**。
+ *
+ * 这是一次实测事故：上一版把光晕做成了会扩散的 box-shadow 动画，结果整个窗口
+ * 每一个动画周期闪一次，闪得很厉害。原因是 box-shadow 属于**绘制**属性，改它必须
+ * 重新栅格化；而 `.app` 的底是一层铺满窗口的 `--ambient` 径向渐变，于是一颗 7px 的
+ * 灯每帧都把那层渐变连带刷一遍。opacity 与 transform 走合成器，不触发任何重绘。
+ *
+ * 缩放而不是变尺寸：胶囊里那几个数字是等宽对齐的，让灯改变行内尺寸会让整条随呼吸抖。
+ */
+@keyframes chbrth {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.62);
+  }
 }
 .chpill .nm {
   font-size: 11px;
@@ -3844,9 +4371,18 @@ a:hover {
 }
 /* 远端没在跑、只剩本地压着队：灯不该继续绿着呼吸（那是「在动」的信号），
    改成与本地队列同色的静止黄点 —— 一眼看出这条通道是在等空位，不是在生成。 */
-.chpill.idle .dot {
+.chpill.hold .dot {
   background: var(--ch-local);
-  animation: none;
+}
+/* 两头都空着的那一格。常驻三格之后这是个常态，所以它要明确地「灭」着，
+   而不是借用别的状态的颜色。 */
+.chpill.idle .dot {
+  background: var(--line2);
+}
+/* 当前正筛着这条通道 —— 与列表顶上那枚快捷片同时亮，两处指的是同一件事。 */
+.chpill.on {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 2px var(--accbg);
 }
 
 /* ── 视频成片库 ─────────────────────────────────────────── */
@@ -4381,4 +4917,65 @@ a:hover {
 }
 .ikmore:hover {
   text-decoration: underline;
+}
+
+/* ==================== 应用内消息（sonner toast） ====================
+ *
+ * v0.24.0 起跟应用同一套外观。此前用的是 sonner 自带的深色主题：三块黑胶囊叠在
+ * 一整屏浅色界面的右上角，比它们要传达的消息本身（「已刷新，暂无新出片」）显眼得多
+ * —— 而那正好是这一栏最不需要抢注意力的时候。
+ *
+ * 选择器写成 `[data-sonner-toast].tst` 而不是单个 `.tst`：sonner 在运行时把自己的
+ * 样式表注入 `<head>`，落在本文件**之后**，同特异度时它赢。多带一个属性选择器
+ * 把特异度抬到 (0,2,0)，这几条才真的生效。
+ */
+[data-sonner-toast].tst {
+  background: var(--panel);
+  color: var(--t1);
+  border: 1px solid var(--line2);
+  border-radius: 11px;
+  box-shadow: var(--sh3);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 11px 14px 11px 15px;
+  gap: 9px;
+  align-items: flex-start;
+}
+/* 左端一道 3px 的色条 = 这条消息是什么性质。整条染色会让一句「已保存」看着像事故；
+   一道细条既认得出又不喊。默认（普通消息）是中性的，不占用任何一支语义色。 */
+[data-sonner-toast].tst::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--line2);
+}
+[data-sonner-toast].tst[data-type="success"]::before {
+  background: var(--ok);
+}
+[data-sonner-toast].tst[data-type="error"]::before {
+  background: var(--er);
+}
+[data-sonner-toast].tst[data-type="warning"]::before {
+  background: var(--wr);
+}
+[data-sonner-toast].tst[data-type="error"] {
+  color: var(--er);
+  border-color: var(--erln);
+}
+/* 图标跟着色条走。sonner 自带的那套勾/叉图形保留 —— 它们在余光里比文字先被认出来。 */
+[data-sonner-toast].tst [data-icon] {
+  margin-top: 1px;
+}
+[data-sonner-toast].tst [data-title] {
+  font-weight: 500;
+}
+[data-sonner-toast].tst [data-description] {
+  color: var(--t3);
+  font-size: 11.5px;
+  margin-top: 2px;
 }

@@ -75,7 +75,10 @@ export function V2vReviewFlow({
 
   const c = cur.clip;
   const video = assetSrc(c.videoPath);
-  const frame = assetSrc(c.thumbPath);
+  // 对照窗读**原图**（`imagePath`）而不是 512px 缩略图：这一格要判的就是
+  // 「动起来之后产品还对不对」，拿一张糊图去对照等于把这次对照取消掉。
+  // 与生成质量无关 —— 提交给即梦的一直是原图（`dreamina::submit` 的 `--image=`）。
+  const frame = assetSrc(c.imagePath);
   const pct = list.length === 0 ? 0 : Math.round(((index + 1) / list.length) * 100);
   // 只画光标附近 ±11 条：46 条全铺出来会横向溢出到看不见，而胶片条要回答的是
   // 「还剩多少 / 刚判了什么」，两端各留一个计数就够。

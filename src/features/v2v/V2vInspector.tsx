@@ -1,4 +1,5 @@
 import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
+import { V2vQueueTrail } from "@/features/v2v/V2vQueueTrail";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, STAGE_META, fmtClock, fmtDur } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -50,7 +51,7 @@ export function V2vInspector({
         <div className="fs11 t3" style={{ padding: "24px 4px", lineHeight: 1.8 }}>
           选中一条看它的账与历程。
           <br />
-          J/K 上下移动 · ⌥\ 收起本栏。
+          ←/→ 换条 · ⌥\ 收起本栏。
         </div>
       </div>
     );
@@ -229,6 +230,11 @@ export function V2vInspector({
         />
         <Fact k="尝试" v={`第 ${Math.max(1, c.attempt)} 次`} />
       </div>
+      {/* 位次的**轨迹**：一个静止的「第 4485 位」答不出「今晚能不能出片」，
+          而那正是看这一栏时真正要决定的事。只在即梦手上的条目才有队可排。 */}
+      {row.stage === "run" && row.action !== "queued" && (
+        <V2vQueueTrail clipId={c.id} queueIdx={c.queueIdx} />
+      )}
 
       <div className="vsec">这一条的历程</div>
       <div className="mt4">
@@ -345,6 +351,14 @@ function hintFor(row: Row): { text: string; tone: "wr" | "er" } | null {
     return {
       tone: "er",
       text: "两个信号同时缺席（无队列位次、无扣费回执）—— 即梦接了单但从未入队、从未计费。重跑不花钱。",
+    };
+  }
+  // 幽灵单的反面：那个是「查得出没花钱」，这个是「根本没查出话来」。
+  // CLI 在超时被杀之前可能已经下过单，submit_id 却随进程一起没了。
+  if (row.clip.errorType === "submit_timeout") {
+    return {
+      tone: "er",
+      text: "提交时 CLI 超时被终止，我们没拿到 submit_id —— 但这一单可能已经下出去并扣了费。先拿这条提示词去即梦的任务列表看看有没有同一条在跑，确认没有再重跑；直接重跑有再花一份钱的风险。",
     };
   }
   if (row.slow) {

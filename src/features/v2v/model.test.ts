@@ -222,6 +222,22 @@ describe("超时与幽灵的处置必须相反", () => {
     expect(r?.situation).toContain("免费重跑");
     expect(r?.credit).toBe(0);
   });
+
+  /**
+   * 提交超时是第三种，且它与幽灵单恰好构成一对反例：幽灵单是**查得出没花钱**
+   * （两个信号同时缺席，重跑免费），提交超时是**根本没查出话来** —— CLI 在被我们
+   * 杀掉之前可能已经下过单、扣过费，submit_id 却随进程一起没了。
+   * 所以这一格绝不能出现「重跑」二字，必须先说核对。
+   */
+  it("提交超时说「可能已扣费 · 核对后再决定」，不说免费重跑", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "submit_timeout", videoPath: null, submitId: null }),
+    ]);
+    expect(r?.situation).toContain("核对");
+    expect(r?.situation).not.toContain("免费");
+    // 幽灵单那条信号不能沾上：它的含义是「确认没花钱」，而这里恰恰不确认。
+    expect(r?.signals.has("phantom")).toBe(false);
+  });
 });
 
 describe("等待异常", () => {

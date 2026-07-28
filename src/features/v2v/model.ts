@@ -379,6 +379,12 @@ export function deriveRows(
     } else if (stage === "fail" && c.errorType === "phantom") {
       situation = "免费重跑 · 从未计费";
       situationTone = "er";
+    } else if (stage === "fail" && c.errorType === "submit_timeout") {
+      // 与上一条正好相反：幽灵单是「确认没花钱」，这一条是「不知道花没花」。
+      // 提交的 CLI 被超时杀掉之前可能已经下过单，而 submit_id 随进程没了。
+      // 直接重跑是这一格里最贵的一个误操作，所以这句话必须说「先核对」。
+      situation = "提交超时 · 可能已扣费，核对后再决定重跑";
+      situationTone = "er";
     } else if (stage === "fail") {
       situation = `失败 · ${c.errorType ?? "原因见执行日志"}`;
       situationTone = "er";

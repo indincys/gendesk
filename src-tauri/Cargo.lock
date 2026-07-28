@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "gendesk"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5472,6 +5472,7 @@ dependencies = [
  "heck 0.5.0",
  "http",
  "http-range",
+ "image",
  "jni",
  "libc",
  "log",
@@ -6030,6 +6031,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

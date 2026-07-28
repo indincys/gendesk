@@ -30,6 +30,15 @@ pub enum AppError {
     #[error("凭据存储错误：{0}")]
     Keyring(String),
 
+    /// 外部进程 / 请求超时，我们主动放弃等待。
+    ///
+    /// **与「失败」不是一回事，调用方必须分开处置**：失败是对方明确回了「没做成」，
+    /// 超时是我们问不出话来 —— 那件事**可能已经做成了**。即梦的提交就是最锋利的例子：
+    /// 超时被杀掉的那个进程也许已经下过单、扣过费，只是 submit_id 随进程一起没了
+    /// （见 `v2v::dreamina::Timeout::Submit` 与 `v2v::runner::submit_batch`）。
+    #[error("超时：{0}")]
+    Timeout(String),
+
     /// 其它未分类错误。
     #[error("内部错误：{0}")]
     Internal(String),
@@ -78,7 +87,7 @@ pub type AppResult<T> = Result<T, AppError>;
 mod tests {
     use super::*;
 
-    /// 五个变体的 Display（`#[error]`）均非空，且各带自身中文前缀，
+    /// 每个变体的 Display（`#[error]`）均非空，且各带自身中文前缀，
     /// 保证前端错误分级展示不落到空串。
     #[test]
     fn display_covers_every_variant() {
@@ -87,6 +96,7 @@ mod tests {
             (AppError::Io("x".into()), "文件错误"),
             (AppError::InvalidInput("x".into()), "参数错误"),
             (AppError::Keyring("x".into()), "凭据存储错误"),
+            (AppError::Timeout("x".into()), "超时"),
             (AppError::Internal("x".into()), "内部错误"),
         ];
         for (err, prefix) in cases {

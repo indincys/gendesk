@@ -46,6 +46,16 @@ pub async fn run_startup_cleanup(
     if batches_deleted > 0 || trash_purged > 0 {
         tracing::info!(batches_deleted, trash_purged, "启动自动清理完成（D3）");
     }
+    // 排队位次采样是**观测窗口**，保留期固定不进设置：它既不是业务真相，也没人会想
+    // 去调它 —— 排产看的是最近这段时间队列多快，而半年前那一周只是在占索引。
+    {
+        let cutoff = now - crate::v2v::runner::QUEUE_SAMPLE_RETENTION_DAYS * 86_400;
+        match crate::db::repo::v2v::prune_queue_samples(pool, cutoff).await {
+            Ok(n) if n > 0 => tracing::info!(pruned = n, "排队位次采样到期清理"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "排队位次采样清理失败"),
+        }
+    }
     // 启动补跑一次退休扫描：上次退出时可能正好在验收最后几张、或清完废纸篓就关了应用。
     // 条件是幂等的，扫一遍没事可做时它一行 SQL 就返回。
     crate::commands::batches::retire_batches_quietly(pool).await;

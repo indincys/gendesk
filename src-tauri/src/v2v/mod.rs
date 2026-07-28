@@ -6,7 +6,7 @@
 //!
 //! 子模块各管一段：`handoff`（交接目录工单往返）· `runner`（提交/轮询/落盘）·
 //! `dreamina`（CLI 封装）· `autofill`（常驻非 VIP 队列）· `watcher`（监听改写结果）·
-//! `activity`（执行日志）· `events`。
+//! `activity`（执行日志）· `queue_trend`（排队位次 → 排队速度）· `events`。
 //!
 //! ## 这里只剩两个纯函数，它们是「改写提示怎么写」的全部
 //!
@@ -20,6 +20,7 @@ pub mod autofill;
 pub mod dreamina;
 pub mod events;
 pub mod handoff;
+pub mod queue_trend;
 pub mod runner;
 pub mod watcher;
 

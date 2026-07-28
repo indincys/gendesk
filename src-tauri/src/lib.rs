@@ -16,6 +16,7 @@ mod provider;
 mod publish;
 mod purpose;
 mod secrets;
+mod shell;
 mod state;
 mod v2v;
 
@@ -128,8 +129,11 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::resolve_v2v_bin,
             commands::v2v::v2v_models,
             commands::v2v::v2v_credit,
+            commands::v2v::v2v_balance,
             commands::v2v::v2v_credit_stats,
             commands::v2v::v2v_queue_stats,
+            commands::v2v::v2v_queue_trend,
+            commands::v2v::v2v_credit_daily,
             commands::v2v::v2v_autofill_status,
             commands::v2v::v2v_away_digest,
             commands::v2v::v2v_mark_seen,
@@ -287,10 +291,12 @@ pub fn run() {
 
     tauri::Builder::default()
         // single-instance 必须最先注册（保护任务队列与号池，禁双开）。
+        //
+        // 窗口现在会被藏起来（关窗 = 收起，见 `shell`），于是「再打开一次 app」就成了
+        // 把它叫回来的主要路径 —— 而原来这里只 `set_focus`，对一个隐藏的窗口毫无作用：
+        // 表现是双击图标什么都不发生，与「进程已经死了」一模一样。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_focus();
-            }
+            shell::show_main_window(app);
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -316,12 +322,25 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        // `build` + 自己跑事件循环，而不是 `run(ctx)`：macOS 上「点 Dock 图标」只发一个
+        // `Reopen` 事件，没人处理它就什么都不会发生 —— 而窗口现在是被藏起来的，
+        // 那正是把它叫回来最自然的一下。
+        //
+        // **这里不碰 `ExitRequested`**：窗口永不销毁，「窗口全关就退出」那条路本来
+        // 就不会走到；而更新器的「重启安装」（`AppHandle::restart`）用的正是同一个事件，
+        // 拦它等于把更新装不上。退出的确认在 `shell::request_quit` 里，那才是唯一入口。
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             // 启动失败无法进入日志系统，退回 stderr 并非零退出。
             eprintln!("[gendesk] 应用启动失败: {e}");
             fatal_dialog(&e.to_string());
             std::process::exit(1);
+        })
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                shell::show_main_window(_app);
+            }
         });
 }
 
@@ -525,52 +544,41 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // 外壳：关窗只隐藏 · 菜单栏托盘 · 自定义「退出」（理由见 `shell` 模块头）。
+    //
+    // **托盘失败不阻断启动**：没有它应用照样能用（只是后台常驻时看不见），
+    // 而为一个图标让整个程序起不来是不划算的。
+    if let Err(err) = shell::install_tray(app.handle()) {
+        tracing::warn!(error = %err, "菜单栏托盘创建失败，后台运行时将没有可见入口");
+    }
+    match shell::build_menu(app.handle()) {
+        // 同理：菜单建不出来就退回 Tauri 的默认菜单（代价是 ⌘Q 不再问一句），
+        // 这比连窗口都开不出来好。
+        Ok(menu) => {
+            if let Err(err) = app.set_menu(menu) {
+                tracing::warn!(error = %err, "应用菜单挂载失败，退出前确认将不可用");
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "应用菜单构建失败，退出前确认将不可用"),
+    }
+    shell::install_menu_handler(app.handle());
+
     // Windows：无系统装饰，改由前端自绘窗控（macOS 保留 Overlay 交通灯）。
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(windows)]
         {
             let _ = window.set_decorations(false);
         }
+        shell::install_close_to_hide(&window);
+    }
 
-        // E26：关闭窗口拦截——有未完成任务（排队/生成中/重试中）时先确认，
-        // 避免误退中断跑批；空闲时直接关闭无打扰。确认退出走既有中断恢复路径
-        // （下次启动 run/retry → Interrupted，可一键继续）。
-        let handle = window.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let app = handle.app_handle();
-                let state = app.state::<state::AppState>();
-                let pending: i64 = tauri::async_runtime::block_on(async {
-                    sqlx::query_scalar::<_, i64>(
-                        "SELECT COUNT(*) FROM tasks WHERE status IN ('q','run','retry')",
-                    )
-                    .fetch_one(&state.db)
-                    .await
-                    .unwrap_or(0)
-                });
-                if pending == 0 {
-                    return; // 空闲：不拦截
-                }
-                api.prevent_close();
-                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                let win = handle.clone();
-                handle
-                    .dialog()
-                    .message(format!(
-                        "仍有 {pending} 个任务未完成，退出将中断当前生成。\
-                         下次启动可继续未完成的任务。确定退出吗？"
-                    ))
-                    .title("确认退出")
-                    .buttons(MessageDialogButtons::OkCancelCustom(
-                        "退出".into(),
-                        "取消".into(),
-                    ))
-                    .show(move |confirmed| {
-                        if confirmed {
-                            let _ = win.destroy();
-                        }
-                    });
-            }
+    // 托盘上的待办数：启动时先写一次，之后跟着 `v2v://changed` 走。
+    // 不写这一次的话，一台开机自启、从头到尾没人开过窗口的机器上，托盘会一直是空的。
+    {
+        let pool = pool.clone();
+        let app_bg = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            commands::v2v::refresh_tray_badge(&pool, &app_bg).await;
         });
     }
 

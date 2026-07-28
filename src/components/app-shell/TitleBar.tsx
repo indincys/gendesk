@@ -84,11 +84,14 @@ export function TitleBar() {
               <rect x="4.5" y="4.5" width="7" height="7" rx="1" />
             </svg>
           </button>
+          {/* 收起而不是退出：点它之后进程照常跑（轮询器 / 两个 watcher / 常驻补单），
+              图标退进托盘。标签必须说清这件事，否则人会以为自己刚把跑批停了。 */}
           <button
             type="button"
             className="wb wbx"
             onClick={() => void windowControls.close()}
-            aria-label="关闭"
+            aria-label="收起窗口（后台继续运行）"
+            title="收起窗口 —— 后台继续跑，从菜单栏图标叫回来"
           >
             <svg className="ic12" viewBox="0 0 16 16" stroke="currentColor" strokeWidth="1.2">
               <path d="m4.5 4.5 7 7M11.5 4.5l-7 7" />

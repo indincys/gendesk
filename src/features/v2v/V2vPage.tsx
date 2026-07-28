@@ -4,6 +4,7 @@ import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
 import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
 import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
 import { V2vQueuePanel } from "@/features/v2v/V2vQueuePanel";
+import { V2vCreditDaily, V2vQueueTrend } from "@/features/v2v/V2vQueueTrend";
 import { V2vReviewFlow } from "@/features/v2v/V2vReviewFlow";
 import {
   ACTION_CHIPS,
@@ -84,9 +85,12 @@ import { toast } from "sonner";
  *
  * ## 键盘
  *
- * J/K 移动 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
+ * ←/→（或 ↑/↓、J/K）移动 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
  * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 详情栏 · ⌥1/2/3 观测/日志/参数。
  */
+/** 轮询事件带回来的实时进度（`v2v://progress` 的载荷，去掉 clipId）。 */
+type LiveProgress = { genStatus: string; queueIdx: number | null; polledAt: number };
+
 export function V2vPage() {
   // ── 数据 ─────────────────────────────────────────────
   const [clips, setClips] = useState<ClipView[]>([]);
@@ -98,7 +102,8 @@ export function V2vPage() {
   const [auto, setAuto] = useState<AutofillStatus | null>(null);
   const [digest, setDigest] = useState<AwayDigest | null>(null);
   const [tick, setTick] = useState<V2vTick | null>(null);
-  const [progress, setProgress] = useState<Record<number, string>>({});
+  /** 轮询刚问到的实时进度，按 clip id。库里那份要等下一次 `listV2vClips` 才更新。 */
+  const [progress, setProgress] = useState<Record<number, LiveProgress>>({});
   /** 「几秒前」要自己走字，否则一个静止的「12 秒前」比没有还误导。 */
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -186,7 +191,14 @@ export function V2vPage() {
     let un: (() => void) | undefined;
     void subscribeV2v({
       onChanged: () => void load(),
-      onProgress: (e) => setProgress((c) => ({ ...c, [e.clipId]: e.genStatus })),
+      // 位次一起收下。原来这里只取 `genStatus`，把 `queueIdx` 整个丢掉了 ——
+      // 于是轮询刚问到的新位次要等下一次 `listV2vClips` 才看得见，
+      // 而这两件事之间隔着整整一轮（非 VIP 600 秒）。
+      onProgress: (e) =>
+        setProgress((c) => ({
+          ...c,
+          [e.clipId]: { genStatus: e.genStatus, queueIdx: e.queueIdx, polledAt: e.polledAt },
+        })),
       onTick: setTick,
     }).then((f) => {
       un = f;
@@ -616,12 +628,18 @@ export function V2vPage() {
         }
         return;
       }
-      if (e.key === "j" || e.key === "J" || e.key === "ArrowDown") {
+      // 四个方向键**全部**是「换一条」。
+      //
+      // 看片流底部那条胶片条是横向的，于是 ←/→ 才是这里最顺手的换片方向 —— 而它们
+      // 原先唯一的绑定在播放条那个 `tabIndex={-1}` 的 slider 上（`V2vVideo`），
+      // 永远拿不到焦点，等于没绑。逐帧仍留在播放条的按钮上：判形变是停下来慢慢看的事，
+      // 与「一秒一条地过片」不是同一种节奏，不该抢同一组键。
+      if (e.key === "j" || e.key === "J" || e.key === "ArrowDown" || e.key === "ArrowRight") {
         e.preventDefault();
         move(1);
         return;
       }
-      if (e.key === "k" || e.key === "K" || e.key === "ArrowUp") {
+      if (e.key === "k" || e.key === "K" || e.key === "ArrowUp" || e.key === "ArrowLeft") {
         e.preventDefault();
         move(-1);
         return;
@@ -1094,7 +1112,7 @@ export function V2vPage() {
             ) : (
               <>
                 <span className="fs11 t3 nowrap ohide">
-                  {visible.length} 条符合当前筛选 · J/K 移动 · 空格 通过 · X 不通过 · ⏎ 全屏看片
+                  {visible.length} 条符合当前筛选 · ←/→ 换条 · 空格 通过 · X 不通过 · ⏎ 全屏看片
                 </span>
                 <button type="button" className="btn xs gho" disabled={busy} onClick={pollNow}>
                   查一次进度
@@ -1473,7 +1491,7 @@ function SectionBlock({
   open: boolean;
   curId: number | null;
   sel: Set<number>;
-  progress: Record<number, string>;
+  progress: Record<number, LiveProgress>;
   busy: boolean;
   onToggle: () => void;
   onPick: (id: number) => void;
@@ -1612,7 +1630,7 @@ function SectionBlock({
             r={r}
             cur={r.clip.id === curId}
             checked={sel.has(r.clip.id)}
-            status={progress[r.clip.id] ?? r.clip.genStatus ?? ""}
+            status={progress[r.clip.id]?.genStatus ?? r.clip.genStatus ?? ""}
             onPick={() => onPick(r.clip.id)}
             onCheck={() => onCheck(r.clip.id)}
           />
@@ -1747,6 +1765,15 @@ function toneClass(t: Row["situationTone"]): string {
  * 也是唯一一个改了还来得及的时刻 —— 提交即扣费，之后再改只影响下一批。
  * 改完当场重算这一批要花多少：模型之间差 5.5 倍，那个数字必须随选择一起变，
  * 否则「改了参数」与「这一下花多少钱」还是两件对不上的事。
+ *
+ * ## 这张卡上的两处「别让人干等」
+ *
+ * 1. **余额自己去取**（`v2vBalance`）。它原来长在 `previewV2vCommands` 里，于是点
+ *    「提交」之后整个界面要等一次 CLI 网络往返才看得到这张卡 —— 期间一声不吭，
+ *    人以为没点上。现在卡先出来，余额那一格显示「读取中…」。
+ * 2. **提交过程有进度**。后端本来就在逐条记 `submit` 阶段的执行日志（「提交中 i/total」），
+ *    但那些字只有开执行日志才看得到，而这张卡此刻正挡着它。所以直接订阅同一条流，
+ *    把最新一句摆在按钮旁边 —— 不新增事件，也就不会与日志分叉。
  */
 function SubmitConfirm({
   preview,
@@ -1770,6 +1797,43 @@ function SubmitConfirm({
   onConfirm: () => void;
 }) {
   const short = preview.estimatedCredits;
+  /** `undefined` = 还在读；`null` = 读不到（掉线/未登录，不拦人）。 */
+  const [balance, setBalance] = useState<number | null | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    void unwrap(commands.v2vBalance())
+      .then((b) => alive && setBalance(b))
+      .catch(() => alive && setBalance(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 提交进度：订阅执行日志里 `submit` 阶段的那条流。
+  const [step, setStep] = useState<string | null>(null);
+  useEffect(() => {
+    if (!busy) return;
+    let un: (() => void) | undefined;
+    void subscribeV2v({
+      onActivity: (e) => {
+        if (e.entry.phase === "submit") setStep(e.entry.message);
+      },
+    }).then((f) => {
+      un = f;
+    });
+    return () => un?.();
+  }, [busy]);
+
+  // 秒表：这里要回答的是「它还在动吗」，而后端两条日志之间可能隔着一整次网络往返。
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!busy) {
+      setElapsed(0);
+      return;
+    }
+    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [busy]);
   // 即梦同时只跑得下这么多条，其余留在本地排队自动接上。**这个数必须出现在按下确认
   // 之前**：这一版之前，选 9 条点确认得到的是「已提交 9 条」，而实际只有 1 条入队、
   // 8 条被即梦以 ExceedConcurrencyLimit 弹回来判死 —— 界面从头到尾没提过有这个上限。
@@ -1794,9 +1858,20 @@ function SubmitConfirm({
             {waits > 0 ? `先发 ${goesNow} 条 · 其余排队时才扣费` : "提交即扣费，无法撤回"}
           </span>
           <div className="f1" />
-          <button type="button" className="btn sm gho" onClick={onClose}>
-            取消
-          </button>
+          {/* 提交进行中：这一行是「它还在动吗」的全部答案。取消按钮此刻让位给它 ——
+              发出去的那一条撤不回来，一个点了没用的「取消」只会让人更慌。 */}
+          {busy && (
+            <span className="subprog">
+              <RefreshCw className="ic12 spin" />
+              <span className="ohide nowrap">{step ?? "正在提交…"}</span>
+              <span className="mono nowrap">{elapsed}s</span>
+            </span>
+          )}
+          {!busy && (
+            <button type="button" className="btn sm gho" onClick={onClose}>
+              取消
+            </button>
+          )}
           <button
             type="button"
             className="btn sm pri"
@@ -1805,7 +1880,7 @@ function SubmitConfirm({
             onClick={onConfirm}
           >
             <Send className="ic12" />
-            确认提交
+            {busy ? "提交中…" : "确认提交"}
           </button>
         </>
       }
@@ -1844,9 +1919,10 @@ function SubmitConfirm({
               {short}
             </b>{" "}
             额度
-            {preview.balance !== null && (
+            {balance === undefined && <span className="t3">｜余额读取中…</span>}
+            {balance !== undefined && balance !== null && (
               <>
-                ｜余额 <b>{preview.balance}</b> → 提交后约 <b>{preview.balance - short}</b>
+                ｜余额 <b>{balance}</b> → 提交后约 <b>{balance - short}</b>
               </>
             )}
           </div>
@@ -1855,7 +1931,7 @@ function SubmitConfirm({
               {preview.unpriced.join("、")} 没实测过单价，未计入 —— 实际只会更高。
             </div>
           )}
-          {preview.balance !== null && preview.balance < short && (
+          {balance != null && balance < short && (
             <div className="terr">
               余额不足：即梦逐条扣费，会提交到一半开始报错，而前面扣掉的退不回来。
             </div>
@@ -1921,7 +1997,7 @@ function ObserveModal({
       footer={
         <>
           <span className="fs11 t3">
-            即梦不回传排队位次，故这里给的是我们自己测得准的两件事：出片间隔与逐小时趋势。
+            排队位次按轮询节拍采样落库，保留 30 天；额度快照一天一条。
           </span>
           <div className="f1" />
           <button type="button" className="btn sm pri" onClick={onClose}>
@@ -1932,7 +2008,21 @@ function ObserveModal({
     >
       <div style={{ padding: 4 }}>
         <V2vQueuePanel tick={tick} now={now} always />
-        <div className="statgrid mt10">
+
+        {/* 排产用的两块。放在出片统计**之前**：那些是「已经花掉的」，
+            而这两块是「下一批什么时候发」——后者才是打开这个面板时要决定的事。 */}
+        <div className="vsec mt10">非 VIP 排队观测（近 7 天）</div>
+        <div className="mt5">
+          <V2vQueueTrend hours={7 * 24} />
+        </div>
+
+        <div className="vsec mt10">每日额度（近 14 天）</div>
+        <div className="mt5">
+          <V2vCreditDaily />
+        </div>
+
+        <div className="vsec mt10">额度分账</div>
+        <div className="statgrid mt5">
           <Stat label="账户余额" value={credit?.balance == null ? "—" : String(credit.balance)} />
           <Stat label="累计已用" value={String(credit?.spentTotal ?? 0)} />
           <Stat label="近 7 天" value={String(credit?.spentWeek ?? 0)} />

@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.25.0"
+version = "0.26.0"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -15,7 +15,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+# `tray-icon` + `image-png`：关窗之后进程要继续跑（轮询器 / 两个 watcher / 常驻补单），
+# 而一个没有任何界面痕迹的后台进程与「已经退出了」在用户那里长得一模一样。
+# 托盘图标是它唯一的存在证明，也是把窗口叫回来的入口。
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
@@ -37,8 +40,17 @@ async-trait = "0.1"
 base64 = "0.22"
 futures-util = "0.3"
 
-# 异步运行时（调度循环、per-Key Semaphore；M1 起用于数据层测试）
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+# 异步运行时（调度循环、per-Key Semaphore；M1 起用于数据层测试）。
+# `process`：即梦 CLI 的子进程要能**超时后被杀掉**（`v2v::dreamina::run`）。
+# std::process 的 `output()` 没有超时可言，而 CLI 一挂，那条 IPC 就永不返回。
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "fs",
+    "process",
+] }
 
 # 生图 API 调用（rustls 免 OpenSSL）
 reqwest = { version = "0.13", default-features = false, features = [

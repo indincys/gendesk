@@ -19,7 +19,7 @@ use sqlx::SqlitePool;
 
 use crate::db::now_unix;
 use crate::db::repo::v2v as repo;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::files::DataDirs;
 
 use super::activity::Activity;
@@ -422,9 +422,22 @@ pub async fn submit_batch(
                 // 明确拿到失败、且没有 submit_id → 没花钱。判 fail 而不是悄悄放回
                 // ready：错误原文得有地方落，而「处理异常」那一档就是给人看它的。
                 // 认领因此不会留下孤儿（run 且无 submit_id 只可能是进程被杀）。
+                //
+                // **超时是这里唯一的例外**，见 [`submit_error_type`]：那一支的前提
+                // （对方说没做成，所以没花钱）在超时上根本不成立。
+                let kind = submit_error_type(&e);
                 let msg = format!("{e}");
-                log.error("submit", who, format!("提交失败：{msg}"), None);
-                repo::mark_failed(pool, clip.id, "submit", &msg, now_unix()).await?;
+                log.error(
+                    "submit",
+                    who,
+                    if kind == SUBMIT_TIMEOUT {
+                        format!("提交超时，已终止 CLI：{msg} 这一条已判到「处理异常」等你核对 —— 请勿直接重跑。")
+                    } else {
+                        format!("提交失败：{msg}")
+                    },
+                    None,
+                );
+                repo::mark_failed(pool, clip.id, kind, &msg, now_unix()).await?;
                 sum.failed += 1;
                 if sum.first_error.is_none() {
                     sum.first_error = Some(msg);
@@ -441,6 +454,169 @@ pub async fn submit_batch(
         );
     }
     Ok(sum)
+}
+
+/// 排队采样的保留期。**观测窗口，不是业务真相** —— 排产看的是「最近这段时间队列多快」，
+/// 半年前那一周对今晚提交与否毫无参考价值。
+pub const QUEUE_SAMPLE_RETENTION_DAYS: i64 = 30;
+
+/// 今天（本地时区）的 `YYYY-MM-DD`。
+///
+/// 「每天」是**人的**每天。用 UTC 切窗会让北京时间早八点算进前一天，于是每日进账
+/// 会周期性地落在错误的格子里，而这份台账的全部意义就是看那个数字稳不稳定
+/// （`and_utc()` 把北京时间当 UTC 这条坑，CLAUDE.md 里已经记过一次）。
+fn local_day(now: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(now, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
+        // 夏令时折叠等边界拿第一个解；拿不到就退回 UTC，宁可错一格也不要漏一天。
+        chrono::LocalResult::Ambiguous(dt, _) => dt.format("%Y-%m-%d").to_string(),
+        chrono::LocalResult::None => chrono::DateTime::from_timestamp(now, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// 今天还没记过快照就跑一次 `user_credit` 记一条。一天一个进程。
+///
+/// ## 它在验证什么
+///
+/// 「即梦每天登录送 80，能不能靠 CLI 自动领」——CLI 的命令面里没有任何领取/签到命令，
+/// 所以这件事只剩一个可证伪的假设：**服务端在检测到有效登录态时自动发放**。
+/// 这条快照就是那个实验：`delta = 余额涨了多少 + 这期间我们自己花了多少`，
+/// 连着几天稳定 ≈ +80 就说明假设成立，那么「保持后台常驻 + 每天调一次 CLI」本身
+/// 就是全部实现；≈ 0 则说明必须走网页领取。
+///
+/// 失败一律静默跳过（`user_credit` 自己会把原因记进执行日志）：掉线/未登录是常态，
+/// 而这条台账缺一天只是少一个数据点，不该在界面上变成一个错误。
+async fn snapshot_credit_if_new_day(pool: &SqlitePool, bin: &str, log: &Activity) {
+    let now = now_unix();
+    let day = local_day(now);
+    match repo::credit_day(pool, &day).await {
+        Ok(Some(_)) => return, // 今天记过了
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "读每日额度台账失败");
+            return;
+        }
+    }
+    let Ok(info) = dreamina::user_credit(bin, log).await else {
+        return;
+    };
+    let prev = repo::latest_credit_day(pool).await.ok().flatten();
+    // 花掉的那一半从我们自己的账里取（扣费回执），窗口就是「上一条快照到现在」。
+    let spent = match &prev {
+        Some(p) => repo::credit_since(pool, p.at).await.unwrap_or(0),
+        None => 0,
+    };
+    // 首条没有上一条可比 → delta 留空。**不是 0**：0 是「没进账」这个结论，
+    // 而首日我们没有结论。
+    let delta = prev.as_ref().map(|p| info.total_credit - p.balance + spent);
+    let row = repo::CreditDay {
+        day: day.clone(),
+        at: now,
+        balance: info.total_credit,
+        spent_since_prev: spent,
+        delta,
+    };
+    match repo::insert_credit_day(pool, &row).await {
+        Ok(true) => log.info(
+            "cli",
+            None,
+            match delta {
+                Some(d) => format!(
+                    "{day} 额度快照：余额 {}（较上次快照 {}{d} · 期间本机花掉 {spent}）",
+                    info.total_credit,
+                    if d >= 0 { "+" } else { "" }
+                ),
+                None => format!(
+                    "{day} 额度快照：余额 {}（首条，暂无对比）",
+                    info.total_credit
+                ),
+            },
+            None,
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "写每日额度台账失败"),
+    }
+}
+
+/// 落一个排队位次采样点，并**只在转折处**写一行日志。
+///
+/// ## 采样进表，不进日志
+///
+/// 位次是时序：要用它排产，人问的是「这条队多快」，而那是位次对时间的导数
+/// （`queue_trend`）。执行日志答不了这个问题 —— 它是 500 条环形缓冲、重启即清空，
+/// 而非 VIP 一轮 600 秒，一条排 14 小时的单光自己就要占掉 84 行，把真正的报错挤出窗口
+/// （同 `dreamina::run` 里那条「成功也记 = 每分钟 190 条」的教训）。
+///
+/// ## 那日志里还剩什么
+///
+/// 只剩两件**看曲线看不出来**的事：
+///
+/// - **首次拿到位次** = 这一单确实入队了。它同时是幽灵判定的分水岭，值得留一行时刻。
+/// - **位次倒退** = 被重排/重挤了队，罕见且异常，不会刷屏。
+///
+/// 至于「位次半天不动」，曲线上一条平线比一行字清楚得多，而「队列整体停了」在队列面板
+/// 已经由「上次出片 N 前」答过一遍了 —— 同一个信号开第三条通道，就是在制造噪音。
+async fn record_position(
+    pool: &SqlitePool,
+    clip: &repo::ClipRow,
+    q: &dreamina::QueryResult,
+    now: i64,
+    log: &Activity,
+) {
+    let Some(idx) = q.queue_idx else {
+        return;
+    };
+    // 0 = 已经排到头（实测完成态回 `{queue_idx: 0, queue_status: "Finish"}`）。
+    // 它不是队列里的一个位置，画进轨迹会在末尾拖一条冲到底的假斜线。
+    if idx <= 0 {
+        return;
+    }
+    let _ = repo::record_queue_sample(pool, clip.id, now, idx, q.queue_length).await;
+
+    let who = Some((clip.id, clip.prompt_code.as_str()));
+    match clip.queue_idx {
+        None => log.info(
+            "poll",
+            who,
+            match q.queue_length {
+                Some(total) if total > 0 => {
+                    format!("已入队 · 第 {idx} 位（整条队 {total}）")
+                }
+                _ => format!("已入队 · 第 {idx} 位"),
+            },
+            None,
+        ),
+        Some(prev) if idx > prev => log.warn(
+            "poll",
+            who,
+            format!("排队位次倒退：第 {prev} 位 → 第 {idx} 位（被重排或重新入队）"),
+            None,
+        ),
+        _ => {}
+    }
+}
+
+/// 提交超时落库时用的 `error_type`。与普通失败分开是**钱的问题**，不是措辞问题。
+pub const SUBMIT_TIMEOUT: &str = "submit_timeout";
+
+/// 提交失败 → 落库的 `error_type`。
+///
+/// 只有两个取值，而它们的差别是这条链路上最贵的一处：
+///
+/// - `submit`：即梦**明确回了失败**，没有 submit_id，一分钱没扣 → 重跑是安全的。
+/// - `submit_timeout`：我们等不下去、把 CLI 杀了，**根本没拿到回答**。那一单可能已经
+///   下出去并扣了费，而 submit_id 随进程一起没了 → 直接重跑就是再花一份钱买同一条视频。
+///
+/// 把两者混成一个 `submit`，界面上就只剩「失败了，重跑吧」这一句话可说 ——
+/// 而那正是错的那一半。
+fn submit_error_type(e: &AppError) -> &'static str {
+    match e {
+        AppError::Timeout(_) => SUBMIT_TIMEOUT,
+        _ => "submit",
+    }
 }
 
 /// 落库提交回执，失败带退避重试。
@@ -792,6 +968,9 @@ pub async fn sweep_once(
                     position_budget -= 1;
                     let who = Some((clip.id, clip.prompt_code.as_str()));
                     if let Ok(full) = dreamina::query(bin, &submit_id, None, log, who).await {
+                        // 采样要在 `mark_polled` **之前**：那一句会把 clip 行里的
+                        // 上一个位次覆盖掉，而「与上次比是不是倒退了」正要拿它作比较。
+                        record_position(pool, &clip, &full, now, log).await;
                         let _ =
                             repo::mark_polled(pool, clip.id, &full.gen_status, full.queue_idx, now)
                                 .await;
@@ -892,6 +1071,8 @@ async fn query_and_settle(
         }
     };
     sum.polled += 1;
+    // 采样在落库之前（理由同 `sweep_once` 里那处：要拿库里的上一个位次做对比）。
+    record_position(pool, clip, &q, now, log).await;
     // 状态原文落库：切页/重启后看板仍答得出「这条在排队还是在跑」。
     let _ = repo::mark_polled(pool, clip.id, &q.gen_status, q.queue_idx, now).await;
     settle(pool, dirs, bin, clip, q, timeout_secs, true, log, sum).await
@@ -1200,6 +1381,10 @@ pub fn spawn(
                 .await
                 .map(|rows| StageCounts::from_rows(&rows).run)
                 .unwrap_or(0);
+            // 每日额度快照。**在 `poll_enabled` 判断之前**：它与轮询是两件事，
+            // 关掉轮询（比如今天不想跑批）不该把台账也停掉 —— 那正是「不跑批的那一天
+            // 有没有照样进账 80」这个对照组最需要的数据。
+            snapshot_credit_if_new_day(&pool, &settings.bin, &log).await;
             if !settings.poll_enabled {
                 tick.enabled = false;
                 let _ = tick.emit(&app);
@@ -1418,6 +1603,137 @@ mod tests {
             repo::list_by_stages(&pool, &["fail"]).await.unwrap().len(),
             1
         );
+    }
+
+    // 位次采样必须**只进表、不进日志**，转折处才写一行。
+    //
+    // 反过来做（每轮记一条）的代价在 `dreamina::run` 的注释里已经算过一次：
+    // 非 VIP 一轮 600 秒，一条排 14 小时的单光自己就要占掉 84 行，
+    // 而执行日志只有 500 条 —— 真正的报错会被「一切正常」挤出窗口。
+    #[tokio::test]
+    async fn positions_go_into_the_table_and_only_turning_points_go_into_the_log() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 1).await;
+        let id = ids[0];
+        let log = Activity::silent();
+
+        let q = |idx: Option<i64>| dreamina::QueryResult {
+            gen_status: "Queueing".into(),
+            queue_idx: idx,
+            queue_length: Some(574_522),
+            ..Default::default()
+        };
+        // 只有 id 与「上一次问到的位次」参与判断，其余字段用现成的空壳。
+        let clip_at = |queue_idx: Option<i64>| repo::ClipRow {
+            id,
+            queue_idx,
+            ..clip(None, None, None)
+        };
+
+        // ① 首次拿到位次 → 一行「已入队」。
+        record_position(&pool, &clip_at(None), &q(Some(4485)), 1_000, &log).await;
+        // ② 正常推进的后续三轮 → 一行都不该多。
+        record_position(&pool, &clip_at(Some(4485)), &q(Some(4200)), 1_600, &log).await;
+        record_position(&pool, &clip_at(Some(4200)), &q(Some(3900)), 2_200, &log).await;
+        record_position(&pool, &clip_at(Some(3900)), &q(Some(3600)), 2_800, &log).await;
+
+        let samples = repo::queue_samples_of(&pool, id).await.unwrap();
+        assert_eq!(samples.len(), 4, "四轮四个采样点，全部进表");
+        assert_eq!(samples[0].queue_idx, 4485);
+        assert_eq!(samples[0].queue_length, Some(574_522));
+        assert_eq!(
+            log.snapshot().len(),
+            1,
+            "只有「首次入队」那一行，正常推进不写日志：{:?}",
+            log.snapshot()
+        );
+        assert!(log.snapshot()[0].message.contains("已入队"));
+
+        // ③ 位次倒退是真异常（被重排），罕见且必须出声。
+        record_position(&pool, &clip_at(Some(3600)), &q(Some(9000)), 3_400, &log).await;
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[1].level, "warn");
+        assert!(snap[1].message.contains("倒退"), "{}", snap[1].message);
+    }
+
+    // 完成态的 `queue_idx: 0` 不是「排在第 0 位」，它是「已经不在队里了」。
+    // 混进轨迹会在末尾拖出一条冲到底的假斜线，而那条线会让速度估算凭空翻几倍。
+    #[tokio::test]
+    async fn the_zero_position_of_a_finished_task_is_not_a_queue_position() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let id = seed_ready(&pool, 1).await[0];
+        let log = Activity::silent();
+        let finished = dreamina::QueryResult {
+            gen_status: "Finish".into(),
+            queue_idx: Some(0),
+            queue_length: Some(0),
+            ..Default::default()
+        };
+        let row = repo::ClipRow {
+            id,
+            ..clip(None, None, None)
+        };
+        record_position(&pool, &row, &finished, 1_000, &log).await;
+        assert!(repo::queue_samples_of(&pool, id).await.unwrap().is_empty());
+        assert!(log.snapshot().is_empty());
+    }
+
+    // 采样是诊断数据，不是业务真相：同一秒重复写（补扫与定时扫在边界上撞到一起）
+    // 必须是 no-op，而不是一个要往上冒泡、把这一轮轮询打断的错误。
+    #[tokio::test]
+    async fn duplicate_samples_at_the_same_second_are_ignored_not_fatal() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let id = seed_ready(&pool, 1).await[0];
+        repo::record_queue_sample(&pool, id, 500, 4485, None)
+            .await
+            .unwrap();
+        repo::record_queue_sample(&pool, id, 500, 4400, None)
+            .await
+            .unwrap();
+        let s = repo::queue_samples_of(&pool, id).await.unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].queue_idx, 4485, "先写的那个留下");
+    }
+
+    // 「每天」是**人的**每天。用 UTC 切会让北京时间早八点算进前一天，
+    // 于是每日进账会周期性地落进错误的格子，而这份台账的全部意义就是看那个数稳不稳。
+    #[test]
+    fn the_day_boundary_follows_the_local_clock() {
+        use chrono::{Local, TimeZone};
+        // 本地时间当天 00:00:30 与 23:59:30 必须是同一天，且等于本地日历上的那一天。
+        let base = Local
+            .with_ymd_and_hms(2026, 7, 28, 0, 0, 30)
+            .single()
+            .expect("本地时间应可构造");
+        let late = Local
+            .with_ymd_and_hms(2026, 7, 28, 23, 59, 30)
+            .single()
+            .expect("本地时间应可构造");
+        assert_eq!(local_day(base.timestamp()), "2026-07-28");
+        assert_eq!(local_day(late.timestamp()), "2026-07-28");
+        // 跨过本地零点就必须换一天。
+        assert_eq!(local_day(late.timestamp() + 60), "2026-07-29");
+    }
+
+    // 提交超时与提交失败**必须落成两种 error_type**。
+    //
+    // 它们在界面上指挥的是相反的动作：失败 → 重跑（没花钱）；超时 → 先去即梦核对
+    // （可能已经扣了费，而 submit_id 随被杀的进程没了）。混成一个 `submit`，
+    // 「处理异常」那一档就只说得出「失败了，重跑吧」——对超时那一半恰好是最贵的建议。
+    #[test]
+    fn a_submit_timeout_is_not_filed_as_an_ordinary_failure() {
+        assert_eq!(
+            submit_error_type(&AppError::Timeout("卡住了".into())),
+            SUBMIT_TIMEOUT
+        );
+        for e in [
+            AppError::Internal("即梦 CLI 返回失败（1）".into()),
+            AppError::InvalidInput("首帧图不存在".into()),
+            AppError::Io("启动即梦 CLI 失败".into()),
+        ] {
+            assert_eq!(submit_error_type(&e), "submit", "{e}");
+        }
     }
 
     // 位子被占满时一条都不发 —— 包括「占位的是别人放行的」这种情况。

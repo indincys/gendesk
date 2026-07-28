@@ -206,7 +206,7 @@ export function V2vReviewFlow({
         )}
         <div className="f1" />
         <span className="fs10 mono" style={{ color: "var(--rd-t3)" }}>
-          J/K 上下条 · U 撤销 · ESC 退出
+          ←/→ 换条 · U 撤销 · ESC 退出
         </span>
       </div>
     </div>

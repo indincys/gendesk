@@ -757,6 +757,152 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     Ok(n)
 }
 
+// ─────────────────────── 排队位次轨迹（0029）───────────────────────
+
+/// 一个排队位次采样点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromRow)]
+pub struct QueueSample {
+    pub clip_id: i64,
+    pub at: i64,
+    pub queue_idx: i64,
+    pub queue_length: Option<i64>,
+}
+
+/// 记一个排队位次采样点。
+///
+/// `INSERT OR IGNORE`：同一秒的重复写（补扫与定时扫在边界上撞到一起）是 no-op，
+/// 而不是一个要往上冒泡的错误 —— 这是诊断数据，写丢一个点不该影响轮询。
+pub async fn record_queue_sample(
+    pool: &SqlitePool,
+    clip_id: i64,
+    at: i64,
+    queue_idx: i64,
+    queue_length: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO v2v_queue_samples (clip_id, at, queue_idx, queue_length)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(clip_id)
+    .bind(at)
+    .bind(queue_idx)
+    .bind(queue_length)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 某条 clip 的全部采样，按时间正序（详情栏那条曲线）。
+pub async fn queue_samples_of(
+    pool: &SqlitePool,
+    clip_id: i64,
+) -> Result<Vec<QueueSample>, sqlx::Error> {
+    sqlx::query_as::<_, QueueSample>(
+        "SELECT clip_id, at, queue_idx, queue_length FROM v2v_queue_samples
+          WHERE clip_id = ?1 ORDER BY at",
+    )
+    .bind(clip_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// `since` 之后的全部采样，按 (clip, 时间) 正序。
+///
+/// 全局速度是**逐条算斜率、再跨条聚合**的，所以这里不在 SQL 里做窗口函数：
+/// 聚合规则（丢掉位次回升的段、按小时归桶、取中位数）是业务判断，属于纯函数那一层，
+/// 留在 SQL 里既测不动也读不懂。
+pub async fn queue_samples_since(
+    pool: &SqlitePool,
+    since: i64,
+) -> Result<Vec<QueueSample>, sqlx::Error> {
+    sqlx::query_as::<_, QueueSample>(
+        "SELECT clip_id, at, queue_idx, queue_length FROM v2v_queue_samples
+          WHERE at >= ?1 ORDER BY clip_id, at",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// 裁掉过期采样，回删除条数。
+///
+/// 保留期是**观测窗口**，不是业务真相 —— 排产要看的是「最近这段时间队列多快」，
+/// 半年前那一周对今晚提交与否毫无参考价值，而它会一直占着索引。
+pub async fn prune_queue_samples(pool: &SqlitePool, before: i64) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM v2v_queue_samples WHERE at < ?1")
+        .bind(before)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
+// ─────────────────────── 每日额度台账（0030）───────────────────────
+
+/// 一天一条的余额快照。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct CreditDay {
+    pub day: String,
+    pub at: i64,
+    pub balance: i64,
+    pub spent_since_prev: i64,
+    pub delta: Option<i64>,
+}
+
+/// 今天记过快照了吗。日切判断读它，`None` = 还没有。
+pub async fn credit_day(pool: &SqlitePool, day: &str) -> Result<Option<CreditDay>, sqlx::Error> {
+    sqlx::query_as::<_, CreditDay>(
+        "SELECT day, at, balance, spent_since_prev, delta FROM v2v_credit_daily WHERE day = ?1",
+    )
+    .bind(day)
+    .fetch_optional(pool)
+    .await
+}
+
+/// 最近一条快照（用来算 delta 的基准）。
+pub async fn latest_credit_day(pool: &SqlitePool) -> Result<Option<CreditDay>, sqlx::Error> {
+    sqlx::query_as::<_, CreditDay>(
+        "SELECT day, at, balance, spent_since_prev, delta FROM v2v_credit_daily
+          ORDER BY day DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// 写入当天快照。
+///
+/// `INSERT OR IGNORE`：一天只记第一次。**不是 UPSERT** —— 当天第二次写会用一个更晚的
+/// 余额覆盖掉，而那之间跑掉的额度就再也对不上账了，实验数据当场作废。
+pub async fn insert_credit_day(pool: &SqlitePool, row: &CreditDay) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "INSERT OR IGNORE INTO v2v_credit_daily (day, at, balance, spent_since_prev, delta)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&row.day)
+    .bind(row.at)
+    .bind(row.balance)
+    .bind(row.spent_since_prev)
+    .bind(row.delta)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// 最近 n 天的快照，按日期正序（观测面板那条折线）。
+pub async fn recent_credit_days(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<CreditDay>, sqlx::Error> {
+    let mut rows = sqlx::query_as::<_, CreditDay>(
+        "SELECT day, at, balance, spent_since_prev, delta FROM v2v_credit_daily
+          ORDER BY day DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
 /// 验收通过了却没交付到输出目录的条数（成片库徽章）。
 ///
 /// 这是成片这条链上**唯一一处会无声断掉的地方**：验收通过时的拷贝失败不回滚验收
@@ -2487,5 +2633,92 @@ mod tests {
         // 按出片时刻切窗：1_000 那条落在窗外。
         assert_eq!(credit_since(&pool, 1_500).await.unwrap(), 66);
         assert_eq!(credit_since(&pool, 0).await.unwrap(), 110);
+    }
+
+    // 一天只记第一次。**故意不是 UPSERT**：当天第二次写会用一个更晚的余额覆盖掉，
+    // 而那之间跑掉的额度就再也对不上账 —— 这份台账是个实验，覆盖掉就等于数据作废。
+    #[tokio::test]
+    async fn a_days_credit_snapshot_is_written_once_and_never_overwritten() {
+        let (pool, _d) = test_pool().await;
+        let first = CreditDay {
+            day: "2026-07-28".into(),
+            at: 1_000,
+            balance: 12_833,
+            spent_since_prev: 0,
+            delta: None,
+        };
+        assert!(insert_credit_day(&pool, &first).await.unwrap());
+        let second = CreditDay {
+            day: "2026-07-28".into(),
+            at: 50_000,
+            balance: 9_000,
+            spent_since_prev: 3_833,
+            delta: Some(0),
+        };
+        assert!(
+            !insert_credit_day(&pool, &second).await.unwrap(),
+            "同一天的第二次写必须是 no-op"
+        );
+        let got = credit_day(&pool, "2026-07-28").await.unwrap().unwrap();
+        assert_eq!(got.balance, 12_833, "留下的是当天第一次那个余额");
+        assert!(
+            got.delta.is_none(),
+            "首条没有对比基准，delta 必须留空而不是 0"
+        );
+
+        // 第二天：delta = 余额差 + 期间本机花掉，正是「凭空进来了多少」。
+        insert_credit_day(
+            &pool,
+            &CreditDay {
+                day: "2026-07-29".into(),
+                at: 90_000,
+                balance: 12_113,
+                spent_since_prev: 800,
+                delta: Some(12_113 - 12_833 + 800),
+            },
+        )
+        .await
+        .unwrap();
+        let latest = latest_credit_day(&pool).await.unwrap().unwrap();
+        assert_eq!(latest.day, "2026-07-29");
+        assert_eq!(
+            latest.delta,
+            Some(80),
+            "花掉的加回来之后，剩下的就是每日进账"
+        );
+
+        let recent = recent_credit_days(&pool, 14).await.unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].day, "2026-07-28", "折线要按日期正序");
+    }
+
+    // 采样保留期是观测窗口：到期的裁掉，窗口内的一个都不能少。
+    #[tokio::test]
+    async fn pruning_samples_only_removes_what_fell_out_of_the_window() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+        for at in [100, 5_000, 9_000] {
+            record_queue_sample(&pool, id, at, 4_485 - at, Some(574_522))
+                .await
+                .unwrap();
+        }
+        assert_eq!(prune_queue_samples(&pool, 5_000).await.unwrap(), 1);
+        let left = queue_samples_of(&pool, id).await.unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].at, 5_000, "边界上那条属于窗口内");
+    }
+
+    // 采样随 clip 一起走：clip 删了，它的轨迹没有单独留存的意义，
+    // 留下来只会变成一堆认不出主人的孤儿行。
+    #[tokio::test]
+    async fn samples_are_removed_with_their_clip() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+        record_queue_sample(&pool, id, 100, 4_485, None)
+            .await
+            .unwrap();
+        assert_eq!(queue_samples_since(&pool, 0).await.unwrap().len(), 1);
+        remove(&pool, &[id]).await.unwrap();
+        assert!(queue_samples_since(&pool, 0).await.unwrap().is_empty());
     }
 }

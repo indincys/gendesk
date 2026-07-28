@@ -510,6 +510,12 @@ pub struct QueryResult {
     /// 所以它缺席不是常态而是**征兆**：`queue_idx` 与 `credit_count` 双双为 None，
     /// 就是「即梦接了单但没入队」。判定见 `runner::is_phantom`。
     pub queue_idx: Option<i64>,
+    /// 整条全局队列有多长（实测样本 `queue_length: 574522`）。
+    ///
+    /// 它与 [`Self::queue_idx`] 一起才说得出「排在什么位置」：第 4485 位在 57 万人的队里
+    /// 是前 1%，在 5000 人的队里是队尾。轨迹图上它是第二条曲线 —— 位次不动而队长在涨，
+    /// 说明是新单涌进来而不是这条队停了。
+    pub queue_length: Option<i64>,
     /// 实际计费型号（`commerce_info.triplets[].benefit_type`），形如
     /// `dreamina_seedance_20_fast_5s`。这是**回执**，不是我们的输入 ——
     /// 「到底走的哪个模型」只有它答得准。
@@ -559,6 +565,10 @@ pub fn parse_query(v: &serde_json::Value) -> QueryResult {
             .get("queue_info")
             .and_then(|q| q.get("queue_idx"))
             .and_then(|x| x.as_i64()),
+        queue_length: v
+            .get("queue_info")
+            .and_then(|q| q.get("queue_length"))
+            .and_then(|x| x.as_i64()),
         benefit_type: v
             .get("commerce_info")
             .and_then(|c| {
@@ -576,10 +586,72 @@ pub fn parse_query(v: &serde_json::Value) -> QueryResult {
     }
 }
 
+/// 一次 CLI 调用等多久才放弃 —— **按「杀掉它的代价」分档，不是按「它一般跑多久」**。
+///
+/// ## 为什么必须有超时
+///
+/// 原来这里一个都没有：`Command::output()` 一直等到子进程自己结束。于是 CLI 一挂
+/// （网络吊住、等一个永远不来的响应），那条 IPC 命令就永不返回，前端的 `busyRef`
+/// 永不释放 —— 用户看到的「提交页面卡住」，最狠的那个版本就是这么来的。
+///
+/// ## 为什么不能一刀切一个数
+///
+/// 超时的动作是**杀掉子进程**，而杀掉它的代价三档完全不同：
+///
+/// - 只读查询：杀了什么也没发生，下一轮再问就是了 → 可以给得很紧。
+/// - 带下载的查询：杀了只是这一次没下成，成片还在即梦那边 → 给宽一点，别把大文件
+///   下到一半掐了；重来一次不花钱。
+/// - **提交：杀掉的那个进程可能已经下过单、扣过费了**。submit_id 是那笔钱唯一的凭证，
+///   而它随进程一起没了。这与 `runner::persist_submit` 防的是同一类事故，所以这一档
+///   给到十分钟（正常几秒），并且真超时了要按 error 级喊出来、判给人看，
+///   绝不能当成「没花钱的失败」悄悄退回去重跑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timeout {
+    /// 只读查询（`user_credit` / `list_task` / 不带下载的 `query_result` / `session`）。
+    Read,
+    /// 带 `--download_dir` 的 `query_result`：要把成片拉到本地。
+    Download,
+    /// 提交。杀它可能丢掉一笔已经花出去的钱。
+    Submit,
+    /// 测试用的短超时。生产档位最短也有 60 秒，等它跑完的测试没人会留着。
+    #[cfg(test)]
+    Custom(std::time::Duration),
+}
+
+impl Timeout {
+    pub fn duration(self) -> std::time::Duration {
+        match self {
+            Self::Read => std::time::Duration::from_secs(60),
+            Self::Download => std::time::Duration::from_secs(300),
+            Self::Submit => std::time::Duration::from_secs(600),
+            #[cfg(test)]
+            Self::Custom(d) => d,
+        }
+    }
+
+    /// 超时后写进执行日志与错误里的那句话。**提交那一档必须写明钱的下落**：
+    /// 它是人此刻唯一能拿到的线索，而下一步（重跑还是先去核对）取决于它。
+    fn message(self, ms: u128) -> String {
+        let secs = self.duration().as_secs();
+        match self {
+            Self::Read => format!("即梦 CLI 超过 {secs} 秒没有响应，已终止（{ms}ms）。只读查询，未产生任何副作用，下一轮会自动重试。"),
+            Self::Download => format!("即梦 CLI 下载成片超过 {secs} 秒未完成，已终止（{ms}ms）。成片仍在即梦那边，下一轮会重新下载，不额外花钱。"),
+            Self::Submit => format!(
+                "即梦 CLI 提交超过 {secs} 秒没有响应，已终止（{ms}ms）。\
+                 **这一单可能已经下出去并扣了费，而 submit_id 随进程一起丢了。**\
+                 重跑等于再花一份钱 —— 先用这条提示词去即梦的任务列表核对有没有同一条在跑，\
+                 确认没有再重跑。"
+            ),
+            #[cfg(test)]
+            Self::Custom(_) => format!("即梦 CLI 超过 {secs} 秒没有响应，已终止（{ms}ms）。"),
+        }
+    }
+}
+
 /// 跑一条 CLI 命令，回 stdout。
 ///
-/// 在 `spawn_blocking` 里同步 exec：CLI 一次调用要走网络，秒级到十几秒，
-/// 占着异步执行器会把别的 IPC 命令一起卡住（v0.14.0 的上传静默就是这么来的）。
+/// 子进程走 `tokio::process` + `kill_on_drop`，外面套一层 [`Timeout`]：CLI 一次调用要走
+/// 网络，秒级到十几秒，而它挂住的时候必须有个尽头（见 [`Timeout`] 的说明）。
 ///
 /// **失败一律记进执行日志**（含退出码、耗时与 CLI 打出来的原文）：这是「有没有报错」
 /// 在 GUI 里唯一的答案来源 —— 打包后的应用没有终端，`tracing` 写进的那个文件用户不会去看。
@@ -587,30 +659,39 @@ pub fn parse_query(v: &serde_json::Value) -> QueryResult {
 /// 成功只在 `loud` 时记。轮询每 6 秒问 19 条，成功也记就是每分钟 190 条，
 /// 500 条的缓冲两分半钟就被冲干净 —— 那等于用「一切正常」把真正的报错挤出了窗口。
 /// 付费动作（提交）与人按下的按钮才配 `loud`。
-async fn run(argv: Vec<String>, log: &Activity, who: Who<'_>, loud: bool) -> AppResult<String> {
+async fn run(
+    argv: Vec<String>,
+    log: &Activity,
+    who: Who<'_>,
+    loud: bool,
+    timeout: Timeout,
+) -> AppResult<String> {
     let pretty = display_command(&argv);
     let started = std::time::Instant::now();
-    let out = tokio::task::spawn_blocking(move || {
+    let spawned = (|| {
         let (bin, args) = argv.split_first().ok_or_else(|| {
             AppError::Internal("命令行为空（不应发生：command_line 至少给出 bin）".into())
         })?;
-        std::process::Command::new(bin)
+        tokio::process::Command::new(bin)
             .args(args)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            // 超时那一刻我们只是丢掉这个 future，子进程得跟着一起走 —— 否则「超时」
+            // 只是让我们不再等它，而那个还连着网络的进程留在原地。
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => AppError::InvalidInput(format!(
                     "找不到即梦 CLI「{bin}」。请先安装并 `dreamina login`，或在设置里填它的绝对路径。"
                 )),
                 _ => AppError::Io(format!("启动即梦 CLI 失败：{e}")),
             })
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("即梦 CLI 任务panic：{e}")));
+    })();
 
-    let ms = started.elapsed().as_millis();
-    let out = match out {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) | Err(e) => {
+    let child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            let ms = started.elapsed().as_millis();
             log.error(
                 "cli",
                 who,
@@ -618,6 +699,29 @@ async fn run(argv: Vec<String>, log: &Activity, who: Who<'_>, loud: bool) -> App
                 Some(pretty),
             );
             return Err(e);
+        }
+    };
+
+    let waited = tokio::time::timeout(timeout.duration(), child.wait_with_output()).await;
+    let ms = started.elapsed().as_millis();
+    let out = match waited {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            let e = AppError::Io(format!("等待即梦 CLI 结束失败：{e}"));
+            log.error(
+                "cli",
+                who,
+                format!("即梦 CLI 出错（{ms}ms）：{e}"),
+                Some(pretty),
+            );
+            return Err(e);
+        }
+        Err(_) => {
+            log.error("cli", who, timeout.message(ms), Some(pretty.clone()));
+            return Err(AppError::Timeout(format!(
+                "{}\n命令：{pretty}",
+                timeout.message(ms)
+            )));
         }
     };
 
@@ -666,7 +770,16 @@ pub struct CreditInfo {
 /// 查余额（提交前预检 + 设置页显示）。
 pub async fn user_credit(bin: &str, log: &Activity) -> AppResult<CreditInfo> {
     let bin = resolve_bin(bin)?;
-    let v = extract_json(&run(vec![bin, "user_credit".to_string()], log, None, false).await?)?;
+    let v = extract_json(
+        &run(
+            vec![bin, "user_credit".to_string()],
+            log,
+            None,
+            false,
+            Timeout::Read,
+        )
+        .await?,
+    )?;
     let total_credit = v
         .get("total_credit")
         .and_then(|x| x.as_i64())
@@ -714,6 +827,7 @@ pub async fn sessions(bin: &str, log: &Activity) -> AppResult<Vec<SessionInfo>> 
         log,
         None,
         false,
+        Timeout::Read,
     )
     .await?;
     Ok(parse_sessions(&out))
@@ -819,7 +933,7 @@ pub async fn submit(
     let opts = normalize_opts(opts)?;
     let bin = resolve_bin(bin)?;
     let argv = command_line(&bin, &image.to_string_lossy(), prompt, &opts);
-    let stdout = run(argv.clone(), log, who, true).await?;
+    let stdout = run(argv.clone(), log, who, true, Timeout::Submit).await?;
     let v = extract_json(&stdout)?;
     let submit_id = extract_submit_id(&v).ok_or_else(|| {
         AppError::Internal(format!(
@@ -882,7 +996,7 @@ pub async fn list_tasks(
         format!("--offset={offset}"),
     ];
     Ok(parse_list(&extract_json(
-        &run(argv, log, None, false).await?,
+        &run(argv, log, None, false, Timeout::Read).await?,
     )?))
 }
 
@@ -922,8 +1036,15 @@ pub async fn query(
     if let Some(d) = download_dir {
         argv.push(format!("--download_dir={}", d.to_string_lossy()));
     }
+    // 带下载的那一次要把整个 mp4 拉下来，与只问一句状态不是一个量级；
+    // 而两者都杀得起（成片还在即梦那边），故只是宽窄之分。
+    let timeout = if download_dir.is_some() {
+        Timeout::Download
+    } else {
+        Timeout::Read
+    };
     Ok(parse_query(&extract_json(
-        &run(argv, log, who, false).await?,
+        &run(argv, log, who, false, timeout).await?,
     )?))
 }
 
@@ -1564,5 +1685,75 @@ mod tests {
         }
         assert!(models().iter().any(|m| m.vip), "清单里应当有 vip 通道");
         assert!(models().iter().any(|m| !m.vip), "清单里应当有非 vip 通道");
+    }
+
+    // ── 超时 ────────────────────────────────────────────────────────────────
+
+    /// 造一个挂住不返回的假 CLI（`sleep`）。
+    fn hanging_bin(dir: &Path) -> std::path::PathBuf {
+        let p = dir.join("dreamina");
+        std::fs::write(&p, b"#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    // 这条测的是「卡住的 CLI 有个尽头」——在此之前 `Command::output()` 一直等，
+    // 于是那条 IPC 永不返回、前端的重入锁永不释放，界面就那么停在原地。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hanging_cli_times_out_instead_of_blocking_forever() {
+        let td = tempfile::tempdir().unwrap();
+        let bin = hanging_bin(td.path()).to_string_lossy().to_string();
+        let log = Activity::silent();
+        let started = std::time::Instant::now();
+        let err = run(
+            vec![bin, "user_credit".into()],
+            &log,
+            None,
+            false,
+            Timeout::Custom(std::time::Duration::from_millis(300)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::Timeout(_)),
+            "超时必须是自己的分类，调用方要靠它区分「没做成」与「不知道做没做成」：{err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "该在超时那一刻返回，而不是等子进程自己跑完"
+        );
+        // 超时也要留下痕迹：打包后的应用没有终端，日志面板是唯一的答案来源。
+        let snap = log.snapshot();
+        assert!(
+            snap.iter().any(|e| e.level == "error" && e.phase == "cli"),
+            "超时须以 error 级进执行日志：{snap:?}"
+        );
+    }
+
+    // 提交那一档的文案**必须写明钱可能已经花出去了**。它是人此刻唯一的线索，
+    // 而下一步（直接重跑 还是 先去核对）取决于它 —— 猜错就是再花一份钱。
+    #[test]
+    fn submit_timeout_message_warns_about_money() {
+        let msg = Timeout::Submit.message(1234);
+        assert!(msg.contains("扣"), "{msg}");
+        assert!(msg.contains("核对"), "{msg}");
+        assert!(msg.contains("submit_id"), "{msg}");
+        // 只读那两档相反：必须说清杀掉它没有副作用，否则人会以为出了大事。
+        for t in [Timeout::Read, Timeout::Download] {
+            let m = t.message(1);
+            assert!(!m.contains("扣了费"), "{m}");
+        }
+    }
+
+    // 档位的顺序就是「杀掉它的代价」的顺序，反了就会把提交按只读的紧度掐掉。
+    #[test]
+    fn timeout_tiers_are_ordered_by_cost_of_killing() {
+        assert!(Timeout::Read.duration() < Timeout::Download.duration());
+        assert!(Timeout::Download.duration() < Timeout::Submit.duration());
     }
 }

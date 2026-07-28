@@ -944,6 +944,25 @@ async v2vCredit() : Promise<Result<CreditInfo, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 提交前的余额，**单独一条命令**。
+ * 
+ * 它原来长在 [`preview_v2v_commands`] 里，于是点「提交」到确认卡出现之间，整个界面
+ * 要等一次 CLI 网络往返（秒级）——期间一声不吭，人以为没点上。而余额本来就是
+ * 「尽力而为、拉不到也不拦人」的东西，它更没有理由挡住那张卡：卡先出来，
+ * 这个数回来了再填进去。
+ * 
+ * 拉不到一律 `None`（原因已由 `dreamina::user_credit` 记进执行日志）——
+ * 掉线/未登录是常态，不该在确认卡上变成一个红色的错误。
+ */
+async v2vBalance() : Promise<Result<number | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_balance") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async v2vCreditStats() : Promise<Result<CreditStats, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_credit_stats") };
@@ -955,6 +974,25 @@ async v2vCreditStats() : Promise<Result<CreditStats, AppError>> {
 async v2vQueueStats() : Promise<Result<QueueStats, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_queue_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 排队轨迹（详情栏与观测面板共用一条命令，`clip_id` 为空即只要全局部分）。
+ */
+async v2vQueueTrend(hours: number, clipId: number | null) : Promise<Result<[QueueTrend, ClipQueueTrail], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_queue_trend", { hours, clipId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vCreditDaily(days: number) : Promise<Result<CreditDayView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_daily", { days }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1132,6 +1170,9 @@ async setV2vClipParams(ids: number[], modelVersion: string | null, duration: num
  * 额度预估同理，且更要紧：即梦**提交那一刻就扣费且不可撤回**，而通道之间差 5.5 倍
  * （4s/720p：`seedance2.0fast` 8 vs `seedance2.0fast_vip` 44）。18 条一批就是 144 与
  * 792 的区别 —— 这个数必须出现在「确认提交」按钮**旁边**，不是事后在报告里。
+ * 
+ * **这条命令只读库、不碰网络**（`resolve_bin` 只查文件是否存在）。余额另走
+ * [`v2v_balance`]，理由见那里：它曾经把整张卡挡在一次 CLI 往返后面。
  */
 async previewV2vCommands(ids: number[]) : Promise<Result<SubmitPreview, AppError>> {
     try {
@@ -2145,6 +2186,15 @@ export type AppError =
  */
 { type: "Keyring"; message: string } | 
 /**
+ * 外部进程 / 请求超时，我们主动放弃等待。
+ * 
+ * **与「失败」不是一回事，调用方必须分开处置**：失败是对方明确回了「没做成」，
+ * 超时是我们问不出话来 —— 那件事**可能已经做成了**。即梦的提交就是最锋利的例子：
+ * 超时被杀掉的那个进程也许已经下过单、扣过费，只是 submit_id 随进程一起没了
+ * （见 `v2v::dreamina::Timeout::Submit` 与 `v2v::runner::submit_batch`）。
+ */
+{ type: "Timeout"; message: string } | 
+/**
  * 其它未分类错误。
  */
 { type: "Internal"; message: string }
@@ -2294,6 +2344,22 @@ planned: number; failed: number; sheetId: number | null;
  */
 skus: string[] }
 /**
+ * 某一条 clip 的排队位次轨迹（详情栏那条 sparkline）。
+ */
+export type ClipQueueTrail = { 
+/**
+ * 采样点，按时间正序。少于 2 个点时画不出斜率，界面据此只显示当前位次。
+ */
+points: QueuePoint[]; 
+/**
+ * 最近一小时的排队速度（位/小时）。测不出来时为 None —— **不编 0**。
+ */
+ratePerHour: number | null; 
+/**
+ * 按上面那个速度估算，这一条还要排多久（秒）。
+ */
+etaSecs: number | null }
+/**
  * 看板条目视图。
  */
 export type ClipView = { id: number; workId: number; groupId: number | null; groupName: string; batchId: number | null; stage: string; promptCode: string; 
@@ -2372,6 +2438,17 @@ export type CreateSkuInput = { code: string; styleName: string; productName: str
  * 收件箱文件夹别名（可选，中文亦可）。
  */
 folderAlias: string | null }
+/**
+ * 每日额度台账（观测面板那条折线）。
+ * 
+ * 它同时是一个实验的读数：见 `runner::snapshot_credit_if_new_day` ——
+ * 「每天登录送 80」能不能靠 CLI 自动到账，只能靠连着几天的 `delta` 来回答。
+ */
+export type CreditDayView = { day: string; balance: number; spentSincePrev: number; 
+/**
+ * 凭空进账（余额差 + 期间本机花掉）。首条为 None —— 那天没有对比基准。
+ */
+delta: number | null }
 /**
  * 账号与余额（`user_credit` 的完整回体）。
  * 
@@ -2545,6 +2622,22 @@ error: string | null }
  * 一条发布历史（读台账）。
  */
 export type HistoryItem = { date: string; platform: string; taskCode: string; url: string | null; publishedAt: number }
+/**
+ * 一个小时桶里的排队速度。
+ */
+export type HourRate = { 
+/**
+ * 桶的起点（unix 秒，整点对齐）。
+ */
+hourStart: number; 
+/**
+ * 这个小时里队列消化了多少位（位/小时，正数 = 在前进）。
+ */
+positionsPerHour: number; 
+/**
+ * 参与投票的 clip 条数。1 条时这个数字信心很低，界面据此决定要不要画实线。
+ */
+clips: number }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */
@@ -3026,22 +3119,25 @@ tag: string;
  * 一句话说明，选择器里做副标题。
  */
 hint: string }
+export type QueueEntry = { at: number; queueIdx: number }
+export type QueuePoint = { at: number; queueIdx: number; queueLength: number | null }
 /**
  * 队列观测。
  * 
- * ## 为什么这里**没有**「前面还有多少人在排队」
+ * ## 「前面还有多少人在排队」现在有了，但它不在这里
  * 
- * 因为即梦不给。实测排队中的 `query_result` 只回 submit_id / prompt / logid /
- * gen_status 四个字段，`list_task` 也只有状态；`queue_info.queue_idx` 只在**已完成**
- * 的回体里出现过（值 0、Finish）。解析代码留着，它哪天开始回传就自动显示，
- * 但界面上不能凭空造一个「第 N 位」——编出来的排队位次比没有更糟。
+ * 早前这段注释写的是「即梦不回传排队位次」。那条结论是从一批**坏单**上归纳出来的
+ * （2026-07-27 那 18 条从未入队的幽灵单），已被推翻：健康的任务从排队第一秒起就有
+ * `queue_info`，实测提交后 25 秒即 `{queue_idx: 4485, queue_length: 574522}`。
  * 
- * ## 那么「第二天醒来判断还在排队还是卡住了」靠什么
+ * 位次因此有了自己的去处 —— [`v2v_queue_trend`] 那条**时序**。放在那边而不是这里，
+ * 是因为单看一个位次答不出任何要用来排产的问题：「第 4485 位」既可能是今晚出片，
+ * 也可能是明天中午，区别在**这条队多快**，而那是位次对时间的导数。
  * 
- * 靠**我们自己就能测准**的两件事：
+ * 本结构仍然只装我们自己测得准的两件事，它们回答的是另一个问题
+ * （「第二天醒来，是还在排队还是卡住了」）：
  * - 最久那条已经等了多久（`oldest_wait`）——绝对进度。
- * - 这批的出片速度（`since_last_finish` + 逐小时直方图）——**相对进度**，
- * 也是真正的判据：「上次出片 20 分钟前」说明队列在动，「上次出片 9 小时前」说明该查了。
+ * - 这批的出片速度（`since_last_finish` + 逐小时直方图）——**相对进度**。
  */
 export type QueueStats = { running: number; 
 /**
@@ -3082,6 +3178,30 @@ observedLimit: number | null;
  * **本地队列**里等空位的条数（0028）—— 人已放行、还没发出去的那些。
  */
 queued: number }
+/**
+ * 非 VIP 队列的整体观测：逐小时消化速度 + 各单的入队位次。
+ * 
+ * ## 它要回答的是排产问题
+ * 
+ * 「什么时候提交最划算」。位次是**全局**队列里的位次（同一份回体里还有
+ * `queue_length: 574522`），所以任何一条在跑的条目都在测同一条队 —— 把它们的斜率
+ * 按小时归桶取中位数，得到的就是那个小时里非 VIP 通道的真实速度。
+ * 连着几天看下来，「凌晨三点提交比晚上八点快一倍」这种事才有地方看得出来。
+ */
+export type QueueTrend = { 
+/**
+ * 逐小时速度，按时间正序。没有采样的小时**缺席**而不是补 0 ——
+ * 补 0 会画出一条「那时候队列停了」的假线，而真相只是那时候我们没在跑。
+ */
+hourly: HourRate[]; 
+/**
+ * 各单第一次问到的位次（入队时队列有多深）。排产直接读它。
+ */
+entries: QueueEntry[]; 
+/**
+ * 采样覆盖的时间跨度（秒）。太短时界面要说明「数据还不够」而不是给结论。
+ */
+spanSecs: number; samples: number }
 /**
  * 对账结果汇总。
  */
@@ -3377,11 +3497,7 @@ estimatedCredits: number;
 /**
  * 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
  */
-unpriced: string[]; 
-/**
- * 提交前实拉的余额；拉不到（掉线/未登录）为 None，此时不拦人，只是不显示。
- */
-balance: number | null }
+unpriced: string[] }
 /**
  * 提交摘要。
  */

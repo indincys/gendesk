@@ -113,6 +113,7 @@ export type {
   CreditDayView,
   EffectiveParams,
   QueueStats,
+  ChannelStat,
   QueueTrend,
   ClipQueueTrail,
   QueuePoint,

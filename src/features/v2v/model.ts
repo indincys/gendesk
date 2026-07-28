@@ -157,13 +157,25 @@ export function channelOf(c: ClipView, eff: EffectiveParams | null): string {
 }
 
 /**
- * 动作筛选。**筛选片就是动作本身**，没有别的取值。
+ * 工作台的**唯一**筛选：要么按动作切一屏，要么按通道切一屏。
  *
- * v0.24.0 之前还有 `mine` / `all` / `rej` 三个聚合片，它们随「主轴搬进侧栏」一起去掉了：
- * 侧栏那张卡一屏就把六档连同计数全摆了出来，聚合片能答的问题（还剩多少活）
- * 直接读六个数就是了；而 `rej` 已经定案，工作台回答的是「还剩多少活」。
+ * ## 为什么不是「动作 × 通道」的交集
+ *
+ * 两者是**两个维度**：动作沿流程切（拿它怎么办），通道沿队列切（它排在哪条队上）。
+ * 做成交集之后侧栏会同时亮着两行，而那两行的高亮长得一模一样 —— 人读到的是
+ * 「选了两样东西」，读不出「其中一样在缩小另一样」。更要命的是空屏：交集为空时
+ * 界面只能说「这一档在这条通道上没有条目」，而人得自己回想是哪两个条件叠出来的。
+ *
+ * 单选之后每一行的数字就是点进去会看到的条数，一个不多一个不少 —— 侧栏那两列数
+ * 从「可能被另一维削掉一截」变回了字面意思。
+ *
+ * ## 代价
+ *
+ * 「2.0Fast 上这 12 条待放行」这种批量不再筛得出来。补偿在底坞：勾选之后
+ * 「这一档」的按钮按**勾选的那一批**派生（同一动作才出按钮），所以那件事仍做得成，
+ * 只是要先勾。
  */
-export type ActionFilter = NextAction;
+export type Filter = { kind: "action"; key: NextAction } | { kind: "channel"; key: string };
 
 /**
  * 侧栏动作卡的六行。
@@ -574,18 +586,67 @@ export function deriveRows(
 }
 
 /**
- * 动作筛选是否命中。
+ * 筛选是否命中。
  *
  * 收 `Row` 而不是 `Stage`：幽灵判定要看队列位次与扣费回执，那是整行的事 ——
  * 一条 `run` 的幽灵单归「处理异常」，而单看阶段只看得出它在跑。
+ *
+ * 按通道筛时**已定案的不进来**（`done` = pass/rej）。工作台整页回答的是「还剩多少活」，
+ * 六档动作里本来就没有「已定案」那一格；通道这一维要是把它们放进来，同一个界面会
+ * 按你选的维度给出两种「在制」的定义，而多出来的那些条目一个也动不了
+ * （成片在成片页、毙掉的成片在废纸篓）。
  */
-export function matchAction(r: Row, filter: ActionFilter): boolean {
-  return r.action === filter;
+export function matchFilter(r: Row, f: Filter): boolean {
+  return f.kind === "action"
+    ? r.action === f.key
+    : (r.modelFull ?? "") === f.key && isLive(r.stage);
 }
 
-/** 通道筛选是否命中。`null` = 全部通道。与 `channelOf` 同口径（`modelFull` 由它算出）。 */
-export function matchChannel(r: Row, channel: string | null): boolean {
-  return channel == null || (r.modelFull ?? "") === channel;
+/** 当前筛选的「脸」—— 标题、一句话、以及它那个颜色。 */
+export interface FilterFace {
+  label: string;
+  /** 副标题：动作是「拿它怎么办」，通道是这条队的全貌摘要。 */
+  sub: string;
+  /** 通道配色序号（`data-tone`）。动作没有，用 `color`。 */
+  tone: number | null;
+  /** 动作的色，取自 `ACTION_META.dot`。通道为空串 —— 它的色由 `tone` 下发。 */
+  color: string;
+  /** 语气：决定标题与计数用哪支强调色。 */
+  mood: "er" | "rev" | "acc" | "t3";
+}
+
+/**
+ * 筛选 → 它在三处（列表栏头 / 摘要卡 / 底坞）要显示的同一套身份。
+ *
+ * 单点在这里，是因为这三处**必须同色同名**：栏头写「待验收」而摘要卡写别的颜色时，
+ * 人第一反应是自己点错了。
+ */
+export function filterFace(f: Filter, channels: Channel[]): FilterFace {
+  if (f.kind === "action") {
+    const m = ACTION_META[f.key];
+    const mood: FilterFace["mood"] =
+      m.fg === "var(--er)"
+        ? "er"
+        : m.fg === "var(--st-rev)"
+          ? "rev"
+          : m.fg === "var(--t3)"
+            ? "t3"
+            : "acc";
+    return { label: m.label, sub: m.note, tone: null, color: m.dot, mood };
+  }
+  const c = channels.find((x) => x.key === f.key);
+  // 通道会在最后一条走完之后从清单里消失，而筛选还指着它。此时说实话，
+  // 不回落到某条别的通道上 —— 那会让人以为自己看的是刚才那条队。
+  if (!c) {
+    return {
+      label: f.key === "" ? "CLI 默认" : shortModel(f.key),
+      sub: "这条通道上已经没有在制的条目了",
+      tone: null,
+      color: "var(--t3)",
+      mood: "t3",
+    };
+  }
+  return { label: c.label, sub: c.headline, tone: c.tone, color: "", mood: c.headlineTone };
 }
 
 export function sortRows(rows: Row[], sort: SortKey): Row[] {
@@ -613,9 +674,17 @@ export interface Channel {
   tone: number;
   /** 这条通道上涉及的提示词组名 —— 回答「这条队上跑的是哪几组」。 */
   title: string;
-  /** 本通道全部条目（不受任何筛选影响）。 */
+  /** 本通道全部条目（不受任何筛选影响）—— 含已定案的，`worstGroup` 要数毙掉的那些。 */
   rows: Row[];
-  /** 按下一步动作分桶。 */
+  /**
+   * 还没走完的条数 = `rows.length - counts.done`。
+   *
+   * 侧栏那一行显示的就是它，而**不是** `rows.length`：点进去看到的是 `matchFilter`
+   * 筛出来的在制条目，两个数字必须是同一个数 —— 侧栏写 83、列表里躺着 61 的话，
+   * 没人会认为是「另外 22 条已定案」，只会认为其中一个坏了。
+   */
+  live: number;
+  /** 按下一步动作分桶（含 `done`）。 */
   counts: Record<NextAction, number>;
   /** 侧栏那一行的副行：这条队此刻的占用状况，或它贵在哪。没什么可说时为空串。 */
   note: string;
@@ -723,6 +792,7 @@ export function buildChannels(
       tone: toneOf.get(key) ?? 0,
       title: channelTitle(rows),
       rows,
+      live: rows.length - counts.done,
       counts,
       note: channelNote(
         vip,
@@ -794,6 +864,14 @@ export interface SliceSummary {
   oldestWait: number;
   /** 通道构成（堆叠条 + chips）。顺序与 `buildChannels` 一致。 */
   channels: { key: string; label: string; tone: number; n: number }[];
+  /**
+   * 动作构成，顺序同 `WORKBENCH_ACTIONS`。
+   *
+   * 按通道筛出来的一屏里，「这一屏由哪几条通道组成」是个恒等式（就一条），
+   * 该问的是**这条队上的活分成哪几种**。两种构成用同一根堆叠条画，
+   * 由调用方按当前筛的是哪一维选一个 —— 两根一起画等于把答案埋进两条一样的条子里。
+   */
+  actions: { key: NextAction; label: string; dot: string; n: number }[];
 }
 
 export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
@@ -813,6 +891,8 @@ export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
     const k = r.modelFull ?? "";
     n.set(k, (n.get(k) ?? 0) + 1);
   }
+  const byAction = new Map<NextAction, number>();
+  for (const r of rows) byAction.set(r.action, (byAction.get(r.action) ?? 0) + 1);
   return {
     count: rows.length,
     billed,
@@ -823,6 +903,12 @@ export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
     channels: channels
       .filter((c) => (n.get(c.key) ?? 0) > 0)
       .map((c) => ({ key: c.key, label: c.label, tone: c.tone, n: n.get(c.key) ?? 0 })),
+    actions: WORKBENCH_ACTIONS.filter((a) => (byAction.get(a) ?? 0) > 0).map((a) => ({
+      key: a,
+      label: ACTION_META[a].label,
+      dot: ACTION_META[a].dot,
+      n: byAction.get(a) ?? 0,
+    })),
   };
 }
 

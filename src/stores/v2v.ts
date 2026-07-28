@@ -1,14 +1,13 @@
 import {
-  type ActionFilter,
   type Channel,
+  type Filter,
   type NextAction,
   type Row,
   type SortKey,
   WORKBENCH_ACTIONS,
   buildChannels,
   deriveRows,
-  matchAction,
-  matchChannel,
+  matchFilter,
   sortRows,
 } from "@/features/v2v/model";
 import {
@@ -86,8 +85,8 @@ interface V2vState {
   coarseNow: number;
 
   // ── 筛选与选择（UI 态） ─────────────────────────────
-  action: ActionFilter;
-  channel: string | null;
+  /** **一次只有一个**（见 `Filter` 的注释）—— 动作与通道是两个维度，不做交集。 */
+  filter: Filter;
   sort: SortKey;
   sel: Set<number>;
   cur: number | null;
@@ -102,8 +101,7 @@ interface V2vState {
   reload: () => Promise<void>;
   reloadHandoff: () => Promise<void>;
   reloadEff: () => Promise<void>;
-  setAction: (a: ActionFilter) => void;
-  setChannel: (c: string | null) => void;
+  setFilter: (f: Filter) => void;
   setSort: (s: SortKey) => void;
   setCur: (id: number | null) => void;
   setSel: (fn: (cur: Set<number>) => Set<number>) => void;
@@ -145,8 +143,7 @@ export const useV2vStore = create<V2vState>((set, get) => ({
   // 直接写死 `submit` 会让一个手上全是待验收的人一进来看到空列表 —— 所以这里存一个
   // 占位值，`enter()` 拿到数据后按 `WORKBENCH_ACTIONS` 的序落到第一个有条目的档，
   // 与旧的「一进来看到等你动手的」同义，且不会出现「默认档是空的」。
-  action: "review",
-  channel: null,
+  filter: { kind: "action", key: "review" },
   sort: "wait",
   sel: new Set(),
   cur: null,
@@ -221,12 +218,12 @@ export const useV2vStore = create<V2vState>((set, get) => ({
       .then((activity) => set({ activity }))
       .catch(() => {});
 
-    // 默认档：只在**当前这一档是空的**时候才自动挪（见 `action` 的注释）。
+    // 默认档：只在**当前这一屏是空的**时候才自动挪（见 `filter` 的注释）。
     // 每次进页面都强行重置的话，切出去看一眼成片再回来，人刚选好的筛选就没了。
     const rows = selectRows(get());
-    if (!rows.some((r) => r.action === get().action)) {
+    if (!rows.some((r) => matchFilter(r, get().filter))) {
       const first = WORKBENCH_ACTIONS.find((a) => rows.some((r) => r.action === a));
-      if (first) set({ action: first });
+      if (first) set({ filter: { kind: "action", key: first } });
     }
 
     const un = await subscribeV2v({
@@ -267,10 +264,9 @@ export const useV2vStore = create<V2vState>((set, get) => ({
     };
   },
 
-  // 换档/换通道都把光标与勾选清掉：它们指向的条目多半已经不在这一屏里了，
+  // 换筛选就把光标与勾选清掉：它们指向的条目多半已经不在这一屏里了，
   // 留着会让底坞按钮作用在一批看不见的条目上。
-  setAction: (action) => set({ action, cur: null, sel: new Set() }),
-  setChannel: (channel) => set({ channel, cur: null, sel: new Set() }),
+  setFilter: (filter) => set({ filter, cur: null, sel: new Set() }),
   setSort: (sort) => set({ sort }),
   setCur: (cur) => set({ cur }),
   setSel: (fn) => set((c) => ({ sel: fn(c.sel) })),
@@ -330,11 +326,11 @@ export function selectChannels(s: V2vState): Channel[] {
 let countsMemo: { key: Row[]; counts: Record<NextAction, number> } | null = null;
 
 /**
- * 每一档的计数。
+ * 每一档的计数 —— 全流水线的，与当前筛选无关。
  *
- * **不受通道筛选影响** —— 侧栏那张卡回答的是「这条流水线上还剩多少活」，而不是
- * 「当前这条通道上还剩多少活」。让它跟着通道走的话，选了 2.0Fast 之后「处理异常 0」
- * 会把另一条队上那 4 条异常整个藏起来，而那正是最该被看见的东西。
+ * 筛选改成单选之后这条不再需要论证：侧栏每一行的数字**就是**点进去会看到的条数。
+ * 交集时代它得刻意不跟着通道走（否则选了 2.0Fast 之后「处理异常 0」会把另一条队上
+ * 那 4 条异常整个藏起来），代价是那个数字与点进去看到的条数对不上。现在两者同义。
  */
 export function selectActionCounts(s: V2vState): Record<NextAction, number> {
   const rows = selectRows(s);
@@ -351,15 +347,18 @@ export function selectActionCounts(s: V2vState): Record<NextAction, number> {
 let visibleMemo: { key: unknown[]; rows: Row[] } | null = null;
 
 /**
- * 当前 (动作 × 通道) 这一屏，已排序。
+ * 当前这一屏（一个筛选，不是交集），已排序。
  *
- * 也要记忆：`filter` + `sortRows` 每次都产出新数组，而 Zustand 的选择器按 `Object.is`
- * 比较 —— 不记忆的话每一次心跳（6 秒一发）都会让整张表重渲染一遍，
+ * 也要记忆：`Array.filter` + `sortRows` 每次都产出新数组，而 Zustand 的选择器按
+ * `Object.is` 比较 —— 不记忆的话每一次心跳（6 秒一发）都会让整张表重渲染一遍，
  * 而重渲染会把正在播放的 `<video>` 也一起顶掉。
+ *
+ * 依赖里放的是 `filter` 的两个字段而不是对象本身：`setFilter` 每次都造新对象，
+ * 但同一个筛选点两下不该让整张表重算。
  */
 export function selectVisible(s: V2vState): Row[] {
   const all = selectRows(s);
-  const key = [all, s.action, s.channel, s.sort];
+  const key = [all, s.filter.kind, s.filter.key, s.sort];
   if (
     visibleMemo &&
     visibleMemo.key.length === key.length &&
@@ -368,7 +367,7 @@ export function selectVisible(s: V2vState): Row[] {
     return visibleMemo.rows;
   }
   const rows = sortRows(
-    all.filter((r) => matchAction(r, s.action) && matchChannel(r, s.channel)),
+    all.filter((r) => matchFilter(r, s.filter)),
     s.sort,
   );
   visibleMemo = { key, rows };

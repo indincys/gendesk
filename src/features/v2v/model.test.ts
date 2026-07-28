@@ -1,12 +1,13 @@
 import {
-  type ActionFilter,
   CHANNEL_TONES,
   MINE,
+  type NextAction,
   type Row,
   buildChannels,
   carryParams,
   deriveRows,
-  matchAction,
+  filterFace,
+  matchFilter,
   nextAction,
   sliceSummary,
   trailOf,
@@ -518,12 +519,13 @@ describe("下一步动作", () => {
     expect(ghost.phantomLive).toBe(true);
     expect(ghost.action).toBe("fix");
     expect(MINE).toContain(ghost.action);
-    expect(matchAction(ghost, "wait")).toBe(false);
+    expect(matchFilter(ghost, { kind: "action", key: "wait" })).toBe(false);
   });
 });
 
 describe("筛选", () => {
-  const only = (rows: Row[], f: ActionFilter) => rows.filter((r) => matchAction(r, f));
+  const only = (rows: Row[], key: NextAction) =>
+    rows.filter((r) => matchFilter(r, { kind: "action", key }));
 
   /**
    * v0.24.0 起筛选片就是动作本身，`mine` / `all` / `rej` 三个聚合片随主轴搬进侧栏一起
@@ -571,6 +573,82 @@ describe("筛选", () => {
     ]);
     expect(r?.situation).toContain("v2v-rewrite");
     expect(r?.situation).not.toContain("物化");
+  });
+
+  /**
+   * 按通道筛时**已定案的不进来**。
+   *
+   * 工作台整页回答的是「还剩多少活」，六档动作里本来就没有「已定案」那一格。通道
+   * 这一维要是把 pass/rej 放进来，同一个界面会按你选的维度给出两种「在制」的定义，
+   * 而多出来的那些条目一个也动不了（成片在成片页、毙掉的成片在废纸篓）。
+   */
+  it("按通道筛只出在制的 —— 已通过 / 已毙掉的不占这一屏", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "pass" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rej" }),
+      clip({ id: 4, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
+    ]);
+    const f = { kind: "channel", key: "seedance2.0fast" } as const;
+    expect(rows.filter((r) => matchFilter(r, f)).map((r) => r.clip.id)).toEqual([1]);
+  });
+
+  /**
+   * 侧栏那一行的数字与点进去看到的条数**必须是同一个数**。
+   *
+   * 写 `rows.length`（83）而点进去躺着 61 条时，没有人会认为是「另外 22 条已定案」——
+   * 只会认为其中一个坏了。故 `Channel.live` 与 `matchFilter` 是同一条判据的两种读法。
+   */
+  it("通道行的计数 = 点进去会看到的条数", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "pass" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rej" }),
+    ]);
+    const ch = buildChannels(rows, MODELS).find((c) => c.key === "seedance2.0fast");
+    expect(ch?.rows).toHaveLength(3);
+    expect(ch?.live).toBe(1);
+    expect(
+      rows.filter((r) => matchFilter(r, { kind: "channel", key: "seedance2.0fast" })),
+    ).toHaveLength(ch?.live ?? -1);
+  });
+});
+
+/**
+ * 筛选的「脸」—— 列表栏头 / 摘要卡 / 底坞三处读的是同一份，故它们必然同名同色。
+ */
+describe("筛选的身份（filterFace）", () => {
+  it("按动作筛：标题是档名，副行是「拿它怎么办」", () => {
+    const face = filterFace({ kind: "action", key: "review" }, []);
+    expect(face.label).toBe("待验收");
+    expect(face.sub).toContain("判");
+    // 待验收是琥珀档：语气色不能跟蓝色的「待放行」混成一种。
+    expect(face.mood).toBe("rev");
+    expect(face.tone).toBeNull();
+  });
+
+  it("按通道筛：标题是通道简写，副行是这条队的全貌，配色跟 buildChannels 同源", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "fail", videoPath: null }),
+    ]);
+    const chs = buildChannels(rows, MODELS);
+    const face = filterFace({ kind: "channel", key: "seedance2.0fast" }, chs);
+    expect(face.label).toBe("2.0Fast");
+    expect(face.sub).toContain("条出了异常");
+    expect(face.tone).toBe(chs.find((c) => c.key === "seedance2.0fast")?.tone);
+    // 有异常时语气是红的 —— 与 headlineTone 同源，不另编一套。
+    expect(face.mood).toBe("er");
+  });
+
+  /**
+   * 最后一条走完之后通道会从清单里消失，而筛选还指着它。此时说实话，**不回落到
+   * 某条别的通道上** —— 那会让人以为自己看的还是刚才那条队，而屏幕上换了一批条目。
+   */
+  it("通道空掉之后不冒充别的通道", () => {
+    const face = filterFace({ kind: "channel", key: "seedance2.0mini" }, []);
+    expect(face.sub).toContain("没有在制的条目");
+    expect(face.tone).toBeNull();
   });
 });
 
@@ -845,6 +923,29 @@ describe("这一屏的账（sliceSummary）", () => {
     expect(s.channels[0]?.n).toBe(1);
     // 配色与通道卡同源，不在这里另算一遍。
     expect(s.channels[0]?.tone).toBe(chs.find((c) => c.key === "seedance2.0fast")?.tone);
+  });
+
+  /**
+   * 按通道筛出来的一屏里，「由哪几条通道组成」是个恒等式（就一条）—— 该问的是
+   * **这条队上的活分成哪几种**。所以同一根堆叠条要能画另一维，且顺序恒定
+   * （按 `WORKBENCH_ACTIONS`），否则两条条目的比例一变，色段就跟着换位置。
+   */
+  it("动作构成按固定序给出，只列真的有的那几档", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({
+        id: 3,
+        modelVersion: "seedance2.0fast",
+        stage: "fail",
+        errorType: "timeout",
+        videoPath: null,
+      }),
+    ]);
+    const s = sliceSummary(rows, buildChannels(rows, MODELS));
+    // 「处理异常」在 WORKBENCH_ACTIONS 里排在「待验收」之前，故它在前 —— 与条数无关。
+    expect(s.actions.map((a) => a.key)).toEqual(["fix", "review"]);
+    expect(s.actions.map((a) => a.n)).toEqual([1, 2]);
   });
 });
 

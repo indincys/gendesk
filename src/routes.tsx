@@ -37,7 +37,7 @@ export interface RouteDef {
   key: RouteKey;
   label: string;
   /**
-   * ⌘/Ctrl+N 数字；`null` = 无数字快捷键（十个数字已用尽，新页经侧栏与 ⌘K 进）。
+   * ⌘/Ctrl+N 数字；`null` = 无数字快捷键（十个数字已用尽，新页只能从侧栏进）。
    *
    * 不为了给新页腾位而重排既有数字：那会把每个人的肌肉记忆一次性作废，
    * 代价远大于「少一个快捷键」。

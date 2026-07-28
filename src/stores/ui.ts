@@ -15,9 +15,6 @@ function detectPlatform(): Platform {
 interface UiState {
   route: RouteKey;
   platform: Platform;
-  /** 命令面板开关 */
-  paletteOpen: boolean;
-  paletteQuery: string;
   /** 快捷键速查面板开关（E39） */
   helpOpen: boolean;
   /**
@@ -31,10 +28,6 @@ interface UiState {
 
   go: (route: RouteKey) => void;
   setHoldJob: (id: number | null) => void;
-  openPalette: () => void;
-  closePalette: () => void;
-  togglePalette: () => void;
-  setPaletteQuery: (q: string) => void;
   toggleHelp: () => void;
   closeHelp: () => void;
 }
@@ -42,17 +35,11 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   route: "generate",
   platform: detectPlatform(),
-  paletteOpen: false,
-  paletteQuery: "",
   helpOpen: false,
   holdJob: null,
 
-  go: (route) => set({ route, paletteOpen: false, paletteQuery: "" }),
+  go: (route) => set({ route }),
   setHoldJob: (holdJob) => set({ holdJob }),
-  openPalette: () => set({ paletteOpen: true, paletteQuery: "" }),
-  closePalette: () => set({ paletteOpen: false, paletteQuery: "" }),
-  togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen, paletteQuery: "" })),
-  setPaletteQuery: (q) => set({ paletteQuery: q }),
   toggleHelp: () => set((s) => ({ helpOpen: !s.helpOpen })),
   closeHelp: () => set({ helpOpen: false }),
 }));

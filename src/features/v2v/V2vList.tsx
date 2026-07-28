@@ -1,22 +1,23 @@
 import {
-  ACTION_META,
   type Channel,
-  type NextAction,
+  type Filter,
+  type FilterFace,
   type Row,
   SORTS,
   type SortKey,
   fmtDur,
 } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
+import type { CSSProperties } from "react";
 
 /**
  * 工作台右栏 —— 这一屏有哪些条目。
  *
  * ## 为什么不再按通道分节
  *
- * 通道成了侧栏的筛选卡（`V2vNavCards`），所以这里是一条平铺的流。分节时代那些节内
- * 动作（全选本节 / 整节改投 / 看片流 N）没有消失，它们变成了底坞里的「这一档」——
- * 因为「这一档」现在就等于「这一档 × 这条通道」，与一节是同一个集合。
+ * 通道成了侧栏筛选的下半截（`V2vNavCards`），所以这里是一条平铺的流。分节时代那些
+ * 节内动作（全选本节 / 整节改投 / 看片流 N）没有消失，它们变成了底坞里作用于
+ * 「这一屏」的那一组 —— 而按通道筛出来的一屏，恰好就是从前的一节。
  *
  * ## 一行只有四样东西
  *
@@ -27,7 +28,8 @@ import { cn } from "@/lib/utils";
 export function V2vList({
   rows,
   channels,
-  action,
+  filter,
+  face,
   curId,
   sel,
   sort,
@@ -38,7 +40,8 @@ export function V2vList({
 }: {
   rows: Row[];
   channels: Channel[];
-  action: NextAction;
+  filter: Filter;
+  face: FilterFace;
   curId: number | null;
   sel: Set<number>;
   sort: SortKey;
@@ -47,15 +50,18 @@ export function V2vList({
   onCheck: (id: number) => void;
   onToggleAll: () => void;
 }) {
-  const meta = ACTION_META[action];
   const toneOf = new Map(channels.map((c) => [c.key, c.tone]));
   const allIn = rows.length > 0 && rows.every((r) => sel.has(r.clip.id));
 
   return (
     <div className="vlist">
-      <div className="vlisthd">
-        <span className="dot" style={{ background: meta.dot }} />
-        <span className="fs13 fw6 nowrap">{meta.label}</span>
+      <div
+        className="vlisthd"
+        {...(face.tone == null ? {} : { "data-tone": face.tone })}
+        style={{ "--tone": face.color === "" ? undefined : face.color } as CSSProperties}
+      >
+        <span className="dot" />
+        <span className="fs13 fw6 nowrap">{face.label}</span>
         <span className="n">{rows.length} 条</span>
         <div className="f1" />
         <button type="button" className="sortbtn" onClick={onSort} title="点击换一种排序">
@@ -94,11 +100,13 @@ export function V2vList({
             onCheck={() => onCheck(r.clip.id)}
           />
         ))}
+        {/* 空屏必须说清是**哪一个**筛选空了 —— 单选之后这句话又能说准了：
+            一次只有一个条件，不必让人回想是哪两个条件叠出来的。 */}
         {rows.length === 0 && (
           <div className="vlistempty">
-            这一档在这条通道上没有条目。
-            <br />
-            换一档，或把通道切回「全部通道」。
+            {filter.kind === "action"
+              ? "这一档现在没有条目 —— 左边换一档。"
+              : "这条通道上已经没有在制的条目了 —— 左边换一条，或按动作看。"}
           </div>
         )}
       </div>

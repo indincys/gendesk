@@ -5,16 +5,19 @@ import { useEffect } from "react";
 /**
  * 全局键盘管理器（执行计划 0.5 / R9）。
  *
- * - ⌘/Ctrl+K：命令面板开/关
  * - ⌘/Ctrl+1–8：切页
- * - Esc：逐层关闭（命令面板 → 弹窗/抽屉 由各自组件处理）
+ * - ⌘/ 或 ?：快捷键速查面板
+ * - Esc：关闭速查面板（弹窗/抽屉由各自组件处理）
  *
- * 铁律：在 INPUT / TEXTAREA / contentEditable 内不劫持普通按键（命令面板与
- * Esc 除外），避免打断用户输入。
+ * v0.24.0 去掉了 ⌘K 命令面板：它能做的两件事各自有更近的入口 —— 跳转在侧栏
+ * （十一条路由全列着，还带徽章），那几条「操作」在它们自己的页面上
+ * （暂停队列在任务页、生成任务单与导入回执在发布计划页、重扫收件箱在资产页）。
+ * 一个要先想起来才用得上的第二入口，实测从没人用过。
+ *
+ * 铁律：在 INPUT / TEXTAREA / contentEditable 内不劫持普通按键（Esc 除外），
+ * 避免打断用户输入。
  */
 export function useGlobalKeyboard(): void {
-  const togglePalette = useUiStore((s) => s.togglePalette);
-  const closePalette = useUiStore((s) => s.closePalette);
   const toggleHelp = useUiStore((s) => s.toggleHelp);
   const closeHelp = useUiStore((s) => s.closeHelp);
   const go = useUiStore((s) => s.go);
@@ -23,13 +26,6 @@ export function useGlobalKeyboard(): void {
     function onKeyDown(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
 
-      // ⌘K —— 全局有效，输入框内也响应。
-      if (mod && (e.key === "k" || e.key === "K")) {
-        e.preventDefault();
-        togglePalette();
-        return;
-      }
-
       // ⌘/ —— 快捷键速查面板（E39），全局有效。
       if (mod && e.key === "/") {
         e.preventDefault();
@@ -37,20 +33,11 @@ export function useGlobalKeyboard(): void {
         return;
       }
 
-      const { paletteOpen, helpOpen } = useUiStore.getState();
       // 帮助面板打开时，任意 Esc/? / ⌘/ 关闭。
-      if (helpOpen) {
+      if (useUiStore.getState().helpOpen) {
         if (e.key === "Escape" || e.key === "?") {
           e.preventDefault();
           closeHelp();
-        }
-        return;
-      }
-      // 命令面板打开时，Esc 关闭它；其余交给面板内部处理。
-      if (paletteOpen) {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          closePalette();
         }
         return;
       }
@@ -81,5 +68,5 @@ export function useGlobalKeyboard(): void {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [togglePalette, closePalette, toggleHelp, closeHelp, go]);
+  }, [toggleHelp, closeHelp, go]);
 }

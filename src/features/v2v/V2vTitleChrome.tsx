@@ -164,11 +164,12 @@ function ChannelPills({
   queue: QueueStats | null;
   auto: AutofillStatus | null;
 }) {
-  // 点通道灯 = 把工作台筛到那条通道。
+  // 点通道灯 = 把工作台筛到那条通道（此时按动作的那一维自动让位 —— 一次只有一个
+  // 筛选，见 `Filter`）。
   //
   // 它原来点开的是参数面板 —— 而人点一条状态灯时想的是「这条队上都有些什么」，
   // 不是「我要改默认参数」。两者都还在，只是各归各的入口（参数在中栏栏头 ⌥3）。
-  const setChannel = useV2vStore((s) => s.setChannel);
+  const setFilter = useV2vStore((s) => s.setFilter);
   const channels = (queue?.channels ?? []).filter((c) => c.running > 0 || c.queued > 0);
   if (channels.length === 0) return null;
 
@@ -185,7 +186,7 @@ function ChannelPills({
             key={c.modelVersion || "(default)"}
             type="button"
             className={cn("chpill", !live && "idle")}
-            onClick={() => setChannel(c.modelVersion)}
+            onClick={() => setFilter({ kind: "channel", key: c.modelVersion })}
             title={[
               `${c.label} 通道（${c.modelVersion || "设置里没指定型号，实际通道由 CLI 挑"}）。`,
               "即梦按模型通道各排各的队 —— 这条排满了，别的通道照样发得出去。",

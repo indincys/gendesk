@@ -1,22 +1,27 @@
-import type { NextAction, Row } from "@/features/v2v/model";
+import { type NextAction, type Row, WORKBENCH_ACTIONS } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
 import { FolderOpen, RefreshCw, Send } from "lucide-react";
 
 /**
- * 底坞 —— 动作全在这一条上，分成**这一条**与**这一档**两组。
+ * 底坞 —— 动作全在这一条上，分成**这一条**与**这一屏**两组。
  *
  * ## 为什么必须分组
  *
  * 「通过」判的是光标那一条，「进看片流」进的是整屏 —— 两者长得一样却差着 46 倍。
  * 此前它们混在同一排里，唯一的区别是按钮上那个数字，而那个数字恰恰是最容易看漏的东西。
  *
- * ## 「这一条」的按钮按**行**派生，不按档派生
+ * ## 两组按钮都按**行**派生，不按筛选派生
  *
- * 「处理异常」这一档里混着代价完全相反的几种：幽灵单重跑不花钱，超时重跑是第二份钱，
- * 提交超时连花没花都不知道。一套按钮套在整档上必然对其中一类说错话，所以这里读的是
- * 行本身（`row.signals` / `clip.billed` / `errorType`），与详情栏那几句提示同源。
+ * 「处理异常」这一档里就混着代价完全相反的几种：幽灵单重跑不花钱，超时重跑是第二份钱，
+ * 提交超时连花没花都不知道。一套按钮套在整屏上必然对其中一类说错话，所以「这一条」
+ * 读的是行本身（`row.signals` / `clip.billed` / `errorType`），与详情栏那几句提示同源。
  *
- * ## 「这一档」的按钮把**作用域写进标签**
+ * 「这一屏」同理：筛选改成单选之后，按通道筛出来的一屏里混着好几种下一步动作，
+ * 而批量动作按定义是**逐动作**的（放行 / 验收 / 重跑各是一件事）。所以这里先看
+ * 作用域里有几种动作 —— 只有一种才摆那个按钮，混着就说清「勾选同一类」。
+ * 摆一个「放行这 83 条」而实际只有 12 条放得出去，是这一栏最不能犯的错。
+ *
+ * ## 「这一屏」的按钮把**作用域写进标签**
  *
  * 勾了就作用于勾选的，没勾就作用于整屏 —— 两种都合理，但按钮必须说出自己是哪一种，
  * 否则「放行 46 条」点下去只放行了 3 条（或反过来）都不会有人察觉。
@@ -39,7 +44,6 @@ export interface DockHandlers {
 
 export function V2vDock({
   row,
-  action,
   visible,
   sel,
   running,
@@ -48,8 +52,7 @@ export function V2vDock({
   h,
 }: {
   row: Row | null;
-  action: NextAction;
-  /** 当前这一屏（动作 × 通道），已排序。 */
+  /** 当前这一屏（一个筛选，不是交集），已排序。 */
   visible: Row[];
   sel: Set<number>;
   /** 即梦手上在跑几条 —— 「立刻问一遍」实际会去问的就是这些。 */
@@ -63,6 +66,9 @@ export function V2vDock({
   const scope = sel.size > 0 ? visible.filter((r) => sel.has(r.clip.id)) : visible;
   const scoped = sel.size > 0 ? `选中 ${scope.length}` : `这 ${scope.length}`;
   const ids = scope.map((r) => r.clip.id);
+  // 作用域里有哪几种下一步动作。批量按钮只在**恰好一种**时出现（见文件头注释）。
+  const kinds = WORKBENCH_ACTIONS.filter((a) => scope.some((r) => r.action === a));
+  const only = kinds.length === 1 ? kinds[0] : null;
 
   const switchable = scope.filter(
     (r) => r.stage === "ready" || r.stage === "rewrite" || r.stage === "run",
@@ -77,19 +83,25 @@ export function V2vDock({
       {row == null ? (
         <span className="fs11 t3 nowrap">没有选中的条目</span>
       ) : (
-        <RowButtons row={row} action={action} busy={busy} h={h} />
+        <RowButtons row={row} busy={busy} h={h} />
       )}
 
       <span className="sep" />
-      <span className="gl">这一档</span>
-      <BatchButton
-        action={action}
-        scope={scope}
-        scoped={scoped}
-        running={running}
-        busy={busy}
-        h={h}
-      />
+      <span className="gl">这一屏</span>
+      {only ? (
+        <BatchButton
+          action={only}
+          scope={scope}
+          scoped={scoped}
+          running={running}
+          busy={busy}
+          h={h}
+        />
+      ) : (
+        <span className="fs11 t3 nowrap ohide">
+          混着 {kinds.length} 种下一步动作 —— 勾选同一类，或左边按动作筛一次
+        </span>
+      )}
 
       <button
         type="button"
@@ -127,15 +139,15 @@ export function V2vDock({
           </button>
         </span>
       ) : (
-        // 只报**这一档真的能用**的键。`⌘⏎ 确认提交` 挂在一屏待改写上时，按下去
+        // 只报**这一屏真的能用**的键。`⌘⏎ 确认提交` 挂在一屏待改写上时，按下去
         // 得到的是一句「请先选中待放行的条目」—— 一个照着提示按却没反应的键，
-        // 比不写这条提示更伤。
+        // 比不写这条提示更伤。混着几种动作时按光标那一条报，因为这些键判的就是它。
         <span className="fs11 t3 nowrap ohide">
           {ids.length === 0
             ? "↑↓ 换条 · ⌥\\ 账与历程"
-            : action === "review"
+            : (only ?? row?.action) === "review"
               ? "↑↓ 换条 · 空格 通过 · X 不通过 · ⏎ 全屏看片"
-              : action === "submit"
+              : (only ?? row?.action) === "submit"
                 ? "↑↓ 换条 · ⌘⏎ 确认提交 · F 对照首帧"
                 : "↑↓ 换条 · ⌥\\ 账与历程 · ⌥1/2/3 观测·日志·参数"}
         </span>
@@ -144,18 +156,14 @@ export function V2vDock({
   );
 }
 
-/** 「这一条」的按钮 —— 读行本身，不读档。 */
-function RowButtons({
-  row,
-  action,
-  busy,
-  h,
-}: {
-  row: Row;
-  action: NextAction;
-  busy: boolean;
-  h: DockHandlers;
-}) {
+/**
+ * 「这一条」的按钮 —— 读行本身，不读筛选。
+ *
+ * 读 `row.action` 而不是当前筛的那一档：按通道筛出来的一屏里两者根本不是同一件事，
+ * 而这几个按钮判的自始至终都是光标那一条。
+ */
+function RowButtons({ row, busy, h }: { row: Row; busy: boolean; h: DockHandlers }) {
+  const action = row.action;
   const id = row.clip.id;
   const one = [id];
   const back = (

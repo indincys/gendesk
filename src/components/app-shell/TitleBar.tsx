@@ -3,7 +3,7 @@ import { commands, unwrap } from "@/lib/ipc";
 import { windowControls } from "@/lib/window";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
-import { modKeyLabel, useUiStore } from "@/stores/ui";
+import { useUiStore } from "@/stores/ui";
 
 /**
  * 44px 自绘标题栏（执行计划 0.4）。macOS 用原生交通灯（Overlay），Windows 自绘窗控。
@@ -17,11 +17,9 @@ import { modKeyLabel, useUiStore } from "@/stores/ui";
  */
 export function TitleBar() {
   const platform = useUiStore((s) => s.platform);
-  const openPalette = useUiStore((s) => s.openPalette);
   const route = useUiStore((s) => s.route);
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
-  const mod = modKeyLabel(platform);
   const isMac = platform === "mac";
   const isWin = platform === "win";
 
@@ -62,15 +60,6 @@ export function TitleBar() {
           {updateVersion ? `v${updateVersion} ` : ""}已就绪 · 重启安装
         </button>
       )}
-
-      {/* ⌘K 从侧栏顶端搬到这里：它是**全局**的跳转与搜索，长在侧栏第一行会被读成
-          「搜这一列导航」。做成一个看着像输入框的按钮而不是一枚图标 —— 那是它实际
-          打开的东西的样子。 */}
-      <button type="button" className="tsearch" onClick={openPalette}>
-        搜索或跳转…
-        <div className="f1" />
-        <span className="kbd">{mod} K</span>
-      </button>
 
       {isWin && (
         <div className="fx ac noshrink">

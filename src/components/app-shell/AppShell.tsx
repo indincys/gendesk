@@ -1,4 +1,3 @@
-import { CommandPalette } from "@/components/CommandPalette";
 import { DailyBrief } from "@/components/DailyBrief";
 import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
@@ -120,7 +119,6 @@ export function AppShell() {
           <Onboarding />
         </div>
       </div>
-      <CommandPalette />
       <HelpPanel />
       <DailyBrief />
       {holdJob !== null && (

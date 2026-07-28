@@ -1,8 +1,7 @@
 import { V2vQueueTrail } from "@/features/v2v/V2vQueueTrail";
 import {
-  ACTION_META,
-  type Channel,
-  type NextAction,
+  type Filter,
+  type FilterFace,
   type Row,
   type SliceSummary,
   type TrailStep,
@@ -14,7 +13,7 @@ import {
 import type { ActivityEntry, HandoffStatus } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Activity, FolderOpen, ScrollText, SlidersHorizontal } from "lucide-react";
-import { useMemo } from "react";
+import { type CSSProperties, useMemo, useState } from "react";
 
 /**
  * 工作台中栏 —— 「这一条的账与历程」。
@@ -34,9 +33,8 @@ import { useMemo } from "react";
 export function V2vLedger({
   row,
   slice,
-  channels,
-  action,
-  channel,
+  filter,
+  face,
   handoff,
   rewriteTotal,
   activity,
@@ -51,9 +49,8 @@ export function V2vLedger({
 }: {
   row: Row | null;
   slice: SliceSummary;
-  channels: Channel[];
-  action: NextAction;
-  channel: string | null;
+  filter: Filter;
+  face: FilterFace;
   handoff: HandoffStatus | null;
   /**
    * **全流水线**的待改写条数（不受动作/通道筛选影响）。
@@ -74,9 +71,6 @@ export function V2vLedger({
   onParams: () => void;
   onOpenHandoff: () => void;
 }) {
-  const meta = ACTION_META[action];
-  const chLabel = channel == null ? null : (channels.find((c) => c.key === channel)?.label ?? null);
-
   return (
     <div className="vled">
       <div className="vledhd">
@@ -111,9 +105,8 @@ export function V2vLedger({
       <div className="vledbody">
         <SliceCard
           slice={slice}
-          meta={meta}
-          chLabel={chLabel}
-          isRewrite={action === "rewrite"}
+          face={face}
+          filter={filter}
           handoff={handoff}
           rewriteTotal={rewriteTotal}
           now={now}
@@ -138,16 +131,22 @@ export function V2vLedger({
 }
 
 /**
- * 摘要卡 —— 这一屏（这一档 × 这条通道）是个什么局面。
+ * 摘要卡 —— 这一屏是个什么局面。
  *
  * 三个小格里最要紧的是第一格：**已扣与未扣分开报**。合成一个数会把「已经花掉的」和
  * 「打算花的」混成一笔糊涂账，而人看这一格恰恰是为了决定「还要不要再花」。
+ *
+ * ## 它不再是一块有色底的卡
+ *
+ * 从前整张卡按语气刷底色（琥珀 / 红 / 蓝）。那层底色是**面积最大、信息量最小**的
+ * 一块颜色：它说的事（这一档是什么语气）标题、色点、计数三处都已经在说，而它把
+ * 中栏最靠上的一屏整个染了一遍，下面那些真的要读的字反而被压住。现在改成
+ * 「标题与计数用强调色 + 一条分隔线收边」—— 颜色回到字上，卡的边界交给留白与线。
  */
 function SliceCard({
   slice,
-  meta,
-  chLabel,
-  isRewrite,
+  face,
+  filter,
   handoff,
   rewriteTotal,
   now,
@@ -157,9 +156,8 @@ function SliceCard({
   onOpenHandoff,
 }: {
   slice: SliceSummary;
-  meta: (typeof ACTION_META)[keyof typeof ACTION_META];
-  chLabel: string | null;
-  isRewrite: boolean;
+  face: FilterFace;
+  filter: Filter;
   handoff: HandoffStatus | null;
   rewriteTotal: number;
   now: number;
@@ -170,18 +168,34 @@ function SliceCard({
 }) {
   const ge = slice.unpriced > 0 ? "≥ " : "";
   const err = handoff?.error ?? null;
+  const isRewrite = filter.kind === "action" && filter.key === "rewrite";
   // 工单条数与待改写条数对不上，是「收了一半」唯一的可见症状 —— 在此之前没有任何
   // 一处会说这件事，而它的后果是有几条永远不会被改写。
   const mismatch = isRewrite && err == null && handoff != null && handoff.items !== rewriteTotal;
+  // 构成条画哪一维：按动作筛时问「这些分散在哪几条队上」，按通道筛时问
+  // 「这条队上的活分成哪几种」。另一维在那种情况下是恒等式，画出来是一整条纯色。
+  const comp =
+    filter.kind === "action"
+      ? slice.channels.map((c) => ({ key: c.key, label: c.label, tone: c.tone, color: "", n: c.n }))
+      : slice.actions.map((a) => ({
+          key: a.key,
+          label: a.label,
+          tone: null,
+          color: a.dot,
+          n: a.n,
+        }));
 
   return (
-    <div className="vsum" data-mood={moodOf(meta)}>
+    <div
+      className="vsum"
+      data-mood={face.mood}
+      {...(face.tone == null ? {} : { "data-tone": face.tone })}
+      style={{ "--tone": face.color === "" ? undefined : face.color } as CSSProperties}
+    >
       <div className="hd">
-        <span className="dot" style={{ background: meta.dot }} />
-        <span className="ttl">{meta.label}</span>
-        <span className="sub nowrap ohide">
-          {chLabel == null ? `全部通道 · ${meta.note}` : `${chLabel} 这一条通道`}
-        </span>
+        <span className="dot" />
+        <span className="ttl">{face.label}</span>
+        <span className="sub nowrap ohide">{face.sub}</span>
         <div className="f1" />
         <span className="n">{slice.count} 条</span>
       </div>
@@ -202,21 +216,36 @@ function SliceCard({
           <span className="v">{slice.oldestWait === 0 ? "—" : fmtDur(slice.oldestWait)}</span>
         </div>
         <div className="tile">
-          <span className="k">占用通道</span>
-          <span className="v">{slice.channels.length} 条</span>
+          <span className="k">{filter.kind === "action" ? "占用通道" : "涉及动作"}</span>
+          <span className="v">
+            {filter.kind === "action"
+              ? `${slice.channels.length} 条`
+              : `${slice.actions.length} 种`}
+          </span>
         </div>
       </div>
 
-      {slice.channels.length > 0 && (
+      {comp.length > 0 && (
         <div className="comp">
           <div className="bar">
-            {slice.channels.map((c) => (
-              <span key={c.key || "(default)"} style={{ flex: c.n }} data-tone={c.tone} />
+            {comp.map((c) => (
+              <span
+                key={c.key || "(default)"}
+                {...(c.tone == null ? {} : { "data-tone": c.tone })}
+                style={
+                  { flex: c.n, "--tone": c.color === "" ? undefined : c.color } as CSSProperties
+                }
+              />
             ))}
           </div>
           <div className="chips">
-            {slice.channels.map((c) => (
-              <span key={c.key || "(default)"} className="cchip" data-tone={c.tone}>
+            {comp.map((c) => (
+              <span
+                key={c.key || "(default)"}
+                className="cchip"
+                {...(c.tone == null ? {} : { "data-tone": c.tone })}
+                style={{ "--tone": c.color === "" ? undefined : c.color } as CSSProperties}
+              >
                 <i />
                 {c.label} {c.n}
               </span>
@@ -278,20 +307,6 @@ function SliceCard({
   );
 }
 
-/**
- * 摘要卡的底色 —— 跟着这一档自己的颜色走，不另编一套。
- *
- * 属性名叫 `data-mood` 而不是 `data-tone`：后者是**通道配色**的取色器
- * （`[data-tone="0"]` … 那四条规则），两个语义共用一个属性名，早晚会有人把
- * 一个通道色号写进这里，然后对着一张不变色的卡查半天。
- */
-function moodOf(meta: (typeof ACTION_META)[keyof typeof ACTION_META]): string {
-  if (meta.fg === "var(--er)") return "er";
-  if (meta.fg === "var(--st-rev)") return "rev";
-  if (meta.fg === "var(--t3)") return "t3";
-  return "acc";
-}
-
 /** 这一条自己的账 / 历程 / 日志 / 原文。 */
 function ClipLedger({
   row,
@@ -306,6 +321,17 @@ function ClipLedger({
   const hint = hintFor(row);
   const steps = trailOf(row);
   const logs = useMemo(() => activity.filter((a) => a.clipId === c.id), [activity, c.id]);
+  /**
+   * 提示词默认折叠。
+   *
+   * 它是这一栏里最长的一块（视频提示词是一整段叙事），而**判片时不看它** ——
+   * 要看它的时候人是在查「为什么出成这样」，那是少数几次。摊开摆着的代价是
+   * 历程与日志被推到折叠线以下，于是每选一条都要先滚一屏。
+   *
+   * 状态**不随换条复位**：开着它多半是因为正在逐条对提示词，那时每换一条都要
+   * 重点一次展开，等于把这个开关变成一次性的。
+   */
+  const [promptOpen, setPromptOpen] = useState(false);
 
   // 左边那个大数字：回执优先，没回执时退回预估。两者都没有才是「—」。
   const credit = row.credit ?? row.estimate;
@@ -408,8 +434,13 @@ function ClipLedger({
         )}
       </div>
 
-      <div className="vsec">视频提示词</div>
-      <div className="vprompt">{c.videoPrompt ?? "（还没有，等 skill 写回）"}</div>
+      <div className="vsec">
+        视频提示词
+        <button type="button" className="lnk" onClick={() => setPromptOpen((v) => !v)}>
+          {promptOpen ? "收起" : "展开"}
+        </button>
+      </div>
+      {promptOpen && <div className="vprompt">{c.videoPrompt ?? "（还没有，等 skill 写回）"}</div>}
 
       {c.errorMessage && (
         <>

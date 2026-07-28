@@ -281,32 +281,6 @@ a:hover {
   background: var(--line2);
   flex: none;
 }
-/* ⌘K —— 做成输入框的样子而不是一枚图标：那是它实际打开的东西的样子。
-   **可压缩**：地方不够时先压它（里面那句「搜索或跳转…」压没了也还认得出是搜索框），
-   而通道状态灯里的数字压不得 —— 那几个数是这一栏存在的理由。 */
-.tsearch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  flex: 0 1 212px;
-  min-width: 96px;
-  overflow: hidden;
-  white-space: nowrap;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: oklch(100% 0 0 / 0.6);
-  border: 1px solid var(--line);
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--t3);
-  cursor: pointer;
-  flex: none;
-}
-.tsearch:hover {
-  background: #fff;
-  color: var(--t2);
-}
 .pdot {
   width: 6px;
   height: 6px;
@@ -444,61 +418,35 @@ a:hover {
   color: oklch(45% 0.1 70);
   background: var(--wrbg);
 }
-/* ── 侧栏里的两张筛选卡（视频流水线选中时展开） ───────────────
-   动作卡与通道卡是**叠加**的两个正交问题：拿它怎么办 × 它排在哪条队上。
-   卡挂在「视频流水线」那一行下面而不是列表末尾 —— 离得远就成了两件看不出关系的东西。 */
-.navcard {
-  margin: 7px 0 3px 12px;
-  padding: 8px 8px 9px;
-  border: 1px solid var(--line2);
-  border-radius: 0 11px 11px 0;
-  background: oklch(100% 0 0 / 0.72);
+/* ── 侧栏筛选列（视频流水线选中时展开） ─────────────────────
+   **一次只选一个**：上半截按动作，下半截按通道，中间一条细线分隔。
+   两维之间不做交集（判据单点 `matchFilter`），所以这里也不该有任何暗示
+   「这两行可以一起亮」的容器 —— 从前那两张带边框带标题的卡正是那个暗示。
+
+   卡框、卡头、每行的副行说明**全部去掉**：侧栏是全应用最挤的一列，246px 里已经
+   压着十一条路由。说明文字搬进了 `title=`（要用时才读的东西，常驻摆着只会把
+   九行筛选撑成一屏半），身份改由**一枚带色胶囊**承担 —— 一行只剩「是什么」和
+   「有几条」两件事。 */
+.navfl {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
+  margin: 5px 0 5px 11px;
 }
-/* 动作卡是主轴，给它一道与「制作」同色的粗边，和下面那张通道卡分出主次。 */
-.navcard.act {
-  border-color: var(--accln);
-  border-left: 2px solid var(--acc);
-  background: linear-gradient(180deg, oklch(58% 0.18 257 / 0.05), oklch(100% 0 0 / 0.5));
-}
-.navcard.chn {
-  margin-top: 4px;
-  gap: 4px;
-}
-.navcard .hd {
-  font: 600 9.5px var(--mono);
-  letter-spacing: 0.06em;
-  color: var(--t3);
-  padding: 0 3px 4px;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.navcard.act .hd {
-  color: oklch(58% 0.12 257);
-}
-.navcard .hd .hint {
-  font-size: 9.5px;
-  font-weight: 400;
-  letter-spacing: 0;
-  color: var(--t3);
-  opacity: 0.8;
-}
-.navcard .empty {
-  font-size: 10px;
-  color: var(--t3);
-  padding: 3px 4px 1px;
+/* 两个维度之间唯一的分隔。比一整个卡框轻，而它要说的事完全一样：下面换了一维。 */
+.navsep {
+  height: 1px;
+  background: var(--line);
+  margin: 6px 10px 5px;
 }
 .navrow {
-  min-height: 27px;
+  min-height: 26px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 7px;
-  border-radius: 9px;
-  border: 1px solid transparent;
+  padding: 2px 8px 2px 6px;
+  border-radius: 8px;
+  border: none;
   background: transparent;
   cursor: pointer;
   font-family: inherit;
@@ -508,51 +456,34 @@ a:hover {
 .navrow:hover {
   background: oklch(93.5% 0.006 258 / 0.6);
 }
+/* 选中态只靠**胶囊变实心**（见 `.fpill.on`）+ 一层极淡的底。再加边框与投影的话，
+   九行里那一行会比侧栏上面十一条路由的选中态还重，主次就倒过来了。 */
 .navrow.on {
-  background: #fff;
-  border-color: var(--accln);
-  box-shadow: var(--sh1);
+  background: color-mix(in oklch, var(--tone, var(--acc)) 8%, transparent);
 }
-/* 计数为 0 的档压淡但**不禁用**：它仍然回答「这一类现在没有」，而那是好消息。 */
+/* 计数为 0 的压淡但**不禁用**：它仍然回答「这一类现在没有」，而那是好消息。 */
 .navrow.zero {
-  opacity: 0.55;
+  opacity: 0.5;
 }
-.navrow .dot {
-  width: 7px;
-  height: 7px;
+/* 一枚带色胶囊 = 这一档 / 这条通道的身份。色由 `--tone` 下发：动作走 `ACTION_META.dot`
+   经内联 style，通道走 `data-tone` —— 两条路都落在同一个变量上，故只有这一套规则。 */
+.navrow .fpill {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 9px;
   border-radius: 99px;
-  flex: none;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: color-mix(in oklch, var(--tone, var(--acc)) 12%, transparent);
+  color: color-mix(in oklch, var(--tone, var(--acc)) 78%, black);
+  transition: background 0.1s, color 0.1s;
 }
-.navrow .dot.ring {
-  box-shadow: 0 0 0 3px oklch(58% 0.18 257 / 0.14);
-}
-.navrow .rail {
-  width: 3px;
-  align-self: stretch;
-  min-height: 15px;
-  border-radius: 2px;
-  flex: none;
-  background: var(--tone, var(--line2));
-}
-.navrow .bd {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.navrow .lb {
-  font-size: 12.5px;
-  color: var(--t2);
-}
-.navrow.on .lb {
-  color: var(--acc2);
+.navrow.on .fpill {
+  background: var(--tone, var(--acc));
+  color: #fff;
   font-weight: 600;
-}
-.navrow .nt {
-  font-size: 10px;
-  line-height: 1.35;
-  color: var(--t3);
 }
 .navrow .n {
   font: 600 11px var(--mono);
@@ -560,33 +491,8 @@ a:hover {
   flex: none;
 }
 .navrow.on .n {
-  color: var(--acc2);
+  color: color-mix(in oklch, var(--tone, var(--acc)) 72%, black);
 }
-/* 通道 chip：底色是这条通道的色，兑淡到能承载 10.5px 的字。
-   **不叫 `.pill`**：那个类是顶栏那颗更新提示胶囊，两者会叠在一起 ——
-   人会拿到一个带强调色描边、还会 pop 一下的通道名。 */
-.navrow .cpill {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  height: 17px;
-  padding: 0 7px;
-  border-radius: 99px;
-  font: 600 10.5px var(--mono);
-  background: color-mix(in oklch, var(--tone, var(--acc)) 13%, transparent);
-  color: color-mix(in oklch, var(--tone, var(--acc)) 80%, black);
-}
-.navrow .cpill.vip {
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--tone, var(--acc)) 40%, transparent);
-}
-.navrow.all {
-  min-height: 26px;
-}
-.navrow.ch.on {
-  background: color-mix(in oklch, var(--tone, var(--acc)) 9%, #fff);
-  border-color: color-mix(in oklch, var(--tone, var(--acc)) 35%, transparent);
-}
-
 .sfoot {
   font-size: 10.5px;
   color: var(--t3);
@@ -2108,9 +2014,6 @@ a:hover {
   animation: fin 0.13s;
   padding: 0 20px;
 }
-.ovtop {
-  align-items: flex-start;
-}
 .mdl {
   background: #fff;
   border-radius: 13px;
@@ -2225,63 +2128,6 @@ a:hover {
   border-color: var(--accln);
   background: var(--accbg);
   box-shadow: 0 0 0 1px var(--accln);
-}
-.plt {
-  width: 600px;
-  max-width: 92vw;
-  background: #fff;
-  border-radius: 13px;
-  border: 1px solid var(--line);
-  box-shadow: var(--sh3);
-  margin-top: 14vh;
-  overflow: hidden;
-  animation: pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
-}
-.plin {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 15px;
-  height: 46px;
-  border-bottom: 1px solid var(--line);
-  color: var(--t3);
-}
-.plinp {
-  flex: 1;
-  border: none;
-  outline: none;
-  font-size: 13.5px;
-  font-family: inherit;
-  color: var(--t1);
-  background: transparent;
-  height: 100%;
-}
-.pllist {
-  max-height: 320px;
-  overflow: auto;
-  padding: 6px;
-}
-.pltit {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 36px;
-  padding: 0 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 12.5px;
-}
-.pltit:hover {
-  background: var(--sub);
-}
-.pltit.on {
-  background: var(--accbg);
-}
-.plcat {
-  font-size: 11px;
-  color: var(--t3);
-  width: 52px;
-  flex: none;
 }
 .bigempty {
   display: flex;
@@ -3713,27 +3559,29 @@ a:hover {
   padding: 13px 16px 18px;
 }
 
-/* 摘要卡：这一屏（这一档 × 这条通道）是个什么局面。 */
+/* 摘要卡：这一屏是个什么局面。
+   **不再是一块有色底**：那层底色面积最大、信息量最小 —— 它说的事（这一档什么语气）
+   标题、色点、计数三处都已经在说，而它把中栏最靠上的一屏整个染了一遍。现在语气落在
+   **字**上（`--mood`），卡的边界交给一条分隔线。 */
 .vsum {
-  padding: 10px 12px 11px;
-  border-radius: 11px;
-  border: 1px solid var(--line2);
-  background: var(--sub);
+  padding: 0 2px 13px;
   display: flex;
   flex-direction: column;
   gap: 9px;
+  border-bottom: 1px solid var(--line2);
 }
+/* 语气 → 强调色。四档与 `filterFace` 的 `mood` 一一对应。 */
 .vsum[data-mood="acc"] {
-  border-color: var(--accln);
-  background: var(--accbg);
+  --mood: var(--acc2);
 }
 .vsum[data-mood="rev"] {
-  border-color: var(--wrln);
-  background: var(--wrbg);
+  --mood: var(--wr2);
 }
 .vsum[data-mood="er"] {
-  border-color: var(--erln);
-  background: var(--erbg);
+  --mood: var(--er);
+}
+.vsum[data-mood="t3"] {
+  --mood: var(--t2);
 }
 .vsum .hd {
   display: flex;
@@ -3741,16 +3589,21 @@ a:hover {
   gap: 8px;
   min-width: 0;
 }
+/* 色点取的是**这一档 / 这条通道自己的色**（`--tone`），与侧栏胶囊、行左轨同源；
+   语气色（`--mood`）另说一件事：它给标题与计数定调。两者常常不同 ——
+   「排队中」的点是蓝的（那是它的身份色），语气却是灰的（没什么要你做）。 */
 .vsum .hd .dot {
   width: 7px;
   height: 7px;
   border-radius: 99px;
   flex: none;
+  background: var(--tone, var(--acc));
 }
 .vsum .hd .ttl {
   font-size: 12.5px;
   font-weight: 600;
   flex: none;
+  color: var(--mood, var(--t1));
 }
 .vsum .hd .sub {
   font-size: 11px;
@@ -3760,6 +3613,7 @@ a:hover {
 .vsum .hd .n {
   font: 600 13px var(--mono);
   flex: none;
+  color: var(--mood, var(--t1));
 }
 .vsum .tiles {
   display: flex;
@@ -3770,7 +3624,7 @@ a:hover {
   min-width: 0;
   padding: 6px 9px 7px;
   border-radius: 8px;
-  background: oklch(100% 0 0 / 0.75);
+  background: var(--sub);
   border: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -3791,7 +3645,8 @@ a:hover {
   flex-direction: column;
   gap: 6px;
 }
-/* 通道构成条：一条通道一段，宽度按条数。它自带图例（下面那排 chip），
+/* 构成条：一段一类，宽度按条数。按动作筛时画的是通道构成，按通道筛时画的是动作构成
+   （另一维在那种情况下是恒等式，画出来是一整条纯色）。它自带图例（下面那排 chip），
    所以不需要 tooltip —— 一条只能靠 title 才读得懂的进度条等于没人读得懂。 */
 .vsum .bar {
   height: 7px;
@@ -3842,29 +3697,24 @@ a:hover {
   color: var(--er);
 }
 
-/* 这一条的账：左边一个大额度块 + 右边八格。 */
+/* 这一条的账：左边一个大额度数 + 右边八格。
+   左边那块从前是一张有色底的卡（蓝 / 琥珀）。同样的理由拆掉了：**数字本身**就带色，
+   底色只是把同一件事又说了一遍，代价是中栏第二块颜色遮罩。区隔改由一条竖线承担。 */
 .vacct {
   display: flex;
-  gap: 9px;
+  gap: 11px;
   align-items: stretch;
   margin-top: 5px;
 }
 .vacct .big {
-  width: 104px;
+  width: 96px;
   flex: none;
-  padding: 9px 12px 10px;
-  border-radius: 11px;
-  border: 1px solid var(--accln);
-  background: var(--accbg);
+  padding: 2px 11px 2px 2px;
+  border-right: 1px solid var(--line2);
   display: flex;
   flex-direction: column;
   gap: 2px;
   justify-content: center;
-}
-/* 已扣与预估配色不同 —— 一个是已经发生的事实，一个是还能改主意的打算。 */
-.vacct .big.paid {
-  border-color: var(--wrln);
-  background: var(--wrbg);
 }
 .vacct .big .n {
   font: 600 26px / 1 var(--mono);
@@ -4068,11 +3918,13 @@ a:hover {
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
 }
+/* 与侧栏那枚胶囊、行左轨、摘要卡的点同色（`--tone` 由动作或通道下发）。 */
 .vlisthd .dot {
   width: 8px;
   height: 8px;
   border-radius: 99px;
   flex: none;
+  background: var(--tone, var(--acc));
 }
 .vlisthd .n {
   font: 600 12px var(--mono);
@@ -4930,4 +4782,65 @@ a:hover {
 }
 .ikmore:hover {
   text-decoration: underline;
+}
+
+/* ==================== 应用内消息（sonner toast） ====================
+ *
+ * v0.24.0 起跟应用同一套外观。此前用的是 sonner 自带的深色主题：三块黑胶囊叠在
+ * 一整屏浅色界面的右上角，比它们要传达的消息本身（「已刷新，暂无新出片」）显眼得多
+ * —— 而那正好是这一栏最不需要抢注意力的时候。
+ *
+ * 选择器写成 `[data-sonner-toast].tst` 而不是单个 `.tst`：sonner 在运行时把自己的
+ * 样式表注入 `<head>`，落在本文件**之后**，同特异度时它赢。多带一个属性选择器
+ * 把特异度抬到 (0,2,0)，这几条才真的生效。
+ */
+[data-sonner-toast].tst {
+  background: var(--panel);
+  color: var(--t1);
+  border: 1px solid var(--line2);
+  border-radius: 11px;
+  box-shadow: var(--sh3);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 11px 14px 11px 15px;
+  gap: 9px;
+  align-items: flex-start;
+}
+/* 左端一道 3px 的色条 = 这条消息是什么性质。整条染色会让一句「已保存」看着像事故；
+   一道细条既认得出又不喊。默认（普通消息）是中性的，不占用任何一支语义色。 */
+[data-sonner-toast].tst::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--line2);
+}
+[data-sonner-toast].tst[data-type="success"]::before {
+  background: var(--ok);
+}
+[data-sonner-toast].tst[data-type="error"]::before {
+  background: var(--er);
+}
+[data-sonner-toast].tst[data-type="warning"]::before {
+  background: var(--wr);
+}
+[data-sonner-toast].tst[data-type="error"] {
+  color: var(--er);
+  border-color: var(--erln);
+}
+/* 图标跟着色条走。sonner 自带的那套勾/叉图形保留 —— 它们在余光里比文字先被认出来。 */
+[data-sonner-toast].tst [data-icon] {
+  margin-top: 1px;
+}
+[data-sonner-toast].tst [data-title] {
+  font-weight: 500;
+}
+[data-sonner-toast].tst [data-description] {
+  color: var(--t3);
+  font-size: 11.5px;
+  margin-top: 2px;
 }

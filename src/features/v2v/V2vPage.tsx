@@ -15,6 +15,7 @@ import {
   type SortKey,
   carryParams,
   creditPerSec,
+  filterFace,
   fmtAgo,
   sliceSummary,
 } from "@/features/v2v/model";
@@ -87,8 +88,7 @@ export function V2vPage() {
   const activity = useV2vStore((s) => s.activity);
   const coarseNow = useV2vStore((s) => s.coarseNow);
 
-  const action = useV2vStore((s) => s.action);
-  const channel = useV2vStore((s) => s.channel);
+  const filter = useV2vStore((s) => s.filter);
   const sort = useV2vStore((s) => s.sort);
   const sel = useV2vStore((s) => s.sel);
   const cur = useV2vStore((s) => s.cur);
@@ -197,15 +197,16 @@ export function V2vPage() {
   }, [screen, revList, revIndex, setCur]);
 
   const slice = useMemo(() => sliceSummary(visible, channels), [visible, channels]);
-  // 「一组连毙 3 条」按**当前通道的全貌**算，不按这一屏算：毙掉的条目归 `done`，
-  // 而 `done` 在工作台里一档都不占 —— 只看这一屏的话这条提示永远不会出现。
+  const face = useMemo(() => filterFace(filter, channels), [filter, channels]);
+  // 「一组连毙 3 条」按**通道的全貌**算，不按这一屏算：毙掉的条目归 `done`，
+  // 而 `done` 无论按哪一维都进不了这一屏 —— 只看这一屏的话这条提示永远不会出现。
   const badGroup = useMemo(() => {
     const pool =
-      channel == null
-        ? channels.flatMap((c) => c.rows)
-        : (channels.find((c) => c.key === channel)?.rows ?? []);
+      filter.kind === "channel"
+        ? (channels.find((c) => c.key === filter.key)?.rows ?? [])
+        : channels.flatMap((c) => c.rows);
     return worstGroup(pool);
-  }, [channels, channel]);
+  }, [channels, filter]);
 
   // ── 动作 ─────────────────────────────────────────────
   const guard = useCallback(async (fn: () => Promise<void>) => {
@@ -523,9 +524,8 @@ export function V2vPage() {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      // 命令面板 / 速查面板打开时整页让路：不然在 ⌘K 里打字会顺手判掉一条视频。
-      const ui = useUiStore.getState();
-      if (ui.paletteOpen || ui.helpOpen) return;
+      // 速查面板开着时整页让路：那时按 X 是想关面板，不是想毙一条视频。
+      if (useUiStore.getState().helpOpen) return;
       if (e.metaKey || e.ctrlKey) {
         // ⌘⏎ 确认提交：勾选的待提交条目，或（没勾时）当前光标那一条。
         if (e.key === "Enter") {
@@ -705,9 +705,8 @@ export function V2vPage() {
           <V2vLedger
             row={curRow}
             slice={slice}
-            channels={channels}
-            action={action}
-            channel={channel}
+            filter={filter}
+            face={face}
             handoff={handoff}
             rewriteTotal={rewriteN}
             activity={activity}
@@ -724,7 +723,8 @@ export function V2vPage() {
         <V2vList
           rows={visible}
           channels={channels}
-          action={action}
+          filter={filter}
+          face={face}
           curId={curId}
           sel={sel}
           sort={sort}
@@ -753,7 +753,6 @@ export function V2vPage() {
 
       <V2vDock
         row={curRow}
-        action={action}
         visible={visible}
         sel={sel}
         running={tick?.running ?? 0}

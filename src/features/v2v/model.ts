@@ -95,6 +95,21 @@ export function isQueued(c: ClipView): boolean {
   return c.stage === "ready" && c.submitQueuedAt != null;
 }
 
+/**
+ * 这一条走哪条即梦通道：它自己写死的型号优先，没写就落到设置里的默认型号。
+ *
+ * 与 Rust 的 `runner::channel_of` 和 SQL 的 `repo::CHANNEL_OF` **必须同口径**。
+ * 一边按型号分桶、另一边按别的口径数空位，结果就是数着 A 通道的空位往 B 通道发单
+ * ——而界面这一侧分叉的症状同样难查：节头写着「2.0Mini」，节里躺着一条实际会走
+ * 2.0Fast 的条目，于是「这一节全选换通道」换的不是人以为的那批。
+ *
+ * 这里是这份口径在前端的**唯一**副本；分节、本地队列位次、等待中位数三处都读它。
+ */
+export function channelOf(c: ClipView, eff: EffectiveParams | null): string {
+  const own = (c.modelVersion ?? "").trim();
+  return own !== "" ? own : (eff?.modelVersion ?? "");
+}
+
 /** 动作筛选片。`mine` 是默认值 —— 一进页面该看到的是「等你动手的」，不是全部。 */
 export type ActionFilter = NextAction | "mine" | "all" | "rej";
 
@@ -132,14 +147,13 @@ export const SIGNAL_CHIPS: { key: SignalKey; label: string; title: string }[] = 
     label: "超时",
     title: "只是我们这边不等了 —— 额度已扣、即梦那边还在跑。该点「继续等待」而不是重跑。",
   },
-  { key: "slow", label: "等待异常", title: "已超同批在跑条目中位等待时长的 3 倍。" },
+  { key: "slow", label: "等待异常", title: "已超同通道在跑条目中位等待时长的 3 倍。" },
   { key: "rerun", label: "重跑过", title: "尝试次数 > 1，即同一张图已经花过不止一份额度。" },
   { key: "vip", label: "vip 通道", title: "同规格贵 5.5 倍，买到的只是不排队。" },
   { key: "auto", label: "常驻队列", title: "由自动补单放行的条目，不是你手动提交的。" },
 ];
 
 export const SORTS = {
-  batch: "批次倒序",
   wait: "已等最久",
   credit: "额度最高",
   attempt: "重跑最多",
@@ -262,6 +276,50 @@ export function delivered(c: ClipView): boolean {
   return (c.exportPath ?? "").trim() !== "";
 }
 
+/** 换通道时把当前参数带过去的结果。`*Changed` 为真即「原值这条通道接不了，夹过了」。 */
+export interface CarriedParams {
+  duration: number | null;
+  resolution: string;
+  durationChanged: boolean;
+  resolutionChanged: boolean;
+}
+
+/**
+ * 换通道时，把当前生效的时长/分辨率**尽量原样**带到目标通道。
+ *
+ * 为什么不能直接交给 Rust 的 `normalize_opts`：它在只给模型时会把时长补成该模型的
+ * **最小值**、分辨率补成**第一档**（`dreamina.rs`）。于是一条配了 1080p/10s 的条目
+ * 换个通道就被悄悄降成 720p/5s —— 人要的是「换条队」，拿到的是「顺便降了规格」，
+ * 而这件事在界面上一个字都不会说。
+ *
+ * 目标通道接不了原值时才夹，并且**把夹过的事实报出去**（`*Changed`），由面板写成
+ * 「10s → 8s（该通道上限）」摆在确认按钮之前。静默改值正是「我明明选了 1080p
+ * 却不生效」的成因。
+ */
+export function carryParams(
+  target: ModelInfo | undefined,
+  duration: number | null,
+  resolution: string,
+): CarriedParams {
+  if (!target) {
+    return { duration: null, resolution: "", durationChanged: false, resolutionChanged: false };
+  }
+  const dur =
+    duration == null
+      ? target.minDuration
+      : Math.min(target.maxDuration, Math.max(target.minDuration, duration));
+  const res =
+    resolution !== "" && target.resolutions.includes(resolution)
+      ? resolution
+      : (target.resolutions[0] ?? "");
+  return {
+    duration: dur,
+    resolution: res,
+    durationChanged: duration != null && dur !== duration,
+    resolutionChanged: resolution !== "" && res !== resolution,
+  };
+}
+
 /** 单价查询：查不到返回 null（界面据此显示「≥」，绝不摆一个编出来的数字）。 */
 export function creditPerSec(
   models: ModelInfo[],
@@ -293,9 +351,6 @@ export function deriveRows(
    */
   limits: ReadonlyMap<string, number> = new Map(),
 ): Row[] {
-  /** 这一条走哪条通道。与 Rust 的 `runner::channel_of` 同口径。 */
-  const channelOf = (c: ClipView) => c.modelVersion ?? eff?.modelVersion ?? "";
-
   // 本地队列位次：严格照后端取用的顺序（放行时刻，其次 id）算一遍，**并且按通道各排各的**
   // —— 后端补位是逐通道取队首的（`pick_submit_queued_on`），这边若按全局排，
   // 界面会对一条马上就要发出去的 mini 说「本地排第 79」。
@@ -305,17 +360,22 @@ export function deriveRows(
   for (const c of clips
     .filter(isQueued)
     .sort((a, b) => (a.submitQueuedAt ?? 0) - (b.submitQueuedAt ?? 0) || a.id - b.id)) {
-    const ch = channelOf(c);
+    const ch = channelOf(c, eff);
     const pos = (seen.get(ch) ?? 0) + 1;
     seen.set(ch, pos);
     queuePosOf.set(c.id, pos);
   }
-  // 「等待异常」是相对判据：跟同一批的其它在跑条目比，而不是跟一个拍脑袋的绝对秒数比。
-  // 按批分组取中位数 —— 不同批次的提交时刻差着几小时，混在一起算出来的中位数谁也不代表。
+  // 「等待异常」是相对判据：跟**同一条通道**上的其它在跑条目比，而不是跟一个拍脑袋的
+  // 绝对秒数比。
+  //
+  // 分组维度从批次改成了通道（0032）：一个批次的条目会分散到不同通道，而通道之间的
+  // 等待时长差着数量级（VIP 1–3 分钟出片，非 VIP 排到四千多位要等几小时）。把它们
+  // 混在一起取中位数，得到的是一个谁也不代表的数 —— 拿它当判据，要么把正常排队的
+  // 非 VIP 全标成「等待异常」，要么把真的卡住的 VIP 全放过去。
   const runWaits = new Map<string, number[]>();
   for (const c of clips) {
     if (c.stage !== "run") continue;
-    const key = String(c.batchId ?? "none");
+    const key = channelOf(c, eff);
     const w = c.firstSubmittedAt == null ? 0 : Math.max(0, now - c.firstSubmittedAt);
     const bucket = runWaits.get(key);
     if (bucket) bucket.push(w);
@@ -324,20 +384,9 @@ export function deriveRows(
   const medians = new Map<string, number>();
   for (const [k, v] of runWaits) medians.set(k, median(v));
 
-  // 「本批已出 X/Y」：排队中那一行要给的是**进度**，而不是又一句「排队中」。
-  const batchTotal = new Map<string, number>();
-  const batchDone = new Map<string, number>();
-  for (const c of clips) {
-    const key = String(c.batchId ?? "none");
-    batchTotal.set(key, (batchTotal.get(key) ?? 0) + 1);
-    if (c.stage === "rev" || c.stage === "pass" || c.stage === "rej") {
-      batchDone.set(key, (batchDone.get(key) ?? 0) + 1);
-    }
-  }
-
   return clips.map((c) => {
     const stage = c.stage as Stage;
-    const key = String(c.batchId ?? "none");
+    const key = channelOf(c, eff);
     const modelFull = c.modelVersion ?? eff?.modelVersion ?? null;
     const info = models.find((m) => m.modelVersion === modelFull);
     const resolution = c.videoResolution ?? eff?.videoResolution ?? info?.resolutions[0] ?? null;
@@ -391,15 +440,25 @@ export function deriveRows(
       situation = "疑幽灵单 · 没入队也没扣费，重跑不花钱";
       situationTone = "er";
     } else if (slow) {
-      situation = `等待异常 · 已超本批中位数 ${SLOW_FACTOR} 倍，别手动催`;
+      situation = `等待异常 · 已超同通道中位数 ${SLOW_FACTOR} 倍，别手动催`;
       situationTone = "wr";
     } else if (stage === "run") {
       // 位次是排队几小时里**唯一**有意义的进度：「第 4485 位」和「第 12 位」是两件
-      // 完全不同的事。问不到时才回落到本批进度 —— 绝不编一个位次出来。
+      // 完全不同的事。绝不编一个位次出来。
+      //
+      // 问不到时**说「问不到」，并给出上次问的时刻**（0032）。这里原来回落到
+      // 「本批已出 X/Y」，而那个分数的分子分母都不指向任何真实的队列：同一批次的条目
+      // 分散在不同通道上，各排各的队、上限也各不相同，加起来的进度谁也不是。更糟的是
+      // 它长得像个答案，于是没人再去追问「这条到底跑完了没有」。
+      //
+      // 现在这句话答的是「不知道 + 什么时候问的」，而刷新按钮就在顶栏 —— 位次与状态
+      // 都只能靠逐条 `query_result` 拿到，那正是那个按钮做的事。
       situation =
         c.queueIdx != null && c.queueIdx > 0
           ? `即梦在排队 · 前面还有 ${c.queueIdx} 个`
-          : `即梦在跑 · 本批已出 ${batchDone.get(key) ?? 0}/${batchTotal.get(key) ?? 0}`;
+          : polledAgo == null
+            ? "即梦在跑 · 还没问到过位次"
+            : `即梦在跑 · 位次问不到（${fmtAgo(polledAgo)}问过）`;
     } else if (isTimeout) {
       situation = "继续等待 · 额度已扣，即梦还在跑";
       situationTone = "er";
@@ -487,7 +546,12 @@ export function matchAction(r: Row, filter: ActionFilter): boolean {
   return r.action === filter;
 }
 
-/** 搜索：编号 / 组名 / 视频提示词 / 生图提示词 / submit_id 一次覆盖。 */
+/**
+ * 搜索：编号 / 组名 / 视频提示词 / 生图提示词 / submit_id / 通道 一次覆盖。
+ *
+ * 批次号不在里面（0032）：它在界面上已经一处都不显示了，留一个搜得到却看不见的
+ * 维度，只会让「搜 46 出来一堆不相干的东西」变成一个查不出原因的怪事。
+ */
 export function matchQuery(r: Row, q: string): boolean {
   if (q === "") return true;
   const needle = q.toLowerCase();
@@ -498,7 +562,7 @@ export function matchQuery(r: Row, q: string): boolean {
     (c.videoPrompt ?? "").toLowerCase().includes(needle) ||
     c.sourcePrompt.toLowerCase().includes(needle) ||
     (c.submitId ?? "").toLowerCase().includes(needle) ||
-    String(c.batchId ?? "").includes(needle)
+    r.modelShort.toLowerCase().includes(needle)
   );
 }
 
@@ -507,18 +571,21 @@ export function sortRows(rows: Row[], sort: SortKey): Row[] {
   if (sort === "wait") out.sort((a, b) => b.waitSecs - a.waitSecs);
   else if (sort === "credit") out.sort((a, b) => (b.credit ?? -1) - (a.credit ?? -1));
   else if (sort === "attempt") out.sort((a, b) => b.clip.attempt - a.clip.attempt);
-  // batch：后端已按 group_id, id 返回；分节本身按批次倒序，节内保持验收序。
   return out;
 }
 
-/** 一节（= 一个批次）。 */
+/** 一节（= 一条即梦通道）。 */
 export interface Section {
+  /** 通道全名（`model_version`）。空串 = 设置里也没写默认型号，走 CLI 默认。 */
   key: string;
-  batchId: number | null;
+  /** 通道简写（`ModelInfo.label`，随模型清单从 Rust 下发）。节头那个 chip 显示它。 */
+  label: string;
+  vip: boolean;
+  /** 这条通道上涉及的提示词组名 —— 回答「这条队上跑的是哪几组」。 */
   title: string;
-  /** 本批全部条目（不受筛选影响）—— 摘要与「已定案」判定要看全貌。 */
+  /** 本通道全部条目（不受筛选影响）—— 摘要与「已定案」判定要看全貌。 */
   all: Row[];
-  /** 当前筛选下这一批还剩哪些行。 */
+  /** 当前筛选下这条通道还剩哪些行。 */
   rows: Row[];
   /** 按下一步动作分桶。节内动作按钮据此显示，组件不必再数一遍。 */
   counts: Record<NextAction, number>;
@@ -536,6 +603,9 @@ export interface Section {
  * 取代原来那条 104px 的阶段混合分段条 —— 它唯一的图例是 `title=` tooltip，
  * 于是「这些进度条是什么意思」成了一个没人答得上来的问题。一句话既自带图例，
  * 又能直接说出数字。
+ *
+ * 「这一批 N 条」那个前缀去掉了（0032）：一节现在是一条通道，而通道里的条目来自
+ * 若干个批次，「这一批」会直接把人指错方向。总数由第一句的语义承担。
  */
 function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   const parts: string[] = [];
@@ -543,41 +613,54 @@ function headlineOf(all: Row[], counts: Record<NextAction, number>) {
   if (counts.rewrite > 0) parts.push(`${counts.rewrite} 条等你改写`);
   if (counts.submit > 0) parts.push(`${counts.submit} 条等你放行`);
   if (counts.review > 0) parts.push(`${counts.review} 条等你验收`);
-  if (counts.queued > 0) parts.push(`${counts.queued} 条排队等发`);
+  if (counts.queued > 0) parts.push(`${counts.queued} 条在本地排队`);
   if (counts.wait > 0) parts.push(`${counts.wait} 条在即梦跑`);
   const headlineTone: Section["headlineTone"] =
     counts.fix > 0 ? "er" : counts.rewrite + counts.submit + counts.review > 0 ? "acc" : "t3";
   const headline =
     parts.length === 0
-      ? `这一批 ${all.length} 条 · 已全部定案`
-      : `这一批 ${all.length} 条 · ${parts.join("，")}`;
+      ? `共 ${all.length} 条 · 已全部定案`
+      : `共 ${all.length} 条 · ${parts.join("，")}`;
   return { headline, headlineTone };
 }
 
 /**
- * 按批次分节。批次倒序（最近一批在最上），无批次的历史条目垫底。
+ * 按**通道**分节（0032）。
  *
- * **当前筛选下一条都不显示的批次整节消失**，无论它是否还有活。
+ * ## 为什么不再按批次
  *
- * 旧规则只砍「已定案」的空节，于是筛「处理异常」时几十个还在跑的批次会留下几十个
- * 只写着「当前筛选下这一批没有条目」的空壳节头，把真正的三条待办推到屏幕外面 ——
- * 用户那句「筛选项随便选一个都会保留每一个分组」说的就是这个。旧规则的理由是
- * 「分段条正是这一批做到哪了的答案，所以空节也该留着」；分段条没了，理由也就没了。
+ * 即梦按模型通道各排各的队，一条通道排满与另一条能不能发**毫无关系**。而一个批次的
+ * 条目会分散到不同通道上 —— 于是「按批次分节」下的每一个节内数字都不指向任何真实的
+ * 队列：「本批已出 0/49」的分子分母跨着几条互不相干的队，「全选本节」选出来的是一堆
+ * 跨通道的条目，对它们做的任何批量动作（尤其是换通道）都不成立。
  *
- * 条目不会因此变得无处可寻：成片在成片库，毙掉的选「未通过」筛选片还能翻出来
- * （那时 `rows` 非空，这一节就会重新出现）。
+ * 按通道分之后，一节 = 一条队 = 一个可以整体处置的单位：节内的「还剩多少活」是真的，
+ * 「全选本节 → 换通道」也是一个完整动作。
+ *
+ * 没写 `model_version` 的条目归**默认通道**那一节 —— 那本来就是它们会走的通道
+ * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径），另设一个「未定」节反而会把
+ * 同一条队拆成两半。
+ *
+ * ## 排序：还在动的排前面
+ *
+ * 远端在跑 > 本地压着队 > 其余，同档按条数多的在前。批次曾经有一个天然的时间序
+ * （id 倒序），通道没有 —— 通道之间唯一有意义的先后是「哪条还有账要算」。
+ *
+ * **当前筛选下一条都不显示的通道整节消失**，无论它是否还有活。旧规则只砍「已定案」的
+ * 空节，于是筛「处理异常」时会留下一排只写着「当前筛选下没有条目」的空壳节头，
+ * 把真正的三条待办推到屏幕外面。
  */
-export function buildSections(all: Row[], visible: Row[]): Section[] {
+export function buildSections(all: Row[], visible: Row[], models: ModelInfo[] = []): Section[] {
   const groups = new Map<string, Row[]>();
   for (const r of all) {
-    const key = String(r.clip.batchId ?? "none");
+    const key = r.modelFull ?? "";
     const bucket = groups.get(key);
     if (bucket) bucket.push(r);
     else groups.set(key, [r]);
   }
   const visByKey = new Map<string, Row[]>();
   for (const r of visible) {
-    const key = String(r.clip.batchId ?? "none");
+    const key = r.modelFull ?? "";
     const bucket = visByKey.get(key);
     if (bucket) bucket.push(r);
     else visByKey.set(key, [r]);
@@ -587,7 +670,7 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
   for (const [key, rows] of groups) {
     const visRows = visByKey.get(key) ?? [];
     if (visRows.length === 0) continue;
-    const batchId = key === "none" ? null : Number(key);
+    const info = models.find((m) => m.modelVersion === key);
     const counts = Object.fromEntries(ACTION_ORDER.map((a) => [a, 0])) as Record<
       NextAction,
       number
@@ -595,7 +678,11 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
     for (const r of rows) counts[r.action] += 1;
     out.push({
       key,
-      batchId,
+      // 简写的真相在 Rust（`dreamina::short_label`）。查不到 `ModelInfo` 才回落 ——
+      // 那说明库里存着一个已经从清单里下架的型号，此时行内的 `modelShort` 用的也是
+      // 同一条回落，两处必须一致。
+      label: info?.label ?? (key === "" ? "CLI 默认" : shortModel(key)),
+      vip: info?.vip ?? false,
       title: sectionTitle(rows),
       all: rows,
       rows: visRows,
@@ -605,21 +692,25 @@ export function buildSections(all: Row[], visible: Row[]): Section[] {
       createdAt: Math.max(...rows.map((r) => r.clip.createdAt)),
     });
   }
-  // 批次倒序；无批次的（历史）永远垫底。
-  out.sort((a, b) => {
-    if (a.batchId == null) return 1;
-    if (b.batchId == null) return -1;
-    return b.batchId - a.batchId;
-  });
+  // 还在动的排前面：远端在跑 > 本地压着队 > 其余；同档按条数多的在前，再同则按名字
+  // 定死顺序（否则每次重渲染的节序会随 Map 插入序漂移）。
+  const rank = (s: Section) => (s.counts.wait > 0 ? 0 : s.counts.queued > 0 ? 1 : 2);
+  out.sort(
+    (a, b) =>
+      rank(a) - rank(b) ||
+      b.counts.wait + b.counts.queued - (a.counts.wait + a.counts.queued) ||
+      b.all.length - a.all.length ||
+      a.key.localeCompare(b.key),
+  );
   return out;
 }
 
 /**
- * 分节标题 = 本批涉及的提示词组名。
+ * 分节标题 = 这条通道上涉及的提示词组名。
  *
- * 批次本身没有名字（`batches` 表只有 id 与备注），而组名恰好就是人给这批片子起的名
- * （一份 txt = 一个组）。一批混多个组时只列前两个 —— 铺满整行的组名反而什么都读不出来
- * （同作品库分节的处置）。
+ * 组名是人给这批片子起的名（一份 txt = 一个组），而通道本身只是一条队 ——
+ * 光看「2.0Fast」答不出「这条队上跑的是什么」。混多个组时只列前两个 ——
+ * 铺满整行的组名反而什么都读不出来（同作品库分节的处置）。
  */
 function sectionTitle(rows: Row[]): string {
   const names: string[] = [];

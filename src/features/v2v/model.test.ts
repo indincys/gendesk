@@ -2,6 +2,7 @@ import {
   type ActionFilter,
   type Row,
   buildSections,
+  carryParams,
   deriveRows,
   matchAction,
   matchQuery,
@@ -100,6 +101,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     submitQueuedAt: null,
     exportPath: null,
     phantomSuspect: false,
+    billed: false,
     acceptedAt: NOW - 8000,
     updatedAt: NOW - 600,
     ...over,
@@ -210,12 +212,42 @@ describe("本地待发队列（0028）", () => {
     expect(r?.situation).toBe("即梦在排队 · 前面还有 4485 个");
   });
 
-  it("问不到位次就退回本批进度，绝不编一个数字出来", () => {
+  /**
+   * 断言从「退回本批进度」改成了「说问不到 + 报上次问的时刻」（0032）。
+   *
+   * **改断言而不是删**：原断言的前提被推翻了 —— 它假定「本批已出 X/Y」是一个有意义的
+   * 回落，而实际上同一批次的条目分散在好几条互不相干的即梦队列上（各排各的队、上限
+   * 各不相同），那个分数的分子分母都不指向任何真实的队列。更糟的是它长得像个答案，
+   * 于是没人再去追问「这条到底跑完了没有」。
+   *
+   * 「绝不编一个数字出来」这条规则本身没变，只是现在贯彻得更彻底：问不到就说问不到。
+   */
+  it("问不到位次就说问不到、并报上次问的时刻，绝不编一个数字出来", () => {
     const [r] = derive([
-      clip({ stage: "run", videoPath: null, queueIdx: null, firstSubmittedAt: NOW - 600 }),
+      clip({
+        stage: "run",
+        videoPath: null,
+        queueIdx: null,
+        firstSubmittedAt: NOW - 600,
+        polledAt: NOW - 240,
+      }),
     ]);
     expect(r?.queuePos).toBeNull();
-    expect(r?.situation).toContain("本批已出");
+    expect(r?.situation).toBe("即梦在跑 · 位次问不到（4 分钟前问过）");
+    expect(r?.situation).not.toContain("本批");
+  });
+
+  it("一次都没问到过位次时不假装问过", () => {
+    const [r] = derive([
+      clip({
+        stage: "run",
+        videoPath: null,
+        queueIdx: null,
+        firstSubmittedAt: NOW - 600,
+        polledAt: null,
+      }),
+    ]);
+    expect(r?.situation).toBe("即梦在跑 · 还没问到过位次");
   });
 });
 
@@ -519,52 +551,108 @@ describe("筛选", () => {
 });
 
 describe("分节", () => {
-  // v0.20.0 起语义变了：已定案的批次不再折叠成一行，而是**整节消失**。
-  // 折叠一行也是一行 —— 几十批做完之后，那些「已定案」的行会把真正在跑的两批
-  // 挤到屏幕外面去，而工作台要答的恰恰是「还剩多少活」。
-  it("按批次倒序；全部落在 pass/rej 的批次整节消失", () => {
+  /**
+   * 分组维度从批次改成了**通道**（0032）。
+   *
+   * 即梦按模型通道各排各的队，而一个批次的条目会分散到不同通道上 —— 于是按批次分节时
+   * 每一个节内数字都不指向任何真实的队列，「全选本节」选出来的也是一堆跨通道的条目，
+   * 对它们做批量动作（尤其是换通道）根本不成立。
+   */
+  it("按通道分节：同通道归一节，跨通道拆开", () => {
     const rows = derive([
-      clip({ id: 1, batchId: 31, stage: "rev" }),
-      clip({ id: 2, batchId: 30, stage: "pass" }),
-      clip({ id: 3, batchId: 30, stage: "rej" }),
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rev" }),
+    ]);
+    const secs = buildSections(rows, rows, MODELS);
+    expect(new Set(secs.map((s) => s.key))).toEqual(
+      new Set(["seedance2.0fast", "seedance2.0fast_vip"]),
+    );
+    expect(secs.find((s) => s.key === "seedance2.0fast")?.all).toHaveLength(2);
+    // 简写来自 Rust 下发的 `ModelInfo.label`，不在前端另判一次后缀。
+    expect(secs.find((s) => s.key === "seedance2.0fast_vip")?.label).toBe("2.0Fast VIP");
+    expect(secs.find((s) => s.key === "seedance2.0fast_vip")?.vip).toBe(true);
+  });
+
+  /**
+   * 没写 `model_version` 的条目归**默认通道**那一节 —— 那本来就是它们会走的通道
+   * （`channelOf` 与 Rust 的 `runner::channel_of` 同口径）。另设一个「未定通道」节
+   * 会把同一条真实队列在界面上劈成两半，而「全选本节 → 换通道」就只换得到一半。
+   */
+  it("没写 model_version 的条目与默认通道的条目落在同一节", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: null, stage: "rewrite" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "rev" }),
+    ]);
+    const secs = buildSections(rows, rows, MODELS);
+    expect(secs).toHaveLength(1);
+    expect(secs[0]?.key).toBe("seedance2.0fast");
+    expect(secs[0]?.all).toHaveLength(2);
+  });
+
+  // v0.20.0 起语义就是：已定案的不再折叠成一行，而是**整节消失**。
+  // 折叠一行也是一行 —— 做完几十条之后，那些「已定案」的行会把真正在跑的挤到屏幕
+  // 外面去，而工作台要答的恰恰是「还剩多少活」。
+  it("全部落在 pass/rej 的通道整节消失", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "pass" }),
+      clip({ id: 3, modelVersion: "seedance2.0fast_vip", stage: "rej" }),
     ]);
     // 工作台的可见集不含已定案的两态（`matchAction(_, "all")` 只放行在制）。
     const visible = rows.filter((r) => matchAction(r, "all"));
-    const secs = buildSections(rows, visible);
-    expect(secs.map((s) => s.batchId)).toEqual([31]);
+    const secs = buildSections(rows, visible, MODELS);
+    expect(secs.map((s) => s.key)).toEqual(["seedance2.0fast"]);
     expect(secs[0]?.done).toBe(false);
   });
 
   /**
-   * v0.22.0 起这条语义反转了：**当前筛选下一条都不显示的批次整节消失**，
-   * 无论它是否还有活。
+   * v0.22.0 起这条语义反转了：**当前筛选下一条都不显示的整节消失**，无论它是否还有活。
    *
-   * 旧规则只砍已定案的空节，于是筛「处理异常」时几十个还在跑的批次留下几十个
-   * 只写着「当前筛选下这一批没有条目」的空壳节头 —— 用户那句「筛选项随便选一个
-   * 都会保留每一个分组」说的就是它。旧规则的理由是「分段条正是这一批做到哪了的
-   * 答案，空节也该留着」；分段条已经删了，理由也就没了。
+   * 旧规则只砍已定案的空节，于是筛「处理异常」时会留下一排只写着「当前筛选下没有
+   * 条目」的空壳节头 —— 用户那句「筛选项随便选一个都会保留每一个分组」说的就是它。
    */
-  it("当前筛选下没有可见行的批次整节消失 —— 哪怕它还有活", () => {
+  it("当前筛选下没有可见行的通道整节消失 —— 哪怕它还有活", () => {
     const rows = derive([
-      clip({ id: 1, batchId: 31, stage: "rev" }),
-      clip({ id: 2, batchId: 30, stage: "rej" }),
+      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
+      clip({ id: 2, modelVersion: "seedance2.0fast_vip", stage: "rej" }),
     ]);
     const secs = buildSections(
       rows,
       rows.filter((r) => matchAction(r, "rej")),
+      MODELS,
     );
-    // 只剩 30（它有命中的行）。31 还有活，但这一屏里它一行都没有 —— 留一个空壳
-    // 节头不回答任何问题，只会把真正命中的那一节挤下去。
-    expect(secs.map((s) => s.batchId)).toEqual([30]);
+    // 只剩 vip（它有命中的行）。2.0fast 还有活，但这一屏里它一行都没有。
+    expect(secs.map((s) => s.key)).toEqual(["seedance2.0fast_vip"]);
     expect(secs[0]?.done).toBe(true);
   });
 
-  it("无批次的历史条目垫底，不占最新那一节的位置", () => {
+  /**
+   * 通道之间没有批次那样天然的时间序（id 倒序），唯一有意义的先后是「哪条还有账要算」：
+   * 远端在跑 > 本地压着队 > 其余。
+   */
+  it("有远端在跑的通道排在只压着本地队列的前面", () => {
     const rows = derive([
-      clip({ id: 1, batchId: null, stage: "rewrite" }),
-      clip({ id: 2, batchId: 12, stage: "rev" }),
+      clip({
+        id: 1,
+        modelVersion: "seedance2.0fast",
+        stage: "ready",
+        submitQueuedAt: NOW - 100,
+        videoPath: null,
+      }),
+      clip({
+        id: 2,
+        modelVersion: "seedance2.0fast_vip",
+        stage: "run",
+        videoPath: null,
+        firstSubmittedAt: NOW - 100,
+        submitCredit: 44,
+      }),
     ]);
-    expect(buildSections(rows, rows).map((s) => s.batchId)).toEqual([12, null]);
+    expect(buildSections(rows, rows, MODELS).map((s) => s.key)).toEqual([
+      "seedance2.0fast_vip",
+      "seedance2.0fast",
+    ]);
   });
 
   // 节头摘要取代了那条无图例的分段条 —— 用户问「每个分组这些进度条是什么意思」，
@@ -573,54 +661,100 @@ describe("分节", () => {
     const rows = derive([
       clip({
         id: 1,
-        batchId: 31,
         stage: "run",
         videoPath: null,
         submitCredit: 8,
         firstSubmittedAt: NOW - 60,
       }),
-      clip({ id: 2, batchId: 31, stage: "rev" }),
-      clip({ id: 3, batchId: 31, stage: "ready", videoPath: null, submitId: null }),
-      clip({ id: 4, batchId: 31, stage: "fail", errorType: "timeout", videoPath: null }),
+      clip({ id: 2, stage: "rev" }),
+      clip({ id: 3, stage: "ready", videoPath: null, submitId: null }),
+      clip({ id: 4, stage: "fail", errorType: "timeout", videoPath: null }),
     ]);
-    const sec = buildSections(rows, rows)[0];
-    expect(sec?.headline).toBe(
-      "这一批 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦跑",
-    );
+    const sec = buildSections(rows, rows, MODELS)[0];
+    // 「这一批 N 条」那个前缀去掉了（0032）：一节是一条通道，里面的条目来自若干个批次。
+    expect(sec?.headline).toBe("共 4 条 · 1 条出了异常，1 条等你放行，1 条等你验收，1 条在即梦跑");
     expect(sec?.headlineTone).toBe("er");
   });
 
-  it("全定案的批次摘要直说定案，不假装还有活", () => {
-    const rows = derive([
-      clip({ id: 1, batchId: 31, stage: "pass" }),
-      clip({ id: 2, batchId: 31, stage: "rej" }),
-    ]);
-    const sec = buildSections(rows, rows)[0];
-    expect(sec?.headline).toBe("这一批 2 条 · 已全部定案");
+  it("全定案的通道摘要直说定案，不假装还有活", () => {
+    const rows = derive([clip({ id: 1, stage: "pass" }), clip({ id: 2, stage: "rej" })]);
+    const sec = buildSections(rows, rows, MODELS)[0];
+    expect(sec?.headline).toBe("共 2 条 · 已全部定案");
     expect(sec?.headlineTone).toBe("t3");
     expect(sec?.counts.done).toBe(2);
   });
 
   it("分节标题取组名；混多组时只列前两个", () => {
     const rows = derive([
-      clip({ id: 1, batchId: 7, groupName: "甲组" }),
-      clip({ id: 2, batchId: 7, groupName: "乙组" }),
-      clip({ id: 3, batchId: 7, groupName: "丙组" }),
+      clip({ id: 1, groupName: "甲组" }),
+      clip({ id: 2, groupName: "乙组" }),
+      clip({ id: 3, groupName: "丙组" }),
     ]);
-    expect(buildSections(rows, rows)[0]?.title).toBe("甲组 · 乙组 等 3 组");
+    expect(buildSections(rows, rows, MODELS)[0]?.title).toBe("甲组 · 乙组 等 3 组");
   });
 
-  it("筛选只影响列出来的行，节头摘要仍按全貌算 —— 否则「这一批做到哪了」当场失真", () => {
-    const rows = derive([
-      clip({ id: 1, batchId: 31, stage: "rev" }),
-      clip({ id: 2, batchId: 31, stage: "pass" }),
-    ]);
+  it("筛选只影响列出来的行，节头摘要仍按全貌算 —— 否则「这条队做到哪了」当场失真", () => {
+    const rows = derive([clip({ id: 1, stage: "rev" }), clip({ id: 2, stage: "pass" })]);
     const visible = rows.filter((r) => r.stage === "rev");
-    const sec = buildSections(rows, visible)[0];
+    const sec = buildSections(rows, visible, MODELS)[0];
     expect(sec?.rows).toHaveLength(1);
     expect(sec?.all).toHaveLength(2);
-    // 摘要说的是这一批的全貌（2 条），不是这一屏筛出来的 1 条。
-    expect(sec?.headline).toBe("这一批 2 条 · 1 条等你验收");
+    // 摘要说的是这条通道的全貌（2 条），不是这一屏筛出来的 1 条。
+    expect(sec?.headline).toBe("共 2 条 · 1 条等你验收");
     expect(sec?.counts.done).toBe(1);
+  });
+});
+
+describe("换通道时的参数带过去（carryParams）", () => {
+  /**
+   * 这一组守的是一件会**静默改值**的事。
+   *
+   * Rust 的 `normalize_opts` 在只给模型时会把时长补成该模型的最小值、分辨率补成第一档
+   * —— 于是「换条队」这个动作会顺便把 1080p/10s 降成 720p/4s，而界面上一个字都不说。
+   * 「我明明选了 1080p 却不生效」正是这么来的。
+   */
+  const WIDE: ModelInfo = {
+    modelVersion: "seedance1.5pro",
+    label: "1.5Pro",
+    minDuration: 5,
+    maxDuration: 10,
+    resolutions: ["720p", "1080p"],
+    creditAtMin: 20,
+    resPrices: [
+      { resolution: "720p", creditPerSec: 2 },
+      { resolution: "1080p", creditPerSec: 4 },
+    ],
+    vip: false,
+  };
+
+  it("目标通道接得住就原样带过去，不报「改过」", () => {
+    const c = carryParams(WIDE, 8, "1080p");
+    expect(c).toEqual({
+      duration: 8,
+      resolution: "1080p",
+      durationChanged: false,
+      resolutionChanged: false,
+    });
+  });
+
+  it("超出时长区间就夹到边界，并把夹过的事实报出去", () => {
+    expect(carryParams(WIDE, 15, "720p")).toMatchObject({ duration: 10, durationChanged: true });
+    expect(carryParams(WIDE, 2, "720p")).toMatchObject({ duration: 5, durationChanged: true });
+  });
+
+  it("目标通道不支持的分辨率退回第一档，并报「改过」", () => {
+    // MODELS[0] 只有 720p。
+    const c = carryParams(MODELS[0], 6, "1080p");
+    expect(c).toMatchObject({ resolution: "720p", resolutionChanged: true });
+  });
+
+  it("原本就没设过参数时不算「改过」—— 那是回落，不是被夹", () => {
+    const c = carryParams(WIDE, null, "");
+    expect(c).toEqual({
+      duration: 5,
+      resolution: "720p",
+      durationChanged: false,
+      resolutionChanged: false,
+    });
   });
 });

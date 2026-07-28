@@ -102,6 +102,8 @@ export type {
   V2vProgress,
   V2vActivity,
   V2vTick,
+  V2vRefresh,
+  ChannelSwitch,
   ActivityEntry,
   ModelInfo,
   ResPrice,
@@ -268,6 +270,7 @@ export async function subscribeV2v(handlers: {
   onProgress?: (e: import("./bindings").V2vProgress) => void;
   onActivity?: (e: import("./bindings").V2vActivity) => void;
   onTick?: (e: import("./bindings").V2vTick) => void;
+  onRefresh?: (e: import("./bindings").V2vRefresh) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const unlisteners = await Promise.all([
@@ -275,6 +278,7 @@ export async function subscribeV2v(handlers: {
     events.v2vProgress.listen((e) => handlers.onProgress?.(e.payload)),
     events.v2vActivity.listen((e) => handlers.onActivity?.(e.payload)),
     events.v2vTick.listen((e) => handlers.onTick?.(e.payload)),
+    events.v2vRefresh.listen((e) => handlers.onRefresh?.(e.payload)),
   ]);
   return () => {
     for (const un of unlisteners) un();

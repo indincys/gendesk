@@ -123,6 +123,16 @@ pub fn next_sweep_in(now: i64) -> Option<i64> {
     (last > 0).then(|| (last + every - now).max(0))
 }
 
+/// 上一次**真的去问过即梦**的时刻（`None` = 这个进程还没问过）。
+///
+/// 顶栏那个刷新按钮要显示的是这个，**不是心跳时刻**。心跳 6 秒一次、纯内存读，
+/// 拿它写「3 秒前」会让人以为数据是三秒前的新鲜货，而真实查询可能已经是十分钟前 ——
+/// 这正是它取代的那颗胶囊最误导的地方。
+pub fn last_sweep_at() -> Option<i64> {
+    let last = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
+    (last > 0).then_some(last)
+}
+
 /// 单条 clip 距上次查询要隔多久才再查一次（秒），按它已经等了多久递增。
 ///
 /// **只用于回落路径**：整表扫描里认不出的 submit_id（翻页没覆盖到、CLI 输出变了）
@@ -1156,45 +1166,72 @@ pub async fn sweep_once(
     Ok(sum)
 }
 
-/// 逐条查询一轮（人点「查一次进度」走 `force`；扫描认不出的条目也走这里）。
-pub async fn poll_once(
+/// 人点了顶栏那个「刷新」—— 把**全部依赖即梦回传的数值**现在就问一遍。
+///
+/// ## 为什么它不能是「跑一次 `sweep_once`」
+///
+/// `sweep_once` 的主路径是 `list_task`，而那玩意儿**读的是本机缓存**
+/// （`~/.dreamina_cli/tasks.db`，见 [`SWEEP_VIP_SECS`] 上那段实证），并且**不带
+/// `queue_info`**。人按这个按钮想知道的三件事恰好全在它给不出的那一侧：
+///
+/// - 这条到底跑完了还是还在排队 → `gen_status` 的**服务端**真相
+/// - 即梦队列里前面还有几个 → `queue_idx`
+/// - 到底扣了多少 → `credit_count`
+///
+/// 三者都只有逐条 `query_result` 才有。所以这里是 O(n) 个进程，**没有退避、没有
+/// [`POSITION_QUERY_BUDGET`]**：预算是给后台循环省钱的，人按下按钮就是要现在全问一遍。
+/// n 是**在跑条数**（受逐通道并发上限压着，稳态是个位数），不是本地队列长度 ——
+/// 本地队列里那些即梦压根不知道，没什么可问的。
+///
+/// ## 进度用回调而不是 `AppHandle`
+///
+/// 这一轮可能要跑几十秒，期间界面必须能显示「正在查 12/78」并逐条走字，否则跟死机
+/// 没有区别。但把 `AppHandle` 收进来会让这个函数没法脱离 Tauri 测试，故收一个回调，
+/// 由命令层负责把它翻译成事件。
+///
+/// 结束时重置 [`LAST_SWEEP`]：手动问过一整轮之后，「下次查询还有 N 秒」理应重新计时，
+/// 否则面板上那个倒计时会与刚刚发生的事对不上。
+pub async fn refresh_now<F>(
     pool: &SqlitePool,
     dirs: &DataDirs,
     bin: &str,
     default_model: &str,
     timeout_secs: Option<i64>,
-    // force：无视退避、这一轮全查一遍（人点了「查一次进度」时）。
-    force: bool,
     log: &Activity,
-) -> AppResult<PollSummary> {
+    mut on_step: F,
+) -> AppResult<PollSummary>
+where
+    F: FnMut(i64, i64, &PollSummary),
+{
     let running = repo::list_running(pool).await?;
     let mut sum = PollSummary::default();
+    // 与 `sweep_once` 同样的理由：**先记跑过了再判空**，否则空集合会把 `LAST_SWEEP`
+    // 永远留在 0，循环里那句「到点了吗」恒为真。
+    LAST_SWEEP.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
+    let total = running.len() as i64;
+    on_step(0, total, &sum);
     if running.is_empty() {
         return Ok(sum);
     }
     std::fs::create_dir_all(dirs.clips())?;
 
-    for clip in running {
-        if clip.submit_id.is_none() {
-            continue;
+    let mut done = 0;
+    for clip in &running {
+        if clip.submit_id.is_some() {
+            query_and_settle(
+                pool,
+                dirs,
+                bin,
+                default_model,
+                clip,
+                timeout_secs,
+                log,
+                &mut sum,
+            )
+            .await?;
         }
-        let now = now_unix();
-        if !force && !is_due(clip.submitted_at, clip.polled_at, now) {
-            sum.still_running += 1;
-            sum.skipped += 1;
-            continue;
-        }
-        query_and_settle(
-            pool,
-            dirs,
-            bin,
-            default_model,
-            &clip,
-            timeout_secs,
-            log,
-            &mut sum,
-        )
-        .await?;
+        done += 1;
+        on_step(done, total, &sum);
     }
     Ok(sum)
 }
@@ -1545,6 +1582,7 @@ pub fn spawn(
                 finished: 0,
                 failed: 0,
                 error: None,
+                last_sweep_at: last_sweep_at(),
             };
             let settings = match crate::commands::v2v::load_settings(&pool).await {
                 Ok(s) => s,
@@ -1663,6 +1701,10 @@ pub fn spawn(
                 // 自动补单跟着扫描的节拍走：它要看的「在跑几条」正是扫描刚更新过的。
                 super::autofill::tick(&pool, &settings, &app, &log, &mut last_refill).await;
             }
+            // 重读一次：这一轮若真跑了扫描，`LAST_SWEEP` 已经被推到当下，而心跳载荷是在
+            // 扫描**之前**填的。不重读的话，顶栏那句「上次查询 N 前」会整整慢一拍
+            // ——刚扫完却显示「10 分钟前」，正是这颗按钮要消灭的那种误导。
+            tick.last_sweep_at = last_sweep_at();
             let _ = tick.emit(&app);
         }
     });
@@ -2568,6 +2610,50 @@ mod tests {
             next_sweep_in(after).is_some_and(|s| s > 0),
             "下一轮必须等满一个间隔，而不是下个 tick 立刻再来"
         );
+    }
+
+    /// 手动刷新在空表上也要**把倒计时重置掉**，并且一个进程都不起。
+    ///
+    /// 同 `sweep_once` 的理由：`LAST_SWEEP` 留在 0 会让循环里那句「到点了吗」恒为真。
+    /// 另外 `on_step` 必须**至少回调一次**（哪怕 total=0）—— 前端那个按钮靠它从
+    /// 「正在刷新」回到空闲态，一次都不回调的话按钮会一直转下去。
+    #[tokio::test]
+    async fn a_manual_refresh_on_an_empty_table_still_resets_the_countdown() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let dirs = DataDirs::new("/tmp/gd-refresh-test-never-written");
+        LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
+        SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
+
+        let mut steps: Vec<(i64, i64)> = Vec::new();
+        let sum = refresh_now(
+            &pool,
+            &dirs,
+            "dreamina",
+            "seedance2.0fast",
+            None,
+            &Activity::silent(),
+            |done, total, _| steps.push((done, total)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sum.polled, 0, "没有在跑条目 → 一个 query_result 都不该起");
+        assert_eq!(steps, vec![(0, 0)], "空表也要回一次进度，否则按钮一直转");
+        let after = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > 0, "手动问过一轮之后，「下次查询」理应重新计时");
+        assert!(last_sweep_at().is_some_and(|t| t == after));
+    }
+
+    /// 「上次查询」是**真实查询时刻**，不是心跳时刻。
+    ///
+    /// 顶栏那颗按钮读的就是它。此前那颗胶囊读的是心跳（6 秒一次），于是它显示的
+    /// 「3 秒前」与「数据有多新」完全无关 —— 真实查询可能已经是十分钟前的事。
+    #[test]
+    fn last_sweep_at_is_absent_until_something_actually_asked() {
+        LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(last_sweep_at(), None, "没问过就说没问过，不拿 0 当时刻");
+        LAST_SWEEP.store(1_700_000_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(last_sweep_at(), Some(1_700_000_000));
     }
 
     // 队列面板那句「下次查询还有 N 秒」必须与真正跑的循环同源。

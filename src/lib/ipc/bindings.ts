@@ -1162,6 +1162,43 @@ async setV2vClipParams(ids: number[], modelVersion: string | null, duration: num
 }
 },
 /**
+ * 换通道 —— 把选中的条目改投到另一条即梦队列。
+ * 
+ * ## 这条命令存在的理由：本地排队 ≠ 远端排队
+ * 
+ * 一条通道同时只有 `effective_in_flight` 条真在即梦手上（2.0fast 非 VIP 实测 = 1），
+ * **其余同通道的全压在本地**（`stage='ready' AND submit_queued_at IS NOT NULL`）——
+ * 即梦对它们一无所知，`submit_id` 为空，一分钱没扣。所以「排在慢通道上的那 78 条」
+ * 换通道是**免费**的，而人此前唯一找得到的按钮是「重跑」，那个按钮对已提交的条目
+ * 会丢弃一份已付费的任务。两件事的代价差着一整份额度，必须由不同的入口表达。
+ * 
+ * ## 为什么是一条 Rust 命令而不是前端串两次 IPC
+ * 
+ * 已提交的那条要先 `requeue_for_run` 再 `set_params`。前端串起来的话，中间失败会留下
+ * 「提交单已经丢了、参数却没改成」——那是最坏的一种半截状态：钱花了，通道没换成。
+ * 
+ * ## 三项参数整套传入
+ * 
+ * 不靠 `normalize_opts` 替人补全：它在只给模型时会把时长补成该模型的**最小值**、
+ * 分辨率补成**第一档**（见那个函数），于是一条配了 1080p/10s 的条目换个通道就会被
+ * 悄悄降成 720p/5s。这里仍然调用它，但只当**校验**用 —— 越界即报错，而报错必须发生在
+ * 花钱之前。
+ * 
+ * ## 撤销令牌只含被丢弃的那些
+ * 
+ * `ClipSnapshot` 不含三项生成参数，所以纯参数改动**撤不回来** —— 与其发一个假装能
+ * 撤销的令牌，不如不发：换回去本来就是免费的，再点一次即可。而被丢弃的那些必须能撤：
+ * 令牌里的 `submit_id` 还指着即梦那条**仍然活着**的任务，撤销即把它认领回来。
+ */
+async switchV2vChannel(ids: number[], modelVersion: string, duration: number, videoResolution: string, abandonSubmitted: boolean) : Promise<Result<ChannelSwitch, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("switch_v2v_channel", { ids, modelVersion, duration, videoResolution, abandonSubmitted }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 提交前给人看的**真实命令行 + 这一下要花多少额度**。
  * 
  * 「我设了却没生效」这类怀疑只能靠把真实请求摆到确认之前来消除；与真正 exec 的 argv
@@ -1214,7 +1251,28 @@ async unqueueV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
 }
 },
 /**
- * 立刻轮询一轮（用户点「刷新」；后台轮询器照常在跑）。
+ * 立刻把**全部依赖即梦回传的数值**问一遍（顶栏那个「刷新」）。
+ * 
+ * ## 为什么它立刻返回，活儿丢到后台
+ * 
+ * 这一轮是 O(n) 个 `query_result` 进程（理由见 `runner::refresh_now`），几十条就是
+ * 几十秒。旧实现是同步 `await` 到底的，于是整段时间里界面一声不吭 —— 而人点刷新的
+ * 场景恰恰是「我怀疑它卡住了」，用一次真的卡住来回答这个怀疑是最坏的答案。
+ * 
+ * 现在：命令立刻返回本轮要问几条，进度经 `v2v://refresh` 事件走字，行内数值随查随更新
+ * （`query_and_settle` 每条都会 `mark_polled` 落库）。`AppState` 那三个字段都可廉价
+ * clone（`SqlitePool` / `Arc<DataDirs>` / `Activity` 各自内部是 Arc），故直接 spawn。
+ * 
+ * ## 收尾做什么、不做什么
+ * 
+ * **做** `drain_queue`：出片/判死会腾出通道空位，不顺手推一格的话，人刚看到一条出片、
+ * 队列却要再等一轮扫描才动。它只提交**人已经放行过**的条目。
+ * 
+ * **不做** `autofill::tick`：那是自主下新单、自主花钱。一个叫「刷新」的按钮不该顺手
+ * 替人买东西；下一个 tick 自会跑到它。
+ * 
+ * **做**一次余额查询：余额也是远端回传值，而这是唯一会走网络拿它的地方（`v2v_balance`
+ * 无缓存）。放在最后、失败不影响任何东西。
  */
 async pollV2vNow() : Promise<Result<number, AppError>> {
     try {
@@ -2048,6 +2106,7 @@ updateStateChanged: UpdateStateChanged,
 v2vActivity: V2vActivity,
 v2vChanged: V2vChanged,
 v2vProgress: V2vProgress,
+v2vRefresh: V2vRefresh,
 v2vTick: V2vTick
 }>({
 backupProgress: "backup-progress",
@@ -2066,6 +2125,7 @@ updateStateChanged: "update-state-changed",
 v2vActivity: "v2v-activity",
 v2vChanged: "v2v-changed",
 v2vProgress: "v2v-progress",
+v2vRefresh: "v2v-refresh",
 v2vTick: "v2v-tick"
 })
 
@@ -2406,6 +2466,30 @@ autoRunning: number;
  */
 autofill: boolean }
 /**
+ * 一次「换通道」的结果。
+ */
+export type ChannelSwitch = { 
+/**
+ * 直接改成了的条数（待改写 / 待放行 / 已放行但还压在本地队列里的）。**没花钱**。
+ */
+switched: number; 
+/**
+ * 丢弃了已提交单之后改成的条数。
+ */
+abandoned: number; 
+/**
+ * 上一项丢掉的已扣额度合计（只数真有计费证据的）。
+ */
+abandonedCredit: number; 
+/**
+ * 阶段不允许换（已出片 / 已定案 / 失败），或选了不丢弃时的在跑条目。
+ */
+skipped: number; label: string; 
+/**
+ * **只含被丢弃的那些**。理由见命令文档。
+ */
+undo: V2vUndoEntry[] }
+/**
  * 某一条 clip 的排队位次轨迹（详情栏那条 sparkline）。
  */
 export type ClipQueueTrail = { 
@@ -2485,7 +2569,20 @@ exportPath: string | null;
  * —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
  * 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
  */
-phantomSuspect: boolean; acceptedAt: number; updatedAt: number }
+phantomSuspect: boolean; 
+/**
+ * 即梦**确实收过这一单的钱**（`runner::Evidence::billed`）。
+ * 
+ * 决定的是一件只有两种答案、且代价极不对称的事：**重跑要不要再花一份钱**。
+ * 没扣过费的（幽灵单、被并发上限弹回的）重跑免费；扣过费的重跑会丢弃那条已付费的
+ * 视频（`requeue_for_run` 清 `submit_id`，此后 `list_running` 再也认不出它），
+ * 下次提交是第二份钱。
+ * 
+ * **由 Rust 下发而不是前端拿 `creditCount != null` 凑**：判据读五处证据
+ * （本次回体两处 + 已落库三处），而前端只看得见其中两个字段。少读一处的后果不是
+ * 少一个提示，是对着一条已经扣过钱的单子说「重跑不花钱」。
+ */
+billed: boolean; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**
@@ -3816,6 +3913,22 @@ genStatus: string; queueIdx: number | null;
  */
 polledAt: number }
 /**
+ * `v2v://refresh` —— 人点了顶栏刷新按钮之后的逐条进度。
+ * 
+ * 手动刷新是 O(n) 个 `query_result` 进程（见 `runner::refresh_now`），几十条就要跑
+ * 几十秒。没有这条事件的话，那段时间里界面与死机没有区别；有了它，按钮上就是
+ * 「正在查 12/78」在走字，而行内的队列位次也随查随更新。
+ */
+export type V2vRefresh = { 
+/**
+ * 还在跑吗。`false` 即这一轮已经结束（无论成功还是出错）。
+ */
+active: boolean; done: number; total: number; 
+/**
+ * 这一轮取回了几条成片。
+ */
+finished: number; error: string | null }
+/**
  * 图生视频设置（`settings` 表 key='v2v' 单行 JSON）。
  */
 export type V2vSettings = { 
@@ -3897,7 +4010,15 @@ enabled: boolean; finished: number; failed: number;
 /**
  * 整轮失败的原因（读设置失败、CLI 不可用……）。
  */
-error: string | null }
+error: string | null; 
+/**
+ * 上一次**真的问过即梦**的时刻（`runner::last_sweep_at`）。
+ * 
+ * 顶栏那个刷新按钮显示的「上次查询 N 前」读的是这个，**不是 [`Self::at`]**。
+ * 心跳 6 秒一次且纯内存读，拿它写「3 秒前」会让人以为数据是三秒前的新鲜货 ——
+ * 而真实查询是 5/10 分钟一次。这两个时刻差一个数量级，混用就是在骗人。
+ */
+lastSweepAt: number | null }
 /**
  * 一条 clip 的撤销原料 = 改动前的整份快照（+ 不通过时产生的废纸篓行）。
  */

@@ -97,9 +97,7 @@ export function V2vReviewFlow({
           本轮已过 {passedCount} · 已毙 {killedCount} · 剩 {Math.max(0, list.length - index - 1)}
         </span>
         <div className="f1" />
-        <span className="vrevchip">
-          {c.batchId == null ? "无批次" : `#${c.batchId}`} · {c.groupName || "未分组"}
-        </span>
+        <span className="vrevchip">{c.groupName || "未分组"}</span>
         <span className="vrevchip">
           {cur.modelShort} ·{" "}
           {c.creditCount != null ? `${c.creditCount} 额度` : `${cur.estimate ?? "?"} 额度（估）`}
@@ -144,7 +142,6 @@ export function V2vReviewFlow({
             </div>
             <div className="vrevtext">{c.videoPrompt ?? "（无）"}</div>
             <div className="fx wrap gap5 mt8">
-              <span className="vrevchip sm">{c.batchId == null ? "无批次" : `#${c.batchId}`}</span>
               <span className="vrevchip sm">{cur.modelFull ?? "CLI 默认"}</span>
               <span className="vrevchip sm">第 {Math.max(1, c.attempt)} 次尝试</span>
               {cur.waitSecs > 0 && (

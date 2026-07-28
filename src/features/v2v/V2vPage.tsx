@@ -19,6 +19,8 @@ import {
   type SortKey,
   type Stage,
   buildSections,
+  carryParams,
+  creditPerSec,
   deriveRows,
   fmtAgo,
   fmtDur,
@@ -39,6 +41,7 @@ import {
   type ModelInfo,
   type QueueStats,
   type SubmitPreview,
+  type V2vRefresh,
   type V2vTick,
   type V2vUndoEntry,
   commands,
@@ -91,6 +94,15 @@ import { toast } from "sonner";
 /** 轮询事件带回来的实时进度（`v2v://progress` 的载荷，去掉 clipId）。 */
 type LiveProgress = { genStatus: string; queueIdx: number | null; polledAt: number };
 
+/**
+ * 换通道要写下去的一套参数。
+ *
+ * 与 `Params` 的区别是 `duration` **不可为 null** —— 即梦只接受「三者都不给」或
+ * 「一套完整组合」，而换通道属于后者。用 `Required<Params>` 顶不了这个：它只去掉
+ * 可选性，`number | null` 里的 null 照样留着。
+ */
+type ChannelParams = { modelVersion: string; duration: number; videoResolution: string };
+
 export function V2vPage() {
   // ── 数据 ─────────────────────────────────────────────
   const [clips, setClips] = useState<ClipView[]>([]);
@@ -102,6 +114,13 @@ export function V2vPage() {
   const [auto, setAuto] = useState<AutofillStatus | null>(null);
   const [digest, setDigest] = useState<AwayDigest | null>(null);
   const [tick, setTick] = useState<V2vTick | null>(null);
+  /**
+   * 手动刷新的实时进度。
+   *
+   * 手动刷新是 O(n) 个 `query_result` 进程，几十条要跑几十秒 —— 没有这份状态，
+   * 那段时间里按钮点下去毫无反应，而人点它的场景恰恰是「我怀疑它卡住了」。
+   */
+  const [refresh, setRefresh] = useState<V2vRefresh | null>(null);
   /** 轮询刚问到的实时进度，按 clip id。库里那份要等下一次 `listV2vClips` 才更新。 */
   const [progress, setProgress] = useState<Record<number, LiveProgress>>({});
   /** 「几秒前」要自己走字，否则一个静止的「12 秒前」比没有还误导。 */
@@ -110,7 +129,7 @@ export function V2vPage() {
   // ── 筛选与选择 ───────────────────────────────────────
   const [action, setAction] = useState<ActionFilter>("mine");
   const [signals, setSignals] = useState<SignalKey[]>([]);
-  const [sort, setSort] = useState<SortKey>("batch");
+  const [sort, setSort] = useState<SortKey>("wait");
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cur, setCur] = useState<number | null>(null);
@@ -126,6 +145,20 @@ export function V2vPage() {
   const [showObserve, setShowObserve] = useState(false);
   const [cmdPreview, setCmdPreview] = useState<{ ids: number[]; data: SubmitPreview } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  /** 换通道面板要处置的行。 */
+  const [switching, setSwitching] = useState<Row[] | null>(null);
+  /**
+   * 重跑前的确认：只在选中里**确实有已扣费的在跑条目**时才出现。
+   *
+   * 幽灵单与未计费的在跑条目不弹 —— 它们重跑本来就免费，多一次确认只会训练出
+   * 盲点头的习惯，等真正要花钱的那次弹出来时就没人读了。
+   */
+  const [confirmRerun, setConfirmRerun] = useState<{
+    ids: number[];
+    paid: number;
+    credit: number;
+    advanceFrom?: number;
+  } | null>(null);
   const [bulk, setBulk] = useState<Params>({
     modelVersion: "",
     duration: null,
@@ -200,6 +233,16 @@ export function V2vPage() {
           [e.clipId]: { genStatus: e.genStatus, queueIdx: e.queueIdx, polledAt: e.polledAt },
         })),
       onTick: setTick,
+      // 刷新跑完了才重取列表：中途每查一条就 `listV2vClips` 一次，等于把一次刷新变成
+      // n 次全表查询。行内的位次不会因此滞后 —— `onProgress` 已经把它逐条送过来了。
+      onRefresh: (e) => {
+        setRefresh(e);
+        if (!e.active) {
+          if (e.error) toast.error(`刷新出错：${e.error}`);
+          else toast(e.finished > 0 ? `取回 ${e.finished} 条成片` : "已刷新，暂无新出片");
+          void load();
+        }
+      },
     }).then((f) => {
       un = f;
     });
@@ -241,7 +284,7 @@ export function V2vPage() {
     return sortRows(filtered, sort);
   }, [rows, action, signals, sort, query]);
 
-  const sections = useMemo(() => buildSections(rows, visible), [rows, visible]);
+  const sections = useMemo(() => buildSections(rows, visible, models), [rows, visible, models]);
 
   const actionCount = useCallback(
     (k: ActionFilter) => rows.filter((r) => matchAction(r, k)).length,
@@ -421,6 +464,64 @@ export function V2vPage() {
     [guard, advance, load],
   );
 
+  /**
+   * 重跑的入口 —— 已扣费的在跑条目先弹确认。
+   *
+   * `requeue_for_run` 会把 `submit_id` 与 `credit_count` 一起清掉，此后 `list_running`
+   * 再也认不出那一单：即梦还在跑、钱已经扣了，片子却永远取不回来，下次提交是第二份钱。
+   * 而底栏按钮与 `R` 键此前对**任何阶段**都直接放行，代价提示是在动作**完成之后**
+   * 才弹的 —— 那时已经晚了。
+   *
+   * 判据用 Rust 下发的 `clip.billed`（`Evidence::billed`，读五处证据），不在这里拿
+   * `creditCount != null` 凑：前端只看得见其中两个字段，少读一处的后果是对着一条
+   * 已经扣过钱的单子说「重跑不花钱」。没扣过费的（幽灵单、被并发上限弹回的）
+   * **不弹** —— 它们重跑本来就免费。
+   */
+  const rerun = useCallback(
+    (ids: number[], advanceFrom?: number) => {
+      const paid = ids
+        .map((id) => byId.get(id))
+        .filter((r): r is Row => r != null && r.stage === "run" && r.clip.billed);
+      if (paid.length === 0) {
+        void requeue(ids, "run", advanceFrom);
+        return;
+      }
+      setConfirmRerun({
+        ids,
+        paid: paid.length,
+        credit: paid.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0),
+        ...(advanceFrom == null ? {} : { advanceFrom }),
+      });
+    },
+    [byId, requeue],
+  );
+
+  /** 换通道。免费的那些与要丢弃提交单的那些，由面板上的复选框分开。 */
+  const switchChannel = useCallback(
+    (ids: number[], p: ChannelParams, abandon: boolean) =>
+      guard(async () => {
+        const res = await unwrap(
+          commands.switchV2vChannel(ids, p.modelVersion, p.duration, p.videoResolution, abandon),
+        );
+        setSwitching(null);
+        if (res.switched + res.abandoned === 0) {
+          toast("这些条目当前阶段不允许换通道");
+          return;
+        }
+        // 撤销令牌只含被丢弃的那些（纯参数改动撤不回来，换回去本来就免费）——
+        // 所以没有丢弃时不摆那个「撤销」pill，免得人以为它能把通道换回去。
+        if (res.undo.length > 0) setUndo({ label: res.label, entries: res.undo });
+        toast(
+          res.abandoned > 0
+            ? `${res.label}（丢弃 ${res.abandoned} 条已提交单，其中已扣 ${res.abandonedCredit} 额度）`
+            : `${res.label}（还没提交出去，未产生额度消耗）`,
+        );
+        setSel(new Set());
+        await load();
+      }),
+    [guard, load],
+  );
+
   const doUndo = useCallback(() => {
     const u = undo;
     if (!u || u.entries.length === 0) return;
@@ -438,7 +539,7 @@ export function V2vPage() {
     (ids: number[]) =>
       guard(async () => {
         // 已经放行、正在本地队列里等空位的不算 —— 对它们再点一次确认什么也不会发生，
-        // 而确认卡会把它们算进「这一批 N 条 · 预估 M 额度」，两个数字当场就不准了。
+        // 而确认卡会把它们算进「共 N 条 · 预估 M 额度」，两个数字当场就不准了。
         const ready = ids.filter((id) => {
           const c = byId.get(id);
           return c?.clip.stage === "ready" && c.clip.submitQueuedAt == null;
@@ -540,15 +641,26 @@ export function V2vPage() {
     [guard, load],
   );
 
-  const pollNow = useCallback(
-    () =>
-      guard(async () => {
-        const n = await unwrap(commands.pollV2vNow());
-        toast(n > 0 ? `取回 ${n} 条成片` : "暂无出片，仍在生成中");
-        await load();
-      }),
-    [guard, load],
-  );
+  /**
+   * 立刻问一遍即梦。
+   *
+   * **不走 `guard`**：那把锁是给「会改状态、不能连点」的动作用的，而刷新要跑几十秒，
+   * 用它锁住整页等于刷新期间什么都干不了。命令本身立刻返回（活儿在 Rust 后台），
+   * 重入由 Rust 侧的 `REFRESHING` 闸挡，界面这边只把按钮置灰。
+   */
+  const pollNow = useCallback(() => {
+    void unwrap(commands.pollV2vNow())
+      .then((n) => {
+        // **进度一律只从事件来**，不在这里乐观地写一个 `active: true`。
+        // Rust 在 spawn 之前就发了第一帧，而命令返回值走的是另一条通道 —— 一轮很快的
+        // 刷新（在跑 0 条）完全可能先收到终帧、再收到这个 `.then()`，那样写下去就是
+        // 把已经结束的那一轮复活成「正在刷新」，按钮从此一直转下去。
+        if (n === 0) toast("即梦手上没有在跑的条目 —— 本地队列里那些它还不知道");
+      })
+      .catch((e) => {
+        if (e instanceof Error) toast.error(e.message);
+      });
+  }, []);
 
   // ── 看片流的单条判定（键盘与按钮共用） ────────────────
   const judgeCurrent = useCallback(
@@ -563,14 +675,15 @@ export function V2vPage() {
         if (r.stage !== "rev") return;
         void review([id], false, id);
       } else if (kind === "rerun") {
-        void requeue([id], "run", id);
+        // `R` 键与按钮走同一条路 —— 护栏若只挂在按钮上，最快的那个入口就是敞开的。
+        rerun([id], id);
       } else if (kind === "rewrite") {
         void requeue([id], "rewrite", id);
       } else {
         void requeue([id], "wait", id);
       }
     },
-    [curRow, review, requeue],
+    [curRow, review, requeue, rerun],
   );
 
   const move = useCallback(
@@ -697,6 +810,7 @@ export function V2vPage() {
       <div className="col f1 ohide">
         <V2vHeader
           tick={tick}
+          refresh={refresh}
           now={now}
           balance={credit?.balance ?? null}
           spentDay={credit?.spentDay ?? null}
@@ -706,6 +820,7 @@ export function V2vPage() {
           queue={queue}
           auto={auto}
           passCount={0}
+          onRefresh={pollNow}
           onObserve={() => setShowObserve(true)}
           onLog={() => setShowLog(true)}
           onParams={() => setShowParams(true)}
@@ -738,6 +853,7 @@ export function V2vPage() {
     <div className="col f1 ohide" style={{ position: "relative" }}>
       <V2vHeader
         tick={tick}
+        refresh={refresh}
         now={now}
         balance={credit?.balance ?? null}
         spentDay={credit?.spentDay ?? null}
@@ -747,6 +863,7 @@ export function V2vPage() {
         queue={queue}
         auto={auto}
         passCount={passN}
+        onRefresh={pollNow}
         onObserve={() => setShowObserve(true)}
         onLog={() => setShowLog(true)}
         onParams={() => setShowParams(true)}
@@ -867,7 +984,7 @@ export function V2vPage() {
           className="btn xs"
           onClick={() => {
             const ks = Object.keys(SORTS) as SortKey[];
-            setSort((s) => ks[(ks.indexOf(s) + 1) % ks.length] ?? "batch");
+            setSort((s) => ks[(ks.indexOf(s) + 1) % ks.length] ?? "wait");
           }}
         >
           排序：{SORTS[sort]} ▾
@@ -939,7 +1056,10 @@ export function V2vPage() {
                   setTally({ passed: 0, killed: 0 });
                   setScreen("review");
                 }}
-                onRerunBatch={(ids) => void requeue(ids, "run")}
+                onRerunBatch={(ids) => rerun(ids)}
+                onSwitchChannel={(ids) =>
+                  setSwitching(ids.map((id) => byId.get(id)).filter((r): r is Row => r != null))
+                }
                 onRewriteGroup={(ids) => void requeue(ids, "rewrite")}
               />
             ))}
@@ -947,7 +1067,8 @@ export function V2vPage() {
               <div className="vclear">
                 <div className="fs13 fw5 t2">工作台已清空</div>
                 <div className="fs11 t3" style={{ lineHeight: 1.8, maxWidth: 460 }}>
-                  当前筛选下没有还在制的批次 —— 全部定案的批次会**整节消失**，不再折叠占位。
+                  当前筛选下没有还在制的条目 —— 一条通道上的活全部定案后，那一节会**整节
+                  消失**，不再折叠占位。
                   {passN > 0 && (
                     <>
                       {" "}
@@ -1075,11 +1196,25 @@ export function V2vPage() {
                     <span className="kh">W</span>
                   </button>
                 )}
+                {/* 换通道排在重跑**前面**：想「换条快队」时该点的是它，而重跑对已提交
+                    的条目会丢弃一份已付费的任务。此前这一格只有重跑，于是那件免费的事
+                    只能靠一个会花第二份钱的按钮去做。 */}
+                {selected.some((r) => r.stage === "ready" || r.stage === "rewrite") && (
+                  <button
+                    type="button"
+                    className="btn xs"
+                    disabled={busy}
+                    onClick={() => setSwitching(selected)}
+                    title="改投到另一条即梦队列。还在本地排队的换起来一分钱不花 —— 即梦对它们一无所知。"
+                  >
+                    换通道
+                  </button>
+                )}
                 <button
                   type="button"
                   className="btn xs"
                   disabled={busy}
-                  onClick={() => void requeue([...sel], "run")}
+                  onClick={() => rerun([...sel])}
                   title="用同一条视频提示词再抽一次（回到待提交，确认后重新扣额度）"
                 >
                   重跑 <span className="kh">R</span>
@@ -1118,14 +1253,12 @@ export function V2vPage() {
                 )}
               </>
             ) : (
-              <>
-                <span className="fs11 t3 nowrap ohide">
-                  {visible.length} 条符合当前筛选 · ←/→ 换条 · 空格 通过 · X 不通过 · ⏎ 全屏看片
-                </span>
-                <button type="button" className="btn xs gho" disabled={busy} onClick={pollNow}>
-                  查一次进度
-                </button>
-              </>
+              // 「查一次进度」搬到了顶栏（`RefreshButton`）：它原来只在**没有勾选任何
+              // 条目**时才出现，而人最想立刻查一遍的时刻，恰恰是手里正攥着一批选中的
+              // 条目、拿不准它们跑到哪了的时候。
+              <span className="fs11 t3 nowrap ohide">
+                {visible.length} 条符合当前筛选 · ←/→ 换条 · 空格 通过 · X 不通过 · ⏎ 全屏看片
+              </span>
             )}
             <div className="f1" />
             {undo && (
@@ -1207,6 +1340,37 @@ export function V2vPage() {
       )}
       {showObserve && (
         <ObserveModal tick={tick} now={now} credit={credit} onClose={() => setShowObserve(false)} />
+      )}
+
+      {switching && switching.length > 0 && (
+        <ChannelSwitchModal
+          rows={switching}
+          models={models}
+          busy={busy}
+          onClose={() => setSwitching(null)}
+          onConfirm={(p, abandon) =>
+            void switchChannel(
+              switching.map((r) => r.clip.id),
+              p,
+              abandon,
+            )
+          }
+        />
+      )}
+
+      {confirmRerun && (
+        <ConfirmModal
+          title={`重跑 ${confirmRerun.ids.length} 条 · 其中 ${confirmRerun.paid} 条已经花过钱`}
+          desc={`这 ${confirmRerun.paid} 条即梦已经收下并扣了 ${confirmRerun.credit} 额度，且不可撤回。重跑会丢弃原提交单 —— 那几条视频即梦还在跑，但我们此后再也取不回来，下次确认提交是第二份钱。想换条队而不是重抽的话，用「换通道」。`}
+          confirmLabel="仍要重跑"
+          danger
+          onConfirm={() => {
+            const c = confirmRerun;
+            setConfirmRerun(null);
+            void requeue(c.ids, "run", c.advanceFrom);
+          }}
+          onClose={() => setConfirmRerun(null)}
+        />
       )}
 
       {confirmRemove && (
@@ -1318,13 +1482,85 @@ function firstSignal(rows: Row[]): SignalKey | null {
 }
 
 /**
- * 页头。心跳、余额、通过率、三个面板入口。
+ * 顶栏那个「刷新」—— 同一个控件回答两件事：**数据有多新** 与 **现在就去问一遍**。
  *
- * 心跳必须在**什么都没发生**时也答得出「轮询器还活着吗」—— 一个静默的界面和一个
- * 卡死的轮询器长得一模一样。
+ * ## 它取代的那颗胶囊为什么必须消失
+ *
+ * 原来这里写的是「轮询中 · 2 在跑 · 3 秒前」。那个「3 秒前」是**心跳**（6 秒一次、
+ * 纯内存读），不是「3 秒前问过即梦」—— 真正的查询是 5/10 分钟一次。两个时刻差着一个
+ * 数量级，而胶囊把慢的那个藏起来、把快的那个摆出来，于是它最擅长的事就是让人相信
+ * 屏幕上的位次和状态是新鲜的。这一格现在读 `tick.lastSweepAt`（`runner::last_sweep_at`，
+ * 真实查询时刻），并且可以点。
+ *
+ * 「N 在跑」也不在脸上了：旁边那排通道状态灯已经**逐通道**答了同一个问题，而求和成
+ * 一个数恰恰是 0031 刚拆掉的那种表达。它挪进了 tooltip。
+ *
+ * ## 四种状态
+ *
+ * 刷新中（转圈，写「正在查 k/n」）· 后台轮询已关 · 循环卡住/上一轮出错（红）· 空闲。
+ * 「循环卡住」仍按心跳判（超过 30 秒没心跳），因为那问的是**后台循环还活着吗**，
+ * 与「上次查询多久前」是两件事 —— 关掉轮询开关时前者正常、后者会一直老下去。
+ */
+function RefreshButton({
+  busy,
+  bad,
+  off,
+  sweptAgo,
+  done,
+  total,
+  running,
+  beat,
+  error,
+  onClick,
+}: {
+  busy: boolean;
+  bad: boolean;
+  off: boolean;
+  sweptAgo: number | null;
+  done: number;
+  total: number;
+  running: number;
+  beat: number | null;
+  error: string | null;
+  onClick: () => void;
+}) {
+  const label = busy
+    ? total > 0
+      ? `正在查 ${done}/${total}`
+      : "正在刷新"
+    : sweptAgo == null
+      ? "刷新 · 还没查过"
+      : `刷新 · 上次查询 ${fmtAgo(sweptAgo)}`;
+  return (
+    <button
+      type="button"
+      className={cn("refbtn", busy && "busy", off && "off", bad && "bad")}
+      disabled={busy}
+      onClick={onClick}
+      title={[
+        "点一下立刻逐条问一遍即梦：队列位次、生成状态、扣费额度、已出的片，全部现取。",
+        `即梦手上 ${running} 条${running > 0 ? "（本地队列里那些即梦还不知道，问不到）" : ""}`,
+        off
+          ? "后台轮询开关是关的 —— 不影响手动刷新，也不影响已扣额度的任务"
+          : "后台自己也在扫（含 VIP 5 分钟一次、全非 VIP 10 分钟一次）",
+        beat != null && beat > 30 ? `后台已 ${fmtAgo(beat)}没有心跳` : null,
+        error ? `上一轮出错：${error}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n")}
+    >
+      <span className="dot" />
+      {label}
+    </button>
+  );
+}
+
+/**
+ * 页头。刷新按钮、余额、通过率、三个面板入口。
  */
 function V2vHeader({
   tick,
+  refresh,
   now,
   balance,
   spentDay,
@@ -1334,11 +1570,13 @@ function V2vHeader({
   queue,
   auto,
   passCount,
+  onRefresh,
   onObserve,
   onLog,
   onParams,
 }: {
   tick: V2vTick | null;
+  refresh: V2vRefresh | null;
   now: number;
   balance: number | null;
   spentDay: number | null;
@@ -1348,29 +1586,31 @@ function V2vHeader({
   queue: QueueStats | null;
   auto: AutofillStatus | null;
   passCount: number;
+  onRefresh: () => void;
   onObserve: () => void;
   onLog: () => void;
   onParams: () => void;
 }) {
-  const ago = tick == null ? null : Math.max(0, now - tick.at);
+  const beat = tick == null ? null : Math.max(0, now - tick.at);
   // 心跳每 6 秒一次；超过 30 秒没心跳说明循环卡住或应用被挂起了。
-  const bad = tick != null && (tick.error != null || (ago ?? 0) > 30);
+  const bad = tick != null && (tick.error != null || (beat ?? 0) > 30);
+  const busy = refresh?.active === true;
+  const swept = tick?.lastSweepAt ?? null;
   return (
     <div className="vhd">
       <span className="ptt">视频流水线</span>
-      <span
-        className={cn("pollpill", tick && !tick.enabled && "off", bad && "bad")}
-        title={
-          tick?.error
-            ? `上一轮出错：${tick.error}`
-            : "后台整表扫描即梦（含 VIP 5 分钟一次、全非 VIP 10 分钟一次），心跳每 6 秒一次；关掉应用不影响已扣额度的任务"
-        }
-      >
-        <span className="dot" />
-        {tick == null
-          ? "轮询 · 等待首轮"
-          : `${tick.enabled ? "轮询中" : "轮询已关"} · ${tick.running} 在跑 · ${fmtAgo(ago ?? 0)}`}
-      </span>
+      <RefreshButton
+        busy={busy}
+        bad={bad}
+        off={tick != null && !tick.enabled}
+        sweptAgo={swept == null ? null : Math.max(0, now - swept)}
+        done={refresh?.done ?? 0}
+        total={refresh?.total ?? 0}
+        running={tick?.running ?? 0}
+        beat={beat}
+        error={tick?.error ?? refresh?.error ?? null}
+        onClick={onRefresh}
+      />
       {stale && staleSecs != null && (
         <span
           className="vstalepill"
@@ -1537,7 +1777,7 @@ function ChannelPills({
   );
 }
 
-/** 一个批次一节。分段条 + 待办摘要 + 就地的批次级动作。 */
+/** 一条即梦通道一节。待办摘要 + 就地的整条通道级动作。 */
 function SectionBlock({
   s,
   open,
@@ -1553,6 +1793,7 @@ function SectionBlock({
   onReviewBatch,
   onRerunBatch,
   onRewriteGroup,
+  onSwitchChannel,
 }: {
   s: Section;
   open: boolean;
@@ -1568,6 +1809,7 @@ function SectionBlock({
   onReviewBatch: (firstId: number) => void;
   onRerunBatch: (ids: number[]) => void;
   onRewriteGroup: (ids: number[]) => void;
+  onSwitchChannel: (ids: number[]) => void;
 }) {
   // 「待放行」与「已放行、在本地排队」都是 `ready` 阶段，但按钮只该管前者 ——
   // 对已经放过行的再点一次「确认提交」什么也不会发生，而按钮上写着 9 条。
@@ -1593,7 +1835,11 @@ function SectionBlock({
         tabIndex={0}
       >
         <span className="cr">{open ? "▾" : "▸"}</span>
-        <span className="pid">{s.batchId == null ? "历史" : `#${s.batchId}`}</span>
+        {/* 一节 = 一条即梦队列。这个 chip 是它的身份，也是「全选本节 → 换通道」
+            那个动作的对象 —— 所以它必须是通道名，不能是一个跨着几条队的批次号。 */}
+        <span className="pid" title={s.key === "" ? "设置里没写默认型号，走 CLI 默认" : s.key}>
+          {s.label}
+        </span>
         <span className="nm" title={s.title}>
           {s.title}
         </span>
@@ -1640,8 +1886,25 @@ function SectionBlock({
         )}
         {queuedRows.length > 0 && (
           <span className="fs11 t3 nowrap" title="已放行、正排在本地等即梦的空位，出一条自动补一条">
-            排队中 {queuedRows.length}
+            本地排队 {queuedRows.length}
           </span>
+        )}
+        {/* 「整条通道改投」—— 一节现在就是一条队，所以这是一个完整动作。
+            只算本地那些：它们即梦一无所知，改起来一分钱不花；已提交的那几条要不要
+            一起丢，在面板里单独勾。 */}
+        {queuedRows.length + ready.length > 0 && (
+          <button
+            type="button"
+            className="btn xs gho"
+            disabled={busy}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSwitchChannel([...queuedRows, ...ready].map((r) => r.clip.id));
+            }}
+            title="把这条通道上还没发出去的条目改投到别的队 —— 它们还在本地，换通道不花钱"
+          >
+            改投 {queuedRows.length + ready.length} 条
+          </button>
         )}
         {rev.length > 0 && (
           <button
@@ -1702,14 +1965,14 @@ function SectionBlock({
             onCheck={() => onCheck(r.clip.id)}
           />
         ))}
-      {/* 「当前筛选下这一批没有条目」那句提示没了，因为这一节现在根本不会出现 ——
+      {/* 「当前筛选下这一节没有条目」那句提示没了，因为这一节现在根本不会出现 ——
           `buildSections` 里空节整节消失。留个空壳节头不回答任何问题，只会把真正
-          命中的那一节挤下去（几十批之后就是整屏的空壳）。 */}
+          命中的那一节挤下去。 */}
     </div>
   );
 }
 
-/** 本批里毙得最狠的那个组（≥3 条不通过才报）。返回可退回改写的条目 id。 */
+/** 这条通道上毙得最狠的那个组（≥3 条不通过才报）。返回可退回改写的条目 id。 */
 function worstGroup(rows: Row[]): { name: string; rejected: number; ids: number[] } | null {
   const byGroup = new Map<string, Row[]>();
   for (const r of rows) {
@@ -1829,8 +2092,8 @@ function toneClass(t: Row["situationTone"]): string {
  * 提交确认卡：真实命令行 + 这一下要花多少额度 + **就地改参数**，全摆在按钮之前。
  *
  * 参数编辑放在这里而不是设置页，是因为「提交前」正是唯一一个人一定会看的时刻，
- * 也是唯一一个改了还来得及的时刻 —— 提交即扣费，之后再改只影响下一批。
- * 改完当场重算这一批要花多少：模型之间差 5.5 倍，那个数字必须随选择一起变，
+ * 也是唯一一个改了还来得及的时刻 —— 提交即扣费，之后再改只影响下一次。
+ * 改完当场重算这一下要花多少：模型之间差 5.5 倍，那个数字必须随选择一起变，
  * 否则「改了参数」与「这一下花多少钱」还是两件对不上的事。
  *
  * ## 这张卡上的两处「别让人干等」
@@ -1855,7 +2118,7 @@ function SubmitConfirm({
   ids: number[];
   models: ModelInfo[];
   busy: boolean;
-  /** 把参数写进这一批条目并重取预览。 */
+  /** 把参数写进这些条目并重取预览。 */
   onApplyParams: (p: Params) => void;
   onClose: () => void;
   onConfirm: () => void;
@@ -1954,7 +2217,7 @@ function SubmitConfirm({
       <div style={{ padding: 4 }}>
         {/* 参数条放在最上面：它是这张卡里唯一还能改的东西，而下面那串命令行是它的结果。 */}
         <div className="parambar mb8">
-          <span className="fs11 fw6 t3 nowrap">这一批的参数</span>
+          <span className="fs11 fw6 t3 nowrap">这些条目的参数</span>
           <V2vParamPicker
             models={models}
             value={p}
@@ -2005,7 +2268,7 @@ function SubmitConfirm({
         </div>
         <div className="costbar mb8">
           <div className="fs12">
-            即梦<b>按模型通道各排各的队</b>，每条通道各有一个在跑上限，所以这一批{" "}
+            即梦<b>按模型通道各排各的队</b>，每条通道各有一个在跑上限，所以现在{" "}
             <b>先发 {goesNow} 条</b>
             {waits > 0 && (
               <>
@@ -2014,19 +2277,19 @@ function SubmitConfirm({
             )}
             。
           </div>
-          {/* 逐通道分账。一批横跨两条通道时，一个合计数答不出「卡的是哪条」——
+          {/* 逐通道分账。这一次提交横跨两条通道时，一个合计数答不出「卡的是哪条」——
               而那正是「我这 6 条 mini 为什么不走」当初没人答得上来的原因。 */}
           <div className="fs11 t3" style={{ lineHeight: 1.8 }}>
             {preview.lanes.map((l) => (
               <span key={l.label} style={{ marginRight: 12 }}>
-                <b className="t1">{l.label}</b> 本批 {l.total} 条 · 先发 {l.goesNow} 条（该通道上限{" "}
+                <b className="t1">{l.label}</b> 共 {l.total} 条 · 先发 {l.goesNow} 条（该通道上限{" "}
                 {l.limit}）
               </span>
             ))}
           </div>
           <div className="fs11 t3">
             排队的那些<b>还没扣费</b>：额度是在真正发出去的那一刻扣的，所以下面那个预估是
-            这一批全部跑完的总数，不是现在就要花掉的。
+            这些条目全部跑完的总数，不是现在就要花掉的。
           </div>
         </div>
         <div className="fs12 t2 mb8" style={{ lineHeight: 1.7 }}>
@@ -2039,6 +2302,185 @@ function SubmitConfirm({
               {line}
             </div>
           ))}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * 换通道面板 —— 把选中的条目改投到另一条即梦队列。
+ *
+ * ## 这张卡存在的全部理由：两种「排队中」的代价差着一整份额度
+ *
+ * 一条通道同时只有上限那么几条真在即梦手上（2.0fast 非 VIP 实测 = 1），**其余同通道的
+ * 全压在本地**（`stage='ready' AND submit_queued_at IS NOT NULL`）—— 即梦对它们一无所知，
+ * `submit_id` 为空、一分钱没扣。所以「排在慢通道上的那 78 条」换通道是**免费**的。
+ *
+ * 而人此前找得到的唯一按钮是「重跑」，那个按钮对已提交的条目会丢弃一份已付费的任务。
+ * 一个免费、一个是第二份钱，长得却一模一样 —— 这张卡的职责就是把这两件事**分开说**，
+ * 并且在按钮之前把数字摆出来。
+ *
+ * 已提交的那些默认**不动**：那个复选框不勾，它们就原样留在原通道上继续跑。
+ */
+function ChannelSwitchModal({
+  rows,
+  models,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  rows: Row[];
+  models: ModelInfo[];
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (p: ChannelParams, abandon: boolean) => void;
+}) {
+  // 三堆，代价各不相同。
+  const free = rows.filter((r) => r.stage === "ready" || r.stage === "rewrite");
+  const live = rows.filter((r) => r.stage === "run");
+  const paid = live.filter((r) => r.clip.billed);
+  const locked = rows.length - free.length - live.length;
+  const paidCredit = paid.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0);
+
+  const [abandon, setAbandon] = useState(false);
+  // 带过去的原值取第一条 —— 混选时下面会标「多条不一致」，而一个「保持不变」的选项在
+  // 这里不存在：即梦只接受一套完整组合。
+  const first = rows[0];
+  const wantDur = first?.duration ?? null;
+  const wantRes = first?.resolution ?? "";
+  const mixed = rows.some((r) => r.duration !== wantDur || r.resolution !== wantRes);
+
+  const [p, setP] = useState<Params>({ modelVersion: "", duration: null, videoResolution: "" });
+  const target = models.find((m) => m.modelVersion === p.modelVersion);
+  const carried = carryParams(target, wantDur, wantRes);
+
+  const willMove = free.length + (abandon ? live.length : 0);
+  const perSec = creditPerSec(models, p.modelVersion, p.videoResolution);
+  const after = perSec != null && p.duration != null ? perSec * p.duration * willMove : null;
+  const before = estimateOf(rows.filter((r) => free.includes(r) || (abandon && live.includes(r))));
+
+  return (
+    <Modal
+      title={`换通道 · ${rows.length} 条`}
+      width="w700"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="fs11 t3">
+            {willMove === 0
+              ? "当前选择下没有可改投的条目"
+              : `将改投 ${willMove} 条${abandon && paid.length > 0 ? `，其中 ${paid.length} 条要丢弃已付费的提交单` : ""}`}
+          </span>
+          <div className="f1" />
+          <button type="button" className="btn sm gho" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className={cn("btn sm", abandon && paid.length > 0 ? "dngo" : "pri")}
+            disabled={busy || target == null || willMove === 0}
+            onClick={() => {
+              if (!target || p.duration == null) return;
+              onConfirm(
+                {
+                  modelVersion: p.modelVersion,
+                  duration: p.duration,
+                  videoResolution: p.videoResolution,
+                },
+                abandon,
+              );
+            }}
+          >
+            改投 {willMove} 条
+          </button>
+        </>
+      }
+    >
+      <div style={{ padding: 4 }}>
+        <div className="parambar mb8">
+          <span className="fs11 fw6 t3 nowrap">改投到</span>
+          <V2vParamPicker
+            models={models}
+            value={p}
+            disabled={busy}
+            onChange={(next) => {
+              // 换模型时**把原值带过去**，而不是像别处那样清空 —— 这张卡的语义是
+              // 「换条队」，不是「重设参数」。夹过的会在下面报出来。
+              if (next.modelVersion !== p.modelVersion) {
+                const c = carryParams(
+                  models.find((m) => m.modelVersion === next.modelVersion),
+                  wantDur,
+                  wantRes,
+                );
+                setP({
+                  modelVersion: next.modelVersion,
+                  duration: c.duration,
+                  videoResolution: c.resolution,
+                });
+              } else {
+                setP(next);
+              }
+            }}
+          />
+        </div>
+
+        {target && (carried.durationChanged || carried.resolutionChanged) && (
+          <div className="fs11 wr2 mb8" style={{ lineHeight: 1.8 }}>
+            这条通道接不了原来的规格，已经夹到最近的合法值：
+            {carried.durationChanged && ` 时长 ${wantDur}s → ${carried.duration}s`}
+            {carried.resolutionChanged && ` 分辨率 ${wantRes} → ${carried.resolution}`}
+            。上面还能再改。
+          </div>
+        )}
+        {mixed && (
+          <div className="fs11 t3 mb8">
+            选中的条目原参数不一致 —— 上面填的这一套会**整体覆盖**它们，不是逐条保持。
+          </div>
+        )}
+
+        <div className="costbar mb8">
+          {free.length > 0 && (
+            <div className="fs12">
+              <b>{free.length} 条还在本地队列 / 待放行</b> —— 即梦对它们一无所知，
+              <b>一分钱没扣</b>，换通道免费。已放行的会带着原来的放行时刻插进新通道的队，
+              不会被罚到队尾。
+            </div>
+          )}
+          {live.length > 0 && (
+            <div className={cn("fs12", paid.length > 0 && "terr")} style={{ lineHeight: 1.8 }}>
+              <b>{live.length} 条已经提交给即梦</b>
+              {paid.length > 0 ? (
+                <>
+                  ，其中 {paid.length} 条<b>确实扣了 {paidCredit} 额度且不可撤回</b>
+                  。改投等于丢弃它们 —— 那几条视频即梦还在跑，但我们此后再也取不回来， 新通道上要
+                  <b>再花一份钱</b>。
+                </>
+              ) : (
+                <>，但一处计费证据都没有（幽灵单 / 被并发上限弹回的），改投不花钱。</>
+              )}
+              <label className="fx ac gap6 mt5" style={{ cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={abandon}
+                  disabled={busy}
+                  onChange={(e) => setAbandon(e.target.checked)}
+                />
+                <span className="fs11">连这 {live.length} 条一起改投</span>
+              </label>
+            </div>
+          )}
+          {locked > 0 && (
+            <div className="fs11 t3">
+              另有 {locked} 条已出片或已定案，换通道对它们没有意义，会跳过。
+            </div>
+          )}
+          {target && (
+            <div className="fs11 t3">
+              额度预估：{before == null ? "?" : before} → <b className="t1">{after ?? "?"}</b>
+              {target.vip && " · vip 同规格贵 5.5 倍，买到的只是不排队"}
+            </div>
+          )}
         </div>
       </div>
     </Modal>
@@ -2063,10 +2505,14 @@ function ObserveModal({
       width="w700"
       onClose={onClose}
       headerExtra={
+        // 「上次查询」读 `lastSweepAt`（真实问过即梦的时刻），不是心跳时刻 ——
+        // 同顶栏那个按钮的理由：两者差一个数量级，混用就是在说数据比实际新鲜。
         <span className="chip">
           {tick == null
             ? "等待首轮心跳"
-            : `${tick.running} 在跑 · ${fmtAgo(Math.max(0, now - tick.at))}`}
+            : `${tick.running} 在跑 · 上次查询 ${
+                tick.lastSweepAt == null ? "还没查过" : fmtAgo(Math.max(0, now - tick.lastSweepAt))
+              }`}
         </span>
       }
       footer={

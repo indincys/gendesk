@@ -425,7 +425,7 @@ function ClipSide({
         <span className="pid">{c.promptCode}</span>
         <span className="f1" />
         <span className="fs10 t3 nowrap ohide">
-          {c.batchId == null ? "无批次" : `#${c.batchId}`} · {c.groupName || "未分组"}
+          {row.modelShort} · {c.groupName || "未分组"}
         </span>
       </div>
       {video ? (

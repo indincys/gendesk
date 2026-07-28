@@ -82,8 +82,10 @@ export function V2vInspector({
         <span className="f1" />
         <span className="fs10 t3 mono">{posText}</span>
       </div>
+      {/* 通道而不是批次号：这一条排在哪条队上，决定了它要等多久、能不能换、换了要不要
+          花钱 —— 批次号一个也答不出（同一批次的条目分散在好几条队上）。 */}
       <div className="fs10 t3 nowrap ohide mt5">
-        {c.batchId == null ? "无批次" : `#${c.batchId}`} · {c.groupName || "未分组"}
+        {row.modelShort} · {c.groupName || "未分组"}
       </div>
 
       {/* 小窗默认 9:16 竖幅 —— 出的片子基本都是竖版，横幅画框会把它压成中间一条，
@@ -180,7 +182,8 @@ export function V2vInspector({
       ) : (
         <div className="fs10 t3 mt5" style={{ lineHeight: 1.6 }}>
           已提交之后改参数不会重新生效（那条视频用的是提交那一刻的参数），
-          所以这里只显示，不给编辑。要换参数就重跑。
+          所以这里只显示，不给编辑。要换参数只能重跑
+          {c.billed && " —— 而这一条即梦已经扣过费了，重跑是第二份钱"}。
         </div>
       )}
 
@@ -364,7 +367,7 @@ function hintFor(row: Row): { text: string; tone: "wr" | "er" } | null {
   if (row.slow) {
     return {
       tone: "wr",
-      text: "这一条已超本批中位等待时长的 3 倍。退避轮询已放缓到十分钟一次，不必手动催。",
+      text: "这一条已超同通道中位等待时长的 3 倍。退避轮询已放缓到十分钟一次，不必手动催。",
     };
   }
   if (row.vip) {

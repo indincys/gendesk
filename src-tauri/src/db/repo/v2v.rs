@@ -477,6 +477,18 @@ pub async fn list_running(pool: &SqlitePool) -> Result<Vec<ClipRow>, sqlx::Error
     sqlx::query_as::<_, ClipRow>(&sql).fetch_all(pool).await
 }
 
+/// [`list_running`] 的条数。手动刷新要先告诉界面「这一轮要问几条」，而那时把整行捞
+/// 出来只为了数一下是白费 —— 谓词必须与 `list_running` 一字不差，否则进度条的分母
+/// 会和实际问的条数对不上。
+pub async fn count_running(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND submit_id IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// 在跑条目各自写死的模型（去重）。轮询档位据此决定走 VIP 档还是非 VIP 档。
 ///
 /// 返回 `Option` 而不是折成字符串：`NULL`/空串意味着「跟随设置里的默认」，
@@ -592,10 +604,25 @@ pub async fn set_export_path(
     Ok(())
 }
 
-/// 重跑同提示词：rev/rej/fail → ready，清掉上一轮的成片引用。
+/// 重跑同提示词：**rev/rej/fail/run** → ready，清掉上一轮的成片引用。
 ///
 /// 视频不通过多半是**没抽中**而不是提示词不对，故这是不通过后的默认动作。
 /// 清 video_path/poster_path 是必须的：旧文件由调用方搬进废纸篓，这里不能再指着它。
+///
+/// ## `run` 也在射程里，而那一格是花钱的
+///
+/// （这里原来的注释只写了 `rev/rej/fail`，与 SQL 不符 —— 而差的正是唯一会花钱的那一格。）
+///
+/// `run` 必须留着，因为有两类调用是对的：**幽灵单重跑**（从未计费，重跑免费）与
+/// `switch_v2v_channel` 的**放弃并改投**（人已经在确认框里看过代价）。
+///
+/// 但对一条即梦**已经收过钱**的单子，这条 SQL 会把 `submit_id` 与 `credit_count` 一起
+/// 清掉 —— 此后 `list_running`（要求 `submit_id IS NOT NULL`）再也认不出它，那条已付费
+/// 的视频永远取不回来，下次提交是第二份钱。所以调用方**必须**先用
+/// `runner::Evidence::billed` 判一次，并且要么拦住、要么记账（`commands::v2v` 两处入口
+/// 都这么做了）。相邻的每一条路径（`release_claim` / `recover_orphan_submits` /
+/// `resume_timed_out` / `requeue_after_reject`）都各自带着 `submit_id IS NULL` 或
+/// `!billed()` 的闸，唯独这条把判断交给了调用方。
 pub async fn requeue_for_run(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, sqlx::Error> {
     let res = sqlx::query(
         "UPDATE v2v_clips
@@ -2905,5 +2932,105 @@ mod tests {
         assert_eq!(queue_samples_since(&pool, 0).await.unwrap().len(), 1);
         remove(&pool, &[id]).await.unwrap();
         assert!(queue_samples_since(&pool, 0).await.unwrap().is_empty());
+    }
+
+    // 手动刷新那条进度条的分母。谓词必须与 `list_running` 一字不差 —— 差了的话，
+    // 按钮上会显示「正在查 8/12」然后停在 8，而人会以为它卡住了。
+    #[tokio::test]
+    async fn count_running_matches_list_running_exactly() {
+        let (pool, _d) = test_pool().await;
+        assert_eq!(count_running(&pool).await.unwrap(), 0);
+        let id = seed_reviewable(&pool, 1).await; // 走到 rev，已不在 run
+        assert_eq!(count_running(&pool).await.unwrap(), 0);
+        // 退回去重跑再提交一次 → 回到 run 且有 submit_id。
+        assert!(requeue_for_run(&pool, id, 400).await.unwrap());
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-2", 8), 500)
+            .await
+            .unwrap();
+        assert_eq!(count_running(&pool).await.unwrap(), 1);
+        assert_eq!(list_running(&pool).await.unwrap().len(), 1);
+        // run 但**没有** submit_id（= 提交到一半被杀的孤儿）两边都必须同时不数它：
+        // 退回 ready 再认领一次，就停在「已认领、还没拿到 submit_id」那一格。
+        assert!(requeue_for_run(&pool, id, 700).await.unwrap());
+        assert_eq!(claim_ready(&pool, &[id], 700).await.unwrap().len(), 1);
+        assert_eq!(count_running(&pool).await.unwrap(), 0);
+        assert_eq!(list_running(&pool).await.unwrap().len(), 0);
+    }
+
+    /// 换通道**不能动 `submit_queued_at`**。
+    ///
+    /// 它是本地队列的排序键（`pick_submit_queued_on` 是 `ORDER BY submit_queued_at, id`）。
+    /// 若换通道时把它刷成当下，一条排了两小时的条目换条队就会被罚到新队的队尾 ——
+    /// 而人做这个动作的全部动机恰恰是「别再等了」。
+    #[tokio::test]
+    async fn switching_channel_keeps_its_place_in_line() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submit_queued(&pool, &[id], 300).await.unwrap();
+
+        set_params(
+            &pool,
+            &[id],
+            Some("seedance2.0mini"),
+            Some(5),
+            Some("720p"),
+            900,
+        )
+        .await
+        .unwrap();
+
+        let after = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(after.model_version.as_deref(), Some("seedance2.0mini"));
+        assert_eq!(
+            after.submit_queued_at,
+            Some(300),
+            "换通道后仍按**原放行时刻**插进新通道的队，不被罚到队尾"
+        );
+        assert_eq!(after.stage, "ready", "换通道不改阶段");
+        assert_eq!(count_submit_queued(&pool).await.unwrap(), 1);
+    }
+
+    /// `set_params` 碰不到已提交的条目 —— 这是「换通道不花钱」那条路径的底线。
+    ///
+    /// 已经在即梦手上的那条要换通道，只能先 `requeue_for_run` 丢弃提交单（花第二份钱），
+    /// 而那是一个人必须在确认框里点过头的动作。若 `set_params` 能直接改 `run` 态，
+    /// 库里的参数就会与那条视频**实际用的**参数对不上，而账还记在原来的通道上。
+    #[tokio::test]
+    async fn set_params_refuses_to_touch_submitted_clips() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
+
+        let n = set_params(
+            &pool,
+            &[id],
+            Some("seedance2.0mini"),
+            Some(5),
+            Some("720p"),
+            900,
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 0, "已提交的条目一行都不该被改到");
+        let after = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(after.stage, "run");
+        assert!(after.model_version.is_none());
+        assert_eq!(after.submit_id.as_deref(), Some("sub-1"));
     }
 }

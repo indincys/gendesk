@@ -999,6 +999,17 @@ pub struct ClipView {
     /// —— 「继续等待」按过一次之后，两边就会对同一条给出不同结论。而这两个结论指向
     /// 相反的动作：幽灵单重跑不花钱，正在排队的重跑要再花一份。
     pub phantom_suspect: bool,
+    /// 即梦**确实收过这一单的钱**（`runner::Evidence::billed`）。
+    ///
+    /// 决定的是一件只有两种答案、且代价极不对称的事：**重跑要不要再花一份钱**。
+    /// 没扣过费的（幽灵单、被并发上限弹回的）重跑免费；扣过费的重跑会丢弃那条已付费的
+    /// 视频（`requeue_for_run` 清 `submit_id`，此后 `list_running` 再也认不出它），
+    /// 下次提交是第二份钱。
+    ///
+    /// **由 Rust 下发而不是前端拿 `creditCount != null` 凑**：判据读五处证据
+    /// （本次回体两处 + 已落库三处），而前端只看得见其中两个字段。少读一处的后果不是
+    /// 少一个提示，是对着一条已经扣过钱的单子说「重跑不花钱」。
+    pub billed: bool,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -1008,8 +1019,10 @@ impl From<repo::ClipRow> for ClipView {
         // 视图是一份快照，判定要一个「现在」。取当前时刻而不是让调用方传：
         // 每个列表命令各传一次，就等于给这条规则开了 N 个改错的机会。
         let phantom_suspect = runner::clip_looks_phantom(&r, crate::db::now_unix());
+        let billed = runner::Evidence::from_clip(&r).billed();
         Self {
             phantom_suspect,
+            billed,
             id: r.id,
             work_id: r.work_id,
             group_id: r.group_id,
@@ -1326,6 +1339,169 @@ pub async fn set_v2v_clip_params(
     Ok(n)
 }
 
+/// 一次「换通道」的结果。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSwitch {
+    /// 直接改成了的条数（待改写 / 待放行 / 已放行但还压在本地队列里的）。**没花钱**。
+    pub switched: i64,
+    /// 丢弃了已提交单之后改成的条数。
+    pub abandoned: i64,
+    /// 上一项丢掉的已扣额度合计（只数真有计费证据的）。
+    pub abandoned_credit: i64,
+    /// 阶段不允许换（已出片 / 已定案 / 失败），或选了不丢弃时的在跑条目。
+    pub skipped: i64,
+    pub label: String,
+    /// **只含被丢弃的那些**。理由见命令文档。
+    pub undo: Vec<V2vUndoEntry>,
+}
+
+/// 换通道 —— 把选中的条目改投到另一条即梦队列。
+///
+/// ## 这条命令存在的理由：本地排队 ≠ 远端排队
+///
+/// 一条通道同时只有 `effective_in_flight` 条真在即梦手上（2.0fast 非 VIP 实测 = 1），
+/// **其余同通道的全压在本地**（`stage='ready' AND submit_queued_at IS NOT NULL`）——
+/// 即梦对它们一无所知，`submit_id` 为空，一分钱没扣。所以「排在慢通道上的那 78 条」
+/// 换通道是**免费**的，而人此前唯一找得到的按钮是「重跑」，那个按钮对已提交的条目
+/// 会丢弃一份已付费的任务。两件事的代价差着一整份额度，必须由不同的入口表达。
+///
+/// ## 为什么是一条 Rust 命令而不是前端串两次 IPC
+///
+/// 已提交的那条要先 `requeue_for_run` 再 `set_params`。前端串起来的话，中间失败会留下
+/// 「提交单已经丢了、参数却没改成」——那是最坏的一种半截状态：钱花了，通道没换成。
+///
+/// ## 三项参数整套传入
+///
+/// 不靠 `normalize_opts` 替人补全：它在只给模型时会把时长补成该模型的**最小值**、
+/// 分辨率补成**第一档**（见那个函数），于是一条配了 1080p/10s 的条目换个通道就会被
+/// 悄悄降成 720p/5s。这里仍然调用它，但只当**校验**用 —— 越界即报错，而报错必须发生在
+/// 花钱之前。
+///
+/// ## 撤销令牌只含被丢弃的那些
+///
+/// `ClipSnapshot` 不含三项生成参数，所以纯参数改动**撤不回来** —— 与其发一个假装能
+/// 撤销的令牌，不如不发：换回去本来就是免费的，再点一次即可。而被丢弃的那些必须能撤：
+/// 令牌里的 `submit_id` 还指着即梦那条**仍然活着**的任务，撤销即把它认领回来。
+#[tauri::command]
+#[specta::specta]
+pub async fn switch_v2v_channel(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+    model_version: String,
+    duration: i64,
+    video_resolution: String,
+    // abandon_submitted：已提交给即梦的那些要不要一并改投（= 丢弃已付费的任务）。
+    // 界面上那个复选框默认**不勾**。
+    abandon_submitted: bool,
+) -> AppResult<ChannelSwitch> {
+    // 校验先行：一组非法参数应该在一行都还没改之前就被拒掉。
+    let norm = dreamina::normalize_opts(&GenOpts {
+        model_version: Some(model_version.clone()),
+        duration: Some(duration),
+        video_resolution: Some(video_resolution.clone()),
+        session: None,
+    })?;
+    let label_ch = dreamina::short_label(&model_version);
+    let now = now_unix();
+
+    let mut out = ChannelSwitch {
+        switched: 0,
+        abandoned: 0,
+        abandoned_credit: 0,
+        skipped: 0,
+        label: String::new(),
+        undo: Vec::new(),
+    };
+    // 直接改的那批攒起来一次 UPDATE；要丢弃的逐条处理（每条都要先留一份账）。
+    let mut direct: Vec<i64> = Vec::new();
+    let mut last_code = String::new();
+
+    for id in &ids {
+        let Some(clip) = repo::get(&state.db, *id).await? else {
+            out.skipped += 1;
+            continue;
+        };
+        match clip.stage.as_str() {
+            "rewrite" | "ready" => {
+                last_code = clip.prompt_code.clone();
+                direct.push(*id);
+            }
+            "run" if abandon_submitted => {
+                let ev = runner::Evidence::from_clip(&clip);
+                let paid = clip.credit_count.or(clip.submit_credit).unwrap_or(0);
+                let snap = repo::snapshot(&state.db, *id).await?;
+                // **先记账再动手**：`requeue_for_run` 会把 submit_id 与 credit_count 一起
+                // 清掉，事后想查「我到底丢了哪一单、花了多少」就只剩这条日志了。
+                state.v2v_log.warn(
+                    "submit",
+                    Some((clip.id, clip.prompt_code.as_str())),
+                    format!(
+                        "改投 {label_ch}：丢弃已提交单 {}（{}），此单不再轮询",
+                        clip.submit_id.as_deref().unwrap_or("无 submit_id"),
+                        if ev.billed() {
+                            format!("已扣 {paid} 额度，不可撤回")
+                        } else {
+                            "未产生额度消耗".into()
+                        }
+                    ),
+                    None,
+                );
+                if repo::requeue_for_run(&state.db, *id, now).await? {
+                    out.abandoned += 1;
+                    if ev.billed() {
+                        out.abandoned_credit += paid;
+                    }
+                    last_code = clip.prompt_code.clone();
+                    direct.push(*id);
+                    if let Some(s) = snap {
+                        out.undo.push(V2vUndoEntry::from_snapshot(s, None));
+                    }
+                } else {
+                    out.skipped += 1;
+                }
+            }
+            _ => out.skipped += 1,
+        }
+    }
+
+    if !direct.is_empty() {
+        let n = repo::set_params(
+            &state.db,
+            &direct,
+            norm.model_version.as_deref(),
+            norm.duration,
+            norm.video_resolution.as_deref(),
+            now,
+        )
+        .await?;
+        // 丢弃的那些刚被 `requeue_for_run` 推回 ready，所以它们也在这次 UPDATE 的射程里；
+        // `switched` 只算「本来就没花钱」的那部分，两个数字加起来才是 `n`。
+        out.switched = (n - out.abandoned).max(0);
+    }
+
+    let changed = out.switched + out.abandoned;
+    out.label = action_label(&format!("已改投 {label_ch}"), changed, &last_code);
+    if changed > 0 {
+        state.v2v_log.info(
+            "submit",
+            None,
+            format!(
+                "换通道 → {label_ch}（{}s · {}）：{} 条改投（其中 {} 条丢弃了已提交单，合计已扣 {} 额度）",
+                norm.duration.unwrap_or(0),
+                norm.video_resolution.as_deref().unwrap_or("CLI 默认"),
+                changed,
+                out.abandoned,
+                out.abandoned_credit,
+            ),
+            None,
+        );
+    }
+    emit_changed(&state.db, &app, None).await;
+    Ok(out)
+}
+
 /// 提交确认卡的全部内容：真实命令行 + 预计额度消耗 + 当前余额。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -1516,45 +1692,118 @@ pub async fn unqueue_v2v_clips(
     Ok(n)
 }
 
-/// 立刻轮询一轮（用户点「刷新」；后台轮询器照常在跑）。
+/// 手动刷新是不是正在跑（进程内）。
+///
+/// 重入闸而不只是把按钮置灰：置灰只挡得住那一个按钮，挡不住键盘、⌘K、以及第二个
+/// 窗口。而重入的代价是**同一条 clip 被两个 `query_result` 同时处置** —— 两条路径都会
+/// 走 `settle`，出片的那一半可能各自改名同一个文件。
+static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 立刻把**全部依赖即梦回传的数值**问一遍（顶栏那个「刷新」）。
+///
+/// ## 为什么它立刻返回，活儿丢到后台
+///
+/// 这一轮是 O(n) 个 `query_result` 进程（理由见 `runner::refresh_now`），几十条就是
+/// 几十秒。旧实现是同步 `await` 到底的，于是整段时间里界面一声不吭 —— 而人点刷新的
+/// 场景恰恰是「我怀疑它卡住了」，用一次真的卡住来回答这个怀疑是最坏的答案。
+///
+/// 现在：命令立刻返回本轮要问几条，进度经 `v2v://refresh` 事件走字，行内数值随查随更新
+/// （`query_and_settle` 每条都会 `mark_polled` 落库）。`AppState` 那三个字段都可廉价
+/// clone（`SqlitePool` / `Arc<DataDirs>` / `Activity` 各自内部是 Arc），故直接 spawn。
+///
+/// ## 收尾做什么、不做什么
+///
+/// **做** `drain_queue`：出片/判死会腾出通道空位，不顺手推一格的话，人刚看到一条出片、
+/// 队列却要再等一轮扫描才动。它只提交**人已经放行过**的条目。
+///
+/// **不做** `autofill::tick`：那是自主下新单、自主花钱。一个叫「刷新」的按钮不该顺手
+/// 替人买东西；下一个 tick 自会跑到它。
+///
+/// **做**一次余额查询：余额也是远端回传值，而这是唯一会走网络拿它的地方（`v2v_balance`
+/// 无缓存）。放在最后、失败不影响任何东西。
 #[tauri::command]
 #[specta::specta]
 pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResult<i64> {
-    let s = load_settings(&state.db).await?;
-    state.v2v_log.info("poll", None, "手动查一次进度", None);
-    // 手动点「查一次进度」要绕开退避（`force`）：人按下按钮就是要现在就问，
-    // 而退避是给后台循环省成本的，不该反过来让人点了没反应。
-    //
-    // 用参数而不是把 `polled_at` 改成 0 去骗过退避判定：那样一旦这次查询失败，
-    // 库里就留下一个 1970 年的时间戳 —— 卡片显示「55 年前查过」，而且此后每个 tick
-    // 都判它到点，退避对这条彻底失效。
-    let sum = runner::poll_once(
-        &state.db,
-        &state.dirs,
-        &s.bin,
-        &s.model_version,
-        s.timeout_secs(),
-        true,
-        &state.v2v_log,
-    )
-    .await?;
-    // 手动查一轮可能刚好腾出空位（出片/判死都会让条目离开 run）—— 顺手把本地队列
-    // 往前推一格，否则人点了「查一次进度」看到一条出片了，队列却要再等一轮扫描才动。
-    if let Err(e) = runner::drain_queue(
-        &state.db,
-        &s.bin,
-        &s.defaults(),
-        s.max_in_flight,
-        &state.v2v_log,
-    )
-    .await
-    {
-        state
-            .v2v_log
-            .error("submit", None, format!("本地队列补位失败：{e}"), None);
+    use crate::v2v::events::V2vRefresh;
+    use std::sync::atomic::Ordering;
+
+    if REFRESHING.swap(true, Ordering::SeqCst) {
+        return Err(AppError::InvalidInput("正在刷新，请等这一轮跑完".into()));
     }
-    emit_changed(&state.db, &app, None).await;
-    Ok(sum.finished)
+    // 从这里往下的每一条返回路径都必须把闸放回去，否则一次失败会让刷新永久卡死。
+    let s = match load_settings(&state.db).await {
+        Ok(s) => s,
+        Err(e) => {
+            REFRESHING.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let total = repo::count_running(&state.db).await.unwrap_or(0);
+    state.v2v_log.info(
+        "poll",
+        None,
+        format!("手动刷新：逐条查询在跑的 {total} 条"),
+        None,
+    );
+    let _ = V2vRefresh {
+        active: true,
+        done: 0,
+        total,
+        finished: 0,
+        error: None,
+    }
+    .emit(&app);
+
+    let pool = state.db.clone();
+    let dirs = state.dirs.clone();
+    let log = state.v2v_log.clone();
+    tauri::async_runtime::spawn(async move {
+        let progress_app = app.clone();
+        let result = runner::refresh_now(
+            &pool,
+            &dirs,
+            &s.bin,
+            &s.model_version,
+            s.timeout_secs(),
+            &log,
+            |done, total, sum| {
+                let _ = V2vRefresh {
+                    active: true,
+                    done,
+                    total,
+                    finished: sum.finished,
+                    error: None,
+                }
+                .emit(&progress_app);
+            },
+        )
+        .await;
+        let (finished, error) = match result {
+            Ok(sum) => (sum.finished, None),
+            Err(e) => {
+                log.error("poll", None, format!("手动刷新失败：{e}"), None);
+                (0, Some(format!("{e}")))
+            }
+        };
+        if let Err(e) =
+            runner::drain_queue(&pool, &s.bin, &s.defaults(), s.max_in_flight, &log).await
+        {
+            log.error("submit", None, format!("本地队列补位失败：{e}"), None);
+        }
+        // 余额也是远端回传值，顺手刷新；拉不到不算错（掉线/未登录是常态）。
+        let _ = dreamina::user_credit(&s.bin, &log).await;
+        emit_changed(&pool, &app, None).await;
+        REFRESHING.store(false, Ordering::SeqCst);
+        let _ = V2vRefresh {
+            active: false,
+            done: total,
+            total,
+            finished,
+            error,
+        }
+        .emit(&app);
+    });
+    Ok(total)
 }
 
 /// 一次可撤销动作的结果。
@@ -1993,10 +2242,31 @@ pub async fn requeue_v2v_clips(
         // 快照必须在改动之前取 —— 这三条路径都会清掉成片路径与扣费回执，
         // 事后再取就只剩清干净的空壳，撤销回去等于把片子弄丢。
         let snap = repo::snapshot(&state.db, id).await?;
-        let code = repo::get(&state.db, id)
-            .await?
-            .map(|c| c.prompt_code)
+        let row = repo::get(&state.db, id).await?;
+        let code = row
+            .as_ref()
+            .map(|c| c.prompt_code.clone())
             .unwrap_or_default();
+        // 重跑一条**即梦已经收过钱**的单子 = 丢弃那条已付费的视频（清 submit_id 之后
+        // `list_running` 再也认不出它），下次提交是第二份钱。护栏在界面上（确认框），
+        // 但账必须在这里记 —— 键盘、⌘K、以及将来任何新入口都绕不开这一行。
+        if mode == "run" {
+            if let Some(c) = row.as_ref().filter(|c| c.stage == "run") {
+                let ev = runner::Evidence::from_clip(c);
+                if ev.billed() {
+                    let paid = c.credit_count.or(c.submit_credit).unwrap_or(0);
+                    state.v2v_log.warn(
+                        "submit",
+                        Some((c.id, c.prompt_code.as_str())),
+                        format!(
+                            "重跑丢弃已提交单 {}（已扣 {paid} 额度，不可撤回），此单不再轮询",
+                            c.submit_id.as_deref().unwrap_or("无 submit_id"),
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
         let ok = match mode.as_str() {
             "run" => repo::requeue_for_run(&state.db, id, now).await?,
             "rewrite" => repo::requeue_for_rewrite(&state.db, id, now).await?,
@@ -2148,6 +2418,74 @@ mod tests {
         assert_eq!(
             s.defaults().model_version.as_deref(),
             Some("seedance2.0fast")
+        );
+    }
+
+    /// `ClipView.billed` 决定的是「重跑要不要再花一份钱」，所以它必须读**全部**
+    /// 已落库的计费证据，而不是只看 `credit_count`。
+    ///
+    /// 少读一处的后果不是少一个提示：那是对着一条即梦已经收过钱的单子说「重跑不花钱」，
+    /// 而人照做之后 `requeue_for_run` 会把 submit_id 清掉 —— 那条已付费的视频从此
+    /// 再也取不回来。前端不许自己算这件事（它只看得见两个字段），故这条断言守的是
+    /// 下发口径本身。
+    #[test]
+    fn billed_reads_every_receipt_not_just_the_obvious_one() {
+        fn row(credit: Option<i64>, submit_credit: Option<i64>) -> repo::ClipRow {
+            repo::ClipRow {
+                id: 1,
+                work_id: 1,
+                group_id: None,
+                group_name: String::new(),
+                export_path: None,
+                batch_id: None,
+                stage: "run".into(),
+                source_prompt: String::new(),
+                variable_part: String::new(),
+                video_prompt: Some("p".into()),
+                model_version: None,
+                duration: None,
+                video_resolution: None,
+                submit_id: Some("sub-1".into()),
+                credit_count: credit,
+                video_path: None,
+                poster_path: None,
+                width: None,
+                height: None,
+                fps: None,
+                duration_sec: None,
+                attempt: 1,
+                error_type: None,
+                error_message: None,
+                submitted_at: Some(100),
+                gen_status: Some("querying".into()),
+                queue_idx: None,
+                polled_at: None,
+                benefit_type: None,
+                first_submitted_at: Some(100),
+                submit_credit,
+                submit_status: None,
+                created_at: 0,
+                rewrote_at: None,
+                finished_at: None,
+                reviewed_at: None,
+                auto_submitted: 0,
+                submit_queued_at: None,
+                updated_at: 0,
+                prompt_code: "GG-0001".into(),
+                image_path: "/img.jpg".into(),
+                thumb_path: "/thumb.jpg".into(),
+                accepted_at: 0,
+            }
+        }
+        assert!(ClipView::from(row(Some(8), None)).billed, "出片回执算数");
+        assert!(
+            ClipView::from(row(None, Some(44))).billed,
+            "提交回执同样算数 —— 一条排队中的单子只有它"
+        );
+        assert!(ClipView::from(row(Some(8), Some(8))).billed);
+        assert!(
+            !ClipView::from(row(None, None)).billed,
+            "两处都空才是「没花过钱」（幽灵单 / 被并发上限弹回的）"
         );
     }
 

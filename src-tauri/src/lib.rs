@@ -150,6 +150,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::open_handoff_dir,
             commands::v2v::update_v2v_clip,
             commands::v2v::set_v2v_clip_params,
+            commands::v2v::switch_v2v_channel,
             commands::v2v::preview_v2v_commands,
             commands::v2v::submit_v2v_clips,
             commands::v2v::unqueue_v2v_clips,
@@ -266,6 +267,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             v2v::events::V2vProgress,
             v2v::events::V2vActivity,
             v2v::events::V2vTick,
+            v2v::events::V2vRefresh,
         ])
 }
 

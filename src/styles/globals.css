@@ -4177,9 +4177,10 @@ a:hover {
   color: var(--er);
 }
 
-/* 轮询心跳 pill：在什么都没发生时也要能回答「轮询器还活着吗」——
-   一个静默的界面和一个卡死的轮询器长得一模一样。 */
-.pollpill {
+/* 顶栏刷新按钮：同一个控件回答「数据有多新」与「现在就去问一遍」。
+   它取代了原来那颗只读的心跳 pill —— 那颗显示的是 6 秒一次的心跳，
+   而真正问即梦是 5/10 分钟一次，于是它最擅长的事是让人以为数据很新鲜。 */
+.refbtn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -4191,19 +4192,36 @@ a:hover {
   border-radius: 99px;
   padding: 3px 9px;
   white-space: nowrap;
+  cursor: pointer;
 }
-.pollpill .dot {
+.refbtn:hover:not(:disabled) {
+  color: var(--t1);
+  border-color: var(--line2);
+}
+.refbtn:disabled {
+  cursor: default;
+}
+.refbtn .dot {
   width: 6px;
   height: 6px;
   border-radius: 99px;
   background: var(--ok);
   flex: none;
 }
-.pollpill.off .dot {
+.refbtn.off .dot {
   background: var(--t3);
 }
-.pollpill.bad .dot {
+.refbtn.bad .dot {
   background: var(--er);
+}
+/* 刷新中：点这里的人正在怀疑它卡住了，所以「在动」必须是看得见的。 */
+.refbtn.busy {
+  color: var(--acc2);
+  border-color: var(--acc);
+}
+.refbtn.busy .dot {
+  background: var(--acc);
+  animation: brth 1.2s ease-in-out infinite;
 }
 
 /* 队列观测条：回答「还在动吗」。 */

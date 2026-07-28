@@ -123,6 +123,29 @@ pub struct V2vTick {
     pub failed: i64,
     /// 整轮失败的原因（读设置失败、CLI 不可用……）。
     pub error: Option<String>,
+    /// 上一次**真的问过即梦**的时刻（`runner::last_sweep_at`）。
+    ///
+    /// 顶栏那个刷新按钮显示的「上次查询 N 前」读的是这个，**不是 [`Self::at`]**。
+    /// 心跳 6 秒一次且纯内存读，拿它写「3 秒前」会让人以为数据是三秒前的新鲜货 ——
+    /// 而真实查询是 5/10 分钟一次。这两个时刻差一个数量级，混用就是在骗人。
+    pub last_sweep_at: Option<i64>,
+}
+
+/// `v2v://refresh` —— 人点了顶栏刷新按钮之后的逐条进度。
+///
+/// 手动刷新是 O(n) 个 `query_result` 进程（见 `runner::refresh_now`），几十条就要跑
+/// 几十秒。没有这条事件的话，那段时间里界面与死机没有区别；有了它，按钮上就是
+/// 「正在查 12/78」在走字，而行内的队列位次也随查随更新。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vRefresh {
+    /// 还在跑吗。`false` 即这一轮已经结束（无论成功还是出错）。
+    pub active: bool,
+    pub done: i64,
+    pub total: i64,
+    /// 这一轮取回了几条成片。
+    pub finished: i64,
+    pub error: Option<String>,
 }
 
 #[cfg(test)]

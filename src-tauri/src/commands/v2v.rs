@@ -1010,6 +1010,17 @@ pub struct ClipView {
     /// （本次回体两处 + 已落库三处），而前端只看得见其中两个字段。少读一处的后果不是
     /// 少一个提示，是对着一条已经扣过钱的单子说「重跑不花钱」。
     pub billed: bool,
+    /// 即梦那边**已经做完了**，只是成片还没落到本地（`stage='run'` 且 `gen_status`
+    /// 判 `Done`，而 `video_path` 还空着）。
+    ///
+    /// 这是一个真实、会持续好几轮、而界面此前完全说不出口的状态：下载走的是
+    /// `query_result --download_dir`，CLI 自己的 HTTP 超时 30 秒，大文件或网络抖动
+    /// 就会失败。此时条目停在 `run`、`queue_idx` 是 0（「已出队」不是位次），
+    /// 于是「情况」列会说「即梦在跑 · 位次问不到」—— 而它根本没在跑。
+    ///
+    /// 判定放在 Rust：`dreamina::classify_status` 是 `gen_status` 取值的单点定义
+    /// （大小写不统一、还有 `PartialSuccess` 这种），在前端拿字符串再判一遍必然分叉。
+    pub awaiting_download: bool,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -1020,9 +1031,15 @@ impl From<repo::ClipRow> for ClipView {
         // 每个列表命令各传一次，就等于给这条规则开了 N 个改错的机会。
         let phantom_suspect = runner::clip_looks_phantom(&r, crate::db::now_unix());
         let billed = runner::Evidence::from_clip(&r).billed();
+        let awaiting_download = r.stage == "run"
+            && r.video_path.as_deref().unwrap_or_default().is_empty()
+            && r.gen_status.as_deref().is_some_and(|s| {
+                dreamina::classify_status(s) == crate::v2v::dreamina::Outcome::Done
+            });
         Self {
             phantom_suspect,
             billed,
+            awaiting_download,
             id: r.id,
             work_id: r.work_id,
             group_id: r.group_id,
@@ -2521,6 +2538,85 @@ mod tests {
         assert!(
             !ClipView::from(row(None, None)).billed,
             "两处都空才是「没花过钱」（幽灵单 / 被并发上限弹回的）"
+        );
+    }
+
+    /// 「即梦做完了，只是还没落到本地」是一个真实、会持续好几轮的状态。
+    ///
+    /// 实跑抓到的：一条 2.0Mini 出片后下载超时（CLI 自己的 30 秒 HTTP 超时），条目停在
+    /// `run`、`gen_status=success`、`queue_idx=0`、已扣 36 额度、`video_path` 为空。
+    /// 界面此前说的是「即梦在跑 · 位次问不到」—— 而 0 不是位次，它根本没在跑。
+    ///
+    /// 判定必须读 `classify_status`（`gen_status` 取值的单点定义）而不是比一个
+    /// `== "success"`：那个枚举大小写不统一，还有 `PartialSuccess`。
+    #[test]
+    fn awaiting_download_is_told_apart_from_still_running() {
+        fn row(stage: &str, gen: Option<&str>, path: Option<&str>) -> repo::ClipRow {
+            repo::ClipRow {
+                stage: stage.into(),
+                gen_status: gen.map(str::to_string),
+                video_path: path.map(str::to_string),
+                queue_idx: Some(0),
+                credit_count: Some(36),
+                submit_id: Some("sub-1".into()),
+                submitted_at: Some(100),
+                first_submitted_at: Some(100),
+                id: 1,
+                work_id: 1,
+                group_id: None,
+                group_name: String::new(),
+                export_path: None,
+                batch_id: None,
+                source_prompt: String::new(),
+                variable_part: String::new(),
+                video_prompt: Some("p".into()),
+                model_version: None,
+                duration: None,
+                video_resolution: None,
+                poster_path: None,
+                width: None,
+                height: None,
+                fps: None,
+                duration_sec: None,
+                attempt: 1,
+                error_type: None,
+                error_message: None,
+                polled_at: None,
+                benefit_type: None,
+                submit_credit: None,
+                submit_status: None,
+                created_at: 0,
+                rewrote_at: None,
+                finished_at: None,
+                reviewed_at: None,
+                auto_submitted: 0,
+                submit_queued_at: None,
+                updated_at: 0,
+                prompt_code: "GG-0001".into(),
+                image_path: "/img.jpg".into(),
+                thumb_path: "/thumb.jpg".into(),
+                accepted_at: 0,
+            }
+        }
+        assert!(
+            ClipView::from(row("run", Some("success"), None)).awaiting_download,
+            "做完了但没落盘 —— 这一格必须说得出口"
+        );
+        assert!(
+            ClipView::from(row("run", Some("PartialSuccess"), None)).awaiting_download,
+            "取值来自 CLI 的枚举，大小写不统一且不止 success 一个"
+        );
+        assert!(
+            !ClipView::from(row("run", Some("querying"), None)).awaiting_download,
+            "真在排队的不算"
+        );
+        assert!(
+            !ClipView::from(row("run", Some("success"), Some("/clips/1.mp4"))).awaiting_download,
+            "已经落盘了就不算 —— 那一轮马上会把它推到待验收"
+        );
+        assert!(
+            !ClipView::from(row("rev", Some("success"), Some("/clips/1.mp4"))).awaiting_download,
+            "只在 run 这一格里有意义"
         );
     }
 

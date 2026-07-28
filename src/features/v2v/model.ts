@@ -442,6 +442,15 @@ export function deriveRows(
     } else if (slow) {
       situation = `等待异常 · 已超同通道中位数 ${SLOW_FACTOR} 倍，别手动催`;
       situationTone = "wr";
+    } else if (stage === "run" && c.awaitingDownload) {
+      // 即梦已经做完了，卡的是**下载**（`query_result --download_dir` 走 CLI 自己的
+      // 30 秒 HTTP 超时，大文件或网络抖动就会失败，下一轮自动重试）。
+      //
+      // 没有这一格的话，这一行会掉进下面那条「位次问不到」——而它根本没在跑，
+      // `queue_idx` 的 0 是「已出队」不是位次。人看到的会是一条「即梦在跑」挂在
+      // 那里好几轮，而真相是片子早就好了、钱也扣完了，只差最后一步落盘。
+      situation = "已出片 · 正在取回到本地，失败会自动重试";
+      situationTone = "wr";
     } else if (stage === "run") {
       // 位次是排队几小时里**唯一**有意义的进度：「第 4485 位」和「第 12 位」是两件
       // 完全不同的事。绝不编一个位次出来。

@@ -102,6 +102,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     exportPath: null,
     phantomSuspect: false,
     billed: false,
+    awaitingDownload: false,
     acceptedAt: NOW - 8000,
     updatedAt: NOW - 600,
     ...over,
@@ -235,6 +236,36 @@ describe("本地待发队列（0028）", () => {
     expect(r?.queuePos).toBeNull();
     expect(r?.situation).toBe("即梦在跑 · 位次问不到（4 分钟前问过）");
     expect(r?.situation).not.toContain("本批");
+  });
+
+  /**
+   * 即梦做完了、卡在下载的那一格，**不能说成「即梦在跑」**。
+   *
+   * 实跑抓到的：一条 2.0Mini 出片后下载超时（`query_result --download_dir` 走 CLI 自己的
+   * 30 秒 HTTP 超时），条目停在 `run`、`gen_status=success`、`queue_idx=0`、已扣 36 额度、
+   * `video_path` 为空。而 0 不是位次（是「已出队」），于是这一行会掉进「位次问不到」
+   * 那条回落 —— 显示「即梦在跑」挂好几轮，而真相是片子早就好了、钱也扣完了。
+   *
+   * 判定由 Rust 下发（`awaitingDownload`，读 `dreamina::classify_status`），
+   * 前端不拿 `genStatus === "success"` 凑：那个枚举大小写不统一，还有 `PartialSuccess`。
+   */
+  it("即梦做完了卡在下载时，说的是「正在取回」而不是「即梦在跑」", () => {
+    const [r] = derive([
+      clip({
+        stage: "run",
+        videoPath: null,
+        genStatus: "success",
+        queueIdx: 0,
+        creditCount: 36,
+        awaitingDownload: true,
+        firstSubmittedAt: NOW - 600,
+        polledAt: NOW - 30,
+      }),
+    ]);
+    expect(r?.situation).toBe("已出片 · 正在取回到本地，失败会自动重试");
+    expect(r?.situation).not.toContain("即梦在跑");
+    // 已经扣过费了，所以它绝不该被当成幽灵单（那句话会说「重跑不花钱」）。
+    expect(r?.phantomLive).toBe(false);
   });
 
   it("一次都没问到过位次时不假装问过", () => {

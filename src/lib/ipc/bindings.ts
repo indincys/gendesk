@@ -2582,7 +2582,20 @@ phantomSuspect: boolean;
  * （本次回体两处 + 已落库三处），而前端只看得见其中两个字段。少读一处的后果不是
  * 少一个提示，是对着一条已经扣过钱的单子说「重跑不花钱」。
  */
-billed: boolean; acceptedAt: number; updatedAt: number }
+billed: boolean; 
+/**
+ * 即梦那边**已经做完了**，只是成片还没落到本地（`stage='run'` 且 `gen_status`
+ * 判 `Done`，而 `video_path` 还空着）。
+ * 
+ * 这是一个真实、会持续好几轮、而界面此前完全说不出口的状态：下载走的是
+ * `query_result --download_dir`，CLI 自己的 HTTP 超时 30 秒，大文件或网络抖动
+ * 就会失败。此时条目停在 `run`、`queue_idx` 是 0（「已出队」不是位次），
+ * 于是「情况」列会说「即梦在跑 · 位次问不到」—— 而它根本没在跑。
+ * 
+ * 判定放在 Rust：`dreamina::classify_status` 是 `gen_status` 取值的单点定义
+ * （大小写不统一、还有 `PartialSuccess` 这种），在前端拿字符串再判一遍必然分叉。
+ */
+awaitingDownload: boolean; acceptedAt: number; updatedAt: number }
 export type CreateAccountInput = { platform: string; name: string; dailyLimit: number | null; slots: string[] | null }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
 /**

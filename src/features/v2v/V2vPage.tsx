@@ -1346,6 +1346,7 @@ export function V2vPage() {
         <ChannelSwitchModal
           rows={switching}
           models={models}
+          autofillOn={auto?.enabled === true}
           busy={busy}
           onClose={() => setSwitching(null)}
           onConfirm={(p, abandon) =>
@@ -2326,12 +2327,15 @@ function SubmitConfirm({
 function ChannelSwitchModal({
   rows,
   models,
+  autofillOn,
   busy,
   onClose,
   onConfirm,
 }: {
   rows: Row[];
   models: ModelInfo[];
+  /** 常驻队列开着没有 —— 决定要不要提示「这一换就退出候选池」。 */
+  autofillOn: boolean;
   busy: boolean;
   onClose: () => void;
   onConfirm: (p: ChannelParams, abandon: boolean) => void;
@@ -2342,6 +2346,10 @@ function ChannelSwitchModal({
   const paid = live.filter((r) => r.clip.billed);
   const locked = rows.length - free.length - live.length;
   const paidCredit = paid.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0);
+  // 换通道 = 把型号写死，而 `AUTOFILL_POOL` 只捡型号为空的（「指定过参数的不给补单器
+  // 捡走」）。于是一个叫「换通道」的动作会顺带把这些条目**永久移出常驻队列的候选池**
+  // —— 补单器开着、水位线又快见底时，这是个查半天查不出原因的静默后果。
+  const leavingPool = rows.filter((r) => (r.clip.modelVersion ?? "").trim() === "").length;
 
   const [abandon, setAbandon] = useState(false);
   // 带过去的原值取第一条 —— 混选时下面会标「多条不一致」，而一个「保持不变」的选项在
@@ -2473,6 +2481,13 @@ function ChannelSwitchModal({
           {locked > 0 && (
             <div className="fs11 t3">
               另有 {locked} 条已出片或已定案，换通道对它们没有意义，会跳过。
+            </div>
+          )}
+          {autofillOn && leavingPool > 0 && (
+            <div className="fs11 wr2" style={{ lineHeight: 1.8 }}>
+              其中 {leavingPool} 条现在跟随全局默认通道，换过去等于**给它们写死型号** ——
+              常驻队列只捡没写死型号的，所以这 {leavingPool} 条从此不会再被自动补单捡走。
+              要放回去：底栏参数条把模型选回「跟随全局默认」。
             </div>
           )}
           {target && (

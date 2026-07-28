@@ -44,21 +44,51 @@ impl Kick for Engine {
     }
 }
 
+/// 收录进度回报。与 [`Kick`] 同一个理由抽成 trait：本模块不该依赖 Tauri。
+///
+/// 存在的理由写在 `commands::refs::RefImportProgress` 的注释里，那是同一个故障：
+/// 一条十几秒不出声的链路，人会当它死了然后反复重按——于是同一批图进库五六遍。
+/// 一份 120 张的工单收录要几十秒，没有进度就是同样的剧本。
+pub trait ProgressSink: Send + Sync {
+    /// 参考图落盘进度。`done` 单调递增，收完等于 `total`。
+    fn refs(&self, job_id: &str, done: i64, total: i64);
+}
+
+/// 不回报。后台扫描与测试用——那些场景没有人在等着看进度。
+pub struct NoProgress;
+
+impl ProgressSink for NoProgress {
+    fn refs(&self, _job_id: &str, _done: i64, _total: i64) {}
+}
+
 /// 收录所需的全部句柄。命令层与后台监听各自构造一个，字段都是 clone 友好的。
 #[derive(Clone)]
 pub struct Ctx {
     pub pool: SqlitePool,
     pub dirs: Arc<DataDirs>,
     pub engine: Arc<dyn Kick>,
+    pub progress: Arc<dyn ProgressSink>,
     /// 任务数超过它就不自动开跑，转「待确认」。`<= 0` = 不限。
     pub threshold: i64,
+    /// 扫描互斥锁。**必须全进程共用同一把**（见 [`scan`]）。
+    pub scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// 一轮扫描的结果：本轮真正处理掉的工单（已跳过的不在其中）。
 pub type ScanResult = Vec<JobView>;
 
 /// 扫描收件目录并逐个收录。**幂等**：已记账的工单一律跳过。
+///
+/// **全程持锁串行。** 两条路径会同时触发扫描：设置页点「确认开跑」会直接扫一轮，
+/// 而写下的 `确认.txt` 落在被监听的收件目录里，watcher 防抖 2 秒后也会扫一轮。
+/// 没有这把锁，两轮会在「`repo::exists` 查过了、`insert_running` 还没写」的窗口里
+/// 撞车：`job_id UNIQUE` 保证不会重复花钱，但输的那一轮会把 UNIQUE 冲突当成收录失败
+/// 抛给用户——一份其实跑得好好的工单显示「确认失败」，而本轮剩下的工单被整个放弃。
+///
+/// 这个窗口会随着收录变快而**变宽**（同样的 2 秒防抖，能覆盖的工作变多了），
+/// 所以它不是「以后再说」的问题。
 pub async fn scan(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
+    let _guard = ctx.scan_lock.lock().await;
     let pending = super::pending_dir(root);
     // 目录不存在就先建出来：用户第一次看设置页时应该能直接「打开目录」把工单丢进去。
     std::fs::create_dir_all(&pending)?;
@@ -229,6 +259,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
 
     // ── 按 (参数快照, 抽卡) 分桶。参数是**批次级**的，各组比例不同就必须拆批次。
     let mut buckets: Vec<Bucket> = Vec::new();
+    let total_refs: i64 = plan.groups.iter().map(|g| g.refs.len() as i64).sum();
 
     for (g, group_id) in plan.groups.iter().zip(result.group_ids.iter().copied()) {
         let key = g.bucket();
@@ -247,34 +278,48 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
                 buckets.len() - 1
             }
         };
-        for path in &g.refs {
-            let p = path.to_string_lossy().to_string();
-            let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
-            // 解码 + 缩放 + 重编码是纯 CPU，留在异步执行器上会把整个 IPC 卡住（v0.14.0）。
-            let ing = tokio::task::spawn_blocking(move || ingest_one(&p, &rd, &td))
-                .await
-                .map_err(|e| AppError::Io(format!("参考图导入任务失败：{e}")))??;
-            let id = refs_repo::insert(
-                &ctx.pool,
-                &refs_repo::NewRefImage {
-                    name: ing.name,
-                    ref_group_id,
-                    file_path: ing.file_path,
-                    thumb_path: ing.thumb_path,
-                    width: ing.width,
-                    height: ing.height,
-                    file_size: ing.file_size,
-                    content_hash: ing.content_hash,
-                    upload_path: ing.upload_path,
-                    ephemeral: plan.ephemeral,
-                },
-            )
-            .await?;
-            out.ref_count += 1;
-            buckets[slot].mappings.push(RefMapping {
-                ref_image_id: id,
-                prompt_group_id: group_id,
+        // 分块并行落盘，块内并发、块间串行、**插库严格按原顺序**。
+        //
+        // 为什么不干脆「全部解完再全部插库」：失败回执是承重的（谎称「没有导入任何
+        // 东西」会让人点重试拿到第二份提示词），两段式会在解码阶段失败时留下一整批
+        // 谁也不知道存在的孤儿文件，而台账上 ref_count 还是 0。分块把孤儿窗口压到
+        // 一个块以内，且 ref_count 是可见地往前走的。
+        //
+        // 顺序必须保持：mappings 的顺序会喂给 create_batch 决定任务创建顺序。
+        // `join_all` 按输入顺序返回，故这里天然保序。
+        for chunk in g.refs.chunks(crate::files::decode::max_concurrent()) {
+            let jobs = chunk.iter().map(|path| {
+                let p = path.to_string_lossy().to_string();
+                let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
+                // 解码 + 缩放 + 重编码是纯 CPU，留在异步执行器上会把整个 IPC 卡住
+                // （v0.14.0）；`bounded` 同时把它纳入进程级解码预算。
+                crate::files::decode::bounded(move |permit| ingest_one(&p, &rd, &td, permit))
             });
+            for ing in futures_util::future::join_all(jobs).await {
+                let ing = ing?;
+                let id = refs_repo::insert(
+                    &ctx.pool,
+                    &refs_repo::NewRefImage {
+                        name: ing.name,
+                        ref_group_id,
+                        file_path: ing.file_path,
+                        thumb_path: ing.thumb_path,
+                        width: ing.width,
+                        height: ing.height,
+                        file_size: ing.file_size,
+                        content_hash: ing.content_hash,
+                        upload_path: ing.upload_path,
+                        ephemeral: plan.ephemeral,
+                    },
+                )
+                .await?;
+                out.ref_count += 1;
+                ctx.progress.refs(&plan.job_id, out.ref_count, total_refs);
+                buckets[slot].mappings.push(RefMapping {
+                    ref_image_id: id,
+                    prompt_group_id: group_id,
+                });
+            }
         }
     }
 
@@ -443,18 +488,42 @@ mod tests {
         dir
     }
 
+    /// 记录进度回报，供「进度必须单调且到达 total」那条测试用。
+    #[derive(Default)]
+    struct RecordingProgress(std::sync::Mutex<Vec<(i64, i64)>>);
+    impl ProgressSink for RecordingProgress {
+        fn refs(&self, _job_id: &str, done: i64, total: i64) {
+            if let Ok(mut v) = self.0.lock() {
+                v.push((done, total));
+            }
+        }
+    }
+
     fn ctx_for(pool: &SqlitePool, data: &Path, threshold: i64) -> (Ctx, Arc<CountingKick>) {
+        let (ctx, kick, _) = ctx_for_full(pool, data, threshold);
+        (ctx, kick)
+    }
+
+    fn ctx_for_full(
+        pool: &SqlitePool,
+        data: &Path,
+        threshold: i64,
+    ) -> (Ctx, Arc<CountingKick>, Arc<RecordingProgress>) {
         let dirs = Arc::new(DataDirs::new(data));
         dirs.init().unwrap();
         let kick = Arc::new(CountingKick::default());
+        let progress = Arc::new(RecordingProgress::default());
         (
             Ctx {
                 pool: pool.clone(),
                 dirs,
                 engine: kick.clone(),
+                progress: progress.clone(),
                 threshold,
+                scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             },
             kick,
+            progress,
         )
     }
 
@@ -528,6 +597,88 @@ mod tests {
         assert_eq!(moved.len(), 1);
         let receipt = std::fs::read_to_string(moved[0].join(super::super::RESULT_FILE)).unwrap();
         assert!(receipt.contains("aspect_ratio"), "回执要写清实际发出去什么");
+    }
+
+    /// 分块并行落盘之后，**参考图的入库顺序必须仍然是工单里写的顺序**。
+    ///
+    /// mappings 的顺序会喂给 `create_batch` 决定任务创建顺序；并行化最容易在这里
+    /// 静默出错——图都进去了、数量也对，只是配对错位，而那要到验收时才看得出来。
+    /// 同时钉住进度回报：单调、且最终等于总数。
+    #[tokio::test]
+    async fn parallel_ref_ingest_preserves_order_and_reports_progress() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _kick, progress) = ctx_for_full(&pool, data.path(), 500);
+
+        // 七张（> 并发块大小，保证真的跨了多个块），名字本身带顺序。
+        let names: Vec<String> = (1..=7).map(|i| format!("r{i}.png")).collect();
+        let refs_line = names
+            .iter()
+            .map(|n| format!("images/{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        make_job(
+            home.path(),
+            "20260727-顺序",
+            &format!("分组: 顺序组\n参考图: {refs_line}\n\n提示词一\n"),
+            &name_refs,
+        );
+
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "done", "收录应成功：{}", jobs[0].message);
+        assert_eq!(jobs[0].ref_count, 7);
+
+        // 入库顺序 = 工单顺序。ref_images.id 递增，故按 id 排出来就是入库顺序。
+        let got: Vec<String> = sqlx::query_scalar("SELECT name FROM ref_images ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let want: Vec<String> = (1..=7).map(|i| format!("r{i}")).collect();
+        assert_eq!(got, want, "并行落盘不得打乱参考图顺序");
+
+        let seen = progress.0.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "必须有进度回报");
+        assert!(
+            seen.windows(2).all(|w| w[0].0 < w[1].0),
+            "进度必须单调递增：{seen:?}"
+        );
+        assert_eq!(seen.last(), Some(&(7, 7)), "最后一条应是 7/7");
+    }
+
+    /// 同一个收件目录被并发扫两轮 —— 设置页点「确认开跑」会直接扫一轮，而写下的
+    /// `确认.txt` 落在被监听目录里，watcher 也会扫一轮。结果必须是**恰好一个批次**，
+    /// 且**两轮都不报错**：输的那一轮该安静地跳过，而不是把 UNIQUE 冲突当成
+    /// 「收录失败」抛给用户（一份其实跑得好好的工单显示确认失败）。
+    #[tokio::test]
+    async fn concurrent_scans_ingest_exactly_once_without_error() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 500);
+
+        make_job(
+            home.path(),
+            "20260727-并发",
+            "分组: 并发组\n参考图: images/a.png\n\n提示词一\n",
+            &["a.png"],
+        );
+
+        let (c1, c2) = (ctx.clone(), ctx.clone());
+        let (h1, h2) = (home.path().to_path_buf(), home.path().to_path_buf());
+        let (r1, r2) = tokio::join!(
+            tokio::spawn(async move { scan(&c1, &h1).await }),
+            tokio::spawn(async move { scan(&c2, &h2).await }),
+        );
+        let a = r1.unwrap().expect("第一轮扫描不该报错");
+        let b = r2.unwrap().expect("第二轮扫描不该报错");
+
+        // 一轮收录了它，另一轮什么都没做。
+        assert_eq!(a.len() + b.len(), 1, "工单只该被收录一次");
+        assert_eq!(count(&pool, "batches").await, 1, "只该建出一个批次");
+        assert_eq!(count(&pool, "intake_jobs").await, 1);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1, "只该唤醒一次调度器");
     }
 
     // 各组比例不同 → 自动拆成多个批次（params_json 是批次级的，塞不进一个批次）。

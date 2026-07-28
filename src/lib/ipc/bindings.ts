@@ -795,6 +795,21 @@ async previewIntakeJob(id: number) : Promise<Result<JobPreview, AppError>> {
 }
 },
 /**
+ * 单张参考图的预览缩略图 → 缓存文件绝对路径（前端 `assetSrc` 读）。
+ * 
+ * 命中缓存就直接返回，**连解码预算都不碰**：重开确认卡、来回滚动都是零成本，
+ * 这才是「反复打开不会把 CPU 叠上去」的真正保证——`spawn_blocking` 不可取消，
+ * 想靠取消来收场是收不住的，只能让重复的活根本不发生。
+ */
+async intakeRefThumb(id: number, path: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("intake_ref_thumb", { id, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 确认开跑一份超阈值的工单。
  * 
  * 做的事就两件：**在工单目录里写下 `确认.txt`**，然后删掉台账那行让它重新收录。
@@ -802,7 +817,7 @@ async previewIntakeJob(id: number) : Promise<Result<JobPreview, AppError>> {
  * 你在 Claude Code 里 `touch` 一下和在这里点一下走的是同一段代码，
  * 不可能出现「一条路对、另一条路错」。
  */
-async confirmIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
+async confirmIntakeJob(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("confirm_intake_job", { id }) };
 } catch (e) {
@@ -1980,6 +1995,7 @@ batchSummary: BatchSummary,
 exportProgressEvent: ExportProgressEvent,
 inboxIngestEvent: InboxIngestEvent,
 intakeChanged: IntakeChanged,
+intakeProgress: IntakeProgress,
 keyHealth: KeyHealth,
 publishBadgesEvent: PublishBadgesEvent,
 refImportProgress: RefImportProgress,
@@ -1997,6 +2013,7 @@ batchSummary: "batch-summary",
 exportProgressEvent: "export-progress-event",
 inboxIngestEvent: "inbox-ingest-event",
 intakeChanged: "intake-changed",
+intakeProgress: "intake-progress",
 keyHealth: "key-health",
 publishBadgesEvent: "publish-badges-event",
 refImportProgress: "ref-import-progress",
@@ -2641,6 +2658,18 @@ stale: number }
  */
 export type IntakeChanged = { jobs: JobView[] }
 /**
+ * `intake://progress` —— 收录一份工单时的逐张进度。
+ * 
+ * 确认一份 120 张的工单要几十秒。没有这条事件，那几十秒里界面上什么都不会动，
+ * 而「看起来卡死了」的下一步永远是再点一次——`RefImportProgress` 的注释里
+ * 已经记着同一个故障了。
+ */
+export type IntakeProgress = { jobId: string; 
+/**
+ * 当前阶段。目前只有 `refs`（参考图落盘），留字段是为了以后加阶段不必改事件形状。
+ */
+phase: string; done: number; total: number }
+/**
  * 收件设置（`settings` 表 key='intake' 单行 JSON）。
  */
 export type IntakeSettings = { 
@@ -2691,13 +2720,16 @@ refs: JobPreviewRef[];
 paramsJson: string; wireJson: string; draws: number; taskCount: number }
 export type JobPreviewRef = { fileName: string; 
 /**
- * 内联 data: URI 缩略图。
+ * 工单目录内的参考图绝对路径。
  * 
- * **不能走 asset 协议**：它的 scope 限定在 `$APPDATA/$APPLOCALDATA/$PICTURE`，
- * 而工单目录在交接根下（默认 `~/GenDesk交接/`）。为了给一张预览图去放宽
- * 整个应用的文件读取范围，代价与收益完全不成比例。
+ * **这里不带缩略图。** 缩略图由 [`intake_ref_thumb`] 按需单张生成——原来是在
+ * 组装预览时把每张参考图都全分辨率解码一遍再塞成 base64，一份 120 张 26 MP
+ * 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两组。
+ * 
+ * 顺带解决了 asset 协议的 scope 问题：工单目录在交接根下（默认 `~/GenDesk交接/`），
+ * 够不着 `$APPDATA/**`；而按需生成的缩略图**缓存在 app data 里**，正好够得着。
  */
-thumbDataUri: string | null }
+path: string }
 /**
  * 工单收录结果（事件与设置页列表共用）。
  */

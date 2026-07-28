@@ -123,8 +123,10 @@ export type {
   // 生图工单收件（Claude Code / Codex 投单）
   IntakeSettings,
   IntakeChanged,
+  IntakeProgress,
   JobView,
   JobPreview,
+  JobPreviewRef,
 } from "./bindings";
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
@@ -234,6 +236,20 @@ export async function subscribeIntake(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const un = await events.intakeChanged.listen((e) => handler(e.payload));
+  return () => un();
+}
+
+/**
+ * 订阅工单收录进度（逐张参考图落盘）。
+ *
+ * 确认一份大工单要几十秒，这条事件是那段时间里唯一的动静 ——
+ * 没有它，「看起来卡死了」的下一步永远是再点一次。
+ */
+export async function subscribeIntakeProgress(
+  handler: (e: import("./bindings").IntakeProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.intakeProgress.listen((e) => handler(e.payload));
   return () => un();
 }
 

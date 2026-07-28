@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.24.0"
+version = "0.25.0"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -61,6 +61,17 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 
 # 缩略图生成 / 格式转换（输出统一 JPG）
 image = "0.25"
+
+# JPEG 的 DCT 缩放解码（`files::decode`）。image 0.25 走 zune-jpeg，而 zune-jpeg 至今
+# 没有任何缩放解码入口（`decode`/`decode_into`/`decode_headers`/`set_options` 而已），
+# 于是一张 26 MP 相机图为了做 240 px 缩略图也要物化 78 MB 位图——那正是「点确认工单
+# CPU 拉爆 600%」的本体。jpeg-decoder 的 `scale()` 按 1/2·1/4·1/8 走 DCT 缩放，
+# 内存直接掉到 ~1.2 MB。它是 image 0.25 之前自带的解码器，不是冷门物件。
+# **只在能确定安全时使用**：非 JPEG、非 RGB24/L8 像素格式、任何解码错误一律回落 image。
+# **必须 default-features = false**：它默认开 rayon，一次解码就会摊到全部核上，
+# 那样 `files::decode` 的信号量就只是在数「同时有几张图在解」而不是在数核，封顶失效。
+# 单线程解码 + 信号量 = 许可数就是核数上限，这才是可预测的桌面行为。
+jpeg-decoder = { version = "0.3", default-features = false }
 
 # 提示词 txt 导入：GBK/UTF-8 编码探测
 encoding_rs = "0.8"

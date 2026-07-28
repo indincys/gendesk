@@ -114,6 +114,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::intake::scan_intake_now,
             commands::intake::retry_intake_job,
             commands::intake::preview_intake_job,
+            commands::intake::intake_ref_thumb,
             commands::intake::confirm_intake_job,
             commands::intake::open_intake_dir,
             commands::intake::pick_intake_root,
@@ -255,6 +256,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             publish::events::ExportProgressEvent,
             // 生图工单收件事件
             commands::intake::IntakeChanged,
+            commands::intake::IntakeProgress,
             // 视频流水线事件
             v2v::events::V2vChanged,
             v2v::events::V2vProgress,
@@ -427,12 +429,15 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 视频流水线执行日志：轮询器 / 提交 / 交接监听共用同一份环形缓冲，
     // 命令层从 AppState 读它。在 manage 之前建好，好让后台任务拿到同一个句柄。
     let v2v_log = v2v::activity::Activity::new(app.handle().clone());
+    // 收件扫描互斥锁：**只此一把**，命令层与 watcher 共用（见 intake::ingest::scan）。
+    let intake_scan_lock = Arc::new(tokio::sync::Mutex::new(()));
     app.manage(state::AppState::new(
         pool.clone(),
         secrets,
         dirs,
         engine,
         v2v_log.clone(),
+        intake_scan_lock.clone(),
     ));
 
     // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
@@ -469,7 +474,9 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 pool: pool.clone(),
                 dirs: dirs_for_intake,
                 engine: engine_for_intake,
+                progress: Arc::new(intake::ingest::NoProgress),
                 threshold: iset.task_threshold,
+                scan_lock: intake_scan_lock.clone(),
             };
             match intake::watcher::start(ctx.clone(), root.clone(), app.handle().clone()) {
                 Ok(w) => {

@@ -1185,9 +1185,10 @@ async previewV2vCommands(ids: number[]) : Promise<Result<SubmitPreview, AppError
 /**
  * 放行一批到即梦。
  * 
- * **不再是「N 条一起砸过去」**：即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），
- * 超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里只发得下的那几条，
- * 其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序自动补上。
+ * **不再是「N 条一起砸过去」**：即梦对每条模型通道各有一个并发上限（实测 2.0fast
+ * 只跑得下 1 条），超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里
+ * 只发得下的那几条，其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序
+ * 自动补上 —— **逐通道各补各的**（0031）。
  */
 async submitV2vClips(ids: number[]) : Promise<Result<SubmitSummary, AppError>> {
     try {
@@ -2344,6 +2345,67 @@ planned: number; failed: number; sheetId: number | null;
  */
 skus: string[] }
 /**
+ * 一条即梦通道此刻的样子（0031）。
+ * 
+ * ## 为什么这是一个列表而不是一个数字
+ * 
+ * 「即梦 1/1 · 本地排队 78」把六条互不相干的队列压成了一个数，而那个数每一位都是错的：
+ * 2.0fast 上排着 78 条不代表 2.0mini 发不出去（实测两条通道各有各的
+ * `dreamina_matrix_queue_name`）。压成一个数之后，界面既答不出「哪条通道在动」，
+ * 也答不出「我这 6 条 mini 为什么不走」。
+ * 
+ * 每条通道各占一格，各自回答两个问题：**远端此刻在替我做什么**（在排队 → 前面还有
+ * 多少个；在生成 → 几条），以及**本地还压着多少条同通道的**。
+ */
+export type ChannelStat = { 
+/**
+ * 型号全名。空串 = 设置里没指定模型，实际通道由 CLI 自己挑。
+ */
+modelVersion: string; 
+/**
+ * 通道简写（`dreamina::short_label`）。空型号在这里是「CLI 默认」。
+ */
+label: string; vip: boolean; 
+/**
+ * 已提交、还在即梦手上的条数。
+ */
+running: number; 
+/**
+ * 这条通道生效的在跑上限。
+ */
+limit: number; 
+/**
+ * 这条通道实测到的上限（撞过墙才有值）。
+ */
+observedLimit: number | null; 
+/**
+ * 人已放行、在本地等这条通道空位的条数 —— 界面上那句「本地队列 N 个」。
+ */
+queued: number; 
+/**
+ * 有提示词、但还没放行的条数（「等你点确认提交」）。**不算进本地队列**：
+ * 它们还等着人点一下，而本地队列的含义是「随时会自己发出去」。
+ */
+ready: number; 
+/**
+ * 这条通道上最靠前那一单的即梦排队位次 —— 界面上那句「前方排队 N」。
+ * `None` = 没有任何一单报得出位次（在生成中，或还没问到），此时改报「任务中 N」。
+ * **绝不补 0**：回体里的 0 意思是「已出队」，拿它当「前面没人了」会说反。
+ */
+frontQueueIdx: number | null; 
+/**
+ * 这条通道上最早那一单已经等了多久（秒）。
+ */
+oldestWait: number; 
+/**
+ * 在跑的里面有几条是常驻队列放行的。
+ */
+autoRunning: number; 
+/**
+ * 常驻队列是不是就配在这条通道上（配了但没开也算 —— 界面要说得出「开着没」）。
+ */
+autofill: boolean }
+/**
  * 某一条 clip 的排队位次轨迹（详情栏那条 sparkline）。
  */
 export type ClipQueueTrail = { 
@@ -2906,7 +2968,11 @@ skipped: number }
 /**
  * 受控模型清单（前端选择器渲染源）。
  */
-export type ModelInfo = { modelVersion: string; minDuration: number; maxDuration: number; resolutions: string[]; 
+export type ModelInfo = { modelVersion: string; 
+/**
+ * 通道简写（[`short_label`]）。界面上凡是要在一行里挤下型号的地方都读它。
+ */
+label: string; minDuration: number; maxDuration: number; resolutions: string[]; 
 /**
  * 最短时长 + 首个分辨率下的预估额度 —— 选择器里那行「≈N 额度/条」。
  * 选模型这一刻才是价格该出现的地方：44 与 8 差 5.5 倍，选完再告知就晚了。
@@ -2998,6 +3064,18 @@ platforms: string[];
  * 展开行数（平台 × 该平台在用账号数，日限裁剪前）。
  */
 rows: number }
+/**
+ * 确认卡上一条通道的分账。
+ */
+export type PreviewLane = { label: string; 
+/**
+ * 这一批里走这条通道的条数。
+ */
+total: number; 
+/**
+ * 其中现在就会真的发出去的条数（其余留在本地队列，出一条补一条）。
+ */
+goesNow: number; limit: number }
 /**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
@@ -3166,18 +3244,28 @@ nextPollIn: number | null;
  */
 timeoutHours: number | null; 
 /**
- * 生效的在跑上限（配置值与实测值取小）。`running/limit` 就是「即梦这边跑满没有」。
+ * **默认通道**生效的在跑上限（配置值与实测值取小）。
+ * 
+ * 逐条的上限请读 [`ChannelStat::limit`] —— 上限是按通道算的（0031），
+ * 这一项只是没有通道上下文时的兜底（设置页那句「同时在跑上限」）。
  */
 inFlightLimit: number; 
 /**
- * 本次运行实测到的上限；有值即「我们撞过 `ExceedConcurrencyLimit`，
- * 所以就算你设得更大也只能跑这么多」。
+ * 默认通道本次运行实测到的上限；有值即「我们在这条通道上撞过
+ * `ExceedConcurrencyLimit`，所以就算你设得更大也只能跑这么多」。
  */
 observedLimit: number | null; 
 /**
- * **本地队列**里等空位的条数（0028）—— 人已放行、还没发出去的那些。
+ * **本地队列**里等空位的条数（0028），跨通道求和。
  */
-queued: number }
+queued: number; 
+/**
+ * 逐通道的现状（0031）—— 顶部那排通道状态灯的数据源。
+ * 
+ * 即梦按模型通道各排各的队，一条通道排满与另一条能不能发**毫无关系**，
+ * 所以这些数字不能求和成一个「即梦 1/1」。
+ */
+channels: ChannelStat[] }
 /**
  * 非 VIP 队列的整体观测：逐小时消化速度 + 各单的入队位次。
  * 
@@ -3497,7 +3585,14 @@ estimatedCredits: number;
 /**
  * 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
  */
-unpriced: string[] }
+unpriced: string[]; 
+/**
+ * 这一批按通道拆开的「现在就发得出去几条」（0031）。
+ * 
+ * **由 Rust 算**：空位是逐通道的，前端拿一个全局上限减一个全局在跑数，
+ * 会在一批横跨两条通道时给出一个谁也不对的数 —— 而那个数就印在「确认提交」旁边。
+ */
+lanes: PreviewLane[] }
 /**
  * 提交摘要。
  */

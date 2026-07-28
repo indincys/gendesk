@@ -85,8 +85,9 @@ export function nextAction(stage: Stage, phantom: boolean, queued = false): Next
 /**
  * 这一条是不是「人已放行、正在本地排队等即梦的空位」（0028）。
  *
- * 即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），超出的部分会被它逐条
- * 以 `ExceedConcurrencyLimit` 弹回来。所以 GenDesk 只发得下的那几条，其余留在本地。
+ * 即梦对**每条模型通道**各有一个并发上限（实测 2.0fast 只跑得下 1 条），超出的部分
+ * 会被它逐条以 `ExceedConcurrencyLimit` 弹回来。所以 GenDesk 逐通道只发得下的那几条，
+ * 其余留在本地 —— 而**别的通道不受影响**（0031）。
  * 这一格与「等你点确认提交」必须分开显示 —— 在此之前两者长得一模一样，
  * 于是一批放行完的片子看起来像是没人管。
  */
@@ -195,9 +196,19 @@ export interface Row {
   situationTone: "er" | "wr" | "acc" | "t3";
 }
 
-/** 「seedance2.0fast_vip」→「2.0fast_vip」。表格里那一列只有 86px。 */
+/**
+ * 「seedance2.0fast_vip」→「2.0Fast VIP」。表格里那一列只有 86px。
+ *
+ * **真相在 Rust**（`dreamina::short_label`，随 `ModelInfo.label` 一起下发）——
+ * 这里只是拿不到 `ModelInfo` 时的回落（库里存着一个已经从清单里下架的型号）。
+ * 有 `ModelInfo` 就读 `label`，别在这里再判一遍。
+ */
 export function shortModel(full: string): string {
-  return full.replace(/^seedance/, "");
+  const vip = full.endsWith("_vip");
+  const base = (vip ? full.slice(0, -4) : full).replace(/^seedance/, "");
+  return (
+    base.replace(/[a-z]+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1)) + (vip ? " VIP" : "")
+  );
 }
 
 /** 秒 → 「12s / 3m / 2h31m」。等宽列里要短。 */
@@ -273,16 +284,32 @@ export function deriveRows(
   models: ModelInfo[],
   eff: EffectiveParams | null,
   now: number,
-  /** 即梦同时跑得下几条（`QueueStats.inFlightLimit`）。只用于文案，算不出来时按 1。 */
-  inFlightLimit = 1,
+  /**
+   * 每条通道同时跑得下几条（`ChannelStat.limit`，按 `modelVersion` 索引）。
+   *
+   * **按通道而不是一个全局数字**（0031）：即梦按模型通道各排各的队，2.0fast 排满了
+   * 与 2.0mini 能不能发毫无关系。拿一个全局上限去写文案，会对着一条明明能立刻发出去的
+   * mini 说「即梦同时只跑 1 条」—— 而那句话正是人放弃排查的地方。查不到就按 1。
+   */
+  limits: ReadonlyMap<string, number> = new Map(),
 ): Row[] {
-  // 本地队列位次：严格照后端取用的顺序（放行时刻，其次 id）算一遍。
+  /** 这一条走哪条通道。与 Rust 的 `runner::channel_of` 同口径。 */
+  const channelOf = (c: ClipView) => c.modelVersion ?? eff?.modelVersion ?? "";
+
+  // 本地队列位次：严格照后端取用的顺序（放行时刻，其次 id）算一遍，**并且按通道各排各的**
+  // —— 后端补位是逐通道取队首的（`pick_submit_queued_on`），这边若按全局排，
+  // 界面会对一条马上就要发出去的 mini 说「本地排第 79」。
   // 两边分叉的代价是界面说「你排第 1」而实际先发的是另一条 —— 那种错没人查得出来。
-  const queueOrder = clips
+  const queuePosOf = new Map<number, number>();
+  const seen = new Map<string, number>();
+  for (const c of clips
     .filter(isQueued)
-    .sort((a, b) => (a.submitQueuedAt ?? 0) - (b.submitQueuedAt ?? 0) || a.id - b.id)
-    .map((c) => c.id);
-  const queuePosOf = new Map(queueOrder.map((id, i) => [id, i + 1]));
+    .sort((a, b) => (a.submitQueuedAt ?? 0) - (b.submitQueuedAt ?? 0) || a.id - b.id)) {
+    const ch = channelOf(c);
+    const pos = (seen.get(ch) ?? 0) + 1;
+    seen.set(ch, pos);
+    queuePosOf.set(c.id, pos);
+  }
   // 「等待异常」是相对判据：跟同一批的其它在跑条目比，而不是跟一个拍脑袋的绝对秒数比。
   // 按批分组取中位数 —— 不同批次的提交时刻差着几小时，混在一起算出来的中位数谁也不代表。
   const runWaits = new Map<string, number[]>();
@@ -400,10 +427,15 @@ export function deriveRows(
     } else if (queued) {
       // 这一格要同时答出「为什么还没发出去」和「还要多久轮到我」。只说「排队中」
       // 会立刻引出「排谁的队、卡在哪」——而那正是这次事故里没人答得上来的问题。
+      //
+      // 位次与上限都**只在本通道内**成立，所以句子里必须点名通道：否则「本地排第 79」
+      // 会被读成「整条流水线前面有 78 条」，而那 78 条全在另一条队上，与它无关。
+      const lane = info?.label ?? (modelFull ? shortModel(modelFull) : "默认通道");
+      const cap = limits.get(modelFull ?? "") ?? 1;
       situation =
         queuePos != null && queuePos > 1
-          ? `已放行 · 本地排第 ${queuePos}，即梦同时只跑 ${inFlightLimit} 条`
-          : `已放行 · 下一个就发它（即梦同时只跑 ${inFlightLimit} 条）`;
+          ? `已放行 · ${lane} 本地排第 ${queuePos}，该通道同时只跑 ${cap} 条`
+          : `已放行 · 下一个就发它（${lane} 通道同时只跑 ${cap} 条）`;
     } else if (stage === "ready") {
       situation = "等你点确认提交 · 提交即扣费";
       situationTone = "acc";
@@ -419,7 +451,7 @@ export function deriveRows(
       stage,
       action: nextAction(stage, phantomLive, queued),
       modelFull,
-      modelShort: modelFull ? shortModel(modelFull) : "CLI 默认",
+      modelShort: info?.label ?? (modelFull ? shortModel(modelFull) : "CLI 默认"),
       vip,
       duration,
       resolution,

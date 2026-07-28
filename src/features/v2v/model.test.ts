@@ -24,6 +24,7 @@ const NOW = 1_800_000_000;
 const MODELS: ModelInfo[] = [
   {
     modelVersion: "seedance2.0fast",
+    label: "2.0Fast",
     minDuration: 4,
     maxDuration: 15,
     resolutions: ["720p"],
@@ -33,6 +34,7 @@ const MODELS: ModelInfo[] = [
   },
   {
     modelVersion: "seedance2.0fast_vip",
+    label: "2.0Fast VIP",
     minDuration: 4,
     maxDuration: 15,
     resolutions: ["720p"],
@@ -104,7 +106,12 @@ function clip(over: Partial<ClipView> = {}): ClipView {
   };
 }
 
-const derive = (cs: ClipView[], limit = 1) => deriveRows(cs, MODELS, EFF, NOW, limit);
+/**
+ * `limit` 是**这一条通道**的在跑上限（0031）。测试里的 clip 都不写 modelVersion，
+ * 故它们全落在 `EFF.modelVersion` 那条通道上 —— 用它做键。
+ */
+const derive = (cs: ClipView[], limit = 1) =>
+  deriveRows(cs, MODELS, EFF, NOW, new Map([[EFF.modelVersion ?? "", limit]]));
 
 describe("本地待发队列（0028）", () => {
   /**
@@ -146,9 +153,53 @@ describe("本地待发队列（0028）", () => {
     expect(rows.find((r) => r.clip.id === 5)?.situation).toContain("本地排第 3");
   });
 
-  it("在跑上限写进文案里 —— 「为什么只跑 1 条」必须在界面上答得出", () => {
+  /**
+   * 断言原文从「即梦同时只跑 3 条」改成「2.0Fast 通道同时只跑 3 条」（0031）。
+   *
+   * **改的是前提被实测推翻的那一半，不是断言的意图**：这条测试守的是
+   * 「为什么只跑 N 条必须在界面上答得出」，那一半原样保留。改掉的是「即梦」这个主语
+   * —— 上限是**逐通道**的（即梦回体里 `dreamina_matrix_queue_name` 逐通道不同，
+   * 2026-07-27 五条不同通道同时提交全部被收下），说成账户级会让人对着一条
+   * 明明能立刻发出去的 mini 干等，而那正是这一版要修的故障。
+   */
+  it("在跑上限写进文案里 —— 「为什么只跑 1 条」必须在界面上答得出，且点名是哪条通道", () => {
     const [r] = derive([clip({ stage: "ready", videoPath: null, submitQueuedAt: 1 })], 3);
-    expect(r?.situation).toContain("即梦同时只跑 3 条");
+    expect(r?.situation).toContain("同时只跑 3 条");
+    expect(r?.situation).toContain("2.0Fast");
+  });
+
+  /**
+   * 本地位次**按通道各排各的**（0031）—— 后端补位就是逐通道取队首的
+   * （`pick_submit_queued_on`）。按全局排的话，界面会对一条马上就要发出去的 mini
+   * 说「本地排第 79」，而它前面那 78 条全在另一条队上、与它毫无关系。
+   */
+  it("本地位次不跨通道累计：另一条通道排得再长也不占这条的位次", () => {
+    const rows = deriveRows(
+      [
+        clip({ id: 1, stage: "ready", videoPath: null, submitQueuedAt: 100 }),
+        clip({ id: 2, stage: "ready", videoPath: null, submitQueuedAt: 200 }),
+        clip({
+          id: 3,
+          stage: "ready",
+          videoPath: null,
+          submitQueuedAt: 300,
+          modelVersion: "seedance2.0fast_vip",
+        }),
+      ],
+      MODELS,
+      EFF,
+      NOW,
+      new Map([
+        ["seedance2.0fast", 1],
+        ["seedance2.0fast_vip", 1],
+      ]),
+    );
+    expect(rows.map((r) => [r.clip.id, r.queuePos])).toEqual([
+      [1, 1],
+      [2, 2],
+      [3, 1],
+    ]);
+    expect(rows.find((r) => r.clip.id === 3)?.situation).toContain("下一个就发它");
   });
 
   it("即梦的排队位次直接说人话：前面还有多少个", () => {
@@ -337,7 +388,10 @@ describe("信号", () => {
   it("vip 通道按模型名后缀认，且回落到设置里的默认模型", () => {
     const [vip] = derive([clip({ modelVersion: "seedance2.0fast_vip" })]);
     expect(vip?.vip).toBe(true);
-    expect(vip?.modelShort).toBe("2.0fast_vip");
+    // 简写现在由后端下发（`ModelInfo.label` ← `dreamina::short_label`），不再是
+    // 前端各自 `replace(/^seedance/,"")` 的结果 —— 那份分叉的产物是同屏出现
+    // 「2.0fast」「2.0Fast」两种拼法。断言随之改成下发的那个值（0031）。
+    expect(vip?.modelShort).toBe("2.0Fast VIP");
     const [plain] = derive([clip({ modelVersion: null })]);
     expect(plain?.vip).toBe(false);
     expect(plain?.modelFull).toBe("seedance2.0fast");

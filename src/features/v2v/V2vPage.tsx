@@ -219,9 +219,17 @@ export function V2vPage() {
   // 而它用到的时间全是「已等多久 / 多久前查过」这类以分钟为单位读的值。
   // 顶部那个心跳 pill 与倒计时仍读未量化的 `now`，那才是真需要每秒走字的地方。
   const coarseNow = Math.floor(now / 30) * 30;
+  // 上限按通道下发（0031）。依赖的是「通道构成变了」这个信号而不是 queue 对象本身：
+  // 后者每次心跳都是新对象，挂上去等于每 6 秒重算一整页。
+  const limitKey = (queue?.channels ?? []).map((c) => `${c.modelVersion}:${c.limit}`).join(",");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 见上，依赖的是通道构成这个信号
+  const limits = useMemo(
+    () => new Map((queue?.channels ?? []).map((c) => [c.modelVersion, c.limit])),
+    [limitKey],
+  );
   const rows = useMemo(
-    () => deriveRows(clips, models, eff, coarseNow, queue?.inFlightLimit ?? 1),
-    [clips, models, eff, coarseNow],
+    () => deriveRows(clips, models, eff, coarseNow, limits),
+    [clips, models, eff, coarseNow, limits],
   );
   const byId = useMemo(() => new Map(rows.map((r) => [r.clip.id, r])), [rows]);
 
@@ -1176,7 +1184,6 @@ export function V2vPage() {
           preview={cmdPreview.data}
           ids={cmdPreview.ids}
           models={models}
-          queue={queue}
           busy={busy}
           onApplyParams={(p) => applyParams(cmdPreview.ids, p, true)}
           onClose={() => setCmdPreview(null)}
@@ -1372,8 +1379,7 @@ function V2vHeader({
           {fmtDur(staleSecs)} 未出片
         </span>
       )}
-      <QueuePill queue={queue} onOpen={onParams} />
-      <AutofillPill auto={auto} onOpen={onParams} />
+      <ChannelPills queue={queue} auto={auto} onOpen={onParams} />
       <span className="fs11 t3 nowrap">
         余额 <b className="mono t1">{balance ?? "—"}</b> · 今日{" "}
         <b className="mono t1">{spentDay ?? 0}</b> · 通过率{" "}
@@ -1408,65 +1414,126 @@ function V2vHeader({
 }
 
 /**
- * 在跑上限与本地待发队列的 pill（0028）。
+ * 通道状态灯（0031）—— 顶部那排 pill，一条通道一格。
  *
- * 它回答的是这一版最核心的那个问题：**「我放行了 9 条，为什么只跑 1 条」**。
- * 在此之前界面上没有任何一处提到过并发上限的存在，于是 9 条一起砸向即梦、
- * 8 条被 `ExceedConcurrencyLimit` 弹回来判死，而人只看到「8 个错误」。
+ * ## 为什么不能再是「即梦 1/1 · 本地排队 78」
+ *
+ * 那个写法把六条互不相干的队列压成了一个数，而**每一位都是错的**。即梦按模型通道
+ * 各排各的队 —— `query_result` 回体里 `queue_info.debug_info.dreamina_matrix_queue_name`
+ * 逐通道不同（1.5pro `..._video35_pro_i2v_720p` / 2.0 `..._video40_pro` /
+ * 2.0mini `..._video40_mini` / 2.0_vip `..._video40_pro_vision`），
+ * 2026-07-27 五条不同通道的单子同时下出去全部被收下并计费，一条 `ExceedConcurrencyLimit`
+ * 都没有。于是「1/1」既不是任何一条通道的真实占用，也答不出那 6 条 2.0mini 为什么不走
+ * —— 而真相是它们本来就该走，是我们自己按一个账户级的假上限把它们锁住了。
+ *
+ * ## 每格要答的两个问题
+ *
+ * 1. **远端此刻在替我做什么**。有排队位次就报位次（「前方排队 6233」—— 非 VIP 通道
+ *    实测能排到六千多位，那才是「还要等多久」唯一有意义的信号）；问不到位次而确实
+ *    有在跑的，就报「任务中 N」。**绝不把两者混成一个数**，也绝不拿 0 冒充位次
+ *    （回体里的 0 意思是「已出队」）。
+ * 2. **本地还压着多少条同通道的**。「本地队列」只数已放行、随时会自己发出去的那些；
+ *    还等着人点确认的另算（写在 title 里）—— 两者的下一步动作完全不同。
+ *
+ * ## 一条通道一个胶囊，闲着的一律不出现
+ *
+ * 显示判据是「这条通道上还有没有没走完的事」= 远端在跑 **或** 本地压着队。两者都为 0
+ * 的通道在日常里纯是噪音：它没在动，也没有需要人处理的东西。顶栏位置有限，
+ * 留给真的还有账要算的那几条。
+ *
+ * ## 排版：数字带色，标签不带
+ *
+ * 这一格里三类信息的重要性差着量级：**数字**（6233 / 78 / 1）是要读的，**通道名**是要
+ * 认的，**「前方排队」这些词**只是给数字贴个名。整条染成一个颜色、一个字号，等于把
+ * 三者压成同一层 —— 扫一眼什么都抓不住。
+ *
+ * 所以颜色只落在数字上，且**三个数各是一个颜色**，因为它们是三件不同的事：
+ *
+ * | 数字 | 颜色 | 它在说什么 |
+ * |---|---|---|
+ * | 前方排队 | 蓝 | 队还没轮到我，这个数要往下掉 |
+ * | 任务中   | 绿 | 即梦此刻真的在生成 |
+ * | 本地队列 | 黄 | 还没发出去、也还没花钱的存量 |
+ *
+ * 标签词一律淡灰、通道名深色粗体 —— 三层字重加三个色，一眼就能在六个胶囊里找到
+ * 「哪条在跑、哪条还压着货」。
  */
-function QueuePill({ queue, onOpen }: { queue: QueueStats | null; onOpen: () => void }) {
-  if (!queue) return null;
-  const { running, inFlightLimit, queued, observedLimit } = queue;
-  if (running === 0 && queued === 0) return null;
-  return (
-    <button
-      type="button"
-      className={cn("autopill", queued > 0 && "idle")}
-      onClick={onOpen}
-      title={[
-        `即梦同一时间只跑得下 ${inFlightLimit} 条（账户级并发上限）。`,
-        observedLimit != null
-          ? "这个数是本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收。"
-          : "可在参数面板里调整。",
-        queued > 0
-          ? `另有 ${queued} 条已放行、正排在本地等空位，出一条自动补一条 —— 不必再点提交。`
-          : "",
-      ].join("")}
-    >
-      <span className="dot" />
-      即梦 {running}/{inFlightLimit}
-      {queued > 0 && ` · 本地排队 ${queued}`}
-    </button>
-  );
-}
+function ChannelPills({
+  queue,
+  auto,
+  onOpen,
+}: {
+  queue: QueueStats | null;
+  auto: AutofillStatus | null;
+  onOpen: () => void;
+}) {
+  // 远端没在跑、本地也没压着队 = 这条通道没有任何还没走完的事，不显示（见上）。
+  const channels = (queue?.channels ?? []).filter((c) => c.running > 0 || c.queued > 0);
+  if (channels.length === 0) return null;
 
-/**
- * 常驻队列的 pill。
- *
- * 它要答的是**「开着」与「在跑」的差别** —— 没料了、日限满了、余额不够都会让这条
- * 队列安静地停下来，而一条停摆的常驻队列与一条正常运转的在界面上长得一模一样。
- * 所以停因必须写在脸上，而不是等人去翻日志。
- */
-function AutofillPill({ auto, onOpen }: { auto: AutofillStatus | null; onOpen: () => void }) {
-  if (!auto?.enabled) return null;
-  const bad = auto.error != null;
-  const idle = auto.running < auto.depth;
   return (
-    <button
-      type="button"
-      className={cn("autopill", bad && "bad", !bad && idle && "idle")}
-      onClick={onOpen}
-      title={
-        auto.error ??
-        `常驻的非 VIP 队列：保持 ${auto.depth} 条在跑，完成一条补一条。` +
-          `位子与你手动放行的那些共用（即梦的并发上限是账户级的），所以「在跑 ${auto.running}」数的是全部。` +
-          `今日已提交 ${auto.spentToday}${auto.dailyCredits > 0 ? `/${auto.dailyCredits}` : ""} 额度。`
-      }
-    >
-      <span className="dot" />
-      常驻补单 {auto.running}/{auto.depth}
-      {bad ? " · 配置有误" : auto.blocked ? ` · ${auto.blocked}` : ` · 存量 ${auto.stock}`}
-    </button>
+    <>
+      {channels.map((c) => {
+        const queueing = c.frontQueueIdx != null && c.frontQueueIdx > 0;
+        const live = c.running > 0;
+        // 常驻队列只写进悬停说明，**不在顶栏另占一格**：它是「谁放行的」这条元信息，
+        // 与「这条通道现在什么状况」不是一个问题，挤在同一排会把后者稀释掉。
+        const mine = auto?.enabled === true && c.autofill;
+        return (
+          <button
+            key={c.modelVersion || "(default)"}
+            type="button"
+            className={cn("chpill", !live && "idle")}
+            onClick={onOpen}
+            title={[
+              `${c.label} 通道（${c.modelVersion || "设置里没指定型号，实际通道由 CLI 挑"}）。`,
+              "即梦按模型通道各排各的队 —— 这条排满了，别的通道照样发得出去。",
+              queueing
+                ? `\n远端：最靠前那一单排在第 ${c.frontQueueIdx} 位。`
+                : live
+                  ? `\n远端：${c.running} 条在生成中（还没问到排队位次）。`
+                  : "\n远端：这条通道上暂时没有在跑的任务。",
+              c.oldestWait > 0 ? `最久那条已等 ${fmtSpan(c.oldestWait)}。` : "",
+              `\n本地：${c.queued} 条已放行、正等这条通道的空位（出一条自动补一条，不必再点提交）`,
+              c.ready > 0 ? `；另有 ${c.ready} 条还等着你点「确认提交」。` : "。",
+              `\n同时在跑上限 ${c.limit} 条`,
+              c.observedLimit != null
+                ? "（本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收）。"
+                : "（可在参数面板里调整）。",
+              mine
+                ? `\n常驻队列配在这条通道上：目标 ${auto?.depth} 条在跑，其中 ${c.autoRunning} 条是它放的。${
+                    auto?.blocked ? `当前停在「${auto.blocked}」。` : ""
+                  }`
+                : "",
+            ].join("")}
+          >
+            <span className="dot" />
+            {/* VIP 不另挂标签：`short_label` 已经把它写进名字里（「2.0Fast VIP」），
+                再挂一个「VIP」小牌子就是同一件事说两遍。 */}
+            <span className="nm">{c.label}</span>
+            {queueing ? (
+              <>
+                <span className="k">前方排队</span>
+                <span className="n nque">{c.frontQueueIdx}</span>
+              </>
+            ) : (
+              live && (
+                <>
+                  <span className="k">任务中</span>
+                  <span className="n nrun">{c.running}</span>
+                </>
+              )
+            )}
+            {c.queued > 0 && (
+              <>
+                <span className="k">本地队列</span>
+                <span className="n nloc">{c.queued}</span>
+              </>
+            )}
+          </button>
+        );
+      })}
+    </>
   );
 }
 
@@ -1779,7 +1846,6 @@ function SubmitConfirm({
   preview,
   ids,
   models,
-  queue,
   busy,
   onApplyParams,
   onClose,
@@ -1788,8 +1854,6 @@ function SubmitConfirm({
   preview: SubmitPreview;
   ids: number[];
   models: ModelInfo[];
-  /** 在跑上限与当前占用 —— 这一批里有几条会当场发出去，由它决定。 */
-  queue: QueueStats | null;
   busy: boolean;
   /** 把参数写进这一批条目并重取预览。 */
   onApplyParams: (p: Params) => void;
@@ -1837,8 +1901,10 @@ function SubmitConfirm({
   // 即梦同时只跑得下这么多条，其余留在本地排队自动接上。**这个数必须出现在按下确认
   // 之前**：这一版之前，选 9 条点确认得到的是「已提交 9 条」，而实际只有 1 条入队、
   // 8 条被即梦以 ExceedConcurrencyLimit 弹回来判死 —— 界面从头到尾没提过有这个上限。
-  const limit = queue?.inFlightLimit ?? 1;
-  const goesNow = Math.max(0, Math.min(preview.commands.length, limit - (queue?.running ?? 0)));
+  //
+  // 由 Rust 逐通道算好（`SubmitPreview.lanes`）：空位是按通道的，前端拿一个全局上限减
+  // 一个全局在跑数，会在一批横跨两条通道时给出一个谁也不对的数（0031）。
+  const goesNow = preview.lanes.reduce((a, l) => a + l.goesNow, 0);
   const waits = preview.commands.length - goesNow;
   const [p, setP] = useState<Params>({ modelVersion: "", duration: null, videoResolution: "" });
   const [dirty, setDirty] = useState(false);
@@ -1939,8 +2005,7 @@ function SubmitConfirm({
         </div>
         <div className="costbar mb8">
           <div className="fs12">
-            即梦同一时间只跑得下 <b>{limit}</b> 条
-            {(queue?.running ?? 0) > 0 && `（现在已占 ${queue?.running}）`}，所以这一批{" "}
+            即梦<b>按模型通道各排各的队</b>，每条通道各有一个在跑上限，所以这一批{" "}
             <b>先发 {goesNow} 条</b>
             {waits > 0 && (
               <>
@@ -1948,6 +2013,16 @@ function SubmitConfirm({
               </>
             )}
             。
+          </div>
+          {/* 逐通道分账。一批横跨两条通道时，一个合计数答不出「卡的是哪条」——
+              而那正是「我这 6 条 mini 为什么不走」当初没人答得上来的原因。 */}
+          <div className="fs11 t3" style={{ lineHeight: 1.8 }}>
+            {preview.lanes.map((l) => (
+              <span key={l.label} style={{ marginRight: 12 }}>
+                <b className="t1">{l.label}</b> 本批 {l.total} 条 · 先发 {l.goesNow} 条（该通道上限{" "}
+                {l.limit}）
+              </span>
+            ))}
           </div>
           <div className="fs11 t3">
             排队的那些<b>还没扣费</b>：额度是在真正发出去的那一刻扣的，所以下面那个预估是

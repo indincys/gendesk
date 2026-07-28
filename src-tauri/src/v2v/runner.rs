@@ -38,10 +38,25 @@ pub const TICK: Duration = Duration::from_secs(6);
 /// 比自建轮询器更差（`dreamina::command_line` 已显式 `--poll=0` 关掉它）。
 /// 所以「事件驱动不轮询」在这条链路上做不到，能改的只有频率。
 ///
-/// ## 单位已经是「一整页」，所以频率是纯粹的成本旋钮
+/// ## `list_task` 是**本机缓存**，不是服务端状态（0031 实测推翻了旧结论）
 ///
-/// `dreamina list_task` 一个进程就回一整页全部在跑任务的状态，故进程数与在跑条数
-/// **脱钩**（O(1) 而非 O(n)）—— 100 条在跑和 1 条在跑花的钱一样。
+/// 旧注释写的是「一个进程就回一整页全部在跑任务的状态，进程数与在跑条数脱钩（O(1)）」。
+/// **前半句在字面上成立，但它回的是过期状态**：`dreamina list_task` 读的是
+/// `~/.dreamina_cli/tasks.db`（本机 SQLite，表 `aigc_task`），而那张表里的 `gen_status`
+/// **只有对该 `submit_id` 单独跑过 `query_result` 才会被写回**。
+///
+/// 实证：5 条 2026-07-27 14:04–14:05 提交的任务，在本机表里一直是 `querying`；
+/// 2026-07-28 16:48 我逐条 `query_result` 之后，它们的 `gen_status` 变成 `success`，
+/// 而 `update_time` 恰好停在 16:48:30–16:48:51 —— 整整 26 小时里 `list_task` 一次都没有
+/// 自己去问过服务端。
+///
+/// 所以真正推进状态机的是本函数里那段**逐条** `query_result`，它受
+/// [`POSITION_QUERY_BUDGET`] 限制。成本模型因此是：
+///
+/// - `list_task` 翻页 = 本地读，**不走网络**，可以忽略；
+/// - `query_result` = 唯一的网络调用，每轮 ≤ [`POSITION_QUERY_BUDGET`] 个进程。
+///
+/// 即 O(min(n, 8)) 而不是 O(1)。频率仍然是成本旋钮，只是旋的是后者。
 ///
 /// ## 分档的依据是「这条要等多久」，而那由通道决定
 ///
@@ -161,10 +176,11 @@ pub struct SubmitSummary {
 
 // ─────────────────────── 在跑上限（即梦的账户级并发闸门）───────────────────────
 
-/// 默认同时在跑几条。
+/// 每条通道默认同时在跑几条。
 ///
-/// **1，因为那是实测到的真值**：2026-07-28 一批 9 条同时提交，即梦逐条给了 submit_id，
-/// 随后 8 条回来 `ret=1310 ExceedConcurrencyLimit`，只有 1 条真的进了队列。
+/// **1，因为那是实测到的真值**：2026-07-28 一批 9 条同时提交（全部走 `seedance2.0fast`），
+/// 即梦逐条给了 submit_id，随后 8 条回来 `ret=1310 ExceedConcurrencyLimit`，
+/// 只有 1 条真的进了队列。
 ///
 /// 猜大猜小的代价不对等：猜小只是让后面那些多等一会儿（而「等」在非 VIP 通道上本来
 /// 就是免费的，那正是常驻队列成立的前提）；猜大则是一批片子集体躺进「处理异常」，
@@ -175,44 +191,94 @@ pub const DEFAULT_MAX_IN_FLIGHT: i64 = 1;
 /// 配置值的取值范围。上限 20 不是技术限制，是「一次性把余额烧光」的护栏。
 pub const MAX_IN_FLIGHT_CAP: i64 = 20;
 
-/// 这一次运行里**实测**到的并发上限（`i64::MAX` = 还没撞过墙）。
+/// 这一次运行里**逐通道实测**到的并发上限（缺席 = 这条通道还没撞过墙）。
 ///
-/// 进程内、不落库：即梦随时可以按账户等级调整这个数，而一个被写进库的旧观测会在
-/// 上限放宽之后永远把队列压在低位，且没人知道为什么。重启即重新试探，代价只是
-/// 再撞一次墙 —— 而撞墙现在不花钱也不丢条目。
-static OBSERVED_LIMIT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
+/// ## 为什么是「逐通道」而不是一个账户级的数（0031）
+///
+/// v0.24.0 的结论是「即梦的并发上限是账户级的」，那是**从单通道样本上做的过度归纳**：
+/// 撞墙那一批 9 条全部走 `seedance2.0fast`，所以它证明的只是「2.0fast 同时跑得下 1 条」。
+///
+/// 反证有三条，都来自这个账户的真实回体：
+///
+/// 1. `query_result` 的 `queue_info.debug_info` 里有 `dreamina_matrix_queue_name`，
+///    逐通道不同 —— 1.5pro 是 `dreamina_fusion_video35_pro_i2v_720p`、
+///    2.0 是 `dreamina_fusion_video40_pro`、2.0mini 是 `dreamina_fusion_video40_mini`、
+///    2.0_vip 是 `dreamina_fusion_video40_pro_vision`。**每条通道各有一条队**。
+/// 2. 2026-07-27 逐通道实拍价格时，5 条不同通道的单子同时下出去，**全部**被收下并计费，
+///    一条 `ExceedConcurrencyLimit` 都没有。
+/// 3. 同日 14:45–14:47 的 18 条 `_vip` 单在 90 秒内全部提交、全部收下、全部出片；
+///    若上限真是账户级的 1，那 17 条会当场被弹回来。
+///
+/// 按账户级口径记的代价是实打实的：2.0fast 那条长队一占上，2.0mini 上的 6 条
+/// **一条都发不出去**，而它们本可以并行跑完。
+///
+/// 进程内、不落库：即梦随时可以按账户等级调整这些数，而一个被写进库的旧观测会在上限
+/// 放宽之后永远把队列压在低位，且没人知道为什么。重启即重新试探，代价只是再撞一次墙
+/// —— 而撞墙不花钱也不丢条目。
+static OBSERVED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+    std::sync::OnceLock::new();
 
-/// 生效的在跑上限 = 配置值与实测值取小。
-pub fn effective_in_flight(configured: i64) -> i64 {
+fn observed() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, i64>> {
+    // 中毒的锁照用：里面只有一张「这条通道最多几条」的观测表，一个写者 panic
+    // 不会让这些数字失去意义，而为它把整条提交链路停掉才是真的损失。
+    OBSERVED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// 某条通道生效的在跑上限 = 配置值与该通道实测值取小。
+pub fn effective_in_flight(channel: &str, configured: i64) -> i64 {
     let cfg = configured.clamp(1, MAX_IN_FLIGHT_CAP);
-    let observed = OBSERVED_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
-    cfg.min(observed.max(1))
+    match observed().get(channel) {
+        Some(o) => cfg.min((*o).max(1)),
+        None => cfg,
+    }
 }
 
-/// 撞上 `ExceedConcurrencyLimit` 了 —— 把实测上限收敛到「即梦当时确实收下的条数」。
+/// 某条通道撞上 `ExceedConcurrencyLimit` 了 —— 把该通道的实测上限收敛到
+/// 「即梦当时在这条通道上确实收下的条数」。
 ///
-/// `accepted` 取此刻在跑、且有计费回执或队列位次的条数（`repo::count_running_accepted`）：
-/// 被拒的那些两样都没有，所以剩下的正是即梦愿意同时跑的量。
+/// `accepted` 取此刻**同通道**在跑、且有计费回执或队列位次的条数
+/// （`repo::count_running_accepted_on`）：被拒的那些两样都没有，所以剩下的正是
+/// 即梦愿意在这条通道上同时跑的量。
 ///
-/// 只降不升（`fetch_min`），且下限为 1：升回去交给下次重启。这条路径要防的是
-/// 「设了 5、真值是 1」时每轮提交 4 条、每轮被弹回 4 条的空转，一轮之内就该收敛。
-pub fn observe_concurrency_reject(accepted: i64) -> i64 {
+/// 只降不升，且下限为 1；升回去交给下次重启。这条路径要防的是「设了 5、真值是 1」时
+/// 每轮提交 4 条、每轮被弹回 4 条的空转，一轮之内就该收敛。
+pub fn observe_concurrency_reject(channel: &str, accepted: i64) -> i64 {
     let v = accepted.max(1);
-    OBSERVED_LIMIT.fetch_min(v, std::sync::atomic::Ordering::Relaxed);
-    OBSERVED_LIMIT
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .max(1)
+    let mut map = observed();
+    let slot = map.entry(channel.to_string()).or_insert(v);
+    *slot = (*slot).min(v).max(1);
+    *slot
 }
 
-/// 实测到的上限（`None` = 这次运行还没撞过墙）。设置页据此说明「为什么只跑了 1 条」。
-pub fn observed_in_flight_limit() -> Option<i64> {
-    let v = OBSERVED_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
-    (v != i64::MAX).then_some(v.max(1))
+/// 某条通道实测到的上限（`None` = 这次运行还没在这条通道上撞过墙）。
+/// 界面据此说明「为什么这条通道只跑了 1 条」。
+pub fn observed_in_flight_limit(channel: &str) -> Option<i64> {
+    observed().get(channel).map(|v| (*v).max(1))
 }
 
-/// 现在还能往即梦发几条。
-pub async fn free_slots(pool: &SqlitePool, configured: i64) -> AppResult<i64> {
-    Ok((effective_in_flight(configured) - repo::count_in_flight(pool).await?).max(0))
+/// 这条通道现在还能往即梦发几条。
+pub async fn free_slots(
+    pool: &SqlitePool,
+    default_model: &str,
+    channel: &str,
+    configured: i64,
+) -> AppResult<i64> {
+    let used = repo::count_in_flight_on(pool, default_model, channel).await?;
+    Ok((effective_in_flight(channel, configured) - used).max(0))
+}
+
+/// 一条 clip 实际走哪条通道：它自己写死的型号优先，没写就落到设置里的默认型号。
+///
+/// 与 `repo::CHANNEL_OF` 那段 SQL **必须**同口径 —— 一边按型号分桶、另一边按别的口径
+/// 数空位，结果就是数着 A 通道的空位往 B 通道发单。
+pub fn channel_of<'a>(clip_model: Option<&'a str>, default_model: &'a str) -> &'a str {
+    clip_model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_model)
 }
 
 /// 放行一批：人点了「确认提交」。
@@ -237,7 +303,11 @@ pub async fn release_and_submit(
     Ok(sum)
 }
 
-/// 把本地队列往即梦补到满。空位为 0 就什么都不做（连一次库都不必多读）。
+/// 把本地队列往即梦补到满 —— **逐通道各补各的**（0031）。
+///
+/// 早前这里只有一个全局空位数与一个全局队首：2.0fast 那条长队一把位子占满，队列里
+/// 那 6 条 2.0mini 就再也发不出去，尽管 2.0mini 那条队一条都没有在跑。即梦按模型通道
+/// 各排各的队（见 [`OBSERVED`] 的实测记录），所以闸门也必须逐通道算。
 pub async fn drain_queue(
     pool: &SqlitePool,
     bin: &str,
@@ -245,15 +315,48 @@ pub async fn drain_queue(
     configured: i64,
     log: &Activity,
 ) -> AppResult<SubmitSummary> {
-    let slots = free_slots(pool, configured).await?;
-    if slots <= 0 {
-        return Ok(SubmitSummary::default());
+    let default_model = defaults.model_version.as_deref().unwrap_or("");
+    let mut out = SubmitSummary::default();
+    for ch in repo::channel_stats(pool, default_model).await? {
+        if ch.queued <= 0 {
+            continue;
+        }
+        let slots = free_slots(pool, default_model, &ch.model_version, configured).await?;
+        if slots <= 0 {
+            continue;
+        }
+        let ids =
+            repo::pick_submit_queued_on(pool, default_model, &ch.model_version, slots).await?;
+        if ids.is_empty() {
+            continue;
+        }
+        // 一条通道提交失败不该连坐其余通道：它们各排各的队，凭什么一起停。
+        match submit_batch(pool, bin, &ids, defaults, log).await {
+            Ok(s) => {
+                out.submitted += s.submitted;
+                out.failed += s.failed;
+                if out.first_error.is_none() {
+                    out.first_error = s.first_error;
+                }
+            }
+            Err(e) => {
+                log.error(
+                    "submit",
+                    None,
+                    format!(
+                        "通道 {} 补位失败：{e}",
+                        dreamina::short_label(&ch.model_version)
+                    ),
+                    None,
+                );
+                out.failed += ids.len() as i64;
+                if out.first_error.is_none() {
+                    out.first_error = Some(format!("{e}"));
+                }
+            }
+        }
     }
-    let ids = repo::pick_submit_queued(pool, slots).await?;
-    if ids.is_empty() {
-        return Ok(SubmitSummary::default());
-    }
-    submit_batch(pool, bin, &ids, defaults, log).await
+    Ok(out)
 }
 
 /// 每条 clip 的生成参数：改写结果里带的优先，其次设置里的默认值。
@@ -854,12 +957,36 @@ pub async fn heal_concurrency_rejects(pool: &SqlitePool, log: &Activity) -> AppR
     Ok(healed)
 }
 
-/// 一轮扫描里最多为几条单独问一次排队位次。
+/// 一轮扫描里最多为几条单独跑一次 `query_result`。
 ///
-/// `list_task` 不带 `queue_info`，位次只能逐条 `query_result`（O(n) 个进程）。并发闸门
-/// 把在跑条数压到个位数之后这笔开销可以忽略，但历史库里可能攒着一堆 `run` 条目 ——
-/// 这个预算就是那种情况下的止损线，剩下的下一轮再问。
+/// `list_task` 不带 `queue_info`，且它的 `gen_status` 是本机缓存（见 [`SWEEP_VIP_SECS`]
+/// 的实证），所以**位次与状态都只能逐条问**（O(n) 个进程）。并发闸门把在跑条数压到
+/// 个位数之后这笔开销可以忽略，但历史库里可能攒着一堆 `run` 条目 —— 这个预算就是那种
+/// 情况下的止损线，剩下的下一轮再问。
 pub const POSITION_QUERY_BUDGET: i64 = 8;
+
+/// 扫描起点的轮转游标（进程内）。
+///
+/// ## 没有它，第 9 条起会被永久饿死
+///
+/// 预算只在「这一条看起来还在跑」时才递减，而 `list_running` 是 `ORDER BY id` 的**稳定**
+/// 顺序。于是只要 id 最小的那 8 条一直在跑（非 VIP 排队几小时是常态），它们每一轮都把
+/// 预算吃干净，第 9 条起**一次都轮不到** —— 而 `list_task` 给的是过期状态，
+/// 它们于是永远停在「已提交」。那些条目**已经扣过费**，片子却永远取不回来。
+///
+/// 每轮把起点往后挪一个预算的量，任何一条最多等 ⌈n / 预算⌉ 轮必定轮到。
+static SWEEP_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 这一轮从在跑列表的第几条开始问（并据此环绕遍历全表）。
+///
+/// 抽成纯函数是为了能测「轮转确实覆盖得全」—— 那正是它存在的唯一理由，
+/// 而在 `sweep_once` 里测要有一个会回话的 CLI。
+pub fn sweep_start(cursor: i64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    cursor.rem_euclid(len as i64) as usize
+}
 
 /// 整表扫描一轮 —— **主路径**。
 ///
@@ -869,10 +996,14 @@ pub const POSITION_QUERY_BUDGET: i64 = 8;
 ///
 /// 扫描里认不出的 submit_id 回落到逐条 `query_result`（带退避）—— 那多半是翻页没覆盖
 /// 或 CLI 输出变了，而认不出的条目恰恰最不该被放弃轮询。
+///
+/// `default_model` = 设置里的默认型号。判「被并发上限弹回来」时要拿它算出这一条走的是
+/// 哪条通道 —— 上限是**逐通道**的（0031），认错通道就会把 A 通道的观测记到 B 头上。
 pub async fn sweep_once(
     pool: &SqlitePool,
     dirs: &DataDirs,
     bin: &str,
+    default_model: &str,
     timeout_secs: Option<i64>,
     log: &Activity,
 ) -> AppResult<PollSummary> {
@@ -929,7 +1060,14 @@ pub async fn sweep_once(
     }
 
     let mut position_budget = POSITION_QUERY_BUDGET;
-    for clip in running {
+    // 环绕遍历，起点每轮往后挪一个预算的量：预算只够问前几条，而固定从 id 最小的那条
+    // 开始会把后面的永久饿死（见 [`SWEEP_CURSOR`]）。
+    let total = running.len();
+    let start = sweep_start(
+        SWEEP_CURSOR.fetch_add(POSITION_QUERY_BUDGET, std::sync::atomic::Ordering::Relaxed),
+        total,
+    );
+    for clip in running.iter().cycle().skip(start).take(total) {
         let Some(submit_id) = clip.submit_id.clone() else {
             continue;
         };
@@ -970,7 +1108,7 @@ pub async fn sweep_once(
                     if let Ok(full) = dreamina::query(bin, &submit_id, None, log, who).await {
                         // 采样要在 `mark_polled` **之前**：那一句会把 clip 行里的
                         // 上一个位次覆盖掉，而「与上次比是不是倒退了」正要拿它作比较。
-                        record_position(pool, &clip, &full, now, log).await;
+                        record_position(pool, clip, &full, now, log).await;
                         let _ =
                             repo::mark_polled(pool, clip.id, &full.gen_status, full.queue_idx, now)
                                 .await;
@@ -984,7 +1122,8 @@ pub async fn sweep_once(
                     pool,
                     dirs,
                     bin,
-                    &clip,
+                    default_model,
+                    clip,
                     q,
                     timeout_secs,
                     authoritative,
@@ -1000,7 +1139,17 @@ pub async fn sweep_once(
                     sum.skipped += 1;
                     continue;
                 }
-                query_and_settle(pool, dirs, bin, &clip, timeout_secs, log, &mut sum).await?;
+                query_and_settle(
+                    pool,
+                    dirs,
+                    bin,
+                    default_model,
+                    clip,
+                    timeout_secs,
+                    log,
+                    &mut sum,
+                )
+                .await?;
             }
         }
     }
@@ -1012,6 +1161,7 @@ pub async fn poll_once(
     pool: &SqlitePool,
     dirs: &DataDirs,
     bin: &str,
+    default_model: &str,
     timeout_secs: Option<i64>,
     // force：无视退避、这一轮全查一遍（人点了「查一次进度」时）。
     force: bool,
@@ -1034,16 +1184,28 @@ pub async fn poll_once(
             sum.skipped += 1;
             continue;
         }
-        query_and_settle(pool, dirs, bin, &clip, timeout_secs, log, &mut sum).await?;
+        query_and_settle(
+            pool,
+            dirs,
+            bin,
+            default_model,
+            &clip,
+            timeout_secs,
+            log,
+            &mut sum,
+        )
+        .await?;
     }
     Ok(sum)
 }
 
 /// 单条 `query_result` → 落库 → 定态处置。
+#[allow(clippy::too_many_arguments)] // 只是 settle 的转发层，参数表跟着它走
 async fn query_and_settle(
     pool: &SqlitePool,
     dirs: &DataDirs,
     bin: &str,
+    default_model: &str,
     clip: &repo::ClipRow,
     timeout_secs: Option<i64>,
     log: &Activity,
@@ -1075,7 +1237,19 @@ async fn query_and_settle(
     record_position(pool, clip, &q, now, log).await;
     // 状态原文落库：切页/重启后看板仍答得出「这条在排队还是在跑」。
     let _ = repo::mark_polled(pool, clip.id, &q.gen_status, q.queue_idx, now).await;
-    settle(pool, dirs, bin, clip, q, timeout_secs, true, log, sum).await
+    settle(
+        pool,
+        dirs,
+        bin,
+        default_model,
+        clip,
+        q,
+        timeout_secs,
+        true,
+        log,
+        sum,
+    )
+    .await
 }
 
 /// 一条在跑条目的定态处置：出片 / 判死 / 继续等。两条查询路径共用。
@@ -1089,6 +1263,7 @@ async fn settle(
     pool: &SqlitePool,
     dirs: &DataDirs,
     bin: &str,
+    default_model: &str,
     clip: &repo::ClipRow,
     q: dreamina::QueryResult,
     timeout_secs: Option<i64>,
@@ -1201,7 +1376,14 @@ async fn settle(
             // 真花过钱的单，清掉它的 submit_id 等于把凭证扔了 —— 交给人判断。
             let ev = Evidence::from_clip(clip);
             if dreamina::is_concurrency_reject(&reason) && !ev.billed() {
-                let limit = observe_concurrency_reject(repo::count_running_accepted(pool).await?);
+                // 上限是**逐通道**的（0031）：这一单撞的是它自己那条通道的墙，
+                // 别的通道有没有空位与此无关。收敛与文案都必须点名通道，否则
+                // 「即梦同时只跑得下 1 条」会被读成账户级的结论 —— 那正是上一版
+                // 把 2.0mini 上 6 条一起锁死的那个误解。
+                let channel = channel_of(clip.model_version.as_deref(), default_model);
+                let accepted =
+                    repo::count_running_accepted_on(pool, default_model, channel).await?;
+                let limit = observe_concurrency_reject(channel, accepted);
                 let queued_at = clip
                     .submit_queued_at
                     .or(clip.first_submitted_at)
@@ -1211,8 +1393,9 @@ async fn settle(
                     "submit",
                     who,
                     format!(
-                        "即梦同时只跑得下 {limit} 条，这一单没排上（未扣费）→ 已放回本地队列，\
-                         有空位就自动补上"
+                        "{} 通道同时只跑得下 {limit} 条，这一单没排上（未扣费）→ 已放回本地队列，\
+                         有空位就自动补上。其它通道不受影响。",
+                        dreamina::short_label(channel)
                     ),
                     None,
                 );
@@ -1411,7 +1594,16 @@ pub fn spawn(
             // 心跳每 6 秒发一次（内存读），真正去问即梦是 5/10 分钟一次（一个进程）。
             let last_sweep = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
             if last_sweep == 0 || tick.at - last_sweep >= every {
-                match sweep_once(&pool, &dirs, &settings.bin, settings.timeout_secs(), &log).await {
+                match sweep_once(
+                    &pool,
+                    &dirs,
+                    &settings.bin,
+                    &settings.model_version,
+                    settings.timeout_secs(),
+                    &log,
+                )
+                .await
+                {
                     Ok(sum) => {
                         tick.finished = sum.finished;
                         tick.failed = sum.failed;
@@ -1752,7 +1944,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(free_slots(&pool, 1).await.unwrap(), 0);
+        let ch = opts().model_version.unwrap_or_default();
+        assert_eq!(free_slots(&pool, &ch, &ch, 1).await.unwrap(), 0);
         let sum = release_and_submit(&pool, NO_SUCH_BIN, &ids[1..], &opts(), 1, &log)
             .await
             .unwrap();
@@ -1769,6 +1962,66 @@ mod tests {
             .unwrap();
         assert_eq!(again.submitted + again.failed, 0);
         assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 2);
+    }
+
+    /// 一条通道排满了，**另一条通道照发**（0031）。
+    ///
+    /// 这条测试守的是这一版的核心不变量，而它正是上一版真实发生的故障：库里 78 条
+    /// 2.0fast 排着队、1 条在跑，另有 6 条 2.0mini 一条都发不出去 —— 而 2.0mini
+    /// 那条队从头到尾是空的。判据来自即梦自己的回体：`queue_info.debug_info` 里的
+    /// `dreamina_matrix_queue_name` 逐通道不同，2.0fast 与 2.0mini 是两条队。
+    #[tokio::test]
+    async fn a_full_channel_does_not_block_a_different_one() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        let log = Activity::silent();
+        let default_model = opts().model_version.unwrap_or_default();
+
+        // 第三条走另一条通道。
+        repo::set_params(&pool, &[ids[2]], Some("seedance2.0mini"), None, None, 300)
+            .await
+            .unwrap();
+        // 默认通道上占满唯一那个位子。
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::healthy("busy", 8),
+            400,
+        )
+        .await
+        .unwrap();
+        repo::mark_submit_queued(&pool, &[ids[1], ids[2]], 401)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            free_slots(&pool, &default_model, &default_model, 1)
+                .await
+                .unwrap(),
+            0,
+            "默认通道满了"
+        );
+        assert_eq!(
+            free_slots(&pool, &default_model, "seedance2.0mini", 1)
+                .await
+                .unwrap(),
+            1,
+            "mini 那条通道一条都没在跑，必须还有空位"
+        );
+
+        // drain 会为 mini 那条真的去调 CLI（这里的 bin 不存在，故记一次失败而不是
+        // 静静跳过）—— 断言的是「它确实动了 mini 那条」，而不是别的通道。
+        let sum = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+            .await
+            .unwrap();
+        assert_eq!(sum.failed, 1, "只该动 mini 那一条：默认通道没空位，mini 有");
+        assert_eq!(
+            repo::pick_submit_queued_on(&pool, &default_model, &default_model, 9)
+                .await
+                .unwrap(),
+            vec![ids[1]],
+            "默认通道那条原样排着，没被牵连"
+        );
     }
 
     // 存量修复：升级前被并发上限误判成 fail 的条目要能自己回到队列。
@@ -1811,7 +2064,9 @@ mod tests {
 
         assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 1);
         assert_eq!(
-            repo::pick_submit_queued(&pool, 9).await.unwrap(),
+            repo::pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 9)
+                .await
+                .unwrap(),
             vec![ids[0]]
         );
         let still_failed: Vec<i64> = repo::list_by_stages(&pool, &["fail"])
@@ -1826,30 +2081,77 @@ mod tests {
         assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 0);
     }
 
-    // 在跑上限：配置值与实测值取小，实测值只降不升。
+    // 在跑上限：配置值与实测值取小，实测值只降不升，且**逐通道各记各的**。
     //
-    // **整条链路写在一个测试里**是有意的：`OBSERVED_LIMIT` 是进程级静态量，拆成几个
-    // 并行跑的测试会互相污染 —— 一个把它压到 1，另一个正好在断言 5。
+    // **整条链路写在一个测试里**是有意的：`OBSERVED` 是进程级静态量，拆成几个并行跑的
+    // 测试会互相污染 —— 一个把它压到 1，另一个正好在断言 5。通道名也为此取得独一无二，
+    // 免得与别处的测试用例撞车。
     #[test]
     fn in_flight_limit_clamps_to_both_the_setting_and_what_dreamina_actually_allows() {
+        let a = "test-channel-a";
+        let b = "test-channel-b";
         // 还没撞过墙 → 完全听配置的，但受硬护栏夹取。
-        assert_eq!(effective_in_flight(5), 5);
-        assert_eq!(effective_in_flight(0), 1, "0 条在跑等于这条链路停摆");
-        assert_eq!(effective_in_flight(9999), MAX_IN_FLIGHT_CAP);
-        assert_eq!(observed_in_flight_limit(), None);
+        assert_eq!(effective_in_flight(a, 5), 5);
+        assert_eq!(effective_in_flight(a, 0), 1, "0 条在跑等于这条链路停摆");
+        assert_eq!(effective_in_flight(a, 9999), MAX_IN_FLIGHT_CAP);
+        assert_eq!(observed_in_flight_limit(a), None);
 
-        // 撞墙：即梦当时只收下了 1 条 → 从此上限就是 1，配置再大也没用。
-        assert_eq!(observe_concurrency_reject(1), 1);
-        assert_eq!(observed_in_flight_limit(), Some(1));
-        assert_eq!(effective_in_flight(5), 1);
+        // 撞墙：即梦当时在 a 上只收下了 1 条 → 从此 a 的上限就是 1，配置再大也没用。
+        assert_eq!(observe_concurrency_reject(a, 1), 1);
+        assert_eq!(observed_in_flight_limit(a), Some(1));
+        assert_eq!(effective_in_flight(a, 5), 1);
+
+        // **通道之间互不相干**（0031 的核心）：a 撞了墙，b 该照跑不误。
+        // 反过来（一处观测压住全部通道）正是 2.0fast 那条长队把 2.0mini 锁死的成因。
+        assert_eq!(observed_in_flight_limit(b), None);
+        assert_eq!(effective_in_flight(b, 5), 5);
 
         // 只降不升：又一次观测到 3 不该把上限放宽回去（那会让空转重新开始）。
-        observe_concurrency_reject(3);
-        assert_eq!(effective_in_flight(5), 1);
+        observe_concurrency_reject(a, 3);
+        assert_eq!(effective_in_flight(a, 5), 1);
 
-        // 0 条被收下时兜底为 1：判成 0 会让整条队列永久停摆，
+        // 0 条被收下时兜底为 1：判成 0 会让这条通道永久停摆，
         // 而「一条都跑不了」几乎一定是别的故障，不该由这里下结论。
-        assert_eq!(observe_concurrency_reject(0), 1);
+        assert_eq!(observe_concurrency_reject(a, 0), 1);
+    }
+
+    /// 扫描起点的轮转必须**覆盖全表**，否则预算之外的条目永远问不到。
+    ///
+    /// 这条测试守的是一个会花钱的故障：预算只在「看起来还在跑」时递减，而在跑列表是
+    /// `ORDER BY id` 的稳定顺序 —— 固定从头开始的话，只要前 8 条一直在排队（非 VIP 排
+    /// 几小时是常态），第 9 条起一次都轮不到。而 `list_task` 给的是本机缓存里的过期状态，
+    /// 于是那些**已经扣过费**的条目会永远停在「已提交」，片子取不回来。
+    #[test]
+    fn the_scan_cursor_rotates_so_no_clip_is_starved() {
+        let len = 21usize; // 21 条在跑，预算 8 → 三轮该覆盖完
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = 0i64;
+        for _ in 0..3 {
+            let start = sweep_start(cursor, len);
+            for k in 0..POSITION_QUERY_BUDGET as usize {
+                seen.insert((start + k) % len);
+            }
+            cursor += POSITION_QUERY_BUDGET;
+        }
+        assert_eq!(seen.len(), len, "三轮之后每一条都该被问到过一次");
+
+        // 空表不得取模除零。
+        assert_eq!(sweep_start(7, 0), 0);
+        // 游标一直增长也不会跑出界（`rem_euclid` 对负数同样安全，防的是将来溢出回绕）。
+        assert!(sweep_start(i64::MAX, 5) < 5);
+        assert!(sweep_start(-3, 5) < 5);
+    }
+
+    // 通道归属：条目自己写死的型号优先，没写就落到设置里的默认型号。
+    // 与 `repo::CHANNEL_OF` 那段 SQL 同口径 —— 两边分叉就会数着 A 通道的空位往 B 发单。
+    #[test]
+    fn channel_falls_back_to_the_configured_default_only_when_unset() {
+        assert_eq!(
+            channel_of(Some("seedance2.0mini"), "seedance2.0fast"),
+            "seedance2.0mini"
+        );
+        assert_eq!(channel_of(None, "seedance2.0fast"), "seedance2.0fast");
+        assert_eq!(channel_of(Some("  "), "seedance2.0fast"), "seedance2.0fast");
     }
 
     // 默认往小了猜：猜小只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费），
@@ -2249,9 +2551,16 @@ mod tests {
         LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
         SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
 
-        let sum = sweep_once(&pool, &dirs, "dreamina", None, &Activity::silent())
-            .await
-            .unwrap();
+        let sum = sweep_once(
+            &pool,
+            &dirs,
+            "dreamina",
+            "seedance2.0fast",
+            None,
+            &Activity::silent(),
+        )
+        .await
+        .unwrap();
         assert_eq!(sum.polled, 0, "没有在跑条目 → 一个进程都不该起");
         let after = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
         assert!(after > 0, "空表也要记下「这一轮跑过了」");

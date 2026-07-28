@@ -227,15 +227,19 @@ export function V2vParamsPanel({
           )}
         </div>
 
-        {/* ── 同时在跑上限（即梦的账户级并发闸门） ─────────── */}
+        {/* ── 同时在跑上限（即梦逐通道的并发闸门） ─────────── */}
         <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-          同时在跑上限 · 即梦一次跑得下几条
+          同时在跑上限 · <b>每条通道</b>一次跑得下几条
         </div>
         <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 8 }}>
-          即梦对<b>整个账户</b>限制同时在跑的条数，超出的会被它以{" "}
-          <code>ExceedConcurrencyLimit</code> 逐条拒掉（一分钱不扣，但任务也不跑）。 所以 GenDesk
-          只发得下的那几条，<b>其余留在本地排队，出一条自动补一条</b> ——
-          你点一次确认就够了，不必守着补单。手动放行与常驻队列<b>共用</b>这个配额。
+          即梦按<b>模型通道</b>各排各的队（回体里的 <code>dreamina_matrix_queue_name</code>{" "}
+          逐通道不同），每条通道各有一个并发上限， 超出的会被它以{" "}
+          <code>ExceedConcurrencyLimit</code> 逐条拒掉（一分钱不扣，但任务也不跑）。 所以 GenDesk{" "}
+          <b>逐通道</b>只发得下的那几条，<b>其余留在本地排队，出一条自动补一条</b> ——
+          你点一次确认就够了，不必守着补单。
+          <br />
+          这个数字是<b>每条通道</b>的上限，不是全部通道加起来的：2.0Fast 排满了， 2.0Mini
+          照样发得出去。同一条通道内，手动放行与常驻队列<b>共用</b>这份配额。
         </div>
         <div className="fx ac gap8 wrap">
           <span className="fs11 t3">同时最多</span>
@@ -250,21 +254,33 @@ export function V2vParamsPanel({
             onBlur={() => void save({ maxInFlight: s.maxInFlight ?? 1 })}
             disabled={busy}
           />
-          <span className="fs11 t3">条在即梦手上</span>
+          <span className="fs11 t3">条在即梦手上（每条通道各算各的）</span>
           {queue?.observedLimit != null && (
             <span className="bdg b-amber">
-              实测只跑得下 {queue.observedLimit} 条 —— 设得再大也按这个来
+              默认通道实测只跑得下 {queue.observedLimit} 条 —— 设得再大也按这个来
             </span>
           )}
           {(queue?.queued ?? 0) > 0 && (
-            <span className="fs11 t3">当前本地排队 {queue?.queued} 条</span>
+            <span className="fs11 t3">当前本地排队共 {queue?.queued} 条</span>
           )}
         </div>
         <div className="fs11 t3" style={{ lineHeight: 1.8, marginTop: 6 }}>
-          默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队。往小了猜只是让后面那些
-          多等一会儿（非 VIP 通道上「等」本来就免费），往大了猜是一批片子集体躺进「处理异常」。
-          真撞上拒收时这里会自己往下收敛。
+          默认 1 是实测值：一批 9 条 <code>seedance2.0fast</code> 同时提交，只有 1 条真的入队。
+          往小了猜只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费），
+          往大了猜是一批片子集体躺进「处理异常」。真撞上拒收时这里会
+          <b>按通道各自</b>往下收敛 —— 一条通道撞了墙不影响其它通道。
         </div>
+        {/* 逐通道现状：这个上限是按通道算的，那就必须能当场看到每条通道各占了多少。 */}
+        {(queue?.channels?.length ?? 0) > 0 && (
+          <div className="fx ac gap8 wrap" style={{ marginTop: 8 }}>
+            {queue?.channels.map((c) => (
+              <span key={c.modelVersion || "(default)"} className="fs11 t3">
+                <b className="t1">{c.label}</b> {c.running}/{c.limit} 在跑
+                {c.queued > 0 && ` · 本地 ${c.queued}`}
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* ── 常驻队列（自动补单） ───────────────────────── */}
         {af && (
@@ -278,7 +294,8 @@ export function V2vParamsPanel({
               过夜就能低成本攒下片子。这条队列保持 N 条在跑，完成一条自动补一条；
               待提交的存量见底时发系统通知，好让你提前安排新的。
               <br />
-              它与你手动放行的那些<b>共用上面那个在跑上限</b>（配额是即梦按账户算的）， 且
+              它只跑自己配的那条通道，与你手动放行到<b>同一条通道</b>的那些共用上面那个在跑上限
+              （别的通道跑得再满也不占它的配额），且
               <b>不会碰你已经放行、正在本地排队的条目</b>。
             </div>
             <div className="fx ac gap8 wrap">

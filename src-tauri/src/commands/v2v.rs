@@ -382,13 +382,63 @@ pub struct QueueStats {
     pub next_poll_in: Option<i64>,
     /// 超时上限小时数；None = 不限。
     pub timeout_hours: Option<i64>,
-    /// 生效的在跑上限（配置值与实测值取小）。`running/limit` 就是「即梦这边跑满没有」。
+    /// **默认通道**生效的在跑上限（配置值与实测值取小）。
+    ///
+    /// 逐条的上限请读 [`ChannelStat::limit`] —— 上限是按通道算的（0031），
+    /// 这一项只是没有通道上下文时的兜底（设置页那句「同时在跑上限」）。
     pub in_flight_limit: i64,
-    /// 本次运行实测到的上限；有值即「我们撞过 `ExceedConcurrencyLimit`，
-    /// 所以就算你设得更大也只能跑这么多」。
+    /// 默认通道本次运行实测到的上限；有值即「我们在这条通道上撞过
+    /// `ExceedConcurrencyLimit`，所以就算你设得更大也只能跑这么多」。
     pub observed_limit: Option<i64>,
-    /// **本地队列**里等空位的条数（0028）—— 人已放行、还没发出去的那些。
+    /// **本地队列**里等空位的条数（0028），跨通道求和。
     pub queued: i64,
+    /// 逐通道的现状（0031）—— 顶部那排通道状态灯的数据源。
+    ///
+    /// 即梦按模型通道各排各的队，一条通道排满与另一条能不能发**毫无关系**，
+    /// 所以这些数字不能求和成一个「即梦 1/1」。
+    pub channels: Vec<ChannelStat>,
+}
+
+/// 一条即梦通道此刻的样子（0031）。
+///
+/// ## 为什么这是一个列表而不是一个数字
+///
+/// 「即梦 1/1 · 本地排队 78」把六条互不相干的队列压成了一个数，而那个数每一位都是错的：
+/// 2.0fast 上排着 78 条不代表 2.0mini 发不出去（实测两条通道各有各的
+/// `dreamina_matrix_queue_name`）。压成一个数之后，界面既答不出「哪条通道在动」，
+/// 也答不出「我这 6 条 mini 为什么不走」。
+///
+/// 每条通道各占一格，各自回答两个问题：**远端此刻在替我做什么**（在排队 → 前面还有
+/// 多少个；在生成 → 几条），以及**本地还压着多少条同通道的**。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStat {
+    /// 型号全名。空串 = 设置里没指定模型，实际通道由 CLI 自己挑。
+    pub model_version: String,
+    /// 通道简写（`dreamina::short_label`）。空型号在这里是「CLI 默认」。
+    pub label: String,
+    pub vip: bool,
+    /// 已提交、还在即梦手上的条数。
+    pub running: i64,
+    /// 这条通道生效的在跑上限。
+    pub limit: i64,
+    /// 这条通道实测到的上限（撞过墙才有值）。
+    pub observed_limit: Option<i64>,
+    /// 人已放行、在本地等这条通道空位的条数 —— 界面上那句「本地队列 N 个」。
+    pub queued: i64,
+    /// 有提示词、但还没放行的条数（「等你点确认提交」）。**不算进本地队列**：
+    /// 它们还等着人点一下，而本地队列的含义是「随时会自己发出去」。
+    pub ready: i64,
+    /// 这条通道上最靠前那一单的即梦排队位次 —— 界面上那句「前方排队 N」。
+    /// `None` = 没有任何一单报得出位次（在生成中，或还没问到），此时改报「任务中 N」。
+    /// **绝不补 0**：回体里的 0 意思是「已出队」，拿它当「前面没人了」会说反。
+    pub front_queue_idx: Option<i64>,
+    /// 这条通道上最早那一单已经等了多久（秒）。
+    pub oldest_wait: i64,
+    /// 在跑的里面有几条是常驻队列放行的。
+    pub auto_running: i64,
+    /// 常驻队列是不是就配在这条通道上（配了但没开也算 —— 界面要说得出「开着没」）。
+    pub autofill: bool,
 }
 
 #[tauri::command]
@@ -404,6 +454,24 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
     // 「下次查询还有几秒」现在由整表扫描的节拍决定，不再由每条各自的退避决定 ——
     // 循环自己记着上一次扫描的时刻，这里读它，两边不会分叉。
     let next_poll_in = runner::next_sweep_in(now);
+    let channels = repo::channel_stats(&state.db, &s.model_version)
+        .await?
+        .into_iter()
+        .map(|c| ChannelStat {
+            label: dreamina::short_label(&c.model_version),
+            vip: dreamina::is_vip(&c.model_version),
+            limit: runner::effective_in_flight(&c.model_version, s.max_in_flight),
+            observed_limit: runner::observed_in_flight_limit(&c.model_version),
+            running: c.running,
+            queued: c.queued,
+            ready: c.ready,
+            front_queue_idx: c.front_queue_idx,
+            oldest_wait: c.oldest_submitted_at.map_or(0, |t| (now - t).max(0)),
+            auto_running: c.auto_running,
+            autofill: s.autofill.model_version.trim() == c.model_version,
+            model_version: c.model_version,
+        })
+        .collect();
     Ok(QueueStats {
         running,
         oldest_wait: oldest.map_or(0, |t| (now - t).max(0)),
@@ -415,9 +483,10 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
         eta_secs,
         next_poll_in,
         timeout_hours: s.timeout_hours,
-        in_flight_limit: runner::effective_in_flight(s.max_in_flight),
-        observed_limit: runner::observed_in_flight_limit(),
+        in_flight_limit: runner::effective_in_flight(&s.model_version, s.max_in_flight),
+        observed_limit: runner::observed_in_flight_limit(&s.model_version),
         queued: repo::count_submit_queued(&state.db).await?,
+        channels,
     })
 }
 
@@ -623,14 +692,16 @@ pub async fn v2v_autofill_status(state: State<'_, AppState>) -> AppResult<Autofi
     let s = load_settings(&state.db).await?;
     let cfg = &s.autofill;
     let now = now_unix();
-    // 深度受即梦的账户级并发上限压制：设成 3 而上限是 1 时，界面必须显示 1 ——
-    // 否则「常驻 0/3」会让人一直等一个永远不会发生的第二、三条。
-    let hard_limit = runner::effective_in_flight(s.max_in_flight);
+    // 深度受即梦在**这条通道**上的并发上限压制：设成 3 而上限是 1 时，界面必须显示 1
+    // —— 否则「常驻 0/3」会让人一直等一个永远不会发生的第二、三条。
+    let channel = cfg.model_version.trim();
+    let hard_limit = runner::effective_in_flight(channel, s.max_in_flight);
     let mut out = AutofillStatus {
         enabled: cfg.enabled,
         depth: cfg.depth.min(hard_limit),
-        // 在跑数要数**全部**（不只是补单器自己的）：它们抢的是同一份并发配额。
-        running: repo::count_in_flight(&state.db).await?,
+        // 在跑数要数**同通道**的全部（不只是补单器自己的）：同一条通道内，人手动放行的
+        // 与补单器放的抢同一个位子；而别的通道跑得再满也不占这条通道的配额（0031）。
+        running: repo::count_in_flight_on(&state.db, &s.model_version, channel).await?,
         stock: repo::count_autofill_pool(&state.db).await?,
         low_water: cfg.low_water,
         spent_today: repo::credit_submitted_since(&state.db, now - 24 * 3600).await?,
@@ -1265,6 +1336,23 @@ pub struct SubmitPreview {
     pub estimated_credits: i64,
     /// 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
     pub unpriced: Vec<String>,
+    /// 这一批按通道拆开的「现在就发得出去几条」（0031）。
+    ///
+    /// **由 Rust 算**：空位是逐通道的，前端拿一个全局上限减一个全局在跑数，
+    /// 会在一批横跨两条通道时给出一个谁也不对的数 —— 而那个数就印在「确认提交」旁边。
+    pub lanes: Vec<PreviewLane>,
+}
+
+/// 确认卡上一条通道的分账。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLane {
+    pub label: String,
+    /// 这一批里走这条通道的条数。
+    pub total: i64,
+    /// 其中现在就会真的发出去的条数（其余留在本地队列，出一条补一条）。
+    pub goes_now: i64,
+    pub limit: i64,
 }
 
 /// 提交前的余额，**单独一条命令**。
@@ -1311,7 +1399,16 @@ pub async fn preview_v2v_commands(
     let mut commands = Vec::new();
     let mut estimated_credits = 0;
     let mut unpriced: Vec<String> = Vec::new();
+    // 按通道分桶：这一批可能横跨几条通道，而空位是逐通道的。
+    // 用 Vec 而不是 HashMap 保住顺序 —— 确认卡上的行序该跟着这一批的顺序走。
+    let mut lane_counts: Vec<(String, i64)> = Vec::new();
     for clip in repo::list_ready(&state.db, &ids).await? {
+        let channel =
+            runner::channel_of(clip.model_version.as_deref(), &s.model_version).to_string();
+        match lane_counts.iter_mut().find(|(c, _)| *c == channel) {
+            Some((_, n)) => *n += 1,
+            None => lane_counts.push((channel, 1)),
+        }
         let opts = dreamina::normalize_opts(&runner::opts_for(&clip, &defaults))?;
         let argv = dreamina::command_line(
             &bin,
@@ -1343,18 +1440,31 @@ pub async fn preview_v2v_commands(
             }
         }
     }
+    let mut lanes = Vec::with_capacity(lane_counts.len());
+    for (channel, total) in lane_counts {
+        let free =
+            runner::free_slots(&state.db, &s.model_version, &channel, s.max_in_flight).await?;
+        lanes.push(PreviewLane {
+            label: dreamina::short_label(&channel),
+            total,
+            goes_now: total.min(free),
+            limit: runner::effective_in_flight(&channel, s.max_in_flight),
+        });
+    }
     Ok(SubmitPreview {
         commands,
         estimated_credits,
         unpriced,
+        lanes,
     })
 }
 
 /// 放行一批到即梦。
 ///
-/// **不再是「N 条一起砸过去」**：即梦的并发上限是账户级的（实测非 VIP 只跑得下 1 条），
-/// 超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里只发得下的那几条，
-/// 其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序自动补上。
+/// **不再是「N 条一起砸过去」**：即梦对每条模型通道各有一个并发上限（实测 2.0fast
+/// 只跑得下 1 条），超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里
+/// 只发得下的那几条，其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序
+/// 自动补上 —— **逐通道各补各的**（0031）。
 #[tauri::command]
 #[specta::specta]
 pub async fn submit_v2v_clips(
@@ -1422,6 +1532,7 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
         &state.db,
         &state.dirs,
         &s.bin,
+        &s.model_version,
         s.timeout_secs(),
         true,
         &state.v2v_log,

@@ -43,6 +43,13 @@
   --erbg: oklch(54% 0.15 25 / 0.09);
   --erln: oklch(54% 0.15 25 / 0.35);
 
+  /* 通道状态灯上那三个数各自的颜色。三件不同的事，故三个色而不是一个强调色：
+     蓝＝还在排队（这个数要往下掉）· 绿＝即梦真的在生成 · 黄＝还没发出去也还没花钱的存量。
+     亮度统一压在 50–54%：再浅一档在白底上 12px 的字就开始发虚，而这三个数是要读的。 */
+  --ch-queue: oklch(52% 0.17 257);
+  --ch-run: oklch(51% 0.13 155);
+  --ch-local: oklch(53% 0.13 72);
+
   /* 视频流水线七态：文字色（在浅底上要读得清）与分段条色（在 6px 高的色带上要分得开）。
      两套值不是重复 —— 同一个绿在 11px 文字上要压暗才够对比度，在色带上要提亮才认得出。 */
   --st-run: oklch(52% 0.15 255);
@@ -2241,6 +2248,19 @@ a:hover {
     opacity: 0.35;
   }
 }
+/* 通道状态灯的呼吸。比 blk 慢、比它浅 —— 它是「在正常工作」的背景音，
+   不是要人立刻去处理的告警。 */
+@keyframes brth {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.01ms !important;
@@ -3760,37 +3780,73 @@ a:hover {
   color: var(--rd-t3);
 }
 
-/* 常驻队列 pill —— 「开着」与「在跑」是两回事，停因必须写在脸上。 */
-.autopill {
+/* 通道状态灯（0031）—— 一条还有事没走完的即梦通道一格。
+   即梦按模型通道各排各的队，故这里绝不能求和成一个「即梦 1/1」：
+   2.0fast 排满了与 2.0mini 能不能发毫无关系。
+
+   排版分三层，因为这一格里的信息重要性差着量级：
+     数字（6233 / 78）要读 → 12px 粗体等宽，**各自带色**（见 --ch-queue/run/local）
+     通道名要认           → 11px 粗体、深字色
+     「前方排队」这类标签   → 10px 淡灰，只是给数字贴个名
+   底色保持中性：整条染一个色会把三层压成一层，扫一眼什么都抓不住。颜色只落在数字上。 */
+.chpill {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 5px;
-  height: 20px;
-  padding: 0 8px;
-  border-radius: 99px;
-  border: 1px solid var(--okln);
-  background: var(--okbg);
-  color: var(--ok2);
-  font-size: 10.5px;
-  font-weight: 500;
+  padding: 2px 9px 3px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--sh1);
   white-space: nowrap;
   cursor: pointer;
 }
-.autopill .dot {
-  width: 5px;
-  height: 5px;
+/* 呼吸而不是常亮：一个静止的绿点与一个卡死的轮询器长得一模一样，
+   而这排灯的全部意义就是「远端此刻真的在替我干活」。 */
+.chpill .dot {
+  width: 6px;
+  height: 6px;
   border-radius: 99px;
-  background: currentcolor;
+  background: var(--ok);
+  flex: none;
+  align-self: center;
+  animation: brth 1.9s ease-in-out infinite;
 }
-.autopill.idle {
-  border-color: var(--wrln);
-  background: var(--wrbg);
-  color: var(--wr2);
+.chpill .nm {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--t1);
+  letter-spacing: -0.01em;
 }
-.autopill.bad {
-  border-color: var(--erln);
-  background: var(--erbg);
-  color: var(--er);
+/* 标签词。最轻的一层 —— 它只负责说明旁边那个数字是什么。 */
+.chpill .k {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--t3);
+  margin-left: 3px;
+}
+/* 要读的那个数。等宽避免逐秒跳动时整条抖，比标签大一档、粗一档。
+   颜色由 nque / nrun / nloc 决定 —— 三个数是三件事，同色等于让人自己去读标签。 */
+.chpill .n {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.chpill .nque {
+  color: var(--ch-queue);
+}
+.chpill .nrun {
+  color: var(--ch-run);
+}
+.chpill .nloc {
+  color: var(--ch-local);
+}
+/* 远端没在跑、只剩本地压着队：灯不该继续绿着呼吸（那是「在动」的信号），
+   改成与本地队列同色的静止黄点 —— 一眼看出这条通道是在等空位，不是在生成。 */
+.chpill.idle .dot {
+  background: var(--ch-local);
+  animation: none;
 }
 
 /* ── 视频成片库 ─────────────────────────────────────────── */

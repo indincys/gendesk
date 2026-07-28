@@ -138,7 +138,11 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 **幽灵单**：即梦给了 submit\_id 但 `queue_idx` 与 `credit_count` 双双缺席、从未计费——与超时
 **处置相反**（超时「已扣费 → 继续等待」，幽灵「没扣费 → 直接重跑」），结论由 Rust 下发
 （`clip_looks_phantom`），前端不得手抄判据 · **本地队列 vs 即梦队列**：两个位次**绝不混成一个
-数字**（本地第 3 vs 即梦第 4485）· **封面**：clip 自己的文件副本，绝不指向
+数字**（本地第 3 vs 即梦第 4485），且本地位次**按通道各排各的** · **通道(channel)**：一个
+`model_version` = 即梦一条独立的队（`dreamina_matrix_queue_name`）。条目的通道 =
+`COALESCE(自带型号, 设置默认)`，单点 `runner::channel_of` 与 `repo::CHANNEL_OF`，两边分叉就会
+数着 A 通道的空位往 B 发单；简写单点 `dreamina::short_label` 随 `ModelInfo.label` 下发，
+前端不自己 `replace(/^seedance/)` · **封面**：clip 自己的文件副本，绝不指向
 `accepted_works.thumb_path`（清废纸篓会物理删 file\_paths）· **交付**：验收通过即**拷贝**（不移动）
 成片到 `outputs/视频/`，拷贝失败**不回滚验收**，故 `undelivered` 是合法状态兼侧栏徽章。
 
@@ -188,17 +192,29 @@ submit\_id）。`mark_running` 带 `AND status = ?` 谓词并返回是否认领�
 
 **额度** — 提交成功即写 submit\_id 并置 run；顺序反了会留下认不出主人的孤儿，而恢复只能退回
 重提 = 花两份钱。中断恢复**只**动无 submit\_id 的条目；回执异常也照收，判死统一交给轮询。
-即梦并发上限是**账户级**的：实测非 VIP 同时只跑得下 1 条，超出回 `ret=1310
-ExceedConcurrencyLimit` —— 那**不是失败**（一分钱没扣），走 `requeue_after_reject` 放回本地队首
-且 `attempt` 退回去；`OBSERVED_LIMIT` 进程内自收敛**不落库**。VIP 同规格**贵 5.5 倍**（8 vs 44
+即梦并发上限是**逐模型通道**的，**不是账户级**（v0.24.0 那条「账户级」结论是从单通道样本上
+做的过度归纳，已被推翻：撞墙那批 9 条全走 `seedance2.0fast`）。反证三条，都来自真实回体：
+`query_result` 的 `queue_info.debug_info.dreamina_matrix_queue_name` 逐通道不同
+（2.0fast/2.0mini/1.5pro/2.0\_vip 各一条队）· 2026-07-27 五条不同通道同时提交**全部**被收下并
+计费 · 同日 18 条 `_vip` 单 90 秒内全部收下出片。故 `count_in_flight_on` / `free_slots` /
+`drain_queue` / autofill **一律按通道算**，认错通道的代价是一条通道排满就把别的通道全锁死
+（实测把 6 条 2.0mini 卡在了 78 条 2.0fast 后面）。单通道实测上限 2.0fast = 1，超出回
+`ret=1310 ExceedConcurrencyLimit` —— 那**不是失败**（一分钱没扣），走 `requeue_after_reject`
+放回本地队首且 `attempt` 退回去；`OBSERVED`（通道 → 上限）进程内自收敛**不落库**。
+VIP 同规格**贵 5.5 倍**（8 vs 44
 额度）且只买到不排队，故默认模型必须显式，判定单点 `dreamina::is_vip`。常驻队列 autofill 四道
 闸都是机制：默认关 · 模型必须非 VIP（保存那一刻就拒）· 日额度按**提交**时刻切窗（用出片时刻
 切的话，补单器能在任何一条出片之前把一天额度提交光）· 余额兜底。
 
 **轮询（铁律 4 的唯一例外）** — 实跑确认即梦 CLI 无任何推送机制（`--poll=N` 只是把轮询搬进
-子进程，进程被杀即丢）。单位是**一整页**不是一条：`list_task` 一个进程回全部在跑任务的状态，
-进程数与在跑条数**脱钩**。故频率是纯粹的成本旋钮（含 VIP 300s / 全非 VIP 600s，
-`SWEEP_VIP_SECS`）；逐条退避是回落路径，下限抬到同一常数——它是 O(n) 的，没道理比整表还勤。
+子进程，进程被杀即丢）。**`list_task` 读的是本机缓存，不是服务端**：它查
+`~/.dreamina_cli/tasks.db` 的 `aigc_task` 表，而那里的 `gen_status` **只有对该 submit\_id 单独跑过
+`query_result` 才会写回**（实测 5 条任务在本机表里 `querying` 挂了 26 小时，逐条查完当场变
+`success`，`update_time` 恰好停在查询那一刻）。所以推进状态机的是**逐条 `query_result`**，
+受 `POSITION_QUERY_BUDGET`（8）限制 —— 成本是 O(min(n,8)) 个网络进程，`list_task` 翻页不走网络
+可忽略；早期注释里那句「O(1)、与在跑条数脱钩」**是错的**。预算之外的条目靠 `SWEEP_CURSOR`
+**轮转起点**才轮得到（固定从 id 最小那条开始的话，前 8 条一直排队就把第 9 条起永久饿死，
+而那些条目已经扣过费）。频率仍是成本旋钮（含 VIP 300s / 全非 VIP 600s，`SWEEP_VIP_SECS`）。
 `list_task` 缺两样东西各自决定一段代码：无 `videos[].path`（出片仍要单发 `query_result --download_dir`）· 无 `queue_info`（故幽灵判定拆宽判据 `phantom_suspect` / 权威回体
 `is_phantom`，**确认查询失败就这一轮不判**——问不出话 ≠ 判死）。未知 `gen_status` 判 Running
 而非 Failed（判死会把已扣费正在跑的任务标死）。计费证据一律 `COALESCE` 写回，**只增不抹**。
@@ -219,9 +235,6 @@ ExceedConcurrencyLimit` —— 那**不是失败**（一分钱没扣），走 `r
 `CARGO_PKG_VERSION`。**另一条通往同样症状的路径**：single-instance 插件在已有实例时静默
 exit(0)——区分方法是看日志有没有当次的 `logging initialized`（单实例踢出发生在日志初始化之前，
 一个字都不留；迁移失败则必留一条 ERROR）。
-
-**跑 GUI 之前**：`pnpm tauri dev` 可能**真花钱** —— intake 默认 `enabled: true`，启动会扫描
-收件目录、自动收录工单并建批。先把待收工单挪开，或在设置里关掉收件。
 
 ## 门禁与协作
 

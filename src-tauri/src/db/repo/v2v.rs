@@ -985,29 +985,50 @@ pub async fn count_phantom_suspects(pool: &SqlitePool, before: i64) -> Result<i6
     Ok(n)
 }
 
-/// 此刻在即梦手上的条数 —— **所有**提交路径的总和。
+/// 「这一条走哪条通道」的 SQL 表达式：条目自带的型号优先，没写就落到设置里的默认型号。
 ///
-/// 0028 之前这里只数补单器自己放出去的（`auto_submitted=1`），理由是「人手动提交的
-/// 一批不该顶掉补单器的深度配额」。那条理由被实测推翻了：即梦的并发上限是**账户级**
-/// 的，人提交的和补单器提交的抢的是同一个位子。按旧口径数，补单器会在人已经把唯一
-/// 那个位子占满时继续往外发，而那些单子回来的是 `ExceedConcurrencyLimit`。
-pub async fn count_in_flight(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM v2v_clips WHERE stage='run'")
-        .fetch_one(pool)
-        .await?;
+/// 占位符编号写死成 `?1`，故所有用到它的查询都必须**第一个**绑默认型号。
+const CHANNEL_OF: &str = "COALESCE(NULLIF(TRIM(model_version), ''), ?1)";
+
+/// 某条通道此刻在即梦手上的条数（0031）。
+///
+/// 并发闸门读的是它而不是 [`count_in_flight`]：实测即梦按模型通道各排各的队
+/// （`queue_info.debug_info.dreamina_matrix_queue_name` 逐通道不同），2.0fast 排满了
+/// 与 2.0mini 能不能发**毫无关系**。按全局口径数会让第二条通道永远发不出去。
+pub async fn count_in_flight_on(
+    pool: &SqlitePool,
+    default_model: &str,
+    channel: &str,
+) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND {CHANNEL_OF} = ?2"
+    ))
+    .bind(default_model)
+    .bind(channel)
+    .fetch_one(pool)
+    .await?;
     Ok(n)
 }
 
-/// 在跑、且**即梦确实收下了**的条数（有计费回执或队列位次）。
+/// 某条通道上、在跑且**即梦确实收下了**的条数（有计费回执或队列位次）。
 ///
-/// 它是「即梦这一刻实际允许我们同时跑几条」的下界：撞上 `ExceedConcurrencyLimit`
-/// 那一刻，被收下的这些就是上限本身。自适应夹取（`runner::observe_concurrency_reject`）
-/// 用它，免得逼人去猜一个只有即梦知道的数字。
-pub async fn count_running_accepted(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
-    let (n,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run'
-           AND (credit_count IS NOT NULL OR submit_credit IS NOT NULL OR queue_idx IS NOT NULL)",
-    )
+/// 它是「即梦这一刻在这条通道上实际允许我们同时跑几条」的下界：撞上
+/// `ExceedConcurrencyLimit` 那一刻，被收下的这些就是这条通道的上限本身。自适应夹取
+/// （`runner::observe_concurrency_reject`）用它，免得逼人去猜一个只有即梦知道的数字。
+///
+/// **按通道数**（0031）：跨通道数会把别的通道正在跑的条目算进来，于是一条通道撞墙
+/// 就把所有通道的上限一起收敛到一个偏大的数，此后每轮都要再撞一次才知道发不出去。
+pub async fn count_running_accepted_on(
+    pool: &SqlitePool,
+    default_model: &str,
+    channel: &str,
+) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND {CHANNEL_OF} = ?2
+           AND (credit_count IS NOT NULL OR submit_credit IS NOT NULL OR queue_idx IS NOT NULL)"
+    ))
+    .bind(default_model)
+    .bind(channel)
     .fetch_one(pool)
     .await?;
     Ok(n)
@@ -1048,19 +1069,98 @@ pub async fn count_submit_queued(pool: &SqlitePool) -> Result<i64, sqlx::Error> 
     Ok(n)
 }
 
-/// 取队首的 `limit` 条。**先进先出**（放行时刻，其次 id）：一批 20 条的顺序
-/// 就是人当时在表格里看到的顺序，而不是每轮随机挑几条。
-pub async fn pick_submit_queued(pool: &SqlitePool, limit: i64) -> Result<Vec<i64>, sqlx::Error> {
+/// 取**某条通道**队首的 `limit` 条（0031）。
+///
+/// **先进先出**（放行时刻，其次 id）：一批 20 条的顺序就是人当时在表格里看到的顺序，
+/// 而不是每轮随机挑几条。
+///
+/// 补位必须按通道各取各的：2.0fast 排满时，队列里那 6 条 2.0mini 照样发得出去，
+/// 而按全局队首取会一直取到 2.0fast 的条目、发现没空位、然后什么都不做。
+pub async fn pick_submit_queued_on(
+    pool: &SqlitePool,
+    default_model: &str,
+    channel: &str,
+    limit: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
     if limit <= 0 {
         return Ok(Vec::new());
     }
     let rows: Vec<(i64,)> = sqlx::query_as(&format!(
-        "SELECT id FROM v2v_clips WHERE {QUEUED_POOL} ORDER BY submit_queued_at, id LIMIT ?1"
+        "SELECT id FROM v2v_clips WHERE {QUEUED_POOL} AND {CHANNEL_OF} = ?2
+          ORDER BY submit_queued_at, id LIMIT ?3"
     ))
+    .bind(default_model)
+    .bind(channel)
     .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// 一条通道此刻的全貌（0031）：远端在跑几条、本地还压着几条、队首排在第几位。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelRow {
+    /// 型号全名。空串 = 设置里没指定模型，实际通道由 CLI 自己挑。
+    pub model_version: String,
+    /// 已提交、还在即梦手上（`stage='run'`）。
+    pub running: i64,
+    /// 人已放行、在本地等这条通道的空位。
+    pub queued: i64,
+    /// 有提示词、但还没放行（「等你点确认提交」）。
+    pub ready: i64,
+    /// 这条通道上最靠前那一单的即梦排队位次。`None` = 没有任何一单报得出位次
+    /// （要么在生成中，要么还没问到）—— **绝不补 0**，0 在回体里的含义是「已出队」。
+    pub front_queue_idx: Option<i64>,
+    /// 这条通道上最早那一单的提交时刻。
+    pub oldest_submitted_at: Option<i64>,
+    /// 在跑的里面有几条是常驻队列放行的。
+    pub auto_running: i64,
+}
+
+/// 按通道汇总在跑与本地待发。一次查询出全部通道 —— 顶部那排状态灯与补位循环共用它。
+///
+/// 只取 `run`/`ready` 两个阶段：已定案的条目不占任何通道的位子，把它们算进来只会让
+/// 一条早已跑完的通道永远挂在状态栏上。
+pub async fn channel_stats(
+    pool: &SqlitePool,
+    default_model: &str,
+) -> Result<Vec<ChannelRow>, sqlx::Error> {
+    type Row = (String, i64, i64, i64, Option<i64>, Option<i64>, i64);
+    let rows: Vec<Row> = sqlx::query_as(&format!(
+        "SELECT {CHANNEL_OF} AS ch,
+                CAST(SUM(CASE WHEN stage='run' THEN 1 ELSE 0 END) AS INTEGER),
+                CAST(SUM(CASE WHEN stage='ready' AND submit_queued_at IS NOT NULL
+                          AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''
+                         THEN 1 ELSE 0 END) AS INTEGER),
+                CAST(SUM(CASE WHEN stage='ready' AND submit_queued_at IS NULL
+                          AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''
+                         THEN 1 ELSE 0 END) AS INTEGER),
+                MIN(CASE WHEN stage='run' AND queue_idx > 0 THEN queue_idx END),
+                MIN(CASE WHEN stage='run' THEN submitted_at END),
+                CAST(SUM(CASE WHEN stage='run' AND auto_submitted=1 THEN 1 ELSE 0 END) AS INTEGER)
+           FROM v2v_clips
+          WHERE stage IN ('run','ready')
+          GROUP BY ch
+          ORDER BY ch"
+    ))
+    .bind(default_model)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(model_version, running, queued, ready, front, oldest, auto_running)| ChannelRow {
+                model_version,
+                running,
+                queued,
+                ready,
+                front_queue_idx: front,
+                oldest_submitted_at: oldest,
+                auto_running,
+            },
+        )
+        .filter(|c| c.running > 0 || c.queued > 0 || c.ready > 0)
+        .collect())
 }
 
 /// 撤回放行：本地待发 → 回到「等你点确认提交」。只动还没提交出去的。
@@ -1516,7 +1616,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            count_in_flight(&pool).await.unwrap(),
+            count_in_flight_on(&pool, "seedance2.0fast", "seedance2.0fast")
+                .await
+                .unwrap(),
             2,
             "两条都在即梦手上，抢的是同一份并发配额"
         );
@@ -1559,13 +1661,20 @@ mod tests {
             .unwrap();
         assert_eq!(count_submit_queued(&pool).await.unwrap(), 3);
         assert_eq!(
-            pick_submit_queued(&pool, 2).await.unwrap(),
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 2)
+                .await
+                .unwrap(),
             vec![ids[2], ids[0]],
             "先放行的先走"
         );
         // 重复放行不刷新时刻，否则再点一次确认就会把队首挤到队尾。
         mark_submit_queued(&pool, &ids, 999).await.unwrap();
-        assert_eq!(pick_submit_queued(&pool, 1).await.unwrap(), vec![ids[2]]);
+        assert_eq!(
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 1)
+                .await
+                .unwrap(),
+            vec![ids[2]]
+        );
     }
 
     // 撤回放行只动还没发出去的，且撤回后就不在队列里了。
@@ -1622,7 +1731,9 @@ mod tests {
         assert_eq!(after.attempt, 0, "连队都没入，不算一次尝试");
         assert!(after.error_type.is_none(), "它不是一条出了错的记录");
         assert_eq!(
-            pick_submit_queued(&pool, 5).await.unwrap(),
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 5)
+                .await
+                .unwrap(),
             vec![id],
             "弹回来之后仍在本地队列里等空位"
         );
@@ -1656,13 +1767,18 @@ mod tests {
         assert!(after.submit_id.is_none());
         assert_eq!(after.attempt, 0);
         assert!(after.finished_at.is_none(), "它并没有「结束」过");
-        assert_eq!(pick_submit_queued(&pool, 5).await.unwrap(), vec![id]);
+        assert_eq!(
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 5)
+                .await
+                .unwrap(),
+            vec![id]
+        );
 
         // 幂等：第二次没东西可救（它已经不是 fail 了）。
         assert!(!revive_rejected_fail(&pool, id, 400, 700).await.unwrap());
     }
 
-    // 并发配额是账户级的：人放行的和补单器放行的都算。
+    // 同一条通道内，人放行的和补单器放行的算同一份配额。
     #[tokio::test]
     async fn accepted_count_only_counts_what_dreamina_actually_took() {
         let (pool, _d) = test_pool().await;
@@ -1674,11 +1790,80 @@ mod tests {
         mark_submitted(&pool, ids[1], &SubmitReceipt::bare("b"), 400)
             .await
             .unwrap();
-        assert_eq!(count_in_flight(&pool).await.unwrap(), 2);
         assert_eq!(
-            count_running_accepted(&pool).await.unwrap(),
+            count_in_flight_on(&pool, "seedance2.0fast", "seedance2.0fast")
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            count_running_accepted_on(&pool, "seedance2.0fast", "seedance2.0fast")
+                .await
+                .unwrap(),
             1,
-            "只有拿到计费回执的那条算即梦真收下了 —— 它就是并发上限本身"
+            "只有拿到计费回执的那条算即梦真收下了 —— 它就是这条通道上限本身"
+        );
+    }
+
+    /// 通道之间必须互不相干（0031）—— 这是这一版的核心不变量。
+    ///
+    /// 即梦按模型通道各排各的队（实测 `queue_info.debug_info.dreamina_matrix_queue_name`
+    /// 逐通道不同：2.0fast 与 2.0mini 是两条完全不同的队）。按全局口径数在跑条数，
+    /// 会让 2.0fast 上那条长队把 2.0mini 上的条目一起锁死 —— 而 2.0mini 那条队是空的。
+    #[tokio::test]
+    async fn one_busy_channel_never_blocks_another() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        // 两条走默认通道（model_version 留空 → 落到 default_model），一条显式 mini。
+        set_params(&pool, &[ids[2]], Some("seedance2.0mini"), None, None, 300)
+            .await
+            .unwrap();
+        mark_submitted(&pool, ids[0], &SubmitReceipt::healthy("a", 8), 400)
+            .await
+            .unwrap();
+        mark_submit_queued(&pool, &[ids[1], ids[2]], 401)
+            .await
+            .unwrap();
+
+        let fast = count_in_flight_on(&pool, "seedance2.0fast", "seedance2.0fast")
+            .await
+            .unwrap();
+        let mini = count_in_flight_on(&pool, "seedance2.0fast", "seedance2.0mini")
+            .await
+            .unwrap();
+        assert_eq!((fast, mini), (1, 0), "mini 那条通道上一条都没在跑");
+
+        // 补位取队首也必须按通道各取各的：全局队首是 fast 的那条，
+        // 而 mini 上那条一样该发得出去。
+        assert_eq!(
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0mini", 5)
+                .await
+                .unwrap(),
+            vec![ids[2]],
+        );
+        assert_eq!(
+            pick_submit_queued_on(&pool, "seedance2.0fast", "seedance2.0fast", 5)
+                .await
+                .unwrap(),
+            vec![ids[1]],
+        );
+
+        // 汇总视图：两条通道各占一行，数字各归各的。
+        let chans = channel_stats(&pool, "seedance2.0fast").await.unwrap();
+        let by = |m: &str| {
+            chans
+                .iter()
+                .find(|c| c.model_version == m)
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            (by("seedance2.0fast").running, by("seedance2.0fast").queued),
+            (1, 1)
+        );
+        assert_eq!(
+            (by("seedance2.0mini").running, by("seedance2.0mini").queued),
+            (0, 1)
         );
     }
 

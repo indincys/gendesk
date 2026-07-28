@@ -181,10 +181,13 @@ impl Blocked {
 /// 按 0 算：按 0 算等于把日限当作不存在，而这里宁可少限一层也不能编一个单价出来。
 /// （单价查不到只会发生在没实测过的组合上，而默认模型是实测过的。）
 ///
-/// `in_flight` 是**所有**在跑条目（不只是补单器自己放出去的），`hard_limit` 是即梦的
-/// 账户级并发上限（`runner::effective_in_flight`）。0028 之前这两处都只算补单器自己的
-/// 那份，理由是「手动提交的一批不该顶掉它的配额」—— 而实测证明配额本来就是共用的：
-/// 人占满了唯一那个位子时，补单器再发出去的单子回来的是 `ExceedConcurrencyLimit`。
+/// `in_flight` 是**这条队列所用通道上**的全部在跑条目（不只是补单器自己放出去的），
+/// `hard_limit` 是即梦在该通道上的并发上限（`runner::effective_in_flight`）。
+///
+/// 两次修正各自纠了一个方向相反的错：0028 之前这两处只算补单器自己那份，于是人占满
+/// 位子时它照发不误，回来的是 `ExceedConcurrencyLimit`；0031 之前它们又跨通道地数，
+/// 于是别人在 2.0fast 上排着队，这条跑 2.0mini 的常驻队列被判定「位子满了」而整夜
+/// 一条都不补 —— 而 2.0mini 那条队从头到尾是空的。**同一条通道内共用，跨通道互不相干。**
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     cfg: &AutofillCfg,
@@ -275,9 +278,12 @@ pub async fn tick(
             return;
         }
     };
-    let hard_limit = crate::v2v::runner::effective_in_flight(settings.max_in_flight);
+    // 这条队列只跑它自己那条通道，闸门也只该按那条通道算（0031）。
+    // `validate()` 已经保证模型非空，故这里的 channel 一定是个真型号。
+    let channel = opts.model_version.clone().unwrap_or_default();
+    let hard_limit = crate::v2v::runner::effective_in_flight(&channel, settings.max_in_flight);
     let (in_flight, stock, spent_today) = match tokio::try_join!(
-        repo::count_in_flight(pool),
+        repo::count_in_flight_on(pool, &settings.model_version, &channel),
         repo::count_autofill_pool(pool),
         repo::credit_submitted_since(pool, now - 24 * 3600),
     ) {
@@ -338,8 +344,9 @@ pub async fn tick(
                     "submit",
                     None,
                     format!(
-                        "常驻队列本轮未补单：{}（在跑 {in_flight}/{target}）",
-                        b.label()
+                        "常驻队列本轮未补单：{}（{} 通道在跑 {in_flight}/{target}）",
+                        b.label(),
+                        dreamina::short_label(&channel),
                     ),
                     None,
                 );
@@ -383,7 +390,7 @@ pub async fn tick(
         "submit",
         None,
         format!(
-            "常驻队列补单 {} 条 · 模型 {} · 在跑 {in_flight}/{target} · 今日已提交 {spent_today} 额度",
+            "常驻队列补单 {} 条 · 模型 {} · 该通道在跑 {in_flight}/{target} · 今日已提交 {spent_today} 额度",
             ids.len(),
             opts.model_version.as_deref().unwrap_or("—"),
         ),
@@ -436,12 +443,13 @@ mod tests {
         assert_eq!(plan(&cfg(), 0, 99, 100, 0, Some(9999), Some(8), 0).take, 3);
     }
 
-    // 即梦的账户级并发上限压过配置深度：设了 3 而上限是 1 时，只补到 1。
+    // 即梦在**这条通道**上的并发上限压过配置深度：设了 3 而该通道上限是 1 时，只补到 1。
     //
-    // 这是 0028 的核心修正。旧版只数补单器自己放出去的条目，于是人手动占满了唯一
-    // 那个位子时它照样往外发，而那些单子回来的是 `ExceedConcurrencyLimit`。
+    // 这是 0028 的核心修正（调用方在 0031 改成按通道数 `in_flight`/`hard_limit`，
+    // 这条纯函数的判据不变）。旧版只数补单器自己放出去的条目，于是人手动占满了同一条
+    // 通道上唯一那个位子时它照样往外发，而那些单子回来的是 `ExceedConcurrencyLimit`。
     #[test]
-    fn account_wide_concurrency_limit_wins_over_configured_depth() {
+    fn the_channels_concurrency_limit_wins_over_configured_depth() {
         assert_eq!(plan(&cfg(), 0, 1, 100, 0, Some(9999), Some(8), 0).take, 1);
         assert_eq!(
             plan(&cfg(), 1, 1, 100, 0, Some(9999), Some(8), 0).take,

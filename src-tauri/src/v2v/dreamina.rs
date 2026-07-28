@@ -232,6 +232,8 @@ pub struct ResPrice {
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub model_version: String,
+    /// 通道简写（[`short_label`]）。界面上凡是要在一行里挤下型号的地方都读它。
+    pub label: String,
     pub min_duration: i64,
     pub max_duration: i64,
     pub resolutions: Vec<String>,
@@ -257,11 +259,53 @@ pub fn is_vip(model_version: &str) -> bool {
     model_version.ends_with("_vip")
 }
 
+/// 通道简写 —— 顶部那排通道状态灯上的名字（`seedance2.0fast` → `2.0Fast`）。
+///
+/// **单点定义在这里**，随 [`ModelInfo::label`] 一起下发。型号全名在一个 20px 高的
+/// pill 里放不下，而让每个消费者各自 `replace(/^seedance/, "")` 一遍的结果是
+/// 「2.0fast」「2.0Fast」「2.0 Fast」三种拼法同屏出现（前端此前那个 `shortModel`
+/// 就是这么来的）。
+///
+/// 空串 = 设置里没指定模型，实际通道由 CLI 自己挑 —— 那时**必须**说「CLI 默认」
+/// 而不是编一个型号名：它是一条我们叫不出名字的通道，而叫错名字比不叫更糟。
+pub fn short_label(model_version: &str) -> String {
+    let m = model_version.trim();
+    if m.is_empty() {
+        return "CLI 默认".to_string();
+    }
+    let (base, vip) = match m.strip_suffix("_vip") {
+        Some(b) => (b, true),
+        None => (m, false),
+    };
+    let base = base.strip_prefix("seedance").unwrap_or(base);
+    // 只抬「字母段的首字母」：数字与点原样留着，`2.0fast` → `2.0Fast`。
+    let mut out = String::with_capacity(base.len() + 4);
+    let mut head = true;
+    for c in base.chars() {
+        if c.is_ascii_alphabetic() {
+            if head {
+                out.extend(c.to_uppercase());
+            } else {
+                out.push(c);
+            }
+            head = false;
+        } else {
+            out.push(c);
+            head = true;
+        }
+    }
+    if vip {
+        out.push_str(" VIP");
+    }
+    out
+}
+
 pub fn models() -> Vec<ModelInfo> {
     MODELS
         .iter()
         .map(|(m, lo, hi, res)| ModelInfo {
             model_version: (*m).to_string(),
+            label: short_label(m),
             min_duration: *lo,
             max_duration: *hi,
             resolutions: res.iter().map(|r| (*r).to_string()).collect(),

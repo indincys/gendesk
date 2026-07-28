@@ -499,12 +499,14 @@ impl Scheduler {
         let (full_c, thumb_c) = (full.clone(), thumb.clone());
         // 缩略图生成顺带返回原图真实像素（0027）：验收页按真实比例排版要用它，
         // 而这里已经把整张图解码过一遍了，再读一次纯属白干。
-        let size = tokio::task::spawn_blocking(move || {
-            crate::files::generate_thumbnail(&full_c, &thumb_c)
+        //
+        // 走 `files::decode::bounded` 而不是裸 `spawn_blocking`：并发上限最高 100，
+        // 那就是 100 张图同时解码 —— 阻塞线程池默认能开到 512，谁都拦不住。
+        let size = crate::files::decode::bounded(move |permit| {
+            crate::files::generate_thumbnail(&full_c, &thumb_c, permit)
         })
         .await
-        .ok()
-        .and_then(Result::ok);
+        .ok();
         let thumb_path = if size.is_some() { thumb } else { full.clone() };
 
         let _ = task_repo::mark_review(

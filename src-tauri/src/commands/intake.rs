@@ -3,6 +3,8 @@
 //! 收录本身是**自动**的（watcher + 启动补跑），这里的命令只回答两件事：
 //! 「投单该往哪个目录放」与「刚才那几份工单怎么样了」。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
@@ -25,6 +27,21 @@ const KEY: &str = "intake";
 #[serde(rename_all = "camelCase")]
 pub struct IntakeChanged {
     pub jobs: Vec<JobView>,
+}
+
+/// `intake://progress` —— 收录一份工单时的逐张进度。
+///
+/// 确认一份 120 张的工单要几十秒。没有这条事件，那几十秒里界面上什么都不会动，
+/// 而「看起来卡死了」的下一步永远是再点一次——`RefImportProgress` 的注释里
+/// 已经记着同一个故障了。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct IntakeProgress {
+    pub job_id: String,
+    /// 当前阶段。目前只有 `refs`（参考图落盘），留字段是为了以后加阶段不必改事件形状。
+    pub phase: String,
+    pub done: i64,
+    pub total: i64,
 }
 
 /// 收件设置（`settings` 表 key='intake' 单行 JSON）。
@@ -203,12 +220,15 @@ pub struct JobPreviewGroup {
 #[serde(rename_all = "camelCase")]
 pub struct JobPreviewRef {
     pub file_name: String,
-    /// 内联 data: URI 缩略图。
+    /// 工单目录内的参考图绝对路径。
     ///
-    /// **不能走 asset 协议**：它的 scope 限定在 `$APPDATA/$APPLOCALDATA/$PICTURE`，
-    /// 而工单目录在交接根下（默认 `~/GenDesk交接/`）。为了给一张预览图去放宽
-    /// 整个应用的文件读取范围，代价与收益完全不成比例。
-    pub thumb_data_uri: Option<String>,
+    /// **这里不带缩略图。** 缩略图由 [`intake_ref_thumb`] 按需单张生成——原来是在
+    /// 组装预览时把每张参考图都全分辨率解码一遍再塞成 base64，一份 120 张 26 MP
+    /// 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两组。
+    ///
+    /// 顺带解决了 asset 协议的 scope 问题：工单目录在交接根下（默认 `~/GenDesk交接/`），
+    /// 够不着 `$APPDATA/**`；而按需生成的缩略图**缓存在 app data 里**，正好够得着。
+    pub path: String,
 }
 
 /// 预览一份待确认工单。**只读**：与真正收录走的是同一个 `intake::plan`，
@@ -225,13 +245,53 @@ pub async fn preview_intake_job(state: State<'_, AppState>, id: i64) -> AppResul
             dir.display()
         )));
     }
-    // 解析 + 读图都是纯 IO/CPU，别占着 IPC 的异步执行器。
+    // 解析是纯 IO/CPU，别占着 IPC 的异步执行器。**不再读图**：一份大工单的
+    // 提示词文档也就一两 MB，解析几十毫秒，缩略图交给 `intake_ref_thumb` 按需去做。
     let threshold = s.task_threshold;
     let job_id = job.job_id.clone();
     let dir_name = job.dir_name.clone();
     tokio::task::spawn_blocking(move || build_preview(id, &job_id, &dir_name, &dir, threshold))
         .await
         .map_err(|e| AppError::Internal(format!("预览工单失败：{e}")))?
+}
+
+/// 单张参考图的预览缩略图 → 缓存文件绝对路径（前端 `assetSrc` 读）。
+///
+/// 命中缓存就直接返回，**连解码预算都不碰**：重开确认卡、来回滚动都是零成本，
+/// 这才是「反复打开不会把 CPU 叠上去」的真正保证——`spawn_blocking` 不可取消，
+/// 想靠取消来收场是收不住的，只能让重复的活根本不发生。
+#[tauri::command]
+#[specta::specta]
+pub async fn intake_ref_thumb(
+    state: State<'_, AppState>,
+    id: i64,
+    path: String,
+) -> AppResult<String> {
+    let job = repo::get(&state.db, id).await?;
+    let s = load_settings(&state.db).await?;
+    let job_dir = intake::pending_dir(&s.root_path()).join(&job.dir_name);
+
+    // 越界校验。没有这一段，这个命令就是「解码磁盘上任意文件、并把结果放进
+    // webview 读得到的目录」——命令是公开边界，不该假设调用方只有我们自己的前端。
+    let src = std::fs::canonicalize(&path)
+        .map_err(|e| AppError::InvalidInput(format!("参考图不可读：{e}")))?;
+    let root = std::fs::canonicalize(&job_dir)
+        .map_err(|e| AppError::InvalidInput(format!("工单目录不可读：{e}")))?;
+    if !src.starts_with(&root) {
+        return Err(AppError::InvalidInput("参考图不在该工单目录内".into()));
+    }
+
+    state.dirs.init()?;
+    let previews = state.dirs.previews();
+    let (dest, hit) = crate::files::preview::cached_path(&previews, &src)?;
+    if hit {
+        return Ok(dest.to_string_lossy().to_string());
+    }
+
+    let (d, s2) = (dest.clone(), src.clone());
+    crate::files::decode::bounded(move |permit| crate::files::preview::build(&s2, &d, permit))
+        .await?;
+    Ok(dest.to_string_lossy().to_string())
 }
 
 fn build_preview(
@@ -264,7 +324,7 @@ fn build_preview(
                         .file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default(),
-                    thumb_data_uri: preview_thumb(p),
+                    path: p.to_string_lossy().to_string(),
                 })
                 .collect(),
             params_json: g.params_json.clone(),
@@ -285,39 +345,6 @@ fn build_preview(
     })
 }
 
-/// 预览缩略图长边像素。够看清「是不是这张图」，又不至于让一份 30 张图的工单
-/// 把几十 MB base64 塞进一次 IPC 回包。
-const PREVIEW_EDGE: u32 = 240;
-
-/// 参考图 → `data:image/jpeg;base64,…`。读不出来就返回 None（前端画占位框）——
-/// 一张图预览失败不该让整份确认卡打不开。
-fn preview_thumb(path: &std::path::Path) -> Option<String> {
-    use base64::Engine as _;
-    use image::codecs::jpeg::JpegEncoder;
-
-    let img = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?
-        .thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
-        .to_rgb8();
-    let mut buf: Vec<u8> = Vec::new();
-    JpegEncoder::new_with_quality(&mut buf, 72)
-        .encode(
-            &img,
-            img.width(),
-            img.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .ok()?;
-    Some(format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(&buf)
-    ))
-}
-
 /// 确认开跑一份超阈值的工单。
 ///
 /// 做的事就两件：**在工单目录里写下 `确认.txt`**，然后删掉台账那行让它重新收录。
@@ -330,7 +357,7 @@ pub async fn confirm_intake_job(
     state: State<'_, AppState>,
     app: AppHandle,
     id: i64,
-) -> AppResult<Vec<JobView>> {
+) -> AppResult<()> {
     let job = repo::get(&state.db, id).await?;
     if job.status != "hold" {
         return Err(AppError::InvalidInput(
@@ -351,7 +378,19 @@ pub async fn confirm_intake_job(
     )
     .map_err(|e| AppError::Io(format!("写确认文件失败：{e}")))?;
     repo::delete(&state.db, id).await?;
-    scan_intake_now(state, app).await
+
+    // **不等扫描跑完。** 一份 120 张的工单收录要几十秒，等它就是让 IPC 阻塞几十秒，
+    // 而那段时间界面上什么都不动——用户会以为点了没反应。结果本来就有回报渠道
+    // （`intake://changed` + 系统通知），中途由 `intake://progress` 覆盖。
+    //
+    // 附带好处：`确认.txt` 已经落盘，进程哪怕在这一刻被杀，下次启动重扫也会接上。
+    let s2 = load_settings(&state.db).await?;
+    let ctx = ctx_of_with_progress(&state, s2.task_threshold, &app);
+    let root = s2.root_path();
+    tauri::async_runtime::spawn(async move {
+        scan_and_emit(&ctx, &root, &app).await;
+    });
+    Ok(())
 }
 
 /// 在系统文件管理器打开收件目录。
@@ -440,6 +479,33 @@ fn ctx_of(state: &State<'_, AppState>, threshold: i64) -> Ctx {
         pool: state.db.clone(),
         dirs: state.dirs.clone(),
         engine: state.engine.clone(),
+        progress: Arc::new(intake::ingest::NoProgress),
         threshold,
+        // **必须是 AppState 里那一把**：watcher 与命令层各自构造 Ctx，
+        // 各拿一把新锁就等于没有锁。
+        scan_lock: state.intake_scan_lock.clone(),
+    }
+}
+
+/// 带进度回报的 Ctx。只有「用户正等着的那条路」用它——后台扫描没人在看。
+fn ctx_of_with_progress(state: &State<'_, AppState>, threshold: i64, app: &AppHandle) -> Ctx {
+    Ctx {
+        progress: Arc::new(TauriProgress(app.clone())),
+        ..ctx_of(state, threshold)
+    }
+}
+
+/// `intake://progress` 的 Tauri 实现。
+struct TauriProgress(AppHandle);
+
+impl intake::ingest::ProgressSink for TauriProgress {
+    fn refs(&self, job_id: &str, done: i64, total: i64) {
+        let _ = IntakeProgress {
+            job_id: job_id.to_string(),
+            phase: "refs".into(),
+            done,
+            total,
+        }
+        .emit(&self.0);
     }
 }

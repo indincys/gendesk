@@ -1,7 +1,14 @@
 import { Modal } from "@/components/ui/Modal";
-import { type JobPreview, commands, unwrap } from "@/lib/ipc";
+import { assetSrc } from "@/lib/img";
+import {
+  type JobPreview,
+  type JobPreviewRef,
+  commands,
+  subscribeIntakeProgress,
+  unwrap,
+} from "@/lib/ipc";
 import { AlertTriangle, PlayCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
@@ -17,6 +24,17 @@ import { toast } from "sonner";
  *
  * 预览与真正收录走的是**同一个 `intake::plan`**，故这里看见的就是确认之后
  * 会发生的那一份，不存在两套解析各说各话。
+ *
+ * ## 缩略图为什么是懒加载的
+ *
+ * 一份 120 张 26 MP 相机图的工单，原来打开这张卡会把 767 MB 的图全部解码一遍
+ * 再塞成 base64 —— 弹窗停在「正在读工单…」一两分钟，而后端每关一次再开一次
+ * 就多挂一条停不下来的解码线程（实测 600% CPU / 608 MB RSS）。
+ *
+ * 现在每张图进了视口才去要，且后端有磁盘缓存 —— 滚回去是零成本，重开也是。
+ * 组件卸载就不再发起新请求，这就是这条链路上「取消」能做到的全部：
+ * 后端那次 `spawn_blocking` 本来就不可取消，所以真正的答案是**让多余的活
+ * 根本不要开始**，而不是开始之后去追。
  */
 export function IntakeConfirmModal({
   jobId,
@@ -30,6 +48,7 @@ export function IntakeConfirmModal({
   const [preview, setPreview] = useState<JobPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -45,16 +64,27 @@ export function IntakeConfirmModal({
     };
   }, [jobId]);
 
+  // 确认之后 IPC 立刻返回，真正的收录在后台跑。这条订阅是那几十秒里唯一的动静。
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void subscribeIntakeProgress((e) => {
+      setProgress({ done: e.done, total: e.total });
+    }).then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, []);
+
   const confirm = async () => {
     setBusy(true);
     try {
       await unwrap(commands.confirmIntakeJob(jobId));
-      toast.success("已确认开跑");
+      // 收录在后台继续，结果由 `intake://changed` 那条 toast 兜底报出来。
+      toast.success("已确认开跑，正在导入…");
       onConfirmed();
       onClose();
     } catch (e) {
       toast.error(String(e));
-    } finally {
       setBusy(false);
     }
   };
@@ -74,10 +104,12 @@ export function IntakeConfirmModal({
       footer={
         <>
           <span className="fs11 t3">
-            确认前一条提示词、一张参考图都没进库；确认后整份生效并立即开始花额度
+            {busy && progress
+              ? `正在导入参考图 ${progress.done}/${progress.total}…`
+              : "确认前一条提示词、一张参考图都没进库；确认后整份生效并立即开始花额度"}
           </span>
           <div className="f1" />
-          <button type="button" className="btn sm" onClick={onClose}>
+          <button type="button" className="btn sm" onClick={onClose} disabled={busy}>
             先不跑
           </button>
           <button
@@ -132,30 +164,87 @@ export function IntakeConfirmModal({
               <div className="ikbody mt8">
                 <div className="ikrefs">
                   {g.refs.map((r) => (
-                    <div key={r.fileName} className="ikref" title={r.fileName}>
-                      {r.thumbDataUri ? (
-                        <img src={r.thumbDataUri} alt={r.fileName} />
-                      ) : (
-                        <div className="ph" style={{ aspectRatio: 1, borderRadius: 8 }} />
-                      )}
-                      <div className="fs10 t3 nowrap ohide mono">{r.fileName}</div>
-                    </div>
+                    <LazyRef key={r.path} jobId={jobId} refItem={r} />
                   ))}
                 </div>
-                <div className="ikprompts">
-                  {g.prompts.map((t, i) => (
-                    <div key={`${g.name}-${i}`} className="ikprompt">
-                      <span className="fs10 t3 mono noshrink">{i + 1}</span>
-                      <span className="fs11">{t}</span>
-                    </div>
-                  ))}
-                </div>
+                <PromptList groupName={g.name} prompts={g.prompts} />
               </div>
             </div>
           ))}
         </>
       )}
     </Modal>
+  );
+}
+
+/** 一张参考图：进了视口才去要缩略图。 */
+function LazyRef({ jobId, refItem }: { jobId: number; refItem: JobPreviewRef }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    let alive = true;
+    // rootMargin 提前一屏：滚动时图已经在那儿了，而不是滚到了才开始转。
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        io.disconnect();
+        void unwrap(commands.intakeRefThumb(jobId, refItem.path))
+          .then((p) => {
+            if (alive) setSrc(assetSrc(p) ?? null);
+          })
+          // 一张图读不出来不该让整份确认卡打不开：留占位框，其余照常。
+          .catch(() => {});
+      },
+      { rootMargin: "300px" },
+    );
+    io.observe(el);
+    return () => {
+      alive = false;
+      io.disconnect();
+    };
+  }, [jobId, refItem.path]);
+
+  return (
+    <div ref={boxRef} className="ikref" title={refItem.fileName}>
+      {src ? (
+        <img src={src} alt={refItem.fileName} loading="lazy" decoding="async" />
+      ) : (
+        <div className="ph" style={{ aspectRatio: 1, borderRadius: 8 }} />
+      )}
+      <div className="fs10 t3 nowrap ohide mono">{refItem.fileName}</div>
+    </div>
+  );
+}
+
+/**
+ * 一组的提示词。默认只铺前三条。
+ *
+ * 要核的是「这组配了哪几张图」，不是把 120 组 × 每组几千字全部读一遍；
+ * 一次性铺开 600 段长叙事只会把要核的东西埋掉。
+ */
+const PROMPT_PREVIEW = 3;
+
+function PromptList({ groupName, prompts }: { groupName: string; prompts: string[] }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? prompts : prompts.slice(0, PROMPT_PREVIEW);
+  return (
+    <div className="ikprompts">
+      {shown.map((t, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: 组内提示词允许重复，文本不能当键；这份列表只从尾部增减、永不重排，位置就是身份。
+        <div key={`${groupName}-${i}`} className="ikprompt">
+          <span className="fs10 t3 mono noshrink">{i + 1}</span>
+          <span className="fs11">{t}</span>
+        </div>
+      ))}
+      {prompts.length > PROMPT_PREVIEW && (
+        <button type="button" className="ikmore" onClick={() => setAll((v) => !v)}>
+          {all ? "收起" : `展开全部 ${prompts.length} 条`}
+        </button>
+      )}
+    </div>
   );
 }
 

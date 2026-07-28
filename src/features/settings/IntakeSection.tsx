@@ -1,6 +1,6 @@
-import { IntakeConfirmModal } from "@/features/settings/IntakeConfirmModal";
-import { type IntakeSettings, type JobView, commands, unwrap } from "@/lib/ipc";
+import { type IntakeSettings, type JobView, commands, subscribeIntake, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
 import { AlertTriangle, Check, FolderOpen, PlayCircle, RefreshCw, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -21,7 +21,9 @@ export function IntakeSection() {
   const [dir, setDir] = useState<string>("");
   const [scanning, setScanning] = useState(false);
   // 待确认工单的可视化确认卡（看清提示词组 ↔ 参考图的对应关系再放行）。
-  const [confirming, setConfirming] = useState<number | null>(null);
+  // 卡本身由外壳统一挂载 —— 这里只是把「要看哪一份」写进去。收到 hold 事件时
+  // 外壳也会写同一个字段，于是无论从哪个入口进来，同一时刻都只有一张卡。
+  const setHoldJob = useUiStore((s) => s.setHoldJob);
 
   const refresh = useCallback(async () => {
     setJobs(await unwrap(commands.listIntakeJobs(20)).catch(() => []));
@@ -33,6 +35,19 @@ export function IntakeSection() {
       .then(setS)
       .catch(() => {});
     void refresh();
+  }, [refresh]);
+
+  // 台账跟着收录结果走。确认开跑之后 IPC 立刻就返回了（收录在后台跑），
+  // 所以「这份工单最后怎么样了」只能等这条事件——否则这一行会一直停在「待确认」，
+  // 而它其实早就跑起来了。自动收录同理：人可能正停在这一页看着。
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void subscribeIntake(() => {
+      void refresh();
+    }).then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
   }, [refresh]);
 
   const save = async (p: Partial<IntakeSettings>) => {
@@ -200,7 +215,7 @@ export function IntakeSection() {
                   <span className="fs11" style={{ color: "var(--wr)" }}>
                     {j.message}（还没导入任何东西）
                   </span>
-                  <button type="button" className="btn sm" onClick={() => setConfirming(j.id)}>
+                  <button type="button" className="btn sm" onClick={() => setHoldJob(j.id)}>
                     <PlayCircle className="ic12" />
                     查看并确认
                   </button>
@@ -232,14 +247,6 @@ export function IntakeSection() {
             </div>
           ))}
         </div>
-      )}
-
-      {confirming !== null && (
-        <IntakeConfirmModal
-          jobId={confirming}
-          onClose={() => setConfirming(null)}
-          onConfirmed={() => void refresh()}
-        />
       )}
     </section>
   );

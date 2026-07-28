@@ -14,7 +14,7 @@ import { usePublishStore } from "@/stores/publish";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { useV2vStore } from "@/stores/v2v";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { toast } from "sonner";
 
 /** 应用外壳（执行计划 0.4）：标题栏 + 侧栏 + 主面板容器。 */
@@ -31,7 +31,10 @@ export function AppShell() {
   const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
   // 超阈值工单：在任何页面上都要能当场核对并放行（见下方订阅处的理由）。
-  const [holdJob, setHoldJob] = useState<number | null>(null);
+  // 状态在 store 里、卡只在这里挂一次 —— 设置页那个按钮也只是写这同一个字段，
+  // 否则人停在设置页时会同时挂出两份同样的卡。
+  const holdJob = useUiStore((s) => s.holdJob);
+  const setHoldJob = useUiStore((s) => s.setHoldJob);
 
   // 加载设置（E13 引导态 / 动效偏好等全局所需）。
   useEffect(() => {

@@ -102,8 +102,21 @@ pub(crate) struct Ingested {
     pub upload_path: Option<String>,
 }
 
-/// 把一张源图落进库目录（同步、CPU/IO 密集，调用方须放在阻塞线程）。
-pub(crate) fn ingest_one(path: &str, refs_dir: &Path, thumbs_dir: &Path) -> AppResult<Ingested> {
+/// 把一张源图落进库目录（同步、CPU/IO 密集，调用方须经 `files::decode::bounded`）。
+///
+/// **一次读、一次解码。** 原来这里是 4 次整文件读 + 2 次全分辨率解码：
+/// `fs::copy` 读一遍、`generate_thumbnail` 读+解一遍、`content_hash` 再读一遍、
+/// `make_upload_copy` 又读+解一遍。对一份 120 张 26 MP 相机图的工单，那是
+/// 约 3 GB 的重复 IO 加 240 次 26 MP 解码，全串行——确认一次要四分钟。
+///
+/// 现在：读一次进内存，哈希、落盘、量尺寸都用这份字节；解码只做一次，
+/// 且直接解到「够用的最小档」（超限图解到 ≥2048，正好同时喂饱上传副本和缩略图）。
+pub(crate) fn ingest_one(
+    path: &str,
+    refs_dir: &Path,
+    thumbs_dir: &Path,
+    permit: &files::decode::DecodePermit,
+) -> AppResult<Ingested> {
     let src = PathBuf::from(path);
     let stem = src
         .file_stem()
@@ -116,23 +129,46 @@ pub(crate) fn ingest_one(path: &str, refs_dir: &Path, thumbs_dir: &Path) -> AppR
         .unwrap_or("png")
         .to_lowercase();
 
-    // 拷入 refs/
+    let bytes = std::fs::read(&src)?;
+    let file_size = bytes.len() as i64;
+    // E30b：内容 hash（去重比对用）。用手里这份字节，与落盘的内容同源。
+    let content_hash = Some(files::content_hash_bytes(&bytes));
+
+    // 落进 refs/。这里用 write 而不是 copy，是为了保证「哈希算的」与「盘上存的」
+    // 是同一串字节；权限位差异对库内文件没有意义。别改回 copy。
     let dest = unique_path(refs_dir, &stem, &ext);
-    std::fs::copy(&src, &dest)?;
+    std::fs::write(&dest, &bytes)?;
 
-    // 生成缩略图
+    // 尺寸只读文件头。这也是写进 ref_images.width/height 的那个值，必须是原图尺寸。
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()?
+        .into_dimensions()?;
+
+    // E41：长边或字节数超限就出一份上传用压缩副本。判定在解码之前。
+    let oversize = w > files::UPLOAD_MAX_EDGE
+        || h > files::UPLOAD_MAX_EDGE
+        || bytes.len() as u64 > files::UPLOAD_MAX_BYTES;
+
+    // 唯一一次解码。超限图解到 ≥2048（上传副本要），否则解到 ≥512（只做缩略图）。
+    // 6240 宽的源在 1/2 档解出 3120，两个派生物都够。
+    let target = if oversize {
+        files::UPLOAD_MAX_EDGE
+    } else {
+        files::THUMB_MAX
+    };
+    let img = files::decode::decode_scaled(&bytes, target, permit)?;
+
     let thumb = unique_path(thumbs_dir, &stem, "jpg");
-    let (w, h) = files::generate_thumbnail(&dest, &thumb)?;
-    let file_size = std::fs::metadata(&dest)
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
+    files::write_thumbnail_from(&img, &thumb)?;
 
-    // E30b：内容 hash（去重比对用）。E41：超限则生成上传用压缩副本。
-    let content_hash = files::content_hash(&dest).ok();
-    let upload_dest = unique_path(refs_dir, &format!("{stem}_up"), "jpg");
-    let upload_path = match files::make_upload_copy(&dest, &upload_dest) {
-        Ok(Some(_)) => Some(upload_dest.to_string_lossy().to_string()),
-        _ => None,
+    let upload_path = if oversize {
+        let upload_dest = unique_path(refs_dir, &format!("{stem}_up"), "jpg");
+        match files::write_upload_copy_from(&img, &upload_dest) {
+            Ok(()) => Some(upload_dest.to_string_lossy().to_string()),
+            Err(_) => None,
+        }
+    } else {
+        None
     };
 
     Ok(Ingested {
@@ -175,9 +211,8 @@ pub async fn import_ref_images(
         let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
         let p = path.clone();
         // 解码 + 缩放 + 重编码是纯 CPU；留在异步执行器上会把整个 IPC 卡住。
-        let res = tokio::task::spawn_blocking(move || ingest_one(&p, &rd, &td))
-            .await
-            .map_err(|e| AppError::Io(format!("导入任务失败：{e}")))?;
+        // `bounded` 顺带把它纳入进程级解码预算。
+        let res = files::decode::bounded(move |permit| ingest_one(&p, &rd, &td, permit)).await;
 
         match res {
             Ok(ing) => {
@@ -527,9 +562,9 @@ pub async fn replace_ref_image_file(
     // 那是同一条管线的第二份抄本，而两份抄本只会在下一次改口径时分叉
     // （E30b 的 hash、E41 的上传副本都是后来补进去的，抄本迟早会漏掉某一次）。
     // 顺带把这整段纯 CPU/IO 挪进 `spawn_blocking`（同 v0.14.0 导入那次的教训）。
-    let ing = tokio::task::spawn_blocking(move || ingest_one(&path, &refs_dir, &thumbs_dir))
-        .await
-        .map_err(|e| AppError::Io(format!("参考图更换任务失败：{e}")))??;
+    let ing =
+        files::decode::bounded(move |permit| ingest_one(&path, &refs_dir, &thumbs_dir, permit))
+            .await?;
     repo::update_file(
         &state.db,
         id,

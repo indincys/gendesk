@@ -2,97 +2,77 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## GenDesk — 内部图片生产工具 · 开发约定
+## 项目概览
 
-> 本地批量图生图流水线：参考图素材库 → 提示词分组 → 批量生成 → 进度追踪 → 人工验收 →
-> 合格图输出归档；v0.7.0 起并入发布与资产管理模块。
->
-> 本文件是 AI 开发本仓库的操作手册。**每条铁律都有 guardrails/CI 对应检查**；
-> 改规则必须同步改检查（否则等于没规则）。
->
-> **V1 的四份规划文档（需求/技术选型/开发执行计划/UX 优化计划）已于 445b396 删除**——
-> 内容浓缩进本文末尾的「里程碑进度」，那里就是它们的现存形态，**不要去找那些文件**。
-> 现存参考物：`docs/prototype/prototype.dc.html`（V1 八页像素基准）·
-> `docs/prototype/publish.dc.html`（发布模块原型）· `docs/prototype/Design-Tokens.md`（token 基准）·
-> 发布模块三份（`内部图片生产工具_发布与资产管理需求文档.md` / `..._发布模块开发执行计划.md` /
-> `..._发布模块优化执行计划.md`）· `内部图片生产工具_密钥存储迁移执行计划.md` ·
-> `内部图片生产工具_验收与体验修复执行计划.md` · `发布模块_设计输入摘要.md` ·
-> `docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/mutants-exemptions.md` ·
-> `docs/收件箱收录格式规范.md`。
+GenDesk：内部图片生产工具。Tauri 2 桌面应用，单实例、纯本地（SQLite + 本地文件），无服务端。
+前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），二者只经
+tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon。
+
+四条流水线：**生图**（参考图 + 提示词 → 批量生成 → 人工验收 → 输出归档）·
+**图生视频 v2v**（验收图 → skill 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
+**发布与资产管理**（素材包 → 日内容套装 → 任务单 xlsx → 执行器回执闭环）·
+**工单收件 intake**（外部 skill 投单 → 自动导入 → 建批开跑）。
 
 ## 常用命令
 
 前置：Node ≥ 22 · pnpm 9.15（`packageManager` 已锁）· Rust stable。
-仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon（**Intel Mac 不支持**）。
 
-| 目的                   | 命令                                                          |
-| -------------------- | ----------------------------------------------------------- |
-| 启动双端开发               | `pnpm tauri dev`                                            |
-| **全门禁（CI 镜像，提交前必跑）** | `pnpm check`                                                |
-| 前端类型检查               | `pnpm typecheck`                                            |
-| 前端单测                 | `pnpm test`                                                 |
-| 前端 lint/format 修复    | `pnpm lint:fix`                                             |
-| 架构铁律检查               | `pnpm guardrails`                                           |
-| Rust 测试              | `cd src-tauri && cargo test`                                |
-| Rust 静态检查            | `cd src-tauri && cargo clippy --all-targets -- -D warnings` |
-| **重新生成 IPC 绑定**      | `cd src-tauri && cargo test --lib export_bindings`          |
-| 压测（M2 起）             | `cd src-tauri && cargo test --release -- --ignored`         |
-| 变异测试（里程碑关卡）          | `cd src-tauri && cargo mutants -- --package gendesk`        |
-| 安装 pre-commit        | `pnpm dlx lefthook install`                                 |
+| 目的                    | 命令                                                                         |
+| --------------------- | -------------------------------------------------------------------------- |
+| 启动双端开发                | `pnpm tauri dev`                                                           |
+| **全门禁（CI 镜像，提交前必跑）**  | `pnpm check`                                                               |
+| 前端类型检查 / 单测 / lint 修复 | `pnpm typecheck` · `pnpm test` · `pnpm lint:fix`                           |
+| 架构铁律检查                | `pnpm guardrails`                                                          |
+| Rust 测试 / 静态检查        | `cd src-tauri && cargo test` · `cargo clippy --all-targets -- -D warnings` |
+| **重新生成 IPC 绑定**       | `cd src-tauri && cargo test --lib export_bindings`                         |
+| 压测（dispatcher）        | `cd src-tauri && cargo test --release -- --ignored`                        |
+| 安装 pre-commit         | `pnpm dlx lefthook install`                                                |
 
-**本机 shell 陷阱**：非交互 shell 里 `cd <repo> && <node/pnpm 命令>` 会被 fnm 的 use-on-cd
-钩子打断（`We can't find the necessary environment variables to replace the Node version`），
-**报错来自 cd 而非命令本身**。用 `--dir` 绕开，别去改 shell 配置：
-
-```bash
-pnpm --dir /Users/indincys/Documents/Code/GenDesk check
-```
-
-同理 Rust 侧用 `cargo <cmd> --manifest-path <repo>/src-tauri/Cargo.toml`。
-（表格里的 `cd src-tauri && ...` 在交互终端里正常，仅 AI 的非交互 shell 需绕行。）
-
-**跑单个测试**（迭代时别整套跑，Rust 全量 \~7s、`pnpm check` \~1min）：
+**跑单个测试**（迭代时别整套跑）：
 
 ```bash
 cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocapture
 ```
 
-- 按模块过滤：`cargo test --lib publish::planner::`（子串匹配，无需 `--exact`）。
-- 前端单测：`pnpm vitest run src/routes.test.ts` 或 `pnpm test:watch`。
-- 前端测试极少（仅 `routes.test.ts` / `stores/settings.test.ts`）——**业务真相在 Rust，
-  测试也在 Rust**，别为了「补前端覆盖率」去测 UI 壳。
+按模块过滤用子串匹配无需 `--exact`：`cargo test --lib publish::planner::`。
+前端：`pnpm vitest run src/routes.test.ts`。
+
+**本机 shell 陷阱**：非交互 shell 里 `cd <repo> && <node/pnpm 命令>` 会被 fnm 的 use-on-cd
+钩子打断（`We can't find the necessary environment variables to replace the Node version`），
+**报错来自 cd 而非命令本身**。用 `pnpm --dir <repo> <cmd>` 与
+`cargo <cmd> --manifest-path <repo>/src-tauri/Cargo.toml` 绕开，别去改 shell 配置。
 
 ## 架构地图
 
-**形态**：Tauri 2 桌面应用，单实例、纯本地（SQLite + 本地文件），无服务端。
-前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），
-二者只经 tauri-specta 生成的类型化 IPC 通信。
-
 ### 后端（`src-tauri/src/`）
 
-| 模块           | 职责                                                                                                                                                                         |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib.rs`     | **命令/事件的唯一登记点**（`specta_builder()`）+ 应用启动装配。加命令必改这里。                                                                                                                       |
-| `state.rs`   | `AppState`：DB 池 · 密钥存储 · 数据目录 · 引擎。业务真相的持有者。                                                                                                                               |
-| `commands/`  | IPC 命令层（薄）：校验入参 → 调 repo/引擎 → 组视图结构体。按域分文件。                                                                                                                                |
-| `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                                             |
-| `engine/`    | 任务引擎：`dispatcher`（单循环 + per-Key Semaphore）· `status`（7 态机）· `strategy` · `classify`（错误六类）· `progress`（伪进度）· `recovery`（中断恢复）· `events`（EventSink 抽象，故引擎可脱离 Tauri 测试）。      |
-| `provider/`  | 生图 Provider 抽象；V1 唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`（元数据/C2PA 剥离）。                                                                                      |
-| `publish/`   | 发布与资产管理（最大子系统）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                                               |
-| `v2v/`       | 图生视频流水线（v0.15.0 起状态在库内）：`dreamina`(即梦 CLI 封装) · `handoff`(交接目录工单往返) · `runner`(提交/轮询/落盘) · `watcher`(监听改写结果) · `events`。另留 v0.13.0 的一次性导出包（`common_affixes`/`write_pack`）。 |
-| `intake/`    | 生图工单收件（v0.17.0）：Claude Code / Codex 侧 skill 投单 → 自动导入提示词与参考图 → 建批开跑。`mod`(工单结构 + 校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`(监听收件目录)。                                 |
-| `purpose.rs` | 用途（管线）受控取值单点，同 `publish/platform.rs` 的模式。                                                                                                                                  |
-| `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）+ 一次性 keyring 迁移。                                                                                                                      |
-| `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                                    |
+| 模块           | 职责                                                                                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib.rs`     | **命令/事件的唯一登记点**（`specta_builder()`）+ 启动装配。加命令必改这里。                                                                                                      |
+| `state.rs`   | `AppState`：DB 池 · 密钥存储 · 数据目录 · 引擎。业务真相的持有者。                                                                                                            |
+| `commands/`  | IPC 命令层（薄）：校验入参 → 调 repo/引擎 → 组视图结构体。按域分文件。                                                                                                             |
+| `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                          |
+| `engine/`    | 任务引擎：`dispatcher`(单循环 + per-Key Semaphore) · `status`(7 态机) · `classify`(错误六类) · `progress`(伪进度) · `recovery` · `events`(EventSink 抽象，故引擎可脱离 Tauri 测试)。 |
+| `provider/`  | 生图 Provider 抽象；唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`(元数据/C2PA 剥离)。                                                                      |
+| `publish/`   | 发布与资产管理（最大子系统）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                            |
+| `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `handoff`(交接目录往返) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。                                  |
+| `intake/`    | 工单收件：`mod`(结构 + 校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`。                                                                                       |
+| `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
+| `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                 |
+
+`purpose.rs` 与 `publish/platform.rs` 是同一种模式：受控取值的单点定义，在**命令边界**强制
+校验而不只靠 UI 给选择器——命令是公开边界，放进自由字符串就会有三种拼法同时进库。
 
 ### 前端（`src/`）
 
 `features/<页面>/` 一页一文件（普遍 600–1900 行，就地展开而非过度拆组件）·
-`routes.tsx` 是**路由/侧栏/⌘K/快捷键的单一来源** · `stores/` Zustand（engine 镜像事件、
-generate 选择态、ui、settings、publish）· `lib/ipc/` 唯一 IPC 出入口 ·
-`styles/globals.css` 唯一 token 来源。
+`routes.tsx` 是**路由/侧栏/⌘K/快捷键的单一来源** · `stores/` Zustand 只做事件镜像与 UI 态 ·
+`lib/ipc/` 唯一 IPC 出入口 · `styles/globals.css` 唯一 token 来源。
 
-### 一条请求的完整链路（改生成相关代码前先读懂这条）
+`shortcut: number | null` —— 十个数字已用尽，新页无数字快捷键。**不为新页重排既有数字**
+（会把肌肉记忆一次性作废）；⌘5 属于已移除的提示词库页，**留空不复用**。
+
+### 一条生图请求的完整链路（改生成相关代码前先读懂这条）
 
 ```
 GeneratePage 选组/挂靠 → commands::batches::create_batch
@@ -103,1137 +83,172 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
   → stores/engine 镜像 → 任务页/导航徽章
 ```
 
-**进 multipart 的生成参数只有三个**（`provider::GenParams`，v0.15.2）：`aspect_ratio` /
-`size` / `output_format`，外加恒定的 `n=1`。**画幅两个都要发**——v0.15.2 那句「走
-`aspect_ratio` 而非 `size`」是照文档写的，**线上实测把它推翻了**（key `aixoras` ·
-模型 `gpt-image-2-1k`，批次 24–27 共 56 张）：单发 `aspectRatio: "9:16"` 回来的整批是
-**1024×1024 正方形**；补上 `size` 才是竖幅；单发 `size: "1080x1920"` 则整批 400
-（边长非 16 倍数）。回来的像素也不由我们定——要 1088×1920，上游给 941×1672（≈9:16，
-约 1.57MP），即它只认比例、分辨率自己挑。故**默认应同时发两个且让二者自洽**：
-`1:1`→1024x1024 · `3:4`→1536x2048 · `9:16`→1152x2048 · `2:3`→1024x1536（均为精确
-比例且两边 16 的倍数）。结论只对这把 key/模型成立，但代价不对等：多发一个字段是零成本，
-少发一个是一整批正方形。
-端点文档里的 quality / response\_format / background / output\_compression / extra\_fields
-**一律不做**（用户明确不需要——参数摆在界面上却没人用，只会让「到底哪个在起作用」更难回答）。
-批次的 `params_json` 比它宽（还有 `draws`/本地去水印档位 `watermark`/输出处理开关等纯 UI 键，
-供「再来一批」还原），Rust 侧静默忽略。**故意不加 `deny_unknown_fields`**：严格解析会让整份
-快照退化成「全部空」，用户选的比例反而一个字段都发不出去。入口侧另有 `parse_checked`
-（严格 + 预检），见下文 v0.15.2。
-
 ## 架构铁律（均有机器检查）
 
 1. **业务真相只在 Rust**：任务状态、编号发放、文件操作、DB 读写全部经 Rust 命令；
-   前端不持有可变业务状态，Zustand 只做事件镜像与 UI 态。
+   前端不持有可变业务状态。
 2. **单写者事务**：所有状态迁移由调度器串行提交；配合 single-instance 禁双开。
 3. **前端只经 `src/lib/ipc/` 出入** → guardrails 检查 `invoke(`/`listen(` 仅限该目录。
-4. **事件驱动不轮询**：进度/汇总/健康经 Tauri 事件推送，250ms 节流；导航徽章由事件驱动。
-5. **token 只从 `src/styles/globals.css` 取** → guardrails 检查 `oklch(` 硬编码仅限该文件。
-6. **视觉以原型 HTML 源码为准**（读源码，不截图猜测）。
+4. **事件驱动不轮询**，250ms 节流。唯一例外是即梦 CLI（它没有任何推送机制，见下文）。
+5. **token 只从 `globals.css` 取** → guardrails 检查 `oklch(` 仅限该文件；
+   `classnames.test.ts` 另检查**用到的 class / `var(--x)` 必须真的存在**、
+   **定义了的 class 必须有人用**、**不写 Tailwind 工具类**（本仓库全用自定义类）。
 
 ## IPC 约定
 
-- `src/lib/ipc/bindings.ts` 由 **tauri-specta 自动生成，禁手改**（guardrails 校验生成头；
-  CI `git diff --exit-code` 校验已同步）。
-- 新增/改动命令或事件后：在 `src-tauri/src/lib.rs` 的 `specta_builder()` 登记，然后
-  `cargo test --lib export_bindings` 重新生成并提交 `bindings.ts`。
-- 前端只 import `@/lib/ipc`（`index.ts` 薄封装），不直接 import `bindings.ts` 以外的 Tauri API 做业务调用。
-- 载荷字段 **camelCase** 由 specta 序列化配置统一保证，不手写 TS 类型。
+- `src/lib/ipc/bindings.ts` 由 **tauri-specta 自动生成，禁手改**。改动命令/事件后须在
+  `lib.rs` 的 `specta_builder()` 登记 → `cargo test --lib export_bindings` 重新生成 →
+  **先 `git add` 再跑 `pnpm check`**（门禁第 8 步用 `git diff --exit-code` 校验同步）。
+- 前端只 import `@/lib/ipc`，不直接用 Tauri API 做业务调用。
+- 载荷字段 camelCase 由 specta 序列化配置统一保证，不手写 TS 类型。
 
-## 错误处理规范
+## 错误处理与视觉
 
-- 统一 `thiserror` 错误类型（`src-tauri/src/error.rs`）经 IPC 序列化给前端。
-- **非测试代码禁 `unwrap` / `expect` / `panic`** → Cargo `[lints.clippy]` 强制（deny）。
-  测试内允许，但须以带说明注释的 `#[allow(...)]` 局部放开（guardrails 校验说明）。
-- 前端未捕获错误经 `reportFrontendError` → `log_frontend_error` 命令汇入统一 tracing 日志。
-- 业务错误六类：Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other
-  （分类器 `engine/classify.rs`；Interrupted 为引擎内部态，不来自 provider）。
+- 统一 `thiserror`（`error.rs`）经 IPC 序列化给前端。业务错误六类：
+  Timeout / RateLimited / ContentPolicy / Auth / Interrupted / Other（`engine/classify.rs`；
+  Interrupted 是引擎内部态，不来自 provider）。
+- **非测试代码禁 `unwrap` / `expect` / `panic`**（Cargo `[lints.clippy]` deny），
+  另有 `unsafe_code = "forbid"`。测试内须以带说明注释的 `#[allow(...)]` 局部放开。
+- 前端错误经 `reportFrontendError` → `log_frontend_error` 汇入 tracing；guardrails 禁 `console.log`。
+- **打包应用没有终端**：启动期致命错误必须弹原生对话框（`fatal_dialog`，用 rfd），
+  否则表现只是「双击图标 dock 弹一下就没了」。
+- **7 态 → 5 视觉组**：`q`=灰 · `run`+`retry`=蓝(spinner) · `fail`=红 · `rev`(待验收)=琥珀 ·
+  `pass`=绿 / `rej`=灰。（枚举与 0001 的 CHECK 都是 7 个，早期文档里的「八态」是笔误。）
 
-## 视觉规范
+## 领域词汇
 
-- 颜色/圆角/间距/字号/阴影/动效时长全部为 `globals.css` 的 CSS 变量（oklch 原值仅此一处）。
-- **7 态 → 5 视觉组映射**：待生成 `q`=灰；生成中 `run`+重试中 `retry`=蓝(spinner)；
-  失败 `fail`=红；成功 `rev`(待验收)=琥珀；已通过 `pass`=绿 / 未通过 `rej`=灰。
-  （`TaskStatus` 与 0001 的 CHECK 都是 7 个：q/run/retry/rev/pass/rej/fail。早期文档与
-  0001 注释里的「八态」是沿用初版规划的笔误，以枚举为准。）
-- 动效尊重 `prefers-reduced-motion`，另有设置页「标准/减弱」开关。
+望文生义会出错的那些。
 
-## 领域词汇表
+**生图** — **挂靠**：每张参考图指定一个提示词组，任务数 = Σ(参考图 × 其挂靠组提示词数)，
+非笛卡尔积 · **归档(archived\_at)**：只决定生成页选择器是否默认列出，**与删除无关** ·
+**批次退休**：任务全落 pass/rej 且无本批结果滞留废纸篓时物理删批次与本批提示词（提示词是
+消耗品），故下游必须先存快照（`accepted_works.prompt_code`/`group_name`），编号**不回收** ·
+**临时分组(is\_temp)**：导入 txt 产生，任一提示词首次验收通过则整组转正式 ·
+**临时上传(ephemeral)**：生成页上传的参考图，仍是 ref\_images 行但图库/选择器/去重基准三处
+都不含它（`list_ref_images(include_ephemeral)` 单点控制）· **图库分组(ref\_groups)**：与提示词
+组无关，历史列 `ref_images.group_id` 已废弃不读不写 · **用途(purpose)**：标在**提示词组**上
+（批次会混组），是筛选默认值**不是门禁** · **号池**：编号递增发放回收优先，与业务写同事务 ·
+**废纸篓**：暂存不物理删，**可还原回原位**（作品是唯一「删除即真删行」的实体，故
+`trash_items.payload_json` 存整行快照，还原连 id 一起写回）· **伪进度**：生图 API 无真实进度。
 
-- **批次(batch)**：一次「开始生成」创建的任务集合；全部达终态后自动 `archived`。
-- **挂靠**：生成页每张参考图指定一个提示词组；任务数 = Σ(参考图 × 其挂靠组提示词数)（非笛卡尔积）。
-- **临时分组(is\_temp)**：生成页导入 txt 产生；该组任一提示词首次验收通过 → 整组转正式。
-- **归档(archived\_at, 0016)**：批次开跑后自动给本批的提示词组与参考图打戳。**只**决定
-  生成页选择器是否默认列出，库里仍在、可查、可一键取消。与「删除」无关。
-- **图库分组(ref\_groups, 0019)**：参考图库自己的目录，**与提示词组无关**。历史列
-  `ref_images.group_id`（指向 prompt\_groups）已废弃，不读不写。
-- **临时上传(ephemeral, 0019)**：生成页上传的参考图，只作本批附件。仍是 ref\_images 行
-  （tasks/batch\_refs/accepted\_works 以它为父表），但图库页、「从参考图库选择」、
-  去重基准三处都不含它。
-- **用途标签(purpose)**：标在**提示词组**上（不在图上、不在批次上——批次会混组）；
-  受控取值单点 `purpose.rs`，当前只有「图生视频」。是筛选默认值，**不是门禁**。
-  v0.15.0 起在**导入预览**里就能选（关键词预猜 B-Roll/分镜/首帧，标琥珀「疑似」）。
-- **号池**：编号 `前缀-0001` 递增发放，回收优先；发放/回收与业务写同事务。输出文件名去连字符。
-- **废纸篓**：未通过/删除内容暂存（留缩略图+提示词记录，删原图）；清理=物理删+级联删+编号回收，不可恢复。
-- **伪进度**：生图 API 无真实进度；排队 0→请求 10%→elapsed/expected 线性至 90%→下载 90-98%→落盘 100%。
+**v2v** — **clip**：一张验收图的**一次**视频尝试，七态与 `tasks.status` 同构，`UNIQUE(work_id)`
+故重跑是就地 `attempt+1` 不新增行 · **交接目录**：GenDesk 自动物化工单，skill 写回后 watcher
+收录移档；组目录名对同一组恒定（`g{group_id}`），且**只监听「已改写」**（连「待改写」一起监听
+会形成物化→收录→物化的自激循环）· **skill 边界**：只改写提示词，**不调 dreamina** ·
+**幽灵单**：即梦给了 submit\_id 但 `queue_idx` 与 `credit_count` 双双缺席、从未计费——与超时
+**处置相反**（超时「已扣费 → 继续等待」，幽灵「没扣费 → 直接重跑」），结论由 Rust 下发
+（`clip_looks_phantom`），前端不得手抄判据 · **本地队列 vs 即梦队列**：两个位次**绝不混成一个
+数字**（本地第 3 vs 即梦第 4485）· **封面**：clip 自己的文件副本，绝不指向
+`accepted_works.thumb_path`（清废纸篓会物理删 file\_paths）· **交付**：验收通过即**拷贝**（不移动）
+成片到 `outputs/视频/`，拷贝失败**不回滚验收**，故 `undelivered` 是合法状态兼侧栏徽章。
 
-### 发布模块词汇（v0.7.0）
+**发布** — **SKU**：款式一级分类，下挂素材/标题/正文三池 · **素材包**：视频型=1 视频(+封面)，
+图集型=N 图(+封面)，**入库即 active**；「已用尽/冷却中」是台账派生态不落库 · **日内容套装**：
+某天某 SKU 选定的（素材包+标题\[+正文]），当天全平台全账号统一 · **任务单**：一天一张，
+草稿→已确认→已导出→回收中→已关闭 · **任务包**：xlsx(22 列) + 素材 + 说明 + 回执截图/ +
+**最后写的 READY.txt** · **回执**：执行器只写 xlsx 第 20–22 列，故**重导出会抹掉回执**（导出预检
+里有保护）· **查重窗口**：同素材包同平台最短复用间隔（默认 30 天），**按平台逐个剔除** ·
+**待认领**：收件箱关联不上 SKU 的内容，人工指认不丢弃 · **疑似已发**：超时无回执，
+**绝不自动重发** · **RelPath**：库内只存根目录内相对路径，导出是唯一绝对路径转换点 ·
+**五平台**：`douyin/xhs/kuaishou/shipinhao/bilibili`，映射单点在 `publish/platform.rs` ·
+时刻一律**按本地时区**解析（`and_utc()` 会把北京时间当 UTC）。
 
-- **SKU**：款式一级分类，下挂素材/标题/正文三池；内置「通用」分组收纳无 SKU 文本。
-- **素材包(asset\_pack)**：一次可发布素材单元；视频型=1 视频(+封面)，图集型=N 图(+封面)。
-  存储态 new|active|retired，**入库即 active**（文件齐备即可发；new 留给未来需人工过目的来源，
-  UI 上一键转 active）；「已用尽/冷却中/回可用」为台账 + 查重窗口派生态（不落库）。
-- **日内容套装(daily\_set)**：某天某 SKU 选定的（素材包+标题\[+正文]）；当天全平台全账号统一。
-- **任务单(task\_sheet)**：某天全部发布任务集合，一天一张；草稿→已确认→已导出→回收中→已关闭。
-- **任务包**：任务单.xlsx(22 列) + 素材(按 SKU 一份) + 执行说明.md + 回执截图/ + READY.txt(最后写)。
-- **回执**：执行器回写的任务状态 + RPA 信息(链接｜原因｜时间) + 截图；只写 xlsx 第 20–22 列。
-- **使用台账(usage\_ledger)**：套装粒度发布记录，驱动查重窗口 + 素材生命周期 + 发布历史。
-- **查重窗口**：同素材包同平台最短复用间隔（默认 30 天）；窗口内全部目标平台有发布 → 用尽。
-- **收件箱**：根目录 `收件箱/`，Claude/Codex TXT 与外部 AI 图片落盘后自动收录（notify + 2s 防抖）。
-- **待认领**：收件箱无法关联已知 SKU 的内容，进队列由人工指认，不丢弃。
-- **疑似已发**：超时无回执标记（琥珀）；**绝不自动重发**，只能人工核实后定态（硬性 §6.4）。
-- **相对路径是真相**：库内/包内只存根目录内相对路径（RelPath）；导出是唯一绝对路径转换点。
-- **五平台**：`douyin/xhs/kuaishou/shipinhao/bilibili`（抖音/小红书/快手/视频号/B站），
-  中文名↔枚举映射单点在 `publish/platform.rs`；文本平台标签另有 `general`（通用）。
+**intake** — **工单**：一个目录 = 一次投单，`提示词.txt` + `images/` + **最后写的 READY.txt**
+（没有它一律不碰，skill 可能还在写）· 方向与 v2v **相反**（skill 出工单、GenDesk 收），
+两者共用 `publish::inbox::watcher::coalesce` · **组头键**（`参考图:`/`比例:`/`尺寸:`/`格式:`/
+`抽卡:`/`用途:`）**只在该组第一条正文之前生效**，故挂靠是**位置绑定**，改组名不会让它断掉；
+正文是长叙事，「比例：3:4 的竖构图」不该被当成元信息吃掉 · **挂靠不猜**：多组工单每组必须
+写 `参考图:` · **一份工单 → 多个批次**：`params_json`/`draws` 是批次级的，按 (参数, 抽卡) 分桶 ·
+**job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账在**动手之前** ·
+**阈值(默认 500 张)**：超了转 `hold` **什么都不导入** + 弹应用内可视化确认卡 ·
+**归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
+静默改值正是「我明明写了 9:16 却不生效」的成因）· **写路径只有一条**：提示词走
+`commands::prompts::{build_preview_from_parsed, commit_preview}`，参考图走
+`commands::refs::ingest_one`，与手动导入同一套前缀分配/用途判定/缩略图口径 ·
+**失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
+会让人点重试拿到第二份提示词）· skill 装在用户级 `~/.claude/skills/`。
 
-### 视频流水线词汇（v0.15.0）
+## 高代价陷阱（改代码前必读）
 
-- **clip(v2v\_clips)**：一张验收图的**一次**视频尝试。七态与 `tasks.status` 同构：
-  `rewrite` 待改写 → `ready` 待提交 → `run` 已提交 → `rev` 待验收 → `pass`/`rej`/`fail`。
-  `UNIQUE(work_id)` —— 一张图同时只有一条在跑；重跑是就地 `attempt+1`，不新增行。
-- **交接目录**：默认 `~/GenDesk交接/v2v/`。`待改写/index.jsonl` + `待改写/<组>/manifest.jsonl`
-  由 GenDesk **自动物化**（队列一变就重写，不需要点导出）；skill 写回
-  `已改写/<组>/rewrite.jsonl`，watcher 收录后移档到 `_已收录/`。
-  **组目录名对同一组恒定**（`g{group_id}`），否则 skill 每轮都看见「新」目录重复改写。
-- **skill 的职责边界**：只把生图提示词改写成图生视频提示词。**不调 dreamina**——提交/轮询/
-  下载/重试/验收都在 GenDesk 里（那些不是智能任务，让 LLM 轮询既慢又贵还不可靠）。
-  故 v0.13.0 那份 `ledger.jsonl` 已取消：真相在库里，少一个真相来源是收益。
-- **封面(poster)**：clip 自己的文件（首帧缩略图的**副本**，`clips/clip{id}.jpg`）。
-  绝不指向 `accepted_works.thumb_path` —— 清空废纸篓会物理删 file\_paths，
-  删一条未通过的视频就会顺手删掉还活着的那张作品的缩略图。
-- **重跑 vs 退回改写**：视频不通过多半是**没抽中**而不是提示词不对，故「重跑（同提示词）」
-  是默认动作；「退回改写」才清掉 video\_prompt 让 skill 重写。
-- **额度不可撤回**：提交成功即写 submit\_id 并置 run（顺序反了会留下认不出主人的孤儿，
-  而恢复只能退回重提 = 花两份钱）。中断恢复**只**动无 submit\_id 的条目。
-  **回执异常也照收**：一条有 submit\_id 却没 `credit_count` 的回执，在提交那一刻分不清
-  是没扣费还是只是少给个字段，而猜错的代价不对称 —— 判它没扣费就丢掉 submit\_id，
-  万一扣了就是花钱买了个孤儿。判死统一交给轮询（`runner::is_phantom`）。
-- **幽灵单(phantom)**：即梦接了单、给了 submit\_id、`list_task` 里也查得到，但**从未入队、
-  从未计费** —— `queue_idx` 与 `credit_count` 双双缺席，`gen_status` 永远停在 `querying`。
-  与超时是相反的两件事，处置也必须相反：超时「额度已扣 → 继续等待」，
-  幽灵「没扣费 → 直接重跑」。判据要两个信号同时缺席（`credit_count` 是决定性的那个），
-  且过 15 分钟宽限期（实测健康单 25 秒内就有位次与计费）。判定结果是 `fail(phantom)`
-  而**不是**自动重投：重投要花钱，那是人的决定。
+实测得出、代价不对称、且从代码结构上看不出来的事实。
 
-### 生图工单收件词汇（v0.17.0）
+**生图参数** — 进 multipart 的只有三个（`provider::GenParams`）：`aspect_ratio` / `size` /
+`output_format`，外加恒定 `n=1`。**画幅两个字段都要发**：实测单发 `aspectRatio: "9:16"` 回来
+整批是 1024×1024 正方形，单发 `size: "1080x1920"` 则整批 400（边长非 16 倍数）；配套值单点
+`provider::RATIO_SIZES`（同时满足「正好是该比例」与「两边都是 16 的倍数」）。**回来的像素不由
+我们定**（发 `1088*1920` 上游给 941×1672），这些值是**比例的载体**不是交付分辨率。
+**抽卡 k 次 = k 个任务**，不是发 `n=k`（一次响应里 k 张只有一张能落进当前任务，其余照样计费）。
 
-- **工单(intake job)**：一个目录 = 一次投单。`提示词.txt` + `images/` +
-  **最后写的 `READY.txt`**（没有它一律不碰——skill 可能还在写）。
-  默认根 `~/GenDesk交接/生图/收件/`，与 v2v 共用交接根（用户只配一次）。
-- **方向与 v2v 相反**：v2v 是 GenDesk 出工单、skill 写回；收件是 skill 出工单、GenDesk 收。
-  两者共用 `publish::inbox::watcher::coalesce`（notify + 2s 防抖 + 全量幂等重扫）。
-- **挂靠与参数写在组头里**（`参考图:` / `比例:` / `尺寸:` / `格式:` / `抽卡:` / `用途:`，
-  importer 认，**只在该组第一条正文之前生效**）。挂靠因此是**位置绑定**——它属于紧跟其后
-  的那个组，不引用组名，改组名不会让挂靠悄悄断掉。单一产物也消灭了「txt 与 json
-  各存一半真相」。`job.json` 降级为逃生舱（内联提示词/按组名挂靠仍可用）。
-- **组头键只在组头区认**：这些文档的正文是长叙事，一条以「比例：3:4 的竖构图」开头的
-  提示词若被当成元信息吃掉，会静悄悄少一句话且不报错。老键（前缀/场景/标签）为不改动
-  既有行为仍全文任意位置认。
-- **一份工单 → 多个批次**：`params_json`/`draws` 是**批次级**的，各组比例不同塞不进同一批。
-  收件侧按 (参数, 抽卡) 分桶，相同的并、不同的拆。这不是妥协——参数不同本来就该是
-  不同批次，验收页按批次分节正好对得上。台账 `batch_ids` 存 JSON 数组（指针清单不是真相）。
-- **去重键 job\_id（0023）**：**收录恰好一次**。目录会被移走/重建/手动整理，磁盘标记不可靠，
-  而重复收录 = 重复建批 = 重复花钱。`error`/`hold` 行同样挡住重投；重来是人的决定
-  （设置页「重试」/「确认开跑」删掉那行）。
-- **阈值(task\_threshold，默认 500 张)**：超了就转 `hold`，**什么都不导入**（提示词、
-  参考图一条都没进库），整份工单要么发生要么不发生。判定在 Rust 而不是投单那一侧——
-  投单的是另一个模型，它可以忘记检查也可以被绕过，而花钱的闸门必须是机制。
-- **`确认.txt` 是确认的唯一表达**：设置页那个按钮做的事就是替你写下它。两条确认路径
-  走同一段代码，不可能一条对一条错。
-- **回执文件**：成功 `结果.txt`（随目录移进 `_已收录/`）· 超阈值 `待确认.txt` · 失败
-  `错误.txt`，后两者留在原地。投单侧 `sleep 3` 回读即可，不必猜后面发生了什么。
-- **参数只归一化拼法不归一化取值**：`jpg→jpeg`、全角冒号→半角是拼法；`1080x1920`
-  边长不是 16 的倍数是取值 → **拒单而不是替用户改成 1088**。快照与生成页
-  `buildParamsJson` 同形，且过同一个 `GenParams::parse_checked`。
-- **挂靠不猜**：多组工单里每组必须写 `参考图:`；按顺序猜错要到验收时才看得出来。
-- **写路径只有一条**：提示词走 `commands::prompts::{build_preview_from_parsed, commit_preview}`，
-  参考图走 `commands::refs::ingest_one` —— 与手动导入同一套前缀分配/用途判定/缩略图口径。
-- **skill 侧**：`~/.claude/skills/gendesk-intake/`（**必须装在用户级**——提示词 skill 都在
-  别的项目里，装在 GenDesk 仓库的 `.claude/skills/` 等于不存在）。新写的 `prompts-*` skill
-  直接把 `docs/提示词skill标准产出规范.md` 的「最后一步」抄进收尾，不必引用本 skill。
+**并发认领** — 三处窗口，代价都是钱。`claim_ready`（ready → run + 检查 `rows_affected`）
+必须在提交**之前**，`UNIQUE(work_id)` 拦不住双提交（自始至终只有一行，第二次只是覆盖
+submit\_id）。`mark_running` 带 `AND status = ?` 谓词并返回是否认领成功，0 行不 spawn worker；
+谓词用调用方读到的**状态原文**而非写死 `'q'`（重试任务走 `retry → run`）。
+单 Key 并发上限单点 `db::repo::api_keys::MAX_CONCURRENCY`，写入侧与引擎 Semaphore 容量
+都必须引用它（分叉过一次，症状是设置页与 DB 都显示 50、只有真正跑的信号量是 10）。
 
-## 审查协议（§1.4）
+**额度** — 提交成功即写 submit\_id 并置 run；顺序反了会留下认不出主人的孤儿，而恢复只能退回
+重提 = 花两份钱。中断恢复**只**动无 submit\_id 的条目；回执异常也照收，判死统一交给轮询。
+即梦并发上限是**账户级**的：实测非 VIP 同时只跑得下 1 条，超出回 `ret=1310
+ExceedConcurrencyLimit` —— 那**不是失败**（一分钱没扣），走 `requeue_after_reject` 放回本地队首
+且 `attempt` 退回去；`OBSERVED_LIMIT` 进程内自收敛**不落库**。VIP 同规格**贵 5.5 倍**（8 vs 44
+额度）且只买到不排队，故默认模型必须显式，判定单点 `dreamina::is_vip`。常驻队列 autofill 四道
+闸都是机制：默认关 · 模型必须非 VIP（保存那一刻就拒）· 日额度按**提交**时刻切窗（用出片时刻
+切的话，补单器能在任何一条出片之前把一天额度提交光）· 余额兜底。
 
-- **实现与审查分离**：任务实现完成后，由**全新上下文**会话执行 `/code-review`
-  （默认 medium；引擎/数据层用 high）。同一上下文自审会继承同样盲点。发现项修复后才 merge。
-- **测试完整性规则**：**禁止**为让 CI 变绿而修改/删除/放宽既有测试断言；确需改动须在 PR 描述单独说明理由，审查重点核对。
-- **里程碑深审**：M2（引擎）、M4（发布链）、v1.0.0 前，由用户触发 `/code-review ultra` 云端多智能体深审。
-- 小步提交 + 分支 PR 流：一个任务 = 一个分支 = 实现 + 测试 + 门禁全绿 + 审查通过 = 一次 merge。
-  main 受保护（check.yml 全绿才可合并），即使单人开发也走 PR。
+**轮询（铁律 4 的唯一例外）** — 实跑确认即梦 CLI 无任何推送机制（`--poll=N` 只是把轮询搬进
+子进程，进程被杀即丢）。单位是**一整页**不是一条：`list_task` 一个进程回全部在跑任务的状态，
+进程数与在跑条数**脱钩**。故频率是纯粹的成本旋钮（含 VIP 300s / 全非 VIP 600s，
+`SWEEP_VIP_SECS`）；逐条退避是回落路径，下限抬到同一常数——它是 O(n) 的，没道理比整表还勤。
+`list_task` 缺两样东西各自决定一段代码：无 `videos[].path`（出片仍要单发 `query_result --download_dir`）· 无 `queue_info`（故幽灵判定拆宽判据 `phantom_suspect` / 权威回体
+`is_phantom`，**确认查询失败就这一轮不判**——问不出话 ≠ 判死）。未知 `gen_status` 判 Running
+而非 Failed（判死会把已扣费正在跑的任务标死）。计费证据一律 `COALESCE` 写回，**只增不抹**。
 
-## 提交前门禁清单（`pnpm check` 覆盖）
+**事务粒度** — `accept_tasks` 明确**不做单事务**（与直觉相反）：拷贝无法回滚，第 150 张失败会把
+前 149 条作品记录回滚掉而文件已在 outputs/ 里；现在的顺序（先整批拷完、任一张失败就一行库都
+不写）反而更接近原子。
 
-guardrails · Biome ci · tsc strict · vitest · vite build · cargo fmt · clippy -D warnings ·
-cargo test（含 bindings 同步）· cargo check。
+**迁移** — `src-tauri/migrations/` **forward-only，发布后不可改**（`db/repo/mod.rs` 里「重放
+0019 搬运语句」那条测试正建立在这个前提上）。废弃列一律**保留不读不写**。默认留在事务内，
+只有必须 `PRAGMA foreign_keys=OFF` 的表重建才用 `-- no-transaction`。改动建议先在**真实库副本**
+上跑 `foreign_key_check` + `integrity_check`。`tag_bindings` 是无外键的多态表，删分组时必须手动
+清（分组 id 被复用时旧绑定会把用途安到无关的组头上）。
 
-`pnpm check` 与 CI（`.github/workflows/check.yml`）互为镜像；`lefthook.yml` 是它的秒级
-子集（guardrails + biome + tsc + fmt + clippy），装了 pre-commit 也仍需在提交前跑全门禁。
+**dev 与打包应用共用同一个 `app_data_dir`**，而 `sqlx::migrate!` 在**编译期**内嵌迁移。所以
+`pnpm tauri dev` 跑在新 main 上会把库迁到最新版，装在 `/Applications` 的旧包**从此再也开不
+起来**（`VersionMissing`，这是保护不是故障）。排查看 `latest_embedded_migration()` 而非
+`CARGO_PKG_VERSION`。**另一条通往同样症状的路径**：single-instance 插件在已有实例时静默
+exit(0)——区分方法是看日志有没有当次的 `logging initialized`（单实例踢出发生在日志初始化之前，
+一个字都不留；迁移失败则必留一条 ERROR）。
 
-**注意**：门禁第 8 步会校验 `bindings.ts` 已同步（`git diff --exit-code`）。改过 Rust
-契约后若只重新生成而未 `git add`，这步会红——**先 stage 再跑 `pnpm check`**。
+**跑 GUI 之前**：`pnpm tauri dev` 可能**真花钱** —— intake 默认 `enabled: true`，启动会扫描
+收件目录、自动收录工单并建批。先把待收工单挪开，或在设置里关掉收件。
 
-**数据层实现说明**：sqlx 采用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的
-`cargo test` 集成测试覆盖（比仅编译期检查更强）；故未接入 `cargo sqlx prepare --check`。
-CI 已接入 `cargo llvm-cov`（**engine / ids / importer / publish 纯逻辑 ≥ 85%** 行闸门，
-check.yml；`commands/` · `db/repo/` · `provider/` · publish 的 IO/glue 由集成测试覆盖，
-经 `--ignore-filename-regex` 排除出闸门）与每周 `cargo audit`（`--ignore` 无修复传递告警，
-audit.yml）。
+## 门禁与协作
 
-**迁移约定**：`src-tauri/migrations/` forward-only，发布后不可改（`db/repo/mod.rs` 里
-「重放 0019 搬运语句」那条测试正是建立在这个前提上）。默认留在事务内；只有必须
-`PRAGMA foreign_keys=OFF` 的表重建才用 `-- no-transaction`（见 0017 的教训）。
+`pnpm check` 9 步（guardrails · Biome ci · tsc strict · vitest · vite build · cargo fmt ·
+clippy -D warnings · cargo test 含 bindings 同步 · cargo check），与
+`.github/workflows/check.yml` 互为镜像；`lefthook.yml` 是它的秒级子集，装了 pre-commit
+也仍需在提交前跑全门禁。CI 另有覆盖率闸门（engine / ids / importer / publish 纯逻辑
+≥ 85% 行，IO/glue 经 `--ignore-filename-regex` 排除）与每周 `cargo audit`。
 
-## 里程碑进度
+sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的 `cargo test` 集成测试覆盖
+（比仅编译期检查更强），故未接入 `cargo sqlx prepare --check`。
 
-- [x] **M0 骨架与门禁** — Tauri2+React19 骨架、设计 tokens、窗口壳、命令面板、质量门禁全套。
-- [x] **M1 数据层与基础域** — migration 0001 全 schema、号池(proptest)、files(缩略图/命名/废纸篓)、importer(GBK/两段式)、settings/api\_keys(当时用 keyring，v0.10.0 已改本地加密文件)/refs/prompts 域命令 + 前端 settings store。
-- [x] **M2 任务引擎** — 状态机(proptest)、Provider(OpenAI 兼容, wiremock 7 用例)、错误分类六类、
-  调度器(per-Key Semaphore + 两策略 + 指数退避)、伪进度、中断恢复、1→500 压测；batches/tasks
-  域命令 + 4 事件(status/progress/summary/keyHealth)。M2 出口 cargo-mutants 已跑（见 M5）。
-- [x] **M3 业务页面** — 八大页面全部按原型实现（设置/生成/任务/验收/作品/提示词/参考图/废纸篓）；
-  review/works/trash + 提示词库/参考图详情 后端域；前端引擎事件 store + 导航徽章(运行/验收/废纸篓) +
-  ⌘K 操作补全 + 共享 UI。核心闭环「配 Key→生成→实时任务→验收→输出/废纸篓」端到端可用。
-- [x] **M4 更新发布链** — tauri-plugin-updater/process；minisign 密钥（公钥入 conf，私钥 `~/.tauri/`）；
-  createUpdaterArtifacts + NSIS per-user + WebView2 bootstrapper + macOS 12+；check/install 命令 +
-  `update://state` 事件 + 标题栏 pill + 设置手动检查 + 启动自动检查；release.yml（tag v\* → 双端 + latest.json）。
-- [x] **M5 收尾质量关** — pnpm/cargo audit 清零（无修复传递告警书面豁免）；cargo-mutants(engine/+ids/)
-  存活体全部补测试或书面豁免（docs/mutants-exemptions.md）；八页 UI 冒烟 + reduced-motion；
-  §7 V2 预留自检 + V2 backlog（docs/V2-backlog.md）。**人工收尾清单**（AI 不可替代，交付前执行）见 V2-backlog.md。
-- [x] **UX 优化阶段 E01–E41（v0.3.0）** — 三批 41 条 UX 评审建议全数落地（计划文档已随 445b396
-  删除；四阶段为 M6 安全修正 → M7 生成调度 → M8 验收工作台 → M9 资产运维）。migration 到 0009；
-  单分支 `feat/ux-overhaul` 小步提交（每项/组一 commit 注明 Exx，保 bisect），一次 PR 合入 main。
-  **代码里 `E07`/`E30b`/`E41` 这类编号仍在注释中大量出现**，指的就是这批条目——文档没了，
-  但 `git log --grep=E30b` 能找到对应 commit。
-- [x] **生成输出处理 + 6 项 UX（v0.4.0）** — 输出元数据/C2PA 剥离（provider::sanitize）、生成页两栏消留白、
-  缩略图瀑布流、废纸篓详情、任务多选删/重试、提示词 txt 宽泛解析等（PR #5）。
-- [x] **图片生成页 1:1 重构（v0.5.0）** — 按 Claude Design handoff 原型将生成页由堆叠卡片改为两栏就地挂靠：
-  左栏彩色可展开词组卡（配色 gc0–gc4，可拖拽 + 悬停交叉高亮），右栏参考图就地弹层/拖放挂靠，
-  生成参数移入底栏「参数 ▾」弹层；提示词原文改上一条/下一条弹窗。纯前端（GeneratePage + globals.css），
-  无 migration/无新 IPC，删除旧生成页样式。
-- [x] **发布与资产管理模块（v0.7.0）** — 三阶段（P1 资产管理 / P2 编排导出 / P3 回执闭环）。
-  migration 0010（skus/asset\_packs/text\_items/accounts/daily\_sets/task\_sheets/publish\_tasks/
-  usage\_ledger/inbox\_items + 内置通用分组）。新顶层模块 `publish/`：paths(RelPath/四分区/ASCII/
-  win-mac 拼接)、platform(五平台单点)、inbox(parser 三类 TXT+话题+SKU 三冗余、notify watcher+2s 防抖、
-  ingest 收录事务+媒体归集)、planner(set\_picker/scheduler\[proptest 五不变量]/frequency/generate\_sheet)、
-  xlsx(writer 22 列+reader 表头定位)、exporter(任务包+READY 最后写)、reconcile(三分支+六类处置+疑似已发+
-  关单日报)、ticker(应用内定时+补跑)、events(3 事件)。\~40 IPC 命令（publish\_settings/skus/texts/assets/
-  inbox/accounts/planning/reconcile 域）。前端两新页（资产库/发布计划三页签）+ 设置「发布与同步」区块 +
-  导航两项(⌘9/⌘0)+徽章 + publish store + 作品库「入资产库」。覆盖率闸门扩展至 publish 纯逻辑目录。
-  67 publish 测试（含 proptest + 端到端 + 疑似负向断言）。发版节奏三阶段三 PR 一次发版，全程不打 tag，
-  P3 收尾后一次性 bump 0.7.0 + tag v0.7.0。
-- [x] **发布模块优化 35 项 A–F（v0.9.0）** — 三轮全量审查产出的 35 项，六批次全数落地
-  （《内部图片生产工具\_发布模块优化执行计划.md》）。migration 到 0015。249 Rust 测试。
-  - **A 发版阻断**：素材包入库即 active（原 `new` 使排期永远选不到包，每个 SKU 恒报「无可用素材包」）；
-    回执/计划时刻按**本地时区**解析（原 `and_utc()` 把北京时间当 UTC，疑似已发晚 8 小时才标）；
-    收件箱丢弃改移档（原来只删 DB 行，下轮 rescan 就复活）+ 逐文件容错 + 事件去重；
-    未知 SKU 的媒体进待认领；RelPath 剔除 `..`、SKU 编码拒 Windows 保留名、编码大小写唯一。
-  - **B 回执与导出**：导出预检（素材齐备/路径长度/账号在用/**重导出回执保护**——xlsx 是双侧唯一
-    契约，覆盖=抹掉执行器回执）；取消只允许 pending（suspect 不得绕过 §6.4）+ `cancel_kind` 区分
-    人工/风控；timeout 次日补排 + content 退役素材包 + login 上报；写路径事务化 + `HH:MM` 统一校验；
-    回执 xlsx 快照留底。
-  - **C 排期算法**：查重窗口按平台剔除（原来只要有一个平台没发过，包就展开到**全部**平台，
-    直接违反「同素材包同平台 30 天」）；日限裁剪按日轮转（原来天天裁掉 id 大的同一批）；
-    冷款轮播步进 M；每步独立抖动 + 跨平台错峰；账号级时段 + 无账号进缺料 + hotDaily 改开关。
-  - **D UI 闭环**：事件驱动刷新（sheetRev/inboxRev，不轮询）；账号/时段/文本/SKU 平台覆盖编辑；
-    素材缩略图；选择器搜索 + 列表防抖。
-  - **E 稳健与性能**：导出走 spawn\_blocking + 进度事件；N+1 批量化；watcher 文件大小稳定探测；
-    入库原子回滚 + 删除引用校验；归档保留期；草稿保护（`edited` + 重生成确认）；暂停排期；
-    classify\_fail 把 timeout 提到 content 之前（「上传素材超时」归成 content 会白白退役好素材）。
-  - **F 新功能**：补料提示词（模板由反向 parser 测试守住）· 回执截图 · 资产跑道 · 排期预演 ·
-    发布月历 · 开屏晨报 · 拖放直投 · 看板日期切换 · 同步链路健康 · 素材包使用统计。
-- [x] **密钥存储迁移（v0.10.0）** — API Key 由系统钥匙串迁到本地加密文件，根治自签名下
-  每次更新/重编译反复弹 Keychain 授权（无可信签名身份 → 按应用 ACL 的「始终允许」无法跨版本
-  存活，系统固有限制）。`secrets::FileStore`：`secrets.key`(32B 主密钥) + `secrets.enc`
-  (XChaCha20-Poly1305，24B 随机 nonce 前置)，原子写 + 0600 + 损坏自愈留证；启动时
-  `migrate_from_keyring` 幂等搬运（先写目的地再删源，单条失败不删源、不中断启动）。
-  **安全水位如实记录**：防误不防恶（防备份/截图/grep 出明文），主密钥与密文同目录，
-  不构成独立安全边界；爆炸半径 = 可轮换的第三方 API Key。无 migration / 无新 IPC / 无前端改动。
-- [x] **生成页归档 + 并发 100 + 验收批次序（v0.11.0）** — 四项用户反馈。migration 0016（归档位，
-  事务内）+ 0017（api\_keys 重建，`-- no-transaction`）。
-  - **生成页开始即归档**：`engine::create_batch` 同事务给本批参考图与提示词组打 `archived_at`；
-    归档**只**决定生成页两个选择器是否列出它，库里仍在、可查、可一键取消归档（提示词库分组菜单 /
-    参考图详情）。选择器加「显示已归档 · N」开关，**打开弹窗时已选中的项恒可见**（取 initial
-    selected 而非实时 sel，否则取消勾选会让卡片当场消失）——「按此配置再来一批」照常可用。
-  - **单 Key 并发 10 → 100**：api\_keys 是 tasks / task\_attempts 的**父表**（ON DELETE SET NULL），
-    FK 开启时 DROP 父表触发隐式 DELETE 会把子表 api\_key\_id 整列置空（成功率统计 + 验收「按 Key」
-    分组一并报废），RENAME 又会改写子表 REFERENCES；故 0017 走 `PRAGMA foreign_keys=OFF` 的官方
-    12 步（`legacy_alter_table` 在事务内无效，已被测试抓到）。测试断言子表 schema 仍写
-    `REFERENCES api_keys` —— 守迁移方式而非上限数字。行内步进器改直接输入。
-  - **验收按批次倒序**：`ORDER BY t.batch_id DESC, t.id ASC`；前端新增「按批次」聚类并设为默认。
-  - **修复 Key 行「编辑/删除」被裁**：`.kline` 十列定宽合计 ≈773px > `.swrap` 内容宽 720px，
-    `.klist` 又是 `overflow:hidden` → 末两列被整齐切掉，表现为「没有删除和编辑功能」。
-    文本列改 fr 自适应 + `.klist` 兜横向滚动；`.kline .inp` 补 `width:100%`（否则 number 输入
-    按内在宽度撑出格子压到「成功率」列）。
-- [x] **修复并发上限只生效到 10（v0.11.1）** — 上条「10 → 100」漏改引擎装载处：
-  `engine::load_key_configs` 仍是 `clamp(1, 10)`，于是设置页填 50 → 命令层按 100 夹取通过 →
-  DB 真存 50 → **引擎读出来夹回 10** → `set_keys` 据此建 `Semaphore::new(10)`，其余任务恒卡 `q`。
-  症状有欺骗性：设置页与 DB 查出来都是 50，只有真正跑的信号量是 10。修法是消除重复定义而非改
-  数字 —— `MAX_CONCURRENCY` 单点定义在 `db/repo/api_keys.rs`（与 0017 的 CHECK 同文件），
-  写入侧（命令层夹取）与执行侧（引擎 Semaphore 容量）都引用它。**回归测试取样值必须 >10**：
-  既有那条 `load_key_configs_*` 用 5 取样，夹到 10 和夹到 100 下都通过，正是它放过了这个回归。
-  无 migration / 无 IPC / 无前端改动；已存的 50 不必重填，重启即生效。
-- [x] **导入分组识别 + 预览可编辑（v0.12.0）** — 用户实测「10 次导入 8 次分组识别失败」。
-  根因不是解析崩了（正文条数一直是对的），而是分组头**只认语法标记**（`分组:` / 独立括号行），
-  而手写 txt 最常见的写法是「首行一个裸标题 + 下面全是长段落」——一个标记都没有，
-  于是整份塌进「未分组导入」，还回一句「可在文件开头加一行『分组: 名称』」，把改格式的活推给人。
-  - **形态推断**（`importer`）：判层依据从「写没写关键字」换成「**这行管着几条正文**」——
-    管 ≥2 条 → 分组头，恰好 1 条 → 那条的小标题。仅在**全文一个显式标记都没有**时启用
-    （`heuristic_mode`），文档一旦自己表过态就完全听它的。门槛保守：正文 75 分位 ≥60 字、
-    标题 ≤40 字且 ≤ 基准 1/3、无句末标点、无前导序号 —— 只在长段落文档上生效，不啃短句正文。
-  - **基准取 75 分位而非中位数**：标题行自身也在样本里，两层结构（标题/小标题/长正文）下
-    短行可占一半，中位数会被拉到标题长度，推断当场失效（`plain_heading_two_levels` 抓到过）。
-  - **猜错不丢内容**：推断出来却没管到任何正文的组名，由 `salvage_empty_inferred` 还原成
-    提示词挂回相邻组。形态推断最坏只是「分组分歧」，绝不静默吞条。
-  - 裸括号补齐同一规则（`【某某】` 下跟 ≥2 条正文且此前无分组 → 认作分组，原来一律当小标题）；
-    无线索时用**文件名**兜底命名（剥尾部日期/`(1)`/副本），不再叫「未分组导入」；
-    「正文在分组标记前」告警只在旁边确实还有别的分组时才报，且不再要求回去改文件。
-  - **预览弹窗从只读改为可编辑**：改组名/前缀、`↑↓` 并入相邻组、`✂` 按条拆新组、改小标题与
-    正文、删条删组；推断出的组标琥珀「疑似 · 就这样」一键确认。认错了当场改，不必回去改 txt 重导。
-  - 新 IPC `repreview_import`：结构性改动后重算前缀/编号区间/是否并入已有组。commit 侧按最终态
-    兜底校验（空组跳过、空正文剔除、`sanitize_prefix` 规整），**不信任前端结构**。
-  - 既有 24 条解析测试**一字未改**全部通过 + 新增 11 条（用户真实文件形态、1:1 交替不误判、
-    长短混排不丢条、文件名清洗）。无 migration。
-- [x] **用途标签 + 图生视频包导出（v0.13.0）** — 起点是一个反例：作品库积着不同用途的图，
-  只有一小部分需要做视频。实测 batch 15 的 19 张与其余 92 张**零重叠**——全库含「动势」14 条、
-  「这一帧」11 条、「9:16」19 条，全部落在那一批，它是唯一为视频而写的批次。migration 0018。
-  - **用途标在提示词组上**：一张图的用途由它的提示词决定，提示词的用途由那份 txt 决定，
-    而一份 txt = 一个组。批次会混组（batch 7 混了几十个组），所以批次不是用途单元。
-    机制此前已建好 80%（tags/tag\_bindings 表 + importer 解析 `标签:` + 提示词库按标签筛选），
-    但**唯一写入口开在导入 txt 那一刻**，而用户的 txt 从不带语法标记（v0.12.0 形态推断正为此
-    而生）→ 全库 tags 表长期一条记录都没有。本次补上实际会走的那条写路径。
-    `purpose.rs` 受控用途单点（同 `publish/platform.rs`）；取值在**命令边界**强制校验而非只靠
-    UI 给选择器——命令是公开边界，放进自由字符串就会「图生视频/图转视频/v2v」三种拼法同时进库。
-    `set_prompt_group_purposes` **只替换用途标签、保留 txt 导入的自由标签**（两套东西恰好共用
-    一张 tags 表）；`bind_group_tags` 导入与 UI 共用，标签名规整只此一处。
-  - **一包一组**：不是为了目录整齐——同组分镜最后要剪进同一条成片，运镜语言与时长必须统一，
-    跨组混包改写风格会飘。（曾按全库 50 个组的碎片分布判断「不该按组切」，那是把不同用途的组
-    混在一起看造成的错觉；限定用途后分布是 7/5/4/3。）
-  - **主键取 `accepted_works.id`（`W{id}`）而非文件名**：输出名 `..._BR140010_1.JPG` 的编号已
-    去连字符，`BR140010` 反推不出是 `BR14-0010` 还是 `BR1-40010`——文件名本来就不可逆；历史批次
-    更早于抽卡序号落地，连结构都不一致。中文原名只作 `displayName` 留在 manifest 给人看。
-  - **组内公共前后缀剥离**：四个组各有 147/165/384/305 字逐字相同的产品保真尾巴（「哪个环穿
-    哪个孔、谁挂在谁之上一律不得移动」）。图已是首帧、产品已画对，再喂 300 字配件穿接关系只会
-    把改写带偏。按 **char** 而非 byte 切（按字节切会切碎中文）；单条不剥离（它跟自己的公共缀
-    就是全文）；剥完为空回退全文。公共缀取自该组**全部**验收作品而非本次所选——超集的公共缀
-    必是子集公共缀的前缀，取超集更保守。剥离只是提示不是契约：manifest 同时给 `sourcePrompt`
-    全文与剥离字数，猜错不丢信息。实测剥后可变部分占全文 51–82%，起始正是场景描述。
-  - **包结构**：`manifest.jsonl` 一行一条（可 grep、可 `head -n` 分片，skill 不必整包读进上下文）
-    - `ledger.jsonl`（留给 skill 追加，同 id 最后一条即当前态）+ `images/`（喂即梦）
-    - `thumbs/`（喂模型读图，384×512 约 260 token，比原图省一个量级）+ **READY.txt 最后写**。
-  - **跨包去重台账 `work_exports`**：包内 ledger 只管得住包内，包被移走/删掉就失忆，同一张图会被
-    反复导出反复花额度。只新增表不 ALTER 既有表；`channel` 留给未来别的下游，**不给
-    accepted\_works 加一次性布尔列**（第二个下游来了就要再加一个）。不设 FK：作品进废纸篓后台账
-    仍要答得出「这张图当时导出过」。**台账在包写成之后才记**——反过来会留下「记了没导出」的假
-    记录，而「隐藏已导出」正是靠它筛，假记录会让那张图从候选里永久消失。
-  - 用途是**筛选默认值不是门禁**：作品库照旧允许手选任意作品导出，堵死了就得改代码。
-  - 294 Rust 测试。**后续**（本次未做）：Claude Code 侧 skill（prep/run/pull）、视频回流与
-    视频验收页签（`video_clips` + 废纸篓 `clip` 类 + CSP 补 `media-src` + poster 须独立成文件，
-    否则清空废纸篓会删掉还活着的作品缩略图）。
-- [x] **参考图库独立 + 上传进度 + 参数自检（v0.14.0）** — 六条用户反馈。migration 0019。299 Rust 测试。
-  - **上传静默是主症**：导入一次十几张，后端逐张「拷贝 + 解码 + 缩略图 + hash + 压缩副本」，
-    十几秒里界面一声不吭，还全跑在异步执行器上（纯 CPU 活占着 IPC 线程，连别的命令都卡）。
-    用户以为没点上，反复重按 → 同一批图进库五六遍。修法三件：`ingest_one` 移进
-    `spawn_blocking`；逐张推 `refs://import-progress`（含当前文件名与失败计数）；前端
-    `useRefImport` 的重入锁用 **ref 而非 state**（`useState` 的 busy 要等下一次渲染才生效，
-    挡不住同一帧内的连点）。顺带逐张容错：一张坏图只记一次 failed，不再中断整批。
-  - **生成页上传即临时（ephemeral）**：随手拖一张跑一次的图不该长住长期图库。仍是 ref\_images
-    行（tasks/batch\_refs/accepted\_works 都以它为父表，不落库不行），但图库页与「从参考图库
-    选择」都不列它，**去重基准也剔除它**——否则用户正式导入一张自己刚在生成页试过的图，
-    会收到一句莫名其妙的「重复」。`list_ref_images` 仍返回它：切在后端，生成页当场就显示
-    不出自己刚传的图，过滤只能在消费端做。
-  - **图库分组与提示词组解绑**：`ref_images.group_id` 原本指向 **prompt\_groups**——图库的目录
-    一直跟着「一份 txt = 一个组」的节奏变形，还混进临时组。新建 `ref_groups`（NOCASE 唯一）
-    - `ref_group_id`，并把既有归属**按同名搬过去**而非丢进未分组：眼前的结构一张不动，只是
-      链子断了。历史列 `group_id` 保留不读不写。前端加「管理分组」（新建/改名/删除，删组不删图）。
-      既有两条 refs 测试改断言 `ref_group_id` —— 不是放宽，是语义换了：原样跑会直接撞外键
-      （FK 恰好抓住了这次切换）。
-  - **toast 移到右上**：右下角是各页主操作按钮（开始生成/导出/确认/删除）的固定位置，黑色
-    toast 压在上面只能干等。`offset.top=56` 让开 44px 标题栏（否则改压住「跳转」与 Windows 窗控），
-    驻留 2.6s。
-  - **生成参数自检**：size/quality 的透传链（params\_json → batches → dispatcher → multipart）
-    实测完好，wiremock 两条测试已守住。真问题是**抽卡次数不进快照**——「按此配置再来一批」
-    把 ×3 悄悄还原成 ×1，任务数对不上而没人知道为什么；现随快照记录并夹取 1..=5。
-    另新增 9:16 竖幅（1080×1920）+ **自定义尺寸直填**（不同兼容端点认的取值枚举不一样，
-    写死预设等于赌），并在参数弹层与开始生成确认卡里直书\*\*「实际发往接口的字段」**——
-    「设置了远端却没收到」这类怀疑，只能靠把请求内容摆到确认之前来消除。
-    GenParams 明确**不加\*\* `deny_unknown_fields`：快照比它宽（draws/watermark 等纯 UI 键），
-    严格解析会让整份快照退化成「全部空」，用户选的 9:16 反而一个字段都发不出去。
-- [x] **图生视频流水线 + 作品库重构（v0.15.0）** — 起点是一句「感觉很乱」。诊断出来的病根
-  不是「验收放在哪」，是**导出即失去身份**：v0.13.0 把状态交给包内 `ledger.jsonl`，包一被
-  移走/删掉/重建就失忆；而视频的**终点本来就在库内**（发布模块的视频型素材包 = 1 视频 + 封面）。
-  终点在里面、中段在外面 → 两边各拥有一半真相 → 没有任何一处能回答「这批视频做到哪了」。
-  migration 0020。355 Rust 测试。
-  - **边界重划**：GenDesk 全程持有流水线状态；Claude Code / Codex 侧的 skill 退化成
-    **无状态的改写服务**（读工单 → 写回改写结果），提交/轮询/下载/重试/验收全在本机。
-    理由是分工而非洁癖：轮询不是智能任务，让 LLM 在 agent 循环里干这个既慢又贵还不可靠。
-    `ledger.jsonl` 随之取消 —— 少一个真相来源是收益。
-  - **`v2v_clips` 七态与 `tasks.status` 同构**（rewrite/ready/run/rev/pass/rej/fail），学一次用两处。
-    `UNIQUE(work_id)`：一张图同时只有一条在跑，重跑是就地 `attempt+1` 而非新增行，
-    否则看板堆出同一张图的多条重影，「这张图做到哪了」又变成没有答案。
-  - **交接是自动的，不是一个按钮**：「验收通过后不需要点导出」要成立，就必须由**状态变化**
-    触发物化。组目录名对同一组恒定（`g{group_id}`）——带时间戳的新目录会让 skill 每轮都
-    看见「没见过的」目录、重复改写同一批。READY.txt 最后写；收录后移档留证（同 v0.9.0）。
-    只监听「已改写」：连「待改写」一起监听会形成 物化→事件→收录→物化 的自激循环。
-  - **额度是一次性的**，故顺序不能反：提交成功→立刻写 submit\_id 并置 run。反过来会留下
-    「跑着但认不出是哪条」的孤儿，而恢复只能退回重提 = 花两份钱买同一条视频。
-    `recover_orphan_submits` 因此**只**动无 submit\_id 的条目。
-  - **未知 `gen_status` 判 Running 而非 Failed**：CLI 加一个新中间态时，判失败会把额度已扣、
-    正在跑的任务当场标死；判运行最坏多轮询几轮，由 45 分钟超时兜底。只认落盘 `path`
-    不认 `video_url`（签名会过期，存进库等于存一条几小时后必然 404 的引用）。
-  - **封面 = 首帧缩略图的副本**（`clips/clip{id}.jpg`，独立成文件）。image2video 的第一帧
-    就是那张图，语义正确且不必依赖 ffmpeg；更关键的是不能指向 `accepted_works.thumb_path`
-    —— 清空废纸篓会物理删 file\_paths，删一条未通过的视频会顺手删掉还活着的作品缩略图。
-  - **命令行摆到确认之前**：`dreamina::command_line` 是执行与展示的同一来源。CLI 的 flags
-    会随版本变（skill 文档自己就写「不要硬编码模型支持」），对策不是赌它不变，而是让
-    「我设了却没生效」这类怀疑无处可生。提交前本地预检模型/时长/分辨率组合——半套组合是
-    最容易踩的坑，而 CLI 的拒绝发生在花钱之后，批量 20 条会连报 20 次同样的错。
-  - **重跑是不通过后的默认动作**：视频不通过多半是没抽中，不是提示词不对。「退回改写」
-    才清掉 video\_prompt。
-  - **作品库：分组从「轴」降级为「筛选」**。根因不是分组太多，是「一份 txt = 一个组」让分组
-    天然是**出货单位**而非分类法——它只会越来越多，永远不会是好的浏览轴（旧代码把全部分组
-    平铺成 segmented control，实测 187 组时物理上不可用）。改为默认按**批次**倒序分节
-    （实测 132 张作品 → 5 节，batch 7 一节混了 42 个组），节头带「全选本节」；分组变可搜索
-    popover；新增全文搜索（编号/组名/参考图/正文一次覆盖，人搜时并不知道自己记住的是哪一处）；
-    接上分页。排序改 `batch_id DESC, id ASC`（同验收页）——按 accepted\_at 排会让隔天补验收的
-    同一批被切散到两个日期，分节当场失效。
-  - **用途在导入那一刻定**：一份 txt 是为一个用途写的，那是唯一 100% 知道答案的时刻。
-    预览弹窗行内选择器 + 关键词预猜（B-Roll/分镜/首帧，标琥珀「疑似」），**只看组名/场景/标签
-    不扫正文**——正文里偶然出现「首帧」不该把整组标成视频用途，预猜错的代价必须低于不猜。
-  - **存量补标**（`backfill_group_purposes`）：导入侧只覆盖以后的 txt，而实测存量 `tags` 表
-    一条记录都没有，187 组里 33 个组名带 `B-Roll`/`分镜`、覆盖 40 张验收图。不补就等于
-    「验收自动入队」对全部历史资产失效，手点 33 次是白干的活。**只增不减**，已标过的跳过
-    （人手动取消掉的用途不该在下一轮补标里复活）。
-  - 路由 `shortcut: number | null`：十个数字已用尽，新页无数字快捷键。**不为新页重排既有数字**
-    —— 那会把肌肉记忆一次性作废，代价远大于少一个快捷键。
-  - **验证**：migration 0019+0020 在**真实库副本**（132 作品 / 187 分组）上跑通，
-    `foreign_key_check` 与 `integrity_check` 均干净；新 WORK\_SELECT 与新排序在真实数据上验证。
-    覆盖率 89.3%（闸门 85%），`v2v/watcher.rs` 按既有惯例（同 `publish/inbox/watcher.rs`）
-    排除出闸门。**未做**：独立上下文 `/code-review`（§1.4 要求），建议合并后补跑。
-- [x] **即梦 CLI 定位 + 改写规范按官方指南重写（v0.15.1）** — 用户装好 CLI、终端里 `dreamina`
-  跑得通，应用里却报「找不到即梦 CLI「」」。**两个原因叠在一起**，各修一个都还是不通：
-  - **空串直接当 argv\[0]**：`bin` 的 serde 默认值只在字段**缺失**时生效，而设置页那个输入框
-    可编辑 + onBlur 即存，于是存进来一个空串 —— 报错连名字都没有（`「」`），最难查的正是
-    这一点：错误信息没有指向任何东西。
-  - **GUI 进程根本没有终端的 PATH**：实测正在跑的 GenDesk.app 是
-    `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，而 dreamina 装在 `~/.local/bin`。所以旧文案
-    「dreamina（走 PATH）」对打包应用是**一句空话**；而从终端 `pnpm tauri dev` 起的开发实例
-    继承了完整 PATH，恰好把这个坑藏起来——「开发能跑、装上就不行」的典型成因。
-  - 修法是 `dreamina::resolve_bin`：留空/裸名 → 先 PATH 再翻 `~/.local/bin`、`/opt/homebrew/bin`
-    等常见位置；**填了路径就只认它**，不存在就直说是哪个路径不存在（偷偷回退到探测结果，
-    会让用户填错了路径也「跑起来」，换台机器再神秘失败）。找不到时把翻过的目录一并报出来——
-    这个错误的全部价值就在「我找过哪儿」。三个执行入口（`user_credit`/`submit`/`query`）与
-    提交预览统一走它，故确认卡里显示的绝对路径就是即将 exec 的那一个。设置页直接显示
-    「实际会执行：<绝对路径>」+ 文件选择器，**不让用户去回答「路径填什么」**。
-  - `resolve_in` 把搜索目录做成参数才可测：本仓库 `-F unsafe-code`，而 Rust 2024 起
-    `env::set_var` 是 unsafe fn，测试没法改 PATH。6 条新测试，含「空串走默认名」这条回归。
-  - **改写 skill 按官方提示词指南重写**（火山方舟 Seedance 1.0 / 1.5 pro 提示词指南）：
-    官方公式「主体+运动+环境+运镜+美学描述」，图生视频**略掉主体与环境的外观描写**（首帧图
-    已定死），只写运动 + 运镜 + 约束；官方运镜词表（推/拉/摇/移/跟/升/降/甩/环绕/旋转/变焦）、
-    运镜公式（起幅+运镜+幅度+落幅）、景别语法「主体+景别」、「善用程度副词」、
-    「用特征指定主体且全程一致」。手持质感改用官方术语\*\*「带轻微手持的呼吸感」\*\*（原先只靠
-    「手机实拍质感」隐式带出来）。
-  - **动静分层**是本项目的核心规则，也是对旧 skill 的一次纠正：旧版一律要求「只给一处运动 +
-    镜头固定」，但用户挑出来的两条最满意的成片恰恰一条是**镜头推近**、一条是**背景人影走动**
-    —— 真实场景元素（人/宠物/路人/光影/机位）**可以动**，那正是真实感的来源；只有**产品本体**
-    必须锁死，逐项点名配件 + 明写**不发生形变**。CLI 无 `camera_fixed` flag（`ratio` 也由首帧图
-    推断），故镜头是否动只能写在提示词里。
-  - `改写说明.md`（GenDesk 自动物化进交接目录的那份）同步带上这套要点：用户也在 Codex 里跑，
-    那边没有 Claude skill，工单必须自解释。
-- [x] **画幅改走 aspect\_ratio + 生成参数收敛到三项（v0.15.2）** — 用户报「设了 9:16 报错
-  `edges must be multiples of 16 (got "1080x1920")`，不设又常回 1:1，可我每条提示词都写了 9:16」。
-  两件事叠在一起：
-  - **1080 不是 16 的倍数**（1920 是）。v0.14.0 那个「9:16 竖」预设 `1080x1920` 是精确比例，
-    却撞上端点对边长的硬要求，于是这个预设**从来就没成功过**。
-  - **更根本的是参数选错了**：该端点的 gpt-image-2 系列用 `aspect_ratio` 控制画幅
-    （1:1/16:9/9:16/4:3/3:4/3:2/2:3/21:9，**仅保证比例**，像素由上游定），而我们只发 `size`。
-    不发比例参数 → 模型默认 1:1；**提示词里写「9:16」对模型不构成约束**，那是描述不是参数。
-  - **参数只做三项**（用户定的范围）：`aspect_ratio` / `size` / `output_format`，外加恒定
-    `n=1`。文档里的 quality / response\_format / background / output\_compression /
-    extra\_fields **一律不做**——先按文档全做了一版，用户看完直说「绝大部分用不到」；参数
-    摆在界面上却没人用，只会让「到底哪个在起作用」更难回答。删的时候连 `GenParams` 字段
-    一起删，不留「界面上没有、后台仍在发」的隐形参数。
-  - **抽卡不是 `n`**：抽卡 k 次 = **k 个任务**（各自独立重试与验收），不是发 `n=k`——
-    一次响应里 k 张图只有一张能落进当前任务，其余直接丢掉且照样计费。故 `n` 恒为 1。
-  - **`output_format` 同时决定本地交付格式**（`openai::deliver`）：默认那条「清元数据 +
-    去 C2PA 全开 → 统一重编码 JPEG」的规则会把选中的 PNG 悄悄变成 JPG，而「选了 PNG 拿到
-    JPG」是纯粹的失信。故显式选择优先：PNG 走容器级剥离（抹 tEXt/zTXt/iTXt/eXIf 与 caBX），
-    远端给的不是 PNG 就重编码成 PNG；未选格式则一字不改沿用旧规则（有防回归测试）。
-  - **入口严格、内部宽松**：`parse_checked`（命令边界，键类型不对就报错 + 受控取值/边长
-    预检）vs `from_json`（调度器读已落库批次，坏了也要能跑）。预检放在 create\_batch
-    是因为端点的拒绝发生在**计费之后**，一批 20 个任务会连报 20 次同一个错。
-  - 生成页参数弹层收敛为：比例（首项，旁边直说「提示词里写 9:16 对模型不构成约束」）·
-    精确尺寸（选填，边长非 16 倍数当场标红并给出可用值，同时禁用「开始生成」）· 输出格式
-    （PNG/JPG）· 抽卡次数，再加本地的去水印/AI 元数据/C2PA。「实际发往接口的字段」由构建
-    请求用的那份 wire 记录直接渲染——展示与执行同一来源。
-  - 371 Rust 测试。无 migration / 无 IPC 改动（`params_json` 是字符串，bindings 不变）。
-- [x] **视频流水线可观测 + 参数与额度面板（v0.16.0）** — 两条用户反馈：「任务过程中无法实时
-  查看进度，也不知道有没有报错、进行到哪一步」「无法在软件内**有效**编辑和查看视频生成参数
-  （走哪个模型、哪个通道、什么分辨率、积分额度与用量）」。migration 0021。384 Rust 测试。
-  - **病根是全部操作信号都进了 `tracing`**：即梦查询失败、成片改名失败、「报了成功却没返回
-    落盘路径」、CLI 拒绝提交时打在 stdout 里的那句原因 —— 打包后的应用没有终端，那个日志
-    文件用户不会去看，于是「已提交 19」旁边**没有任何东西**能解释它们在干嘛。
-    新增 `v2v/activity.rs`：500 条环形缓冲 + `v2v://activity` 事件 + 看板「执行日志」面板
-    （按级别筛、命令详情可展开、贴底自动跟随）。**成功只在 `loud` 时记**：轮询每 6 秒问
-    19 条，成功也记就是每分钟 190 条，两分半钟就把真正的报错冲出窗口 —— 付费动作（提交）
-    与人按下的按钮才配。日志同时进 tracing，两者受众不同不是重复。
-  - **每条 clip 的即梦状态落库**（0021 的 `gen_status`/`queue_idx`/`polled_at`）：原先只活在
-    一个 React state map 里，切页/重启即归零。`mark_polled` **不动 `updated_at`** ——
-    每 6 秒把在跑的条目全刷一遍会让看板永远显示「刚刚」，等于把那个信息删掉。
-    `polled_at` 是关键的第三个字段：只有状态时，「还在排队」与「我们已经问不出话了」
-    在界面上长得一模一样。
-  - **心跳与日志是两件事**：`v2v://tick` 每轮必发（含 enabled/running/error），因为
-    「轮询器还活着吗」恰恰要在**什么都没发生**时也答得出 —— 静默的界面和卡死的轮询器
-    长得一样。看板顶部 pill：轮询中 · N 在跑 · 12 秒前；超 30 秒无心跳转红。
-  - **批量提交不再是黑盒**：逐条记「提交中 3/19 · 模型 · 时长 · 分辨率」，且每条提交成功
-    就推一次 `v2v://changed`（整批跑完才刷新的话，人盯着不动的卡片分不清「在提交」还是
-    「卡住了」——同 v0.14.0 上传静默那个坑）。
-  - **超时不再等于烧钱（实测抓到的真 bug）**：真实库里 19 条全被判 `timeout`，而同一时刻
-    `dreamina list_task` 里它们**还是 `querying`** —— 即梦那边没结束，是我们先不等了。
-    而「重跑」会清掉 `submit_id` = 再花一份钱买同一条视频。故：超时文案改指向「继续等待」；
-    新增 `resume_timed_out`（沿用原提交单放回 run，重置 `submitted_at` 否则下一轮立刻又
-    超时）+ 看板主按钮「继续等待 N 条」；`RUN_TIMEOUT_SECS` 45 分钟 → **3 小时**
-    （判死一条在跑的任务代价是钱，多等两小时的代价只是看板上多几条「已提交」，不对等）。
-  - **参数面板回答的是原来回答不了的问题**：设置页那几个下拉框留空意味着「跟随 CLI 默认」，
-    而那个默认是什么、实际发出去哪几个 flag，界面上看不出来。面板给**归一化之后**的三件套
-    - 一条与真正 exec 同源的示例命令行（`v2v_effective_params`）+ 解析到的 CLI 绝对路径。
-  - **通道 = 即梦会话**：原先是个裸数字输入框，「这个数字是哪条会话」在应用里无从得知。
-    新增 `dreamina session list` 解析（**从两端认 token**：id / 末两个是日期时间 / 倒数第三是
-    PINNED / 中间全是名字 —— 表格按**显示宽度**对齐，中文按列宽偏移切必然错位）。
-  - **额度分两个数字，不合并成百分比**：余额来自远端账户（别处也可能在花它），消耗来自本机
-    出片时收到的扣费回执（`credit_count`）。编一个比值会让两者的差异无法解释。
-    分账到 成片 / 未通过（白花的）/ 待验收（未定论）+ 近 7 天 / 近 24 小时。
-    **不做「预估用量」**：提交那一刻并不知道这条会花多少，估出来的是编的。
-  - **参数要能整批改**：`set_v2v_clip_params` 只动 rewrite/ready 两列（已提交的改了不会重新
-    生效，却会让详情页显示的参数与那条视频实际用的对不上），且**不推进阶段**（那会让 skill
-    还没写提示词的条目躺进待提交列）。
-  - 迁移 0021 在**真实库副本**（19 条 clip）上验证：`foreign_key_check` 与 `integrity_check`
-    均干净，`resume_timed_out` 的条件在真实数据上匹配全部 19 条。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求），建议合并后补跑。
-- [x] **退避轮询 + 超时可配 + 队列观测（v0.16.1）** — 用户追问四件事，先把事实查清再动手
-  （直接跑真实 CLI 抓回体，而不是从文档推断）。migration 0022。394 Rust 测试。
-  - **实测确认的四条事实**（结论写在这里，免得下次又去推断）：
-    1. 那批走的是 `seedance2.0fast_vip`（设置里存的），per-clip 参数全空 → 归一化补成
-       720p / 4s。**`seedance2.0fast_vip` 按 CLI 帮助只支持 720p**；整个清单里只有
-       `seedance2.0_vip`（非 fast）支持 1080p / 4k。
-    2. 提交 72 分钟后 19 条在即梦那边**仍是 `querying`** —— 没卡住，就是排队慢。
-    3. **即梦不回传排队位次**：排队中的 `query_result` 只有 submit\_id / prompt / logid /
-       gen\_status 四个字段；`list_task` 也只有状态；`queue_info.queue_idx` 只在**已完成**
-       的回体里出现过（0、Finish）。解析留着以备它哪天开始给，但界面上不能凭空造。
-    4. **CLI 没有任何推送机制**（无 watch/stream/webhook/subscribe）。`--poll=N` 只是把
-       1 秒一次的轮询搬进子进程，进程被杀即丢 —— 那正是 v0.15.0 弃用它的原因。
-       所以「事件驱动而非轮询」在这条链路上做不到；能做的是**把轮询变便宜**。
-  - **退避轮询**（`poll_interval_for`）：原来每条每 6 秒查一次，19 条 = 每分钟 190 次
-    进程启动，过夜 8 小时九万多次。改为按已等时长递增：10s → 30s → 2min → 5min → 10min，
-    过夜约两千次，降两个数量级。心跳仍是 6 秒（界面上那句「12 秒前」要跟得上），
-    **查哪几条由 `is_due` 逐条决定**。手动「查一次进度」走 `force` 参数绕开退避 ——
-    不是把 `polled_at` 改成 0 去骗过判定（那样查询一失败就留下 1970 年的时间戳，
-    卡片显示「55 年前查过」，且此后每个 tick 都判它到点，退避对这条彻底失效）。
-    `polled_at` 语义随之改为「最后一次**发起**查询」，失败也记（`mark_poll_attempt`）——
-    否则 CLI 一旦不可用，最该省的时候反而每 tick 为每条起一个必然失败的进程。
-  - **超时改可配、默认不限**：`timeout_hours: Option<i64>`（设置页：不限 / 3 / 12 / 24 小时）。
-    「未知态判 Running 必须有个尽头」这条顾虑的解法不再是判死 —— 判超时后 submit\_id
-    保留、看板给「继续等待」，而退避让一条永远卡住的任务每十分钟才问一次，代价已经
-    低到不需要用「判死」来兜底。
-  - **队列观测条**（`v2v_queue_stats` + 看板顶部）：既然问不出「前面还有几个人」，就给
-    **我们自己测得准**、且恰好就是判据的两件事 —— **上次出片距今多久**（早上看到
-    「20 分钟前」= 队列在动，「9 小时前」= 该去查了）与**近 12 小时逐小时出片趋势**
-    （柱子在长 = 在动，连着几根空 = 停了），外加最久已等时长、按实测速度的粗略 ETA、
-    下次查询倒计时。超 2 小时没出片转琥珀并提示去看执行日志。
-    **不编「预估排队位次」**：编出来的数字人会拿去做决定。
-  - **计费型号落库**（0022 `benefit_type`，来自 `commerce_info.triplets[].benefit_type`，
-    形如 `dreamina_seedance_20_fast_5s`）：「到底走的哪个模型」用我们自己发出去的
-    `model_version` 回答等于自问自答 —— 上游忽略或降级时输入侧一个字都不会变，
-    只有回执能证伪。顺带 `credit_count` 两处都认（`query_result` 顶层 /
-    `list_task` 的 commerce\_info）。
-  - 迁移 0021+0022 **已在真实库上跑通**（`_sqlx_migrations` 两条 success=1，
-    `foreign_key_check` 与 `integrity_check` 干净）。
-- [x] **生图工单收件：Claude Code 投单即开跑（v0.17.0）** — 用户的原话是「skill 生成提示词的
-  同时我已经上传了参考图，为什么还要再手动导入两次」。手动的三步（导 txt、传参考图、挂靠）
-  被一份工单文件替掉，**验收仍在验收页人工完成**（用户明确要保留）。migration 0023。
-  413 Rust 测试。
-  - **为什么是文件而不是本地端口 / MCP 直连库**：「业务真相只在 Rust」与「单写者事务」
-    直接排除外部进程写库；而 HTTP 端口还有个更实际的问题——**GenDesk 没开时投单会直接失败**。
-    文件不会：启动补跑一次扫描，昨晚投的单今天照样进得来。方向与 v2v 恰好相反
-    （那边 GenDesk 出工单、skill 写回），故复用 `publish::inbox::watcher::coalesce`
-    这一份防抖 + 全量幂等重扫，三处各写一遍必然在某次改动后分叉。
-  - **收录恰好一次靠库不靠目录（0023 `intake_jobs.job_id` UNIQUE）**：工单目录会被移走、
-    被 skill 重建、被手动整理，磁盘上的「已处理」标记不可靠，而重复收录 = 重复建批 =
-    **重复花钱**（同 v0.13.0 `work_exports` 的理由）。`error` 行也挡住重投：失败的工单里
-    可能已有一半东西进了库，自动重来会造出重复提示词；重来是人的决定（设置页「重试」删行）。
-    记账在**动手之前**（同 v0.15.0「提交成功即写 submit\_id」）：进程中途被杀留 `running`，
-    下轮据此跳过而不是从头再来。
-  - **校验先于一切写**：参数非法 / 图片缺失 / 组名对不上，都在「一张图都还没进库」时拒掉，
-    工单要么整份生效要么整份没发生；建批（花钱）是最后一步。失败目录**留在原地**并写
-    `错误.txt`（错误要和 job.json 摆在一起才有用），成功才移档 `_已收录/`。
-  - **参数正确传递（用户点名的关切）由两件事保证**：产出的快照与生成页 `buildParamsJson`
-    **同形**（走下游同一条解析），且立刻过 `GenParams::parse_checked`。归一化**只改拼法
-    不改取值**：`jpg→jpeg`、全角冒号→半角是拼法；`1080x1920` 边长不是 16 的倍数是取值，
-    **拒单而不是替用户改成 1088**——静默改值正是「我明明写了 9:16 却不生效」的成因（v0.15.2）。
-    `draws` 超范围同样报错而不夹取（跑 5 次却以为跑了 9 次，任务数对不上没人解释得了）。
-    另落 `wire_json`（实际进 multipart 的字段），设置页直接摆出来：全自动收录没有经过
-    生成页那张确认卡，「到底发出去没有」在别处无处可查。
-  - **挂靠不猜**：多组工单里每张图必须点名 `group`。按顺序猜错的代价是整批图配错提示词，
-    而那要到验收时才看得出来——那时钱已经花完了。
-  - **写路径只有一条**：为此把 `commands/prompts.rs` 的预览构建与 commit 提成 pool 级函数
-    （`build_preview` / `build_preview_from_parsed` / `commit_preview`），`commands/refs.rs`
-    的 `ingest_one` 改 `pub(crate)`。否则形态推断、前缀分配、用途判定、缩略图口径迟早
-    各走各的，而「同一份 txt 手动导入是 3 组、经工单进来是 1 组」这种分歧没人解释得了。
-    用途经 tags 并入即被判为**显式**用途（不是关键词预猜），一处逻辑也不用改。
-  - **`Kick` trait**：建批后唤醒调度器抽成一行 trait，只为让端到端测试不必启动整个引擎
-    （那要 provider 工厂 + 事件汇 + 密钥存储）。同 `engine::events::EventSink` 的理由——
-    「这条链路到底把什么写进了库」是本模块唯一值得测的东西，不该被装配成本挡住。
-  - **路径安全**：工单是外部输入，绝对路径与 `..` 一律拒绝（一句 `"../../.ssh/id_rsa"`
-    否则就能把任意文件拷进图库）。
-  - 前端：设置页「Claude Code 收件」区块（开关 / 目录 / 打开 / 立即扫描 / 阈值 /
-    最近工单含错误原因与实际接口参数 / 重试 / 确认开跑）+ AppShell 全局 toast
-    （收录是自动的，人当时未必停在设置页）。
-  - **第二轮（同版本内）把标准入口从 job.json 换成 `提示词.txt` 的组头**——起点是用户
-    的一句「不想每个新 skill 都去交代一遍」。实测发现的**真问题**是：他的提示词 skill 全在
-    别的项目里（NFC\_Photo 6 个 / videofac / Claude\_noitems），而 skill 装在 GenDesk 仓库的
-    `.claude/skills/` 在那些目录里**根本不存在**。故改装用户级 `~/.claude/skills/`。
-    - **挂靠写在组头 = 位置绑定**，比 job.json 的按组名引用更强：改组名不会让挂靠断掉。
-      而 `分组:/前缀:/场景:/标签:` 这套 `键: 值` 组头语法 importer 早就有，
-      加四个键是往既有 match 里加四行，不是发明新语法。
-    - **新键只在组头区认**（该组第一条正文之前）。这些文档是长叙事，一条以
-      「比例：3:4 的竖构图」开头的提示词被当成元信息吃掉会静悄悄少一句且不报错。
-      老键行为一字不动，35 条既有解析测试原样通过。
-    - **组级参数与批次模型冲突** → 按 (参数, 抽卡) 分桶自动拆批。这是必须做的适配，
-      不是可选优化：`params_json` 是批次级的，三个组三种比例塞不进一个批次。
-    - **阈值判定放 Rust**：投单侧是另一个模型，可以忘记检查也可以被绕过；花钱的闸门
-      必须是机制。超阈值 → `hold` + 什么都不导入。
-    - **脚本方案被砍掉**：协议缩到「写 txt + images + READY.txt」三个文件后，
-      再引入一个 `gendesk-submit` 二进制只会多一处会坏的地方（安装、PATH、版本漂移），
-      而 Codex 那边也用不了。
-    - **`pgrep -f GenDesk` 是个陷阱**（实测）：仓库路径里带 "GenDesk"，`-f` 会匹配到
-      node/vite/esbuild 三个进程 → 在开发机上「看起来能用」其实一直在说谎。用 `-x`。
-      **进程名还是小写 `gendesk`**（打包后的可执行文件是 `Contents/MacOS/gendesk`）。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求），建议合并后补跑。
-- [x] **画幅：比例与尺寸必须一起发（v0.17.1）** — 起点是「skill 里写的 9:16 到底生不生效」。
-  没有从文档推断，直接量了库里跑过的真图（同一把 key `aixoras`、同一个模型
-  `gpt-image-2-1k`，批次 24–27 共 56 张）：
-  - 单发 `aspectRatio: "9:16"` → **16 张全是 1024×1024 正方形**，那个参数没起作用；
-  - `aspectRatio` + `size: "1088*1920"` → 40 张全是 941×1672（≈9:16），竖幅成立；
-  - 单发 `size: "1080x1920"` → 整批 400（`edges must be multiples of 16`）。
-    于是 v0.15.2 记的「**画幅走 `aspect_ratio` 而非 `size`**」被推翻——那句照的是端点文档，
-    而这把 key 背后的网关显然是拿 `size` 反推比例的。结论只对这把 key/模型成立，但
-    **代价不对等**：多发一个字段是零成本，少发一个是一整批废图，故默认两个都发。
-  - `provider::RATIO_SIZES` 单点定义八个比例的配套尺寸，取值同时满足**正好是该比例**
-    与**两边都是 16 的倍数**。这两条一起把「手机 1080p」排除了：1080÷16=67.5，
-    精确 9:16 的合法值只有 …/1008×1792/**1152×2048**/1296×2304…，取跨过 1080×1920 的
-    那一档。（`1088x1920` 边长合法但它是 17:30。）
-  - **回来的像素不由我们定**：要 1088×1920，上游给 941×1672（≈1.57MP）——它只认比例。
-    所以这些值是**比例的载体**，不是交付分辨率；要精确像素得验收后自己缩放。
-  - 两个入口都补：生成页选比例即自动填尺寸（**只在尺寸是自动填的时候覆盖**——用户手打过
-    别的值就不动，被下拉框静默改掉正是「我设了却不生效」的成因）；工单侧
-    `intake::build_params` 在只有 `比例:` 时补上 `尺寸:`（**补缺失字段**，不改已写下的取值）。
-  - 测试守的是不变量而不是数字：`every_companion_size_passes_validation` 让每个配套值
-    自己过一遍端点预检——写错一个就等于埋了个必炸的默认值。
-    取样用竖比例而非 1:1，否则补与不补的结果长得一样，测不出东西。
-- [x] **幽灵单识别 + 默认通道降本（v0.18.0）** — 起点是一次真实事故：19 条提交出去，
-  1 条出片，另外 18 条在看板上停在「已提交」十几个小时，无人察觉。
-  逐条向即梦复查（不是读本地缓存）后定位：那 18 条 `list_task` 里查得到、`gen_status`
-  停在 `querying`、但**既没有 `queue_info` 也没有 `credit_count`** —— 即梦接了单，
-  从未入队，也从未计费。同参数同通道复现一条新单，25 秒内就拿到
-  `queue_idx: 4485 / queue_length: 574522` 与 `credit_count: 8`。
-  - **事故根因在即梦侧**，但 GenDesk 有三处放大了它，本版修的是这三处：
-    1. `submit()` 只从回体里挑走 `submit_id`，其余整份丢掉 → 提交当时即梦怎么答的、
-       这条计没计费，事后一个字都查不到。现在整份落库（0024 `submit_credit`/`submit_status`），
-       回执异常当场记 warn。**但不拒收**：拿到 submit\_id 就必须记（`额度不可撤回`），
-       判死留给轮询——那时有连续多轮观测，比一次回体可靠。
-    2. 轮询对幽灵单没有识别，而超时默认不限 → 会一直轮询下去。新增 `runner::is_phantom`：
-       `queue_idx` 与 `credit_count` **双双**缺席且过了 15 分钟宽限期 → `fail(phantom)`。
-       两个信号缺一不可：`credit_count` 是决定性的那个，只看 `queue_idx` 会在即梦哪天
-       不下发 `queue_info` 时把已经扣了钱的任务当场标死。
-       文案与超时**相反**（超时说「额度已扣，先继续等待」，幽灵说「没扣费，直接重跑」）——
-       指错方向的代价是真金白银；`resume_timed_out` 也据此只放 `timeout`。
-    3. 「继续等待」把 `submitted_at` 重置成当下（必须重置，否则按钮点了等于没点），
-       代价是原始提交时刻被永久覆盖 —— 事故当天看板显示「最久已等 10 小时 54 分」，
-       而那只是从按下按钮算起的。0024 拆出 `first_submitted_at`，卡片改用它算等待时长。
-  - **推翻了一条写进代码的旧结论**：`QueryResult::queue_idx` 原注释断言「即梦当前不回传
-    队列位次」，还配了测试 `queued_payload_has_no_queue_position`——而那条测试的取样
-    `027e202c` 正是这 18 条坏单之一。从坏样本归纳出的「常态」，把最好的一个报警信号
-    解释成了正常现象。新测试一正一反并排放：健康回体有位次有计费，幽灵回体两个都没有。
-  - **默认模型 `""`（跟随 CLI 默认）→ `seedance2.0fast`**。实测同一张首帧图、同为
-    4s/720p/720×1280：`seedance2.0fast` 走 `dreamina_fusion_video40` 收 **8 额度**，
-    `seedance2.0fast_vip` 走 `..._vision` 收 **44** —— 5.5 倍差价，输出规格一模一样，
-    vip 买到的只是不排队（直接 `Generating`，非 vip 排在第 4485 位）。
-    「跟随 CLI 默认」看着最稳，实为把「这批片子按什么价钱生成」交给一个我们不控制、
-    会随版本变的选择。花钱的选择必须显式。
-- [x] **视频流水线 UI/UX 重构：看板 → 分节表格 + 看片流（v0.19.0）** — 按高保真原型重做整页。
-  migration 0025。451 Rust 测试 + 29 条前端测试。
-  - **五列看板的病根是选错了轴**：它把「阶段」当成唯一维度，而阶段恰恰是**最不缺**的
-    信息 —— 它就写在那条的脸上。真正答不上来的三个问题全是跨阶段的：
-    1. **这一批做到哪了** —— 卡片按阶段散落五列，一批 30 条要横扫五遍才拼得出来。
-       改为按**批次**分节的九列表格，一行一条，节头一条 104px 的分段条给出阶段混合，
-       全部落进 pass/rej 的批次自动降级为「已定案」一行收起、不再占位。
-    2. **有没有出事** —— 18 条幽灵单与 18 条正常排队在「已提交」列里长得一模一样，
-       而处置**完全相反**（一个免费重跑，一个必须继续等否则重复扣费）。故加「信号」
-       这条与阶段正交的筛选轴（幽灵单/超时/等待异常/重跑过/vip/未入资产库），
-       并让每行的末列说出**判断依据**而不只是状态（「疑幽灵单 · 无位次、无计费」）。
-    3. **这一条花没花钱** —— 卡片放不下，原来只能一条条开弹窗。改为常驻详情栏：
-       「这一条的账」（我们发的型号 vs 即梦回执的计费型号 vs submit\_id）+「这一条的历程」
-       （入队→改写写回→提交→出片→定态五个时刻，没发生的留白不编时间）。
-  - **例外优先**是贯穿全页的一条规则：节头摘要与「情况」列都把异常排在常态前面 ——
-    被截断时先没的必须是常态。
-  - **撤销令牌由 Rust 造、前端只当信封**。看片流一秒判一条，手滑判错的概率接近 1，
-    而错判「不通过」会把成片扔进废纸篓。但撤销不能让前端拼一条「把 stage 改回 rev」的
-    命令（那等于把状态机开给前端）。做法：改动**之前**取整份快照封进令牌，撤销时原样
-    传回由 Rust 写回。**整份写回而不是逆变换**：`requeue_for_run` 会连带清掉 submit\_id /
-    成片路径 / 扣费回执，只拨阶段会留下「待验收但没有片子」的空壳，比不给撤销更糟。
-    已经重新提交出去的条目拒绝撤销（新 submit\_id 抹掉 = 认不出主人的孤儿）。
-  - **看片流是一层覆盖不是一个页面**：ESC 回看板，光标与筛选原样保留。判定序列受筛选
-    影响（筛了「幽灵单」就只看那几条），判完自动跳下一条 —— 且跳的是**待验收序列**里的
-    下一条而不是表格里的，否则大播放器会当场变成空画面。
-  - **单价表下发一小片给前端**（`ModelInfo.resPrices`）：节头要算「确认提交 18 条 ·
-    预估 144 额度」，那是每次勾选都变的数，不能每渲染一次往后端跑一趟；抄一份到前端
-    又必然与 `PRICES` 分叉。查不到单价的组合**缺席**而不是给 0，界面据此标「≥」。
-  - **0025 `asset_pack_id`**：成片列那句「可入资产库 · 尚未入库」原先在库里没有任何一处
-    记着 —— `pack_from_clip` 建完包就把 clip id 丢了。判据用
-    `EXISTS(SELECT 1 FROM asset_packs …)` 而非布尔列：包被退役删除后应当**自动回落**成
-    待办，「入库与否」问的是现在库里有没有，不是历史上打过包没有。
-  - **开屏战报**（`v2v_away_digest` + `v2v_mark_seen`）：视频是过夜跑的，回来那一刻要
-    知道的不是「现在有多少条」而是「我不在时出了什么事」。按 `finished_at` 切而不是
-    `updated_at` —— 后者会把用户自己刚做的验收也算进「离开期间」，横幅就开始复述人
-    自己刚点过的操作。只在确实离开过（≥30 分钟）且确实发生过事时才出现。
-  - **全键盘**：J/K 移动 · 空格通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
-    A 入资产库 · U 撤销 · F 对照首帧 · ⏎ 看片流 · ⌘⏎ 确认提交 · ⌥\ 详情栏 ·
-    ⌥1/2/3 观测/日志/参数。⌥ 组合一律用 `e.code`（macOS 上 Alt 会把 `key` 改写成
-    `¡`/`«` 之类的符号）；命令面板/速查面板打开时整页让路（否则在 ⌘K 里打字会顺手判掉
-    一条视频）。看片流里按 A 记住上次选的 SKU，否则每条都要弹一次选择器。
-  - **前端派生逻辑单列成 `features/v2v/model.ts` 并配测试**。它不是 UI 壳：那句
-    「判断依据」直接指挥人按哪个按钮，指错方向的代价是真金白银且不会报错。测试里
-    「幽灵单优先于等待异常」这条正是写测试时才发现的交互。
-  - 迁移 0025 在**真实库副本**（40 条 clip）上跑通，`foreign_key_check` 与
-    `integrity_check` 干净，新 SELECT 与 away\_digest 在真实数据上验证。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求）；未在真机启动 GUI 实跑
-    （会触发 watcher 收录真实工单 = 可能真花钱建批），建议合并后人工跑一次 `pnpm tauri dev`。
-- [x] **整表扫描 + 常驻队列 + 成片库拆页（v0.20.0）** — 七条用户反馈。migration 0026。
-  468 Rust 测试 + 31 条前端测试。
-  - **退避轮询被换掉了，换成整表扫描**。用户问「有没有更好的机制」，答案不在调参而在
-    换掉「问一次」的单位：实跑 `dreamina list_task` 确认它**一个进程就回一整页**全部
-    在跑任务的 `gen_status` / `credit_count` / `benefit_type` / 视频元数据。于是进程数
-    与在跑条数**脱钩**（O(1) 而非 O(n)），频率反而可以调高 —— 19 条过夜 8 小时：
-    逐条 6 秒 = 九万次；退避 ≈ 1140 次；30 秒整表扫描 = **960 次且与条数无关**
-    （100 条在跑仍是 960 次），同时出片延迟从「最长 10 分钟」降到「最长 30 秒」。
-    **成本与延迟同时变好**，而退避是拿延迟换成本、两头都不满意。
-    - CLI 侧仍然没有任何推送（无 watch / stream / webhook），所以「事件驱动不轮询」
-      在这条链路上做不到 —— 这次做的是把轮询的**单位**从一条换成一整页。
-    - **`list_task` 有两样东西拿不到**，各自决定一段代码：没有
-      `result_json.videos[].path`（它不下载）→ 出片的条目仍要单发一次
-      `query_result --download_dir`；**没有 `queue_info`** → 幽灵判定不能只凭这里的
-      `credit_count` 缺席，否则「两个信号同时缺席」这条规则会被悄悄降成一个。
-      故拆出 `phantom_suspect`（宽判据，挑嫌疑）与 `is_phantom`（权威回体才下结论），
-      嫌疑升级时单查一次拿队列位次；**确认查询失败就这一轮不判**（问不出话 ≠ 判死）。
-    - 稳态下每轮就一个进程：`credit_count` 一旦出现，这条就永远出不了嫌疑名单，
-      再不必为它单查。逐条退避（`poll_interval_for` / `is_due`）**保留为回落路径** ——
-      扫描里认不出的 submit\_id 恰恰最不该被放弃轮询。
-    - `credit_count` 随扫描就落库（COALESCE 只增不抹）。早前那句「只有出片那一刻才有
-      回执」是从 `query_result` 单条路径归纳的，而钱在提交那一刻就扣了。
-  - **常驻的非 VIP 队列（`v2v::autofill`）**：非 VIP 实测排在第 4485 位要等几小时，
-    VIP 同规格贵 5.5 倍买到的只是不排队 —— 于是\*\*「等」本身是免费的\*\*，只要队列不空着，
-    过夜就能低成本攒片。保持 N 条在跑，完成一条补一条；存量见底**之前**发系统通知
-    （断流的真正原因从来不是补单器停了，而是没料了，而补料要人去写提示词）。
-    - 它在自动花钱，所以四道闸都是机制不是自觉：**默认关** · **模型必须非 VIP**
-      （保存那一刻就拒，不是跑起来才发现）· **日额度上限**（按**提交**时刻切窗而不是
-      出片时刻 —— 出片要等几小时，用出片切窗的话补单器能在任何一条出片之前把一整天的
-      额度提交光，而那个上限从头到尾不会触发）· **余额兜底**（即梦逐条扣费，
-      「提交到一半开始报错」时前面扣掉的退不回来）。
-    - 通知带 12 小时冷却：每 30 秒弹一次的通知，人会在第三次就把它关掉，
-      然后这条链路永久失灵。
-    - 0026 的 `auto_submitted` 既是责任标记也是**深度计数依据**：只数补单器自己放出去的，
-      否则手动跑 20 条时常驻队列会静悄悄停摆。标记在**提交之前**打 —— 提交成功那一刻
-      钱就扣了，事后再标会在进程恰好被杀时留下一条它认不出是自己放的在跑条目。
-    - `plan()` 是纯函数，10 条测试守住四道闸与通知冷却；另有两条库层测试守住
-      **补单器绝不碰「有人指定过模型」的条目**（它会把廉价参数写进挑中的条目，
-      捡走一条特意设了 vip/1080p 的片子就是静悄悄降级，人要到出片时才看得出来）
-      与「深度只数它自己放出去的」。**单价查不到时不做额度裁剪**
-      而不是按 0 算（按 0 算等于把日限当作不存在）。
-  - **成片离开工作台，独立成「视频成片」页**（route `clips`）。实测库里 18 条验收通过的
-    片子一直挂在看板上，「这里还剩多少活」得靠人在心里做减法才答得出。拆开之后两边
-    各自变简单：工作台只剩在制的，成片页只回答成片自己的问题 —— **哪些还没进资产库**
-    （发布链上唯一一处会无声断掉的地方，故它也是侧栏徽章：`StageCounts.no_asset`，
-    判据用 `EXISTS` 所以包被删掉会自动回落成待办）、这条花了多少、片子在哪。
-    「未通过」作为一档筛选留在这一页 —— 那些条目不该变得无处可寻。
-  - **已定案的批次整节消失**，不再折叠成一行：折叠一行也是一行，几十批做完之后会把
-    真正在跑的两批挤出屏幕。`matchStage(_, "all")` 随之改成「全部**在制**」。
-    实测真实库 6 个批次里，批次 27（9 条全定案）当场整节消失，批次 26 只剩 4 条在制。
-    逃生舱是筛选片：显式点「未通过」那一节就回来（`rows` 非空即保留）。
-  - **播放器自绘控制条**（`V2vVideo`）。原生 `controls` 两条硬伤各自都足以否掉它：
-    ① 它自带一层暗色渐变铺在画面下缘、获焦即常驻，而这一页判的恰恰是**色差与形变**，
-    下三分之一被压暗，验收结论会跟着变；② 获焦后**空格是播放/暂停**，而这一页的空格是
-    「通过」—— 两个处理器都会响应，按一下既判了片又悄无声息地暂停了播放。
-    故控制条放在画面**之外**，`<video tabIndex={-1}>` 永不获焦，控制按钮
-    `onMouseDown` 阻止默认以免点击后留住焦点。顺带加逐帧步进（判形变要停在某一帧上看）
-    与 0.25/0.5× 慢放。详情栏小窗默认 **9:16 竖幅** —— 出的片子基本都是竖版，
-    横幅画框会把它压成中间一条，而那一栏只有 268px 宽。
-  - **参数从全局设置提到主流程**（`V2vParamPicker`，受控组件，两处复用）：提交确认卡
-    顶部可就地改模型/时长/分辨率，改完**当场重取命令行与预估额度**（模型之间差 5.5 倍，
-    那个数字必须随选择一起变），没应用就禁用「确认提交」；底栏选中未提交的条目时给
-    批量参数条。理由是参数**每一批不一样**：放进全局设置等于每换一批去设置页改一次，
-    忘了改回来的代价是下一批按 5.5 倍跑掉。全局设置降级为兜底默认值。
-  - 迁移 0026 在**真实库副本**（40 条 clip：18 pass / 1 rej / 21 rewrite）上跑通，
-    `foreign_key_check` 与 `integrity_check` 干净；成片库徽章、补单器三项输入、
-    分节保留判据均在真实数据上验证。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求）；未在真机启动 GUI 实跑
-    （会触发 watcher 收录真实工单 = 可能真花钱建批），建议合并后人工跑一次 `pnpm tauri dev`。
-- [x] **启动失败必须自己说话（v0.20.1）** — 用户报「有时候点了没反应，dock 弹一下就没了，
-  但 `pnpm tauri dev` 能开」。日志里躺着答案：
-  `应用初始化失败，退出 error=migration 25 was previously applied but is missing in the resolved migrations`
-  （当天 09:03 / 11:08 / 12:12–12:14 反复出现，12:12 起那一串密集重试就是人在连点图标）。
-  - **根因是「旧包对新库」**：`sqlx::migrate!` 在**编译期**把 `migrations/` 内嵌进二进制，
-    而 dev 与打包应用**共用同一个 `app_data_dir`**（identifier 相同）。于是
-    `pnpm tauri dev` 跑在最新 main 上把库迁到 0026；装在 `/Applications` 的 **v0.18.0**
-    （内嵌只到 0024）再打开，sqlx 见到库里有它不认识的迁移 25/26 → `VersionMissing` → 拒绝。
-    这是保护不是故障：旧代码不认识新 schema，让它跑才会真损坏数据。二进制级已核实——
-    0.18.0 的可执行文件里有 `intake jobs`(0023) / `v2v submit receipt`(0024) 的字符串，
-    没有 `v2v asset link`(0025) / `v2v autofill`(0026)。
-  - **「有时候」是错觉，这是一扇单向门**：dev 跑过一次之后旧包**再也**开不起来，直到重装。
-    而「dev 能开」恰恰是同一个原因的另一面（它总是最新的）—— 这个巧合让最该被怀疑的
-    东西看起来最健康，也是这个 bug 难查的全部原因。
-  - **真正的缺陷是没有出口信号**。失败处理此前已经做对了一半（不 panic、记日志、干净退出），
-    但漏了最后一步：**告诉人**。GUI 从 Finder 启动没有 stderr，日志文件没人会主动去翻，
-    于是整件事在用户那里的全部表现就是 dock 弹一下 —— 一个不指向任何东西的症状。
-    现在退出前弹原生对话框（`fatal_dialog`），`setup_app` 与 `run()` 两条失败路径都走它。
-  - **弹窗用 rfd 而非 tauri-plugin-dialog**：后者的 blocking API 文档明写不得在主线程调用，
-    而 setup 钩子正在主线程；它的非阻塞 API 又要求事件循环已经跑起来，而失败发生在那之前。
-    rfd 是该插件自己的底层依赖，特性合一后仍是同一份，`Cargo.lock` 只 +1 行。
-    **它只在打包成 .app 后才弹得出来**（实测）：无父窗口的消息框走
-    `CFUserNotificationDisplayAlert`，裸二进制拿不到显示会话，约 3 秒后返回错误并静默略过。
-    不必修 —— dev 下 stderr 就在眼前，这个弹窗要救的正是双击图标那条路径。
-  - **sqlx 的原文不算「告诉人」**：`migration 25 was previously applied but is missing in
-    the resolved migrations` 不指向任何可执行动作。`db::explain_connect_error` 把它译成
-    「库到了第几版 / 我只认到第几版 / 去更新应用」，两个数字都给。
-    `latest_embedded_migration()` 读的是**内嵌迁移表**而不是 `CARGO_PKG_VERSION` ——
-    那才是「这份可执行文件认识到第几版 schema」的准确答案，排查时要看的也是它。
-  - **第二条通往同一症状的路径（排查中撞见）**：`tauri-plugin-single-instance` 在已有实例时
-    **静默 exit(0)，无任何输出**。所以开着 `pnpm tauri dev` 时再点 .app，同样是「弹一下就没了」。
-    两条路径的区分方法：看日志里有没有当次的 `logging initialized` —— 单实例踢出发生在
-    日志初始化**之前**，一个字都不会留下；迁移失败则必留一条 ERROR。
-  - 471 Rust 测试（+3，用真实临时库重现「库里有本应用不认识的迁移」，断言拒绝启动、
-    文案含两个版本号与可执行动作、且不泄漏 sqlx 英文原文）。弹窗已在真机 .app 中实跑验证
-    （栈停在 `CFUserNotificationDisplayAlert`/`ReceiveResponse`，面板截图确认）。
-    无 migration / 无 IPC 改动 / 无前端改动。
-- [x] **提示词消耗品化 + 验收页真实比例 + 废纸篓可还原（v0.21.0）** — 七条用户反馈。
-  migration 0027。475 Rust 测试 + 43 条前端测试。
-  - **批次不再是可管理的对象，跑完即退出历史**（用户定的方向：「提示词用完即弃」）。
-    `retire_resolved_batches`：批次内任务全落 pass/rej（或任务都被删光）**且**没有本批的
-    未通过结果还躺在废纸篓里 → 物理删批次（级联 tasks/attempts/batch\_refs），并删掉本批
-    消耗掉、且再无任务引用的提示词与分组（含 tag\_bindings —— 那张多态表没有外键，
-    不手动清就会攒下指向已删分组的绑定，而作品库的「用途」判定正是 `EXISTS(tag_bindings…)`，
-    分组 id 被后来的组复用时旧绑定会把用途安到无关的组头上）。
-    - **第二个条件是「还原」换来的**：删了批次那条 rej 任务就没了，废纸篓里的还原按钮会
-      指向一个不存在的任务。所以清空废纸篓也是触发退休的时机之一。实测真实库 30 个批次里
-      8 个当场退休、**14 个正是被这一条挡住**。
-    - **编号不回收**。废纸篓清理会把编号还进号池（那是「这条从来没成过」的语义），这里
-      恰恰相反：编号已经印在输出文件名与作品行上，是花掉的。号池按前缀存 next\_seq，
-      分组删掉不影响它——同名 txt 再导入，前缀一样、编号接着上次往下发（有测试守住）。
-    - **下游必须先存快照，否则上游一删就集体失忆**（0027 的一半篇幅）：`accepted_works`
-      加 `prompt_code`/`group_name` 并回填，`WORK_SELECT`/`V2V_SELECT`/全文搜索全部改读
-      快照列而不再 JOIN prompts/prompt\_groups。同 0020 给 v2v\_clips 冗余 group\_name 的
-      理由。实测回填 135/183，**剩下 48 条旧 JOIN 本来也查不到**（提示词早没了）——
-      即零回归，这条是专门验的。
-  - **提示词库整页移除**（⌘5 空出，**不把后面的页往前挪**：重排会把按了几百次的 ⌘6/⌘7
-    一次性作废）。生成页去掉「选择提示词组」历史选择器，只剩导入 .txt / 拖入 / skill 投工单。
-    连带删掉 17 个只服务于那一页的 IPC 命令与 stats 的分组合格率——那套口径是**长期资产**
-    的口径（「这个分组历来好不好用」），而提示词现在跑完一次就没了，一个只有一次样本的
-    合格率不构成任何判断依据。
-  - **验收页从统一正方形改为齐行（justified）真实比例**。两个要求同时成立才有这个解：
-    ① 按真实比例显示（方格会把竖幅裁掉上下、横幅裁掉左右，而验收判的恰恰是构图与边缘）；
-    ② 可虚拟化（**渲染前**就知道每行多高）。齐行两条都满足：一行共用行高，各自宽度按
-    自己的宽高比分配，行高 = 可用宽度 ÷ 该行宽高比之和。瀑布流做不到第二条——列高要一张
-    张往下累加，第 N 张的位置依赖前面全部张，而虚拟化恰恰不渲染前面那些。
-    - 比例来自 0027 新增的 `tasks.result_width/height`：缩略图生成时顺手记下（那里已经把
-      整张图解码过一遍），历史行由 `list_pending_review` 读**缩略图文件头**补齐并写回
-      （`image_dimensions` 不解码像素）。**不能等&#x20;**<img>**&#x20;加载完再量**：每张图落地都会把
-      它下面的所有行往下顶一次，而这一页正是要连续快速翻的。
-    - 排版抽成 `features/review/layout.ts` 纯函数 + 11 条测试。它不是 UI 壳：算错一格
-      等于给人看了一张裁过的图。写测试当场抓出一个真 bug——`Math.max(0.05, NaN)` 回的是
-      NaN，会顺着「比例和 → 行高 → 每张宽度」一路污染，把整行宽度全变 NaN、那一行当场塌掉。
-    - 键盘上下移动改走行模型：齐行每行张数是变的（一行竖幅塞 8 张、横幅塞 2 张），
-      「焦点 ± 列数」在竖横混排里会跳得毫无规律。
-  - **废纸篓可还原回原位**（`restore_trash_items`）。之所以做得到，是因为「不通过」从来
-    只是记账：原图与缩略图一直在盘上，物理删要等「彻底删除/清空」（E02 的决定）。
-    task/prompt/ref/clip 四类行一直都在，还原就是把状态拨回去；**作品是唯一「删除即真删行」
-    的实体**（accepted\_works 没有 deleted\_at），故 0027 给 trash\_items 加 `payload_json`
-    整行快照，还原时**连 id 一起写回**——v2v\_clips.work\_id 是不设 FK 的锚点（0020），
-    换个新 id 等于把那条视频认领给了别人。还原失败逐条报原因（「点了还原却没回去」
-    比直接说还不回去更难查）。另加铺满查看：320px 的缩略图不足以判断误删。
-  - **任务队列批量中止/删除/重试**，且**一次 IPC 交整份 id 给后端**而不是前端 for 循环
-    逐个发命令——选 200 个就是 200 次往返，中途任何一次失败都会留下一个说不清删到哪儿的
-    中间态。**中止只掐排队态**：请求一旦发出钱就花了，硬把行删掉只会让结果无处可写
-    （与在途 worker 抢同一行，同 `delete_task` 的理由）。跳过数一律报出来并说明原因，
-    否则「我选了 30 个怎么只没了 22 个」的下一步就是再点一次。批次切换器/重命名/
-    再来一批/按批次筛选全部移除，任务页改为展示**全部在制任务**。
-  - **工单超阈值改为应用内可视化确认**（`preview_intake_job`）。原来那句「600 张，去设置页
-    确认」不足以让人做判断：真正要核的是**哪个提示词组配了哪几张参考图**——配错的代价是
-    整批图跑出来全错，而那要到验收时才看得出来，那时钱已经花完了。故确认卡长得像生成页
-    那张「已经挂好靠」的图：一组一块，组头是参数与张数，下面左边参考图缩略图、右边这组的
-    提示词逐条可读。预览与真正收录**走同一个 `intake::plan`**，不存在两套解析各说各话。
-    - 缩略图走 **base64 data URI** 而不是 asset 协议：后者 scope 限定在
-      `$APPDATA/$APPLOCALDATA/$PICTURE`，而工单在交接根下。为一张预览图去放宽整个应用的
-      文件读取范围，代价与收益完全不成比例。
-    - 确认卡挂在 **AppShell** 而不是设置页：`hold` 事件一到就当场弹出并把窗口叫到前面——
-      投单那一刻人在 Claude Code 里，GenDesk 可能只是个后台图标。
-  - **v2v 详情栏在尚无成片时显示首帧原图**而不是「尚无成片」空占位：待改写/待提交/已提交
-    这几个阶段人要做的判断（运镜配不配得上这张图、要不要放行提交）全都要看那张图，
-    而空占位既没信息又占掉这一栏最大一块地方。
-  - **视频验收通过即交付**：把成片从内部暂存区 `clips/clip{id}.mp4`（这个名字人在 Finder
-    里认不出谁是谁）拷进 `outputs/视频/{组}/{编号}_{日期}.mp4`，路径记进 0027 的
-    `export_path`。**拷贝而非移动**：clips/ 那份是流水线自己的资产（封面、重跑、撤销都指着
-    它），移走会让「撤销通过」变成一次搬回来的操作，而搬运是会失败的；撤销时删掉这份拷贝
-    即可，永远只改库不动源文件。拷贝失败不回滚验收（判定是人做的，文件可以补），但必须
-    进执行日志出声。
-  - **验证**：migration 0027 + 退休扫描在**真实库副本**（30 批次 / 1015 任务 / 183 作品 /
-    1485 提示词 / 247 分组 / 998 废纸篓项）上跑通，`foreign_key_check` 与 `integrity_check`
-    均干净，作品与 clip 在提示词删光后仍答得出编号与组名；随后在真机 dev 实例上实跑，
-    日志确认「批次已了结，退出历史 batches=8 prompts=40 groups=4」，验证后已把用户的库
-    **原样还原**（回到 schema 26 与原数据，装着的 v0.20.1 不受影响）。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求）；GUI 未做视觉截图核对——dev 二进制
-    未签名，被截图工具的应用白名单挡在外面（授权匹配的是已安装的 bundle）。齐行排版的
-    算法部分已由 `layout.ts` 的 11 条测试覆盖，但**像素层面的观感建议人工跑一次**。
-- [x] **视频流水线：从「阶段」改按「下一步动作」组织（v0.22.0）** — 八条用户反馈，核心是
-  **看不懂**与**用不了**。查证后不是八个独立缺陷，是四个根因。**无 migration**。
-  478 Rust 测试 + 51 条前端测试。
-  - **页面根本不能滚动，而原因是一个不存在的 class**：`V2vPage:859`/`V2vClipsPage:243`/
-    `V2vReviewFlow:165` 三处滚动容器写的是 `className="sc"`，而 **`.sc` 在 `globals.css`
-    里从来没有定义过**（全仓库、全 git 历史都没有；它只存在于 `prototype.dc.html`）。
-    于是那个 div 只有 `flex:1`、没有 `overflow`，内容溢出后被上游 `.ohide` /
-    `.main{overflow:hidden}` 裁掉——没有滚动条、没有滚轮目标，第一屏之后的行**物理上
-    够不着**，两个版本没人发现。用户那句「你做的都是空转无意义的测试吗」问得对：
-    既有测试全在派生逻辑上，**没有任何一条能发现一个 class 不存在**。
-    故新增 `src/styles/classnames.test.ts`（纯 vitest + node:fs，无新依赖）：扫全部 `.tsx`
-    的 `className=`，断言每个 token 在 `globals.css` 里有定义，失败逐条报 `token → file:line`。
-    实测 416 个使用中的 token / 11 处违规（`sc`×5 · `cwrap`×4 · `pa8`×2 · `genbar` ·
-    `rmx` · `fs14` · `gap12` · `gap2`），全部补齐；三个有意为之的进 ALLOW 并注明理由。
-    **它落地当场就抓到一处漏网**（删了 `.vsempty` 的 CSS 却忘了删 JSX）。解析器要剔掉
-    比较操作数/方法参数/`??` 右手边/对象键，且**对象键规则必须要求前面是 `{` 或 `,`**——
-    否则会把三元的 `cond ? "a" : "b"` 里的 `"a" :` 一起吃掉，那是静默漏报，比假阳性糟得多。
-  - **列对不齐**有两个原因叠在一起：`grid-template-columns` 在 `.vrowh`(表头) 与 `.vrow`(行)
-    **逐字写了两遍**；且表头在滚动容器**外**、行在**内**，滚动一修好那条 10px 的经典滚动条
-    就会让两者差 10px。改成一个 `.vgrid` 携带模板 + `.th`/`.tr` 修饰（同 `.tgrid`/`.sgrid`
-    的房内形制），表头搬进 `.vtbody` 做**两级 sticky**（表头 `top:0`，分节头
-    `top:var(--vhdh)`，高度是单一来源）。列从 **9 收到 7**：1140px 最小窗减去侧栏、
-    268px 详情栏、滚动条与内边距只剩约 601px，而九列最小要 716px——**「情况」列一直被裁
-    且无处可滚**。删掉的两列都是重复信息：「阶段」由那句话与色点代替，「即梦」对非 run 行
-    恒为 `—`。`min-width:530px` 让不够时横向滚动接手而不是继续裁（同 v0.11.0 `.klist`）。
-  - **主轴选错了**：整页按阶段组织，而阶段是**最不缺**的信息——它就写在每条脸上。
-    于是 21 条待改写会同时显示「需要我 0」「待改写 21」「21 条 · 无待办」「等 skill 写回 ·
-    交接已物化」四句互相矛盾的话，而真相是**那 21 条正卡在人身上**：工单早已物化好，
-    在等人去 Claude Code 跑 `v2v-rewrite`。全流水线最大的一处阻塞，界面上说的是「无待办」。
-    - 新增 `NextAction`（去改写/待放行/待验收/处理异常/等即梦/已定案）+ `nextAction()`，
-      在 `deriveRows` 内算出存进 `Row.action` —— 筛选、节头摘要、行内色点三者同源。
-      `matchStage(stage,f)` → `matchAction(row,f)`（要看幽灵判定，那是整行的事）。
-      `StageCounts.actionable` 同步改为 `rewrite+ready+rev+fail`，前端 `MINE` 与它同义。
-    - **顺带修掉一个真 bug**：`phantomLive` 只存在于 `run`，而旧的 `need`=ready|rev|fail
-      不含 `run` —— 唯一该**免费**重跑的那一类被默认筛选整个藏了起来（实测一次事故里
-      18 条这样的单子挂了十几个小时无人察觉）。新轴 `run+phantomLive→fix`，结构上不会再漏。
-    - 「情况」列全换人话：`等你跑 v2v-rewrite · 工单已就绪` / `等你点确认提交 · 提交即扣费` /
-      `即梦在跑 · 本批已出 X/Y` / `疑幽灵单 · 没入队也没扣费，重跑不花钱`。
-      前四个关键词（疑幽灵单/等待异常/继续等待/免费重跑）保留原词——既有测试断言它们，
-      且这四处指错方向的代价是真金白银。
-    - **「去改写」召唤横幅**（`.vcall`，`rewriteN>0` 时常驻、**不可关闭**）：交接目录 +
-      「写完了 · 收录改写结果」+「只看这 N 条」。顺带修一个静默失效：`handoff` 原来只在
-      mount 与手动收录后取一次，而 watcher 会自己收录 —— 横幅上那个数字会在改写落地后
-      还挂着。改为按 `rewriteN` 刷新（不挂 tick 上：`v2v_handoff_status` 会顺手重写工单）。
-  - **无图例的分段条删掉**（用户问「每个分组这些进度条是什么意思」——它唯一的图例是
-    `title=` tooltip，即没人答得上来），换成一句话：`这一批 30 条 · 2 条出了异常，
-    5 条等你放行，20 条在即梦排队`。例外在前（被 ellipsis 截断时先没的必须是常态）。
-  - **空分节整节消失**：`if (done && visRows.length===0)` → `if (visRows.length===0)`。
-    旧规则只砍已定案的空节，于是筛「处理异常」时几十个还在跑的批次留下几十个只写着
-    「当前筛选下这一批没有条目」的空壳节头。旧规则的理由是「分段条正是这一批做到哪了的
-    答案」——分段条没了，理由也就没了。
-  - **参数三处控件、三种作用域，各自在标签上说清楚**：⌥3 弹层重命名「默认参数与账户」
-    并**删掉「应用到选中的 N 条」**（正是这个按钮让全局默认与批量应用共用一组下拉框）；
-    右侧详情栏新增 `InspectorParams`（仅 rewrite/ready，镜像 `repo::set_params` 的
-    `WHERE stage IN`——绝不给一个后端明确 no-op 的控件），`应用到这一条`；底栏参数条
-    **不再藏在「参数 N」开关后面**，选中即出现，`应用到这 N 条`。
-    - 详情栏初值取 `clip.modelVersion` 而**不是** `row.modelFull`：后者是逐级回落后的
-      结果，拿它当初值等于一按应用就把当时的全局默认焊死进这一条，以后改全局默认它不跟。
-    - 底栏 `bulk` 初值**按选中项回填**（一致时填，不一致标「多条不一致」）——
-      `set_v2v_clip_params` 的 `None` 是**清空**不是**保持**，空值开场会静默抹掉已有覆写。
-  - **成片不再入资产库，改为交付台账**（用户定的方向：成片全是 B-roll 素材，不适合直接
-    发布）。整条路径拆掉：前端 `packInto`/`packOrPick`/`passAndPack`/`A` 键/两份
-    `SkuPickModal`；Rust 的 `pack_from_clip`、`ClipView.in_asset_lib`、
-    `ingest::build_video_from_paths`。`v2v_clips.asset_pack_id`（0025）**列保留不读不写**
-    （forward-only），已有的视频型素材包不动。
-    - `StageCounts.no_asset` → **`undelivered`**（`stage='pass' AND export_path 空`）。
-      它是成片这条链上**唯一一处会无声断掉的地方**：验收时的拷贝失败**不回滚验收**
-      （判定是人做的，文件可以补），于是「片子做出来了却没落地」是个完全合法、
-      在此之前又完全看不见的状态。侧栏徽章语义随之从「未入资产库」变为「交付失败」。
-    - 新命令 `redeliver_v2v_clips` 补交付（补得出来是因为 `clips/clip{id}.mp4` 那份是
-      流水线自己的资产，**从来只拷不移**）。成片页给出交付路径、交付失败筛选片与重新交付。
-  - **成片交付目录可自定义**（`V2vSettings::clips_output_dir` + `pick_clips_output_dir` +
-    `v2v_clips_dir`）。形制照 `handoff_root`（空串回落默认）而**不是**
-    `Settings::output_dir`——后者有字段、有选择器、有设置页 UI，**却没有任何 Rust 消费者**
-    （全部输出路径硬编码 `state.dirs.outputs()`，连 `open_output_dir` 打开的都不是它）。
-    那是「选了目录却不生效」，正是这一版要根治的那类失信。**它属于图片链路，本次未动，
-    单独一个任务处理**。
-  - **轮询：只能轮询，能改的只有频率**。实跑 `dreamina -h` 再次确认 CLI 没有任何推送
-    （无 watch/stream/webhook/subscribe；`--poll=N` 只是把 1 秒轮询搬进子进程，进程被杀
-    即丢，`command_line` 已显式 `--poll=0`）。v0.20.0 已把单位从「一条」换成「一整页」
-    （`list_task` 一个进程回一整页），故进程数与在跑条数**脱钩**，频率是纯粹的成本旋钮。
-    按用户定的分档：**含 VIP 300s / 全非 VIP 600s**（依据是实测的两种等待时长：VIP 直接
-    `Generating`、1–3 分钟出片；非 VIP 排在第 4485 位、几小时）。8 小时过夜由 960 次降到
-    96 / 48 次（10× / 20×）。「含 VIP 就走快档」而不是按多数派——判错方向的代价不对等。
-    - **代价与对策都写进注释**：5 分钟一档意味着一条早已出片的 VIP 单最多躺 5 分钟。
-      故 `request_sweep_soon` 在每**批**提交后请求一次 60 秒补扫（按批不按条，20 条只多
-      一个进程），而不是把档位调回去。不立刻扫——提交那一刻即梦还没给位次。
-    - 回落路径 `poll_interval_for` 下限抬到 `SWEEP_VIP_SECS`：它是**逐条**起进程的（O(n)），
-      绝没有道理比整表扫描问得还勤；原来那两档 10s/30s 是在 30 秒常数扫描下定的，
-      分档之后会让「扫描认不出的那几条」反过来成为进程数的大头（有专门测试守住）。
-    - 循环的「上次扫描时刻」改用全局 `LAST_SWEEP` 而非局部变量，否则补扫请求收不到。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求）；**GUI 未实跑**——收件目录里有一份
-    尚未收录的真实工单（`20260727-卡套-拿起来看`，不在 `intake_jobs` 里），而 intake
-    默认 `enabled: true`，启动 dev 会当场收录并建批 = 真花钱。滚动/对齐/sticky 属于
-    「测试证明不了」的那一类，**建议人工跑一次 `pnpm tauri dev`**（先把那份工单挪开或
-    在设置里关掉收件）。
-- [x] **审查整改：计费证据、并发窗口、阻塞 IO 与死代码（v0.23.0）** — 一轮全盘审查的
-  14 条重点候选，按「花钱和丢数据的先做」分五批全数落地。**无 migration**。
-  490 Rust 测试 + 51 条前端测试。
-  - **最大的一处是系统性的：证据落库了但没人读**。`mark_swept` 特意 `COALESCE` 保住的
-    `credit_count`、0024 特意落库的 `submit_credit`，在幽灵判定、前端展示、出片落库
-    三处**全都没有消费者**。三个角度各自独立指向同一个缺口，后果是三件相反的坏事：
-    已经扣过钱的单被判成幽灵、界面告诉人「重跑不花钱」、出片那一刻还把这条的账抹掉。
-    - `runner::Evidence` 把五处证据（本次回体两处 + 已落库三处）合成一份，
-      `is_phantom`/`phantom_suspect` 改读它。**任一非空即永久免疫**；计费仍是决定性
-      信号（有它连嫌疑都不成立），队列位次只免死不免疑。
-    - `mark_polled` 的 `queue_idx` 与 `mark_ready_for_review` 的 `credit_count` /
-      `benefit_type` 一起改 `COALESCE`。前者：任务离开排队后回体不再带 `queue_info`，
-      无条件写回等于在那一刻亲手删掉「进过队列」的证据；后者：出片那份回体未必再带
-      计费，无条件写回 = 成片入库的同时把这一批的账变成永远答不准。
-    - **幽灵结论由 Rust 下发**（`ClipView.phantomSuspect` ← `clip_looks_phantom`），
-      前端那份手抄判据与 `PHANTOM_GRACE_SECS` 常量删除。它同时消灭一处分叉：前端按
-      `firstSubmittedAt` 计时、Rust 按 `submittedAt` 计时，「继续等待」按过一次之后
-      两边会对同一条给出**相反**的结论，而那指向两个相反的动作。
-    - `StageCounts.phantom` 计入徽章（`count_phantom_suspects`）：幽灵疑单是唯一一类
-      **阻在人身上却不在四个待办阶段里**的条目 —— 它躺在 `run`，而按阶段说那是
-      「机器在跑，人插不上手」。事故那次 18 条挂了十几个小时，徽章全程是 0。
-    - sweep 首次为某条落库计费证据时推一次 `v2v://changed`：在跑条目没有阶段变化，
-      不推就要躺到出片那一刻才被看见。
-  - **三处并发窗口，每一处的代价都是钱**：
-    - **v2v 双提交竞态**：`take_ready` 是只读的，而人点「确认提交」与常驻队列补单器
-      跑在不同任务里，中间隔着整个 CLI 网络往返 —— 两边读到同一条 `ready` 就会为同一
-      张图下两次单。`UNIQUE(work_id)` 拦不住它：自始至终只有一行，第二次提交只是覆盖
-      submit\_id，第一张片子当场变成认不出主人的孤儿。改 `claim_ready`（ready → run +
-      检查 `rows_affected`）；**认领发生在提交之前**，被杀在窗口里由既有的
-      `recover_orphan_submits` 兜底（它本来就是为这个窗口写的）。预览命令行那条路径
-      改走只读的 `list_ready`——打开确认卡不该推进任何阶段。
-    - **submit\_id 无声丢失**：`mark_submitted(...).await?` 一次写库失败会同时做两件
-      坏事——中止整批（后面那些连提交都还没提交），以及让这一条的 submit\_id 随内存
-      消失而钱已经扣了。改 `persist_submit`：第一次失败就把 submit\_id 以 error 级喊进
-      日志与 tracing（失败之后仅剩的凭证），退避重试 3 次，仍失败则记账并继续下一条。
-    - **dispatcher TOCTOU**：`mark_running` 加 `AND status = ?` 谓词并返回是否认领成功，
-      0 行不 spawn worker。读队列与派发之间隔着若干次 await，用户在那段窗口里点
-      「批量中止」时，无谓词的 UPDATE 会把已经不该跑的任务重新写成 `run`，
-      再发一次付费请求而结果无处可写。谓词用调用方读到的**状态原文**而非写死 `'q'`
-      —— 冷却结束的重试任务走的是 `retry → run`，写死会让它们永不派发。
-  - **收录失败不再撒谎**：intake 这一串动作没有一步能整体回滚（参考图要拷文件建缩略图，
-    建批要发编号，第一个批次建完就已经在花钱跑了），而失败回执无条件写「没有导入任何
-    东西」—— 人照着它点「重试」就会得到第二份提示词和第二个批次。改为把进度写进
-    `Applied` 并在失败时一并落进台账行与 `错误.txt`；设置页的「重试」按钮**旁边**
-    同样摆出来（那才是人做决定的地方）。
-  - **废纸篓不再删掉还活着的成片**。视频重跑是**就地**的：`v2v_clips` 只有一行，成片
-    路径锚在 clip id 上，于是「判不通过 → 重跑 → 新片子落在同一个路径」是常态，而那条
-    陈旧的废纸篓记录还指着它。两道闸各自独立成立：① 重排时收回这条 clip 的废纸篓行；
-    ② `purge_ids` 物理删之前核对 `v2v_clips` 现在还指着哪些文件，冲突的整行跳过。
-    判据是**路径**而不是 stage —— 问的就是「这个文件现在有主人吗」。
-  - **批次退休认得出废纸篓里的作品**：作品是唯一「删除即真删行」的实体，归属只写在
-    `payload_json` 里，`trash_items` 与 `accepted_works` 之间无从 JOIN，于是本批的作品
-    被删着、批次照样退休，载荷里的 `task_id` 就成了悬空外键。挡住退休（在 Rust 里解析
-    载荷，不引入 JSON1 依赖）；同时给还原侧补安全网：`works::restore` 先探测 task\_id
-    是否仍在，不在就写 NULL 并回报「原任务已退休」。**快照本来就是为「上游消失」而生
-    的**，让整条还原为此永久失败，是把安全网用成了绊索。
-  - **阻塞 IO 下放**：`accept_tasks`（一条 IN 查询 + 整批拷贝进一个 `spawn_blocking`）·
-    `export_works` · `export_clip`（看片流里空格键判一条就走一次，一条成片几十 MB）·
-    `replace_ref_image_file`（顺带删掉那份「拷贝 + 缩略图 + hash + 压缩副本」的第二套
-    抄本，直接调 `ingest_one`）。**`accept_tasks` 明确不改成单事务**（与直觉相反）：
-    拷贝无法回滚，第 150 张失败会把前 149 条作品记录回滚掉而文件已经躺在 outputs/ 里；
-    现在的顺序（先整批拷完、任一张失败就一行库都不写）反而更接近原子。
-  - 另有：`enqueue_works`/`undo_v2v` 去 N+1 · 启动废纸篓清理改 `spawn`（它挡在窗口出现
-    之前，攒了半年废纸篓的机器上表现就是「双击图标之后什么都不发生」）· `LAST_SWEEP`
-    先存再判空（空队列会让「到点了吗」恒为真，顺带把补单器拉成 6 秒一轮）· handoff 归档
-    判据改**逐文件**计数（`sum.*` 是跨文件累计的，前面出过一条 unmatched 之后，后面每个
-    文件都会被移进 `_已收录`）· `materialize` 幂等化（缩略图已存在即跳过、
-    `set_variable_part` 值没变不写 —— 否则每次物化都刷 `updated_at`，看板永远显示
-    「刚刚」）· `V2vPage` 喂给 `deriveRows` 的秒表量化到 30 秒。
-  - **防护网升级 —— `.sc` 那一课的第二、三条**（`classnames.test.ts`）：
-    - **`var(--x)` 引用必须有定义**。当场抓到三个从来没声明过的 token：`--card`
-      （8 处，写成 `var(--card, #fff)` —— 它一直在用兜底白色，换主题时那几块不跟）、
-      `--bg1`（2 处，无 fallback → 整条 background 作废）、`--sans`。
-    - **反向：定义了的 class 必须有人用**。一次清掉 40 个死类、327 行 CSS。用**宽判据**
-      （整个 src 里出现过就算用过），宁可漏报也不能误删一条正在生效的样式。
-    - 顺带修好正向检查的一个盲区：`definedClasses` 没剥注释，而注释里遍地是
-      `prototype.dc.html`、`.vrowh` 这类**在讲**类名的散文，它们被当成「定义过的类」
-      白白放宽了判据。补上之后**当场又抓到一处漏网的 `.sc`**（v0.22.0 那轮清理漏掉的）。
-  - **死代码**：`export_works_v2v` + v2v/mod.rs 的一次性导出包残骸（v0.15.0 起真相就在
-    库里，那条路径此后一直没有调用方）· 作品库「隐藏已导出」开关（它筛的 `work_exports`
-    台账在 v0.15.0 就冻结了，按钮一直在说谎）· 三个零调用命令 · `ClipView.asset_pack_id`
-    · engine store 的四个死字段。表与列一律保留（迁移 forward-only）。
-  - **收敛**：VIP 判定收成单点 `dreamina::is_vip`（原先五处各写一遍 `ends_with("_vip")`
-    —— 即梦哪天出个不带后缀的付费加急档，补单器会整夜按 5.5 倍价提交）·
-    `list_ref_images(include_ephemeral)`（Onboarding 正是漏了那处过滤：在生成页随手拖
-    一张试跑，「上传参考图」那一步立刻显示成已完成）· `bg()` 四份复制 · `fmtDur` 变体。
-  - **未做**：独立上下文 `/code-review`（本轮按用户要求跳过）；**GUI 未实跑**，
-    理由同 v0.22.0（收件目录里那份未收录的真实工单 + intake 默认开启 = 启动 dev
-    会真花钱建批）。建议人工跑一次 `pnpm tauri dev` 前先把工单挪开或关掉收件。
-- [x] **本地待发队列：放行一次，其余排队自动接上（v0.24.0）** — 用户报「我选了 9 条走非
-  VIP 队列，我不是更新了自动补单功能吗？为什么不是 1 个进排队、后面 8 个自动等待」。
-  查证下来不是补单器的 bug，是三处叠在一起。migration 0028。505 Rust 测试 + 61 条前端测试。
-  - **即梦的并发上限是账户级的，而 GenDesk 从来不知道它存在**。实测回体：9 条逐条拿到
-    submit\_id（提交侧「成功 9 · 失败 0」），随后 8 条在轮询里回来
-    `api error: ret=1310, message=ExceedConcurrencyLimit` —— 非 VIP 通道同一时间
-    只跑得下 **1** 条。所以「9 条一起砸过去」这个动作从第一天起就是错的，
-    只是在此之前它错得很安静。
-  - **它被记成了失败**。`settle` 的 `Outcome::Failed` 一视同仁 → `mark_failed(provider)`，
-    于是 8 条**一分钱没扣、从没跑过**的片子躺进「处理异常」，人只能一条条点重跑，
-    而重跑会撞上同一堵墙。现在这一类回体走 `requeue_after_reject`：放回本地队列、
-    排在队首、`attempt` **退回去**（那一列的含义是「这张图花过几份额度」，界面的
-    「重跑过」信号读它，一批被弹回来的片子集体 +1 会把真正花过两份钱的那些淹掉）。
-    `Evidence::billed()` 是硬闸门 —— 万一哪天收了钱又回这个 reason，清掉 submit\_id
-    等于把凭证扔了，那种交给人判断。
-  - **常驻队列救不了它，因为它数的是另一个数**。`count_auto_running` 只数
-    `auto_submitted=1` 的，理由是 0026 写下的「人手动跑 20 条时常驻队列不该静悄悄停摆」
-    —— 那条理由被这次实测推翻了：配额本来就是共用的，人占满了唯一那个位子时，
-    「停摆」正是唯一正确的行为。改 `count_in_flight`（数全部），`plan()` 加
-    `hard_limit` 参数按即梦上限压过配置深度。**旧测试的断言被反过来了**，
-    改动理由写在测试注释里（§1.4 测试完整性规则）。
-  - **`submit_queued_at`（0028）：同一个 `ready` 里的两种东西**。「等你点确认提交」与
-    「你点过了，在排队」此前长得一模一样，于是一批放行完的片子看起来像没人管。
-    不新开阶段 —— 那八条在 `ready` 时的一切（改参数、退回改写、删除）都还成立，
-    它们之间唯一的差别是「有没有人放过行」，那是一个标记不是一个阶段。
-    提交入口改 `release_and_submit`：全部进队列 → 取队首发得下的那几条 →
-    其余由轮询循环 `drain_queue` 在空位腾出来时按放行顺序补上（**排在自动补单之前**：
-    人已经放行过的是明确意图）。
-  - **实测上限会自己收敛**（`OBSERVED_LIMIT`，进程内 `fetch_min`）：撞上拒收就把上限
-    夹到「即梦当时确实收下的条数」（`count_running_accepted`）。默认配置值取 **1**，
-    因为那是量出来的真值；猜小只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费，
-    那正是常驻队列成立的前提），猜大是一批片子集体躺进「处理异常」—— 代价不对等。
-    不落库：即梦随时可以按账户等级调整这个数，写进库的旧观测会永远把队列压在低位。
-  - **存量修复**（`heal_concurrency_rejects`，启动时跑一次）：升级前被误判成 fail 的
-    条目救回本地队列。只改新逻辑不管存量，等于让这个 bug 的后果留在原地 ——
-    用户那 8 条会一直躺在那儿。救回来的直接进队列而不是退回「待放行」：它们正是人
-    已经点过确认的那批；反悔的出口是新加的「撤回放行」。
-  - **排队数按用户要求摆到台面上，且两种队列绝不混成一个数字**：`ready + 已放行` 报
-    **本地**位次（1 = 下一个就发它），`run` 报**即梦**位次（`queue_idx`，实测能到四千多）。
-    「本地排第 3」和「即梦排第 4485」是完全不同的两件事，显示成同一个「第 N 位」
-    会让人以为快轮到了。即梦位次只有 `query_result` 给得出（`list_task` 不带
-    `queue_info`），此前只在幽灵单升级时才顺手问一次 —— 现在每轮扫描为在跑条目单查，
-    预算上限 8 条。**之所以现在负担得起**：并发闸门已经把在跑条数压到个位数。
-  - 界面：页头新增「即梦 N/上限 · 本地排队 M」pill；提交确认卡在按下确认**之前**
-    说清「先发 N 条，其余 M 条排在本地，出一条自动补一条，排队的还没扣费」；
-    「情况」列多一档「已放行 · 本地排第 N，即梦同时只跑 X 条」；参数面板新增
-    「同时在跑上限」并写明实测值；`ExceedConcurrencyLimit` 不再以「失败 · provider」
-    这种什么都没说的形式出现。轮询 pill 的 tooltip 顺带改对（还写着 v0.20.0 就换掉的
-    「退避 10s→10min」）。
-  - **未做**：独立上下文 `/code-review`（§1.4 要求）；**GUI 未实跑**，理由同 v0.22.0
-    （收件目录里有未收录的真实工单 + intake 默认开启 = 启动 dev 会真花钱建批）。
+前端测试只覆盖**派生逻辑与机械规则**（`routes.test.ts` · `stores/settings.test.ts` ·
+`features/review/layout.ts` · `features/v2v/model.ts` · `styles/classnames.test.ts`）——
+业务真相在 Rust，测试也在 Rust，别为了补前端覆盖率去测 UI 壳。
 
+- **实现与审查分离**：实现完成后由**全新上下文**会话执行 `/code-review`（引擎/数据层用 high）。
+  同一上下文自审会继承同样盲点。发现项修复后才 merge。
+- **测试完整性规则**：**禁止**为让 CI 变绿而修改/删除/放宽既有测试断言。确需改动（例如某条
+  断言的前提被实测推翻）须在测试注释与 PR 描述里写明理由。
+- 一个任务 = 一个分支 = 实现 + 测试 + 门禁全绿 + 审查通过 = 一次 merge。main 受保护，
+  即使单人开发也走 PR。
+- 发版流程与更新签名密钥见 README.md。
+
+参考物：`docs/prototype/*.dc.html`（像素基准）· `docs/prototype/Design-Tokens.md` ·
+`docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/收件箱收录格式规范.md` ·
+`docs/提示词skill标准产出规范.md`。
+
+**版本演进史不在本文件里**，去 `git log`（提交信息与代码注释保留了实测数据与取舍理由；
+早期 UX 条目编号可用 `git log --grep=E30b` 定位）。本文件只记**当前仍然成立的约束**。

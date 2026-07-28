@@ -254,7 +254,21 @@ export const useV2vStore = create<V2vState>((set, get) => ({
           },
         })),
       onTick: (tick) => set({ tick }),
-      onRefresh: (refresh) => set({ refresh }),
+      // 一轮手动刷新跑完 → 重拉一次额度台账。
+      //
+      // 「刷新」这颗按钮承诺的是「把远端此刻的真相取回来」，而余额和在跑任务的实扣额度
+      // 同样是远端回传值 —— 它们没有推送通道（`v2v_credit_stats` 要现跑一次 CLI），
+      // 不在这里拉一次的话，顶栏余额会一直停在进页面那一刻的旧值，而刷新明明刚刚把
+      // 每一条的计费回执都问了一遍。拉不到不算错（掉线/未登录是常态）。
+      onRefresh: (refresh) => {
+        const wasActive = get().refresh?.active === true;
+        set({ refresh });
+        if (wasActive && !refresh.active) {
+          void unwrap(commands.v2vCreditStats())
+            .then((credit) => set({ credit }))
+            .catch(() => {});
+        }
+      },
       // 按 seq 去重 —— 取快照与收到事件之间那一瞬产生的条目会同时出现在两边。
       onActivity: (e) =>
         set((c) =>
@@ -310,11 +324,17 @@ export function selectRows(s: V2vState): Row[] {
   const limits = new Map((s.queue?.channels ?? []).map((c) => [c.modelVersion, c.limit]));
   // 依赖里放 `queue.channels` 的构成签名而不是 queue 对象本身：后者每次心跳都是新对象，
   // 直接比引用等于每 6 秒重算一整页。
+  //
+  // `progress` **必须在依赖里**：它是轮询逐条问回来的实时状态与队列位次，而这两样东西
+  // 变化时后端不会推 `v2v://changed`（那是阶段变动才推的）—— 也就是说不把它算进派生，
+  // 收下的进度事件就只是躺在 store 里，页面能一路显示几小时前的「第 4485 位」，
+  // 而那恰恰是排队几小时时唯一在动的数字。
   const key = [
     s.clips,
     s.models,
     s.eff,
     s.coarseNow,
+    s.progress,
     (s.queue?.channels ?? []).map((c) => `${c.modelVersion}:${c.limit}`).join(","),
   ];
   if (
@@ -324,9 +344,37 @@ export function selectRows(s: V2vState): Row[] {
   ) {
     return rowsMemo.rows;
   }
-  const rows = deriveRows(s.clips, s.models, s.eff, s.coarseNow, limits);
+  const rows = deriveRows(
+    overlayProgress(s.clips, s.progress),
+    s.models,
+    s.eff,
+    s.coarseNow,
+    limits,
+  );
   rowsMemo = { key, rows };
   return rows;
+}
+
+/**
+ * 把实时进度盖到快照上。
+ *
+ * 事件先到、`listV2vClips` 后到是常态（推事件不等 DB 往返），所以**按 `polledAt` 取新的
+ * 那一份**而不是无条件覆盖 —— 否则一次重载之后，旧事件会把刚读回来的新位次盖回去。
+ * 位次照 `COALESCE` 的口径只增不抹：事件里没带位次（任务离开排队开始生成了）时保留
+ * 已知的那个，它是幽灵判定的信号之一。
+ */
+function overlayProgress(clips: ClipView[], progress: Record<number, LiveProgress>): ClipView[] {
+  if (Object.keys(progress).length === 0) return clips;
+  return clips.map((c) => {
+    const p = progress[c.id];
+    if (!p || p.polledAt <= (c.polledAt ?? 0)) return c;
+    return {
+      ...c,
+      genStatus: p.genStatus,
+      queueIdx: p.queueIdx ?? c.queueIdx,
+      polledAt: p.polledAt,
+    };
+  });
 }
 
 let channelsMemo: { key: unknown[]; channels: Channel[] } | null = null;

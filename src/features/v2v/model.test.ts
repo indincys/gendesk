@@ -7,6 +7,7 @@ import {
   WORKBENCH_ACTIONS,
   buildChannels,
   carryParams,
+  channelOf,
   deriveRows,
   filterFace,
   matchFilter,
@@ -469,6 +470,21 @@ describe("信号", () => {
     const [plain] = derive([clip({ modelVersion: null })]);
     expect(plain?.vip).toBe(false);
     expect(plain?.modelFull).toBe("seedance2.0fast");
+  });
+
+  // `modelFull` 与 `channelOf` 必须是同一个口径，空白型号上尤其。
+  //
+  // `??` 只兜 null/undefined，会把 `""` 原样留下 —— 而 `channelOf` 会 trim 之后回落到
+  // 默认通道。两处一分叉，同一条 clip 就会「后台在默认通道上执行、界面把它摆进另一条
+  // 通道」：筛选比的是 `modelFull`（`matchFilter`），分节用的是 `channelOf`，
+  // 于是点哪一节都找不着它。
+  it("空白型号与 null 一样回落到默认通道，不另开一条空通道", () => {
+    for (const blank of ["", "   "]) {
+      const [r] = derive([clip({ modelVersion: blank })]);
+      expect(r?.modelFull, `型号 ${JSON.stringify(blank)}`).toBe("seedance2.0fast");
+      // 分节键（`channelOf`）与筛选键（`modelFull`）必须落在同一条通道上。
+      expect(channelOf(clip({ modelVersion: blank }), EFF)).toBe(r?.modelFull);
+    }
   });
 
   // 成片的下游是本地输出目录，不是资产库（v0.22.0）。而拷贝失败**不回滚验收**，

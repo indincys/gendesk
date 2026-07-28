@@ -146,11 +146,14 @@ pub async fn list_by_stages(
     q.fetch_all(pool).await
 }
 
-pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<ClipRow>, sqlx::Error> {
+pub async fn get<'e, E>(ex: E, id: i64) -> Result<Option<ClipRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let sql = format!("{SELECT} WHERE c.id = ?1");
     sqlx::query_as::<_, ClipRow>(&sql)
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
 }
 
@@ -333,14 +336,17 @@ pub async fn release_claim(pool: &SqlitePool, id: i64, now: i64) -> Result<(), s
 /// 与 [`update_ready`] 分开是因为它们回答不同的问题：那条是「人改完了这一条」（顺带把
 /// 它推进待提交），这条是「这十条都换成 seedance2.0_vip」——后者不该把还在待改写的条目
 /// 悄悄推进下一列，否则 skill 还没写提示词，它就已经躺在待提交列里等着被提交了。
-pub async fn set_params(
-    pool: &SqlitePool,
+pub async fn set_params<'e, E>(
+    ex: E,
     ids: &[i64],
     model_version: Option<&str>,
     duration: Option<i64>,
     video_resolution: Option<&str>,
     now: i64,
-) -> Result<i64, sqlx::Error> {
+) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     if ids.is_empty() {
         return Ok(0);
     }
@@ -361,7 +367,7 @@ pub async fn set_params(
     for i in ids {
         q = q.bind(*i);
     }
-    Ok(q.execute(pool).await?.rows_affected() as i64)
+    Ok(q.execute(ex).await?.rows_affected() as i64)
 }
 
 /// 记一次轮询结果（0021）：即梦的状态原文 + 队列位次 + 本次查询时刻。
@@ -373,22 +379,39 @@ pub async fn set_params(
 /// 而它在任务离开排队、开始生成之后就不再出现在回体里 —— 无条件写回等于在这一刻
 /// 亲手抹掉「这条确实进过队列」的证据。那条注释里写的保护意图，要两处都 COALESCE
 /// 才真正成立。
+///
+/// **计费也在这里写回**（同 [`mark_swept`]，同样 `COALESCE`、只增不抹）。原先只写状态
+/// 与位次，于是逐条 `query_result` 这条路径上问到的 `credit_count` 只在内存里当一次
+/// 幽灵证据就扔了：非 VIP 十分钟才扫一轮，一条排队几小时的单可以被逐条问到几十次、
+/// 每次都带着计费回执，而库里那一列直到出片才第一次落值 —— 「在跑的这些已经花了多少」
+/// 在最需要它的那几个小时里恒为 0，重跑护栏读的五处证据也白少一处。
+///
+/// `expect_submit`：结算所有权谓词，见 [`OWNED`]。
+#[allow(clippy::too_many_arguments)] // 一份回体里能落库的字段就这些，拆结构体只会多一层包装
 pub async fn mark_polled(
     pool: &SqlitePool,
     id: i64,
+    expect_submit: &str,
     gen_status: &str,
     queue_idx: Option<i64>,
+    credit_count: Option<i64>,
+    benefit_type: Option<&str>,
     now: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(&format!(
         "UPDATE v2v_clips
-            SET gen_status=?2, queue_idx=COALESCE(?3, queue_idx), polled_at=?4
-          WHERE id=?1",
-    )
+            SET gen_status=?2, queue_idx=COALESCE(?3, queue_idx), polled_at=?4,
+                credit_count=COALESCE(credit_count, ?5),
+                benefit_type=COALESCE(benefit_type, ?6)
+          WHERE id=?1 AND {OWNED}?7"
+    ))
     .bind(id)
     .bind(gen_status)
     .bind(queue_idx)
     .bind(now)
+    .bind(credit_count)
+    .bind(benefit_type)
+    .bind(expect_submit)
     .execute(pool)
     .await?;
     Ok(())
@@ -407,24 +430,26 @@ pub async fn mark_polled(
 pub async fn mark_swept(
     pool: &SqlitePool,
     id: i64,
+    expect_submit: &str,
     gen_status: &str,
     credit_count: Option<i64>,
     benefit_type: Option<&str>,
     now: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(&format!(
         "UPDATE v2v_clips
             SET gen_status=?2,
                 credit_count=COALESCE(credit_count, ?3),
                 benefit_type=COALESCE(benefit_type, ?4),
                 polled_at=?5
-          WHERE id=?1",
-    )
+          WHERE id=?1 AND {OWNED}?6"
+    ))
     .bind(id)
     .bind(gen_status)
     .bind(credit_count)
     .bind(benefit_type)
     .bind(now)
+    .bind(expect_submit)
     .execute(pool)
     .await?;
     Ok(())
@@ -434,12 +459,20 @@ pub async fn mark_swept(
 ///
 /// 失败也要落 `polled_at`，否则退避完全失效：CLI 一旦不可用，19 条会在每个 tick 上
 /// 各起一个必然失败的进程 —— 正是最该省着点的那种时候反而最费。
-pub async fn mark_poll_attempt(pool: &SqlitePool, id: i64, now: i64) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE v2v_clips SET polled_at=?2 WHERE id=?1")
-        .bind(id)
-        .bind(now)
-        .execute(pool)
-        .await?;
+pub async fn mark_poll_attempt(
+    pool: &SqlitePool,
+    id: i64,
+    expect_submit: &str,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "UPDATE v2v_clips SET polled_at=?2 WHERE id=?1 AND {OWNED}?3"
+    ))
+    .bind(id)
+    .bind(now)
+    .bind(expect_submit)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -504,7 +537,25 @@ pub async fn running_models(pool: &SqlitePool) -> Result<Vec<Option<String>>, sq
     Ok(rows.into_iter().map(|(m,)| m).collect())
 }
 
+/// 轮询结算的**所有权谓词**：这一行现在还是当初那一单的吗。
+///
+/// ## 为什么每一处结算写入都要带上它
+///
+/// 查询一条即梦任务要走网络（实测手动刷新逐条问，一轮可以跑几十秒到几分钟），而这段
+/// 时间里人是可以动这一行的 —— 重跑、换通道、放弃改投，都会把 `submit_id` 换成另一单
+/// B。此时 A 的回体才姗姗来迟，若结算只按 `id` 写，就会拿 A 的结果去改 B 的行：B 被
+/// 写成 `rev`/`fail`，而 `list_running`（要求 `stage='run' AND submit_id IS NOT NULL`）
+/// 从此再也捞不到它 —— **一条已经扣过费、即梦那边还在跑的任务当场失联**，且界面上
+/// 看不出任何异常（那一行摆着 A 的成片，看起来一切正常）。
+///
+/// 与 `claim_ready` / `mark_running` 同一种手法（见 CLAUDE.md「并发认领」）：代价都是钱，
+/// 所以判据不能是「读一下再写」，必须压进同一条 UPDATE 的 WHERE 里。
+const OWNED: &str = "stage='run' AND submit_id=";
+
 /// 成片落盘：run → rev（待验收）。
+///
+/// `expect_submit`：结算所有权谓词，见 [`OWNED`]。返回 `false` = 这一行已经不是那一单
+/// 的了，调用方**必须**把刚落盘的文件收掉（那是 A 的成片，而这一行现在属于 B）。
 ///
 /// `credit_count` / `benefit_type` 走 `COALESCE`（同 [`mark_swept`]）：出片那一份回体
 /// 未必再带计费字段，而钱在提交那一刻就扣了、扫描一路上也可能早就问到过。无条件写回
@@ -513,6 +564,7 @@ pub async fn running_models(pool: &SqlitePool) -> Result<Vec<Option<String>>, sq
 pub async fn mark_ready_for_review(
     pool: &SqlitePool,
     id: i64,
+    expect_submit: &str,
     video_path: &str,
     poster_path: Option<&str>,
     width: Option<i64>,
@@ -522,16 +574,16 @@ pub async fn mark_ready_for_review(
     credit_count: Option<i64>,
     benefit_type: Option<&str>,
     now: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(&format!(
         "UPDATE v2v_clips SET stage='rev', video_path=?2, poster_path=?3, width=?4, height=?5,
              fps=?6, duration_sec=?7,
              credit_count=COALESCE(?8, credit_count),
              benefit_type=COALESCE(?10, benefit_type),
              finished_at=?9,
              updated_at=?9, error_type=NULL, error_message=NULL
-         WHERE id=?1",
-    )
+         WHERE id=?1 AND {OWNED}?11"
+    ))
     .bind(id)
     .bind(video_path)
     .bind(poster_path)
@@ -542,30 +594,38 @@ pub async fn mark_ready_for_review(
     .bind(credit_count)
     .bind(now)
     .bind(benefit_type)
+    .bind(expect_submit)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 /// 失败：→ fail，留错误分类与原文供人判断是重跑还是退回改写。
+///
+/// `expect_submit` 是 [`OWNED`] 谓词，但这里必须可选：**提交失败**那条路径（`submit_batch`
+/// 的 `Err` 分支）此时根本还没有 submit_id —— 对方说没做成，所以没花钱。带谓词的是轮询
+/// 结算那几处，它们判的是一条已经花过钱的单。
 pub async fn mark_failed(
     pool: &SqlitePool,
     id: i64,
+    expect_submit: Option<&str>,
     error_type: &str,
     error_message: &str,
     now: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(&format!(
         "UPDATE v2v_clips SET stage='fail', error_type=?2, error_message=?3,
-             finished_at=?4, updated_at=?4 WHERE id=?1",
-    )
+             finished_at=?4, updated_at=?4
+         WHERE id=?1 AND (?5 IS NULL OR ({OWNED}?5))"
+    ))
     .bind(id)
     .bind(error_type)
     .bind(error_message)
     .bind(now)
+    .bind(expect_submit)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 /// 验收定态：rev → pass / rej。
@@ -591,6 +651,19 @@ pub async fn set_reviewed(
 /// 与 `set_reviewed` 分开而不是塞进同一条 UPDATE：拷贝是**文件操作**，它可能失败
 /// （盘满、目标被占用），而那不该让「这一条已经通过验收」这个判定跟着回滚。
 /// 通过了但没拷成，是一条可以事后补的记录；判定丢了才是真丢东西。
+/// 成片文件就位后把路径挪到最终名上（见 `runner::settle` 的两步落盘）。
+///
+/// 单独一条 UPDATE 而不是并进 [`mark_ready_for_review`]：那一条要带所有权 CAS，而 CAS
+/// 通过**之前**最终文件名还不能碰（它按主键命名，那个位置可能属于另一单）。
+pub async fn set_video_path(pool: &SqlitePool, id: i64, path: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE v2v_clips SET video_path = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(path)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_export_path(
     pool: &SqlitePool,
     id: i64,
@@ -623,18 +696,34 @@ pub async fn set_export_path(
 /// 都这么做了）。相邻的每一条路径（`release_claim` / `recover_orphan_submits` /
 /// `resume_timed_out` / `requeue_after_reject`）都各自带着 `submit_id IS NULL` 或
 /// `!billed()` 的闸，唯独这条把判断交给了调用方。
-pub async fn requeue_for_run(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, sqlx::Error> {
+///
+/// `expect_submit` 就是那道闸的另一半：调用方读到哪一单、就对哪一单动手。
+/// `Some(sid)` = 这一行的 `submit_id` 必须仍是 `sid`，否则一行不改（人在确认框上犹豫的
+/// 那几秒里，本地队列可能已经把它提交出去了，或者轮询已经把它结算掉了 —— 那时丢弃的
+/// 就不再是人看过的那一单）。`None` = 不设约束，给 `rev`/`rej`/`fail` 那些本来就没有
+/// 在跑提交单的路径用。
+pub async fn requeue_for_run<'e, E>(
+    ex: E,
+    id: i64,
+    expect_submit: Option<&str>,
+    now: i64,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let res = sqlx::query(
         "UPDATE v2v_clips
             SET stage='ready', submit_id=NULL, video_path=NULL, poster_path=NULL,
                 width=NULL, height=NULL, fps=NULL, duration_sec=NULL, credit_count=NULL,
                 error_type=NULL, error_message=NULL, finished_at=NULL, reviewed_at=NULL,
                 gen_status=NULL, queue_idx=NULL, polled_at=NULL, updated_at=?2
-          WHERE id=?1 AND stage IN ('rev','rej','fail','run')",
+          WHERE id=?1 AND stage IN ('rev','rej','fail','run')
+            AND (?3 IS NULL OR submit_id IS ?3)",
     )
     .bind(id)
     .bind(now)
-    .execute(pool)
+    .bind(expect_submit)
+    .execute(ex)
     .await?;
     Ok(res.rows_affected() > 0)
 }
@@ -1257,21 +1346,23 @@ pub async fn revive_rejected_fail(
 pub async fn requeue_after_reject(
     pool: &SqlitePool,
     id: i64,
+    expect_submit: &str,
     queued_at: i64,
     now: i64,
 ) -> Result<bool, sqlx::Error> {
-    let res = sqlx::query(
+    let res = sqlx::query(&format!(
         "UPDATE v2v_clips
             SET stage='ready', submit_id=NULL, submit_queued_at=?2,
                 gen_status=NULL, queue_idx=NULL, polled_at=NULL,
                 submitted_at=NULL, submit_credit=NULL, submit_status=NULL,
                 error_type=NULL, error_message=NULL, updated_at=?3,
                 attempt = MAX(0, attempt - 1)
-          WHERE id=?1 AND stage='run'",
-    )
+          WHERE id=?1 AND {OWNED}?4"
+    ))
     .bind(id)
     .bind(queued_at)
     .bind(now)
+    .bind(expect_submit)
     .execute(pool)
     .await?;
     Ok(res.rows_affected() > 0)
@@ -1354,6 +1445,13 @@ pub async fn credit_submitted_since(pool: &SqlitePool, since: i64) -> Result<i64
 /// 撤销之所以要整份快照而不是「把 stage 改回去」：`requeue_for_run` / `requeue_for_rewrite`
 /// 会连带清掉 submit_id、成片路径、尺寸、扣费回执 —— 只把 stage 拨回 `rev` 会留下一条
 /// 「待验收但没有片子」的行，比不给撤销更糟。快照在改动**之前**取，撤销即整份写回。
+///
+/// ## 三项生成参数也在里面
+///
+/// 原先不在，理由是「纯参数改动本来就免费，换回去再点一次即可」。但换通道那条路径把这
+/// 个理由推翻了：它**同时**丢弃一单已付费任务并改写参数，撤销只写回 `submit_id` 而不
+/// 写回型号，恢复出来的就是一条「提交单属于 A 通道、库里却记着 B 通道」的行 ——
+/// 而通道正是并发空位的分桶键（`channel_of`），认错通道就会数着 B 的空位往 A 发单。
 #[derive(Debug, Clone, FromRow)]
 pub struct ClipSnapshot {
     pub id: i64,
@@ -1376,18 +1474,25 @@ pub struct ClipSnapshot {
     pub finished_at: Option<i64>,
     pub reviewed_at: Option<i64>,
     pub attempt: i64,
+    pub model_version: Option<String>,
+    pub duration: Option<i64>,
+    pub video_resolution: Option<String>,
 }
 
 /// 取快照（撤销令牌的原料）。
-pub async fn snapshot(pool: &SqlitePool, id: i64) -> Result<Option<ClipSnapshot>, sqlx::Error> {
+pub async fn snapshot<'e, E>(ex: E, id: i64) -> Result<Option<ClipSnapshot>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_as::<_, ClipSnapshot>(
         "SELECT id, stage, video_prompt, submit_id, video_path, poster_path, width, height,
                 fps, duration_sec, credit_count, error_type, error_message, gen_status,
-                queue_idx, polled_at, submitted_at, finished_at, reviewed_at, attempt
+                queue_idx, polled_at, submitted_at, finished_at, reviewed_at, attempt,
+                model_version, duration, video_resolution
            FROM v2v_clips WHERE id = ?1",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(ex)
     .await
 }
 
@@ -1399,7 +1504,8 @@ pub async fn restore(pool: &SqlitePool, s: &ClipSnapshot, now: i64) -> Result<bo
                 width=?7, height=?8, fps=?9, duration_sec=?10, credit_count=?11,
                 error_type=?12, error_message=?13, gen_status=?14, queue_idx=?15,
                 polled_at=?16, submitted_at=?17, finished_at=?18, reviewed_at=?19,
-                attempt=?20, updated_at=?21
+                attempt=?20, updated_at=?21,
+                model_version=?22, duration=?23, video_resolution=?24
           WHERE id=?1",
     )
     .bind(s.id)
@@ -1423,6 +1529,9 @@ pub async fn restore(pool: &SqlitePool, s: &ClipSnapshot, now: i64) -> Result<bo
     .bind(s.reviewed_at)
     .bind(s.attempt)
     .bind(now)
+    .bind(&s.model_version)
+    .bind(s.duration)
+    .bind(&s.video_resolution)
     .execute(pool)
     .await?;
     Ok(res.rows_affected() > 0)
@@ -1546,6 +1655,7 @@ mod tests {
         mark_ready_for_review(
             pool,
             id,
+            "sub-1",
             "/clips/1.mp4",
             Some("/clips/1.jpg"),
             Some(720),
@@ -1750,7 +1860,9 @@ mod tests {
         let before = list_by_stages(&pool, &["run"]).await.unwrap()[0].clone();
         assert_eq!(before.attempt, 1);
 
-        assert!(requeue_after_reject(&pool, id, 300, 500).await.unwrap());
+        assert!(requeue_after_reject(&pool, id, "sub-x", 300, 500)
+            .await
+            .unwrap());
         let after = list_by_stages(&pool, &["ready"]).await.unwrap()[0].clone();
         assert_eq!(after.stage, "ready");
         assert!(after.submit_id.is_none(), "那个 submit_id 已经死了");
@@ -1781,6 +1893,7 @@ mod tests {
         mark_failed(
             &pool,
             id,
+            Some("dead-id"),
             "provider",
             "api error: ret=1310, message=ExceedConcurrencyLimit, logid=x",
             500,
@@ -1908,7 +2021,7 @@ mod tests {
         assert_eq!(snap.credit_count, Some(8));
 
         // 误按了「重跑」：成片引用与扣费回执被清空。
-        assert!(requeue_for_run(&pool, id, 500).await.unwrap());
+        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
         let after = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(after.stage, "ready");
         assert!(after.video_path.is_none());
@@ -1983,7 +2096,7 @@ mod tests {
         seed_work(&pool, 2).await;
         enqueue_one(&pool, 2).await;
         let b = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_failed(&pool, b, "phantom", "无位次、无计费", 450)
+        mark_failed(&pool, b, None, "phantom", "无位次、无计费", 450)
             .await
             .unwrap();
 
@@ -2089,6 +2202,106 @@ mod tests {
         assert_eq!(row.video_prompt.as_deref(), Some("第一版"));
     }
 
+    /// 轮询结算**只能写给它当初问的那一单**。
+    ///
+    /// 场景是实跑里必然会撞上的：手动刷新逐条问，一轮几十秒到几分钟；人在这段时间里
+    /// 重跑了其中一条，于是那一行换成了新的 submit_id B。此时旧单 A 的回体才到 ——
+    /// 若结算只按 id 写，B 会被写成 `rev`，而 `list_running` 从此捞不到它：**一条已经
+    /// 扣过费、即梦那边还在跑的任务当场失联**，界面上却摆着 A 的成片，看不出任何异常。
+    #[tokio::test]
+    async fn settling_an_old_submit_cannot_hijack_the_row_after_a_rerun() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await; // 走到 rev，提交单是 sub-1
+                                                  // 人点了重跑 → 重新提交，这一行现在属于 sub-2。
+        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-2", 8), 600)
+            .await
+            .unwrap();
+
+        // 旧单 sub-1 的回体姗姗来迟，四条结算路径**一条都不许落地**。
+        assert!(
+            !mark_ready_for_review(
+                &pool, id, "sub-1", "/old.mp4", None, None, None, None, None, None, None, 700,
+            )
+            .await
+            .unwrap(),
+            "旧单出片不得把这一行改成待验收"
+        );
+        assert!(
+            !mark_failed(&pool, id, Some("sub-1"), "timeout", "旧单超时", 700)
+                .await
+                .unwrap(),
+            "旧单判死不得把这一行改成失败"
+        );
+        assert!(
+            !requeue_after_reject(&pool, id, "sub-1", 100, 700)
+                .await
+                .unwrap(),
+            "旧单被弹回不得把这一行推回待提交"
+        );
+        mark_polled(&pool, id, "sub-1", "success", Some(1), Some(99), None, 700)
+            .await
+            .unwrap();
+
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "run", "这一行仍属于新提交单");
+        assert_eq!(row.submit_id.as_deref(), Some("sub-2"));
+        assert!(row.video_path.is_none(), "旧单的成片不得挂到新单头上");
+        assert!(row.gen_status.is_none(), "旧单的状态原文同样不得写进来");
+        assert!(row.polled_at.is_none());
+        assert_eq!(
+            list_running(&pool).await.unwrap().len(),
+            1,
+            "新单必须仍在轮询集合里 —— 掉出去就是一条已付费任务永远失联"
+        );
+    }
+
+    /// 逐条 `query_result` 问到的计费要**当场落库**（同 `mark_swept`，COALESCE 只增不抹）。
+    ///
+    /// 非 VIP 十分钟才扫一轮，一条排队几小时的单会被问到几十次、每次都带着计费回执；
+    /// 原先这条路径只写状态与位次，于是库里那一列直到出片才第一次落值 ——
+    /// 「在跑的这些已经花了多少」在最需要它的那几个小时里恒为 0。
+    #[tokio::test]
+    async fn polling_persists_the_bill_the_first_time_it_sees_one() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted(&pool, id, &SubmitReceipt::bare("sub-1"), 500)
+            .await
+            .unwrap();
+        assert!(get(&pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .credit_count
+            .is_none());
+
+        mark_polled(
+            &pool,
+            id,
+            "sub-1",
+            "queue",
+            Some(4485),
+            Some(8),
+            Some("dreamina_x"),
+            900,
+        )
+        .await
+        .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.credit_count, Some(8), "问到的计费要落库");
+        assert_eq!(row.benefit_type.as_deref(), Some("dreamina_x"));
+
+        // 下一轮回体不再带计费（离开排队之后 commerce_info 会消失）→ 不得抹掉。
+        mark_polled(&pool, id, "sub-1", "generating", None, None, None, 1000)
+            .await
+            .unwrap();
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.credit_count, Some(8), "已问到的账只增不抹");
+        assert_eq!(row.queue_idx, Some(4485));
+    }
+
     // 重跑清干净上一轮成片引用，但保留视频提示词（重跑 = 同提示词再抽一次）。
     #[tokio::test]
     async fn requeue_for_run_keeps_prompt_clears_media() {
@@ -2115,6 +2328,7 @@ mod tests {
         mark_ready_for_review(
             &pool,
             id,
+            "sub-1",
             "/clips/1.mp4",
             Some("/clips/1.jpg"),
             Some(960),
@@ -2129,7 +2343,7 @@ mod tests {
         .unwrap();
         assert!(set_reviewed(&pool, id, "rej", 500).await.unwrap());
 
-        assert!(requeue_for_run(&pool, id, 600).await.unwrap());
+        assert!(requeue_for_run(&pool, id, None, 600).await.unwrap());
         let row = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(row.stage, "ready");
         assert_eq!(
@@ -2165,7 +2379,7 @@ mod tests {
                 .await
                 .unwrap();
             mark_ready_for_review(
-                &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
+                &pool, id, "s", "/v.mp4", None, None, None, None, None, None, None, 400,
             )
             .await
             .unwrap();
@@ -2252,7 +2466,7 @@ mod tests {
             .await
             .unwrap();
         mark_ready_for_review(
-            &pool, id, "/v.mp4", None, None, None, None, None, None, None, 400,
+            &pool, id, "s", "/v.mp4", None, None, None, None, None, None, None, 400,
         )
         .await
         .unwrap();
@@ -2414,7 +2628,9 @@ mod tests {
             .unwrap();
         let before = get(&pool, id).await.unwrap().unwrap().updated_at;
 
-        mark_polled(&pool, id, "queue", Some(3), 900).await.unwrap();
+        mark_polled(&pool, id, "sub-1", "queue", Some(3), None, None, 900)
+            .await
+            .unwrap();
         let row = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(row.gen_status.as_deref(), Some("queue"));
         assert_eq!(row.queue_idx, Some(3));
@@ -2436,11 +2652,11 @@ mod tests {
             .await
             .unwrap();
 
-        mark_polled(&pool, id, "queue", Some(4485), 900)
+        mark_polled(&pool, id, "sub-1", "queue", Some(4485), None, None, 900)
             .await
             .unwrap();
         // 开始生成了 —— 这一份回体不再带 queue_info。
-        mark_polled(&pool, id, "generating", None, 1000)
+        mark_polled(&pool, id, "sub-1", "generating", None, None, None, 1000)
             .await
             .unwrap();
         let row = get(&pool, id).await.unwrap().unwrap();
@@ -2467,13 +2683,22 @@ mod tests {
             .await
             .unwrap();
         // 扫描路上问到了计费与计费型号。
-        mark_swept(&pool, id, "generating", Some(8), Some("dreamina_x"), 600)
-            .await
-            .unwrap();
+        mark_swept(
+            &pool,
+            id,
+            "sub-1",
+            "generating",
+            Some(8),
+            Some("dreamina_x"),
+            600,
+        )
+        .await
+        .unwrap();
         // 出片回体只有视频元数据，没有 commerce_info。
         mark_ready_for_review(
             &pool,
             id,
+            "sub-1",
             "/clips/1.mp4",
             None,
             Some(720),
@@ -2528,9 +2753,18 @@ mod tests {
         mark_submitted(&pool, ids[2], &SubmitReceipt::bare("sub-3"), submitted)
             .await
             .unwrap();
-        mark_polled(&pool, ids[2], "queue", Some(4485), submitted + 10)
-            .await
-            .unwrap();
+        mark_polled(
+            &pool,
+            ids[2],
+            "sub-3",
+            "queue",
+            Some(4485),
+            None,
+            None,
+            submitted + 10,
+        )
+        .await
+        .unwrap();
         mark_submitted(&pool, ids[3], &SubmitReceipt::bare("sub-4"), now - 60)
             .await
             .unwrap();
@@ -2555,9 +2789,11 @@ mod tests {
         mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
             .await
             .unwrap();
-        mark_polled(&pool, id, "success", None, 900).await.unwrap();
+        mark_polled(&pool, id, "sub-1", "success", None, None, None, 900)
+            .await
+            .unwrap();
 
-        assert!(requeue_for_run(&pool, id, 1000).await.unwrap());
+        assert!(requeue_for_run(&pool, id, None, 1000).await.unwrap());
         let row = get(&pool, id).await.unwrap().unwrap();
         assert!(row.gen_status.is_none(), "重跑须清掉上一轮的即梦状态");
         assert!(row.polled_at.is_none());
@@ -2636,6 +2872,7 @@ mod tests {
         mark_ready_for_review(
             &pool,
             ids[2],
+            "s2",
             "/v.mp4",
             None,
             None,
@@ -2683,7 +2920,7 @@ mod tests {
         mark_submitted(&pool, id, &SubmitReceipt::healthy("s", 8), 1_000)
             .await
             .unwrap();
-        mark_failed(&pool, id, "timeout", "45 分钟仍未出片", 99_000)
+        mark_failed(&pool, id, Some("s"), "timeout", "45 分钟仍未出片", 99_000)
             .await
             .unwrap();
         assert!(last_finished_at(&pool).await.unwrap().is_none());
@@ -2708,9 +2945,16 @@ mod tests {
         mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-paid", 8), 500)
             .await
             .unwrap();
-        mark_failed(&pool, id, "timeout", "45 分钟仍未出片", 3_200)
-            .await
-            .unwrap();
+        mark_failed(
+            &pool,
+            id,
+            Some("sub-paid"),
+            "timeout",
+            "45 分钟仍未出片",
+            3_200,
+        )
+        .await
+        .unwrap();
 
         assert!(resume_timed_out(&pool, id, 9_000).await.unwrap());
         let row = get(&pool, id).await.unwrap().unwrap();
@@ -2745,9 +2989,16 @@ mod tests {
         mark_submitted(&pool, id, &SubmitReceipt::bare("sub-ghost"), 500)
             .await
             .unwrap();
-        mark_failed(&pool, id, "phantom", "即梦接了单但未入队", 3_200)
-            .await
-            .unwrap();
+        mark_failed(
+            &pool,
+            id,
+            Some("sub-ghost"),
+            "phantom",
+            "即梦接了单但未入队",
+            3_200,
+        )
+        .await
+        .unwrap();
 
         assert!(!resume_timed_out(&pool, id, 9_000).await.unwrap());
         assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "fail");
@@ -2787,7 +3038,7 @@ mod tests {
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
         let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        mark_failed(&pool, id, "submit", "找不到即梦 CLI", 600)
+        mark_failed(&pool, id, None, "submit", "找不到即梦 CLI", 600)
             .await
             .unwrap();
         assert!(!resume_timed_out(&pool, id, 900).await.unwrap());
@@ -2817,6 +3068,7 @@ mod tests {
             mark_ready_for_review(
                 &pool,
                 id,
+                "s",
                 "/v.mp4",
                 None,
                 Some(960),
@@ -2943,7 +3195,7 @@ mod tests {
         let id = seed_reviewable(&pool, 1).await; // 走到 rev，已不在 run
         assert_eq!(count_running(&pool).await.unwrap(), 0);
         // 退回去重跑再提交一次 → 回到 run 且有 submit_id。
-        assert!(requeue_for_run(&pool, id, 400).await.unwrap());
+        assert!(requeue_for_run(&pool, id, None, 400).await.unwrap());
         mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-2", 8), 500)
             .await
             .unwrap();
@@ -2951,10 +3203,41 @@ mod tests {
         assert_eq!(list_running(&pool).await.unwrap().len(), 1);
         // run 但**没有** submit_id（= 提交到一半被杀的孤儿）两边都必须同时不数它：
         // 退回 ready 再认领一次，就停在「已认领、还没拿到 submit_id」那一格。
-        assert!(requeue_for_run(&pool, id, 700).await.unwrap());
+        assert!(requeue_for_run(&pool, id, None, 700).await.unwrap());
         assert_eq!(claim_ready(&pool, &[id], 700).await.unwrap().len(), 1);
         assert_eq!(count_running(&pool).await.unwrap(), 0);
         assert_eq!(list_running(&pool).await.unwrap().len(), 0);
+    }
+
+    /// 丢弃已提交单时**只丢读到的那一单**。
+    ///
+    /// 人在「仍要重跑」那张卡上犹豫的几秒里，本地待发队列完全可能把这一条重新发出去。
+    /// 没有这道闸的话，丢掉的就不是人看过的那一单，而是一单他还没来得及知道的新提交
+    /// —— 而两者都已经扣过钱。
+    #[tokio::test]
+    async fn discarding_a_submit_only_touches_the_one_that_was_read() {
+        let (pool, _d) = test_pool().await;
+        let id = seed_reviewable(&pool, 1).await;
+        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-new", 8), 600)
+            .await
+            .unwrap();
+
+        assert!(
+            !requeue_for_run(&pool, id, Some("sub-old"), 700)
+                .await
+                .unwrap(),
+            "读到的是 sub-old，而这一行已经是 sub-new —— 一行都不许动"
+        );
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "run");
+        assert_eq!(row.submit_id.as_deref(), Some("sub-new"));
+
+        // 指名到当前那一单就放行。
+        assert!(requeue_for_run(&pool, id, Some("sub-new"), 800)
+            .await
+            .unwrap());
+        assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "ready");
     }
 
     /// 换通道**不能动 `submit_queued_at`**。

@@ -120,9 +120,19 @@ pub fn hourly_rates(samples: &[Sample]) -> Vec<HourRate> {
 /// 代价写在这里：它平掉了「这一小时突然变快」这种局部变化。要看那个去观测面板
 /// （[`hourly_rates`] 逐小时归桶），那才是它该在的地方。
 ///
-/// 每条 clip 取**首尾两点**算一段斜率，再跨 clip 取中位数；位次回升的那一段整条丢掉
-/// （规则 1）：首尾之差为负意味着这一单中途被重排过，拿它当负速度会让界面说
-/// 「队列在变长」。
+/// 每条 clip 取一段**单调向前**的轨迹算斜率，再跨 clip 取中位数。
+///
+/// ## 为什么不能只比首尾
+///
+/// 原先就是只比首尾，于是「位次回升的那一段整条丢掉」这条规则只在**回升发生在末尾**时
+/// 才生效。而回升恰恰最常出现在中间：`v2v_queue_samples` 是按 clip 存的，重跑与改投
+/// 都在同一行上就地进行（`UNIQUE(work_id)`，`attempt+1` 不新增行），所以一条轨迹里
+/// 完全可以先排到第 1000 位、被改投之后重新从第 4000 位排起。这种轨迹的首尾之差仍是
+/// 正的（5000→…→3000），于是函数照样交回一个数 —— 而那个数把「排了两轮队」平摊成了
+/// 一条不存在的速度，ETA 跟着一起错。
+///
+/// 现在的做法：在**相邻两点**处切开每一次跳升，取时间跨度最长的那一段来投票。丢掉的
+/// 只是跳升本身，而不是整条轨迹 —— 重排过的那一单仍然有话可说，说的是它当前这一轮。
 pub fn overall_rate(samples: &[Sample]) -> Option<f64> {
     let mut sorted: Vec<Sample> = samples.to_vec();
     sorted.sort_by_key(|s| (s.clip_id, s.at));
@@ -134,15 +144,35 @@ pub fn overall_rate(samples: &[Sample]) -> Option<f64> {
         while j + 1 < sorted.len() && sorted[j + 1].clip_id == clip {
             j += 1;
         }
-        let (first, last) = (sorted[i], sorted[j]);
-        let secs = last.at - first.at;
-        let drained = first.queue_idx - last.queue_idx;
-        if secs > 0 && drained >= 0 {
+        // 这一条 clip 的轨迹是 sorted[i..=j]。按跳升切段，留最长的那一段。
+        let mut best: Option<(i64, i64)> = None; // (秒数, 消化掉的位次)
+        let mut seg_start = i;
+        for k in i..=j {
+            let broke = k > seg_start && sorted[k].queue_idx > sorted[k - 1].queue_idx;
+            if broke {
+                consider(&sorted[seg_start], &sorted[k - 1], &mut best);
+                seg_start = k;
+            }
+        }
+        consider(&sorted[seg_start], &sorted[j], &mut best);
+        if let Some((secs, drained)) = best {
             votes.push(drained as f64 * HOUR as f64 / secs as f64);
         }
         i = j + 1;
     }
     (!votes.is_empty()).then(|| median(&mut votes))
+}
+
+/// 一段轨迹够不够格投票（要跨过时间、且方向向前），够格就与当前最长的那段比一比。
+fn consider(first: &Sample, last: &Sample, best: &mut Option<(i64, i64)>) {
+    let secs = last.at - first.at;
+    let drained = first.queue_idx - last.queue_idx;
+    if secs <= 0 || drained < 0 {
+        return;
+    }
+    if best.map_or(true, |(bs, _)| secs > bs) {
+        *best = Some((secs, drained));
+    }
 }
 
 /// 按当前速度，这一单还要等多久（秒）。
@@ -303,6 +333,39 @@ mod tests {
         assert!(
             overall_rate(&[s(1, 0, 1000), s(1, 3600, 4000)]).is_none(),
             "首尾之差为负 = 中途被重排，没有可用的速度"
+        );
+    }
+
+    // **跳升发生在中间**时也必须切开。轨迹存在 clip 上、重跑与改投都是就地进行，
+    // 所以「排到 1000 位 → 被改投 → 从 4000 位重排」是一条完全正常的轨迹，而它的
+    // 首尾之差仍是正的 —— 只比首尾的话，函数会把两轮排队平摊成一条不存在的速度。
+    #[test]
+    fn overall_rate_splits_a_trail_at_a_mid_way_requeue() {
+        // 第一段：3600 秒消化 4000 位（5000→1000）。
+        // 第二段：7200 秒消化 1000 位（4000→3000）—— 更长，故它说了算。
+        let samples = vec![
+            s(1, 0, 5000),
+            s(1, 3_600, 1000),
+            s(1, 3_700, 4000),
+            s(1, 10_900, 3000),
+        ];
+        let r = overall_rate(&samples).unwrap();
+        assert!(
+            (r - 500.0).abs() < 1.0,
+            "取时间跨度最长的那一段（7200 秒 1000 位 = 500 位/时），实得 {r}"
+        );
+        // 首尾口径会给出 (5000-3000)/10900 秒 ≈ 660 位/时 —— 一个两轮排队平摊出来的、
+        // 谁也不代表的数。这条断言守住「不许再退回去」。
+        assert!((r - 660.0).abs() > 50.0, "不得回退成首尾口径：{r}");
+    }
+
+    // 跳升切完之后一个够格的段都不剩 → 没有答案，而不是硬凑一个。
+    #[test]
+    fn overall_rate_has_no_answer_when_every_segment_is_a_single_point() {
+        let samples = vec![s(1, 0, 1000), s(1, 600, 2000), s(1, 1200, 3000)];
+        assert!(
+            overall_rate(&samples).is_none(),
+            "每一步都在回升，切完全是单点，算不出斜率"
         );
     }
 }

@@ -469,7 +469,12 @@ export function deriveRows(
   return clips.map((c) => {
     const stage = c.stage as Stage;
     const key = channelOf(c, eff);
-    const modelFull = c.modelVersion ?? eff?.modelVersion ?? null;
+    // **通道口径只有 `channelOf` 一个**。这里原先自己拿 `??` 回落一遍，而 `??` 只兜
+    // null/undefined —— 一个空白型号（`""`）会被它原样留下，于是同一条 clip 分节时按
+    // `channelOf` 归到默认通道、`modelFull` 却是空串：筛选（`matchFilter` 比的是
+    // `modelFull`）、通道卡与计数三处随后都读 `modelFull`，结果就是后台在默认通道上
+    // 执行、界面却把它摆进另一条「CLI 默认」通道里，点哪一节都找不着它。
+    const modelFull = key === "" ? null : key;
     const info = models.find((m) => m.modelVersion === modelFull);
     const resolution = c.videoResolution ?? eff?.videoResolution ?? info?.resolutions[0] ?? null;
     const duration = c.duration ?? eff?.duration ?? info?.minDuration ?? null;

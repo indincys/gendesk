@@ -1438,9 +1438,20 @@ pub async fn switch_v2v_channel(
     // 直接改的那批攒起来一次 UPDATE；要丢弃的逐条处理（每条都要先留一份账）。
     let mut direct: Vec<i64> = Vec::new();
     let mut last_code = String::new();
+    // 待记的账攒着，等事务提交之后再写日志：事务回滚了却留下一条「已丢弃提交单 X」
+    // 的记录，比没有记录更难查。
+    let mut ledger: Vec<(i64, String, String)> = Vec::new();
 
+    // ## 整个换通道是**一个事务**
+    //
+    // 「丢弃旧单」与「改写参数」曾经是两次独立 autocommit，中间隔着一个谁都能挤进来的
+    // 缝：后台 `drain_queue`（轮询循环、别的命令、autofill 三处都会调）只要在这个缝里
+    // 认领到刚被推回 `ready` 的条目，就会**照着旧通道的参数**把它发出去 —— 结果是
+    // 「已付费的旧单丢了、通道却没换成」，钱花了两份、队还是原来那条。第二步自己失败
+    // 也是同一个结局。两步落在同一个事务里，这个缝就不存在了。
+    let mut tx = state.db.begin().await?;
     for id in &ids {
-        let Some(clip) = repo::get(&state.db, *id).await? else {
+        let Some(clip) = repo::get(&mut *tx, *id).await? else {
             out.skipped += 1;
             continue;
         };
@@ -1452,30 +1463,30 @@ pub async fn switch_v2v_channel(
             "run" if abandon_submitted => {
                 let ev = runner::Evidence::from_clip(&clip);
                 let paid = clip.credit_count.or(clip.submit_credit).unwrap_or(0);
-                let snap = repo::snapshot(&state.db, *id).await?;
-                // **先记账再动手**：`requeue_for_run` 会把 submit_id 与 credit_count 一起
-                // 清掉，事后想查「我到底丢了哪一单、花了多少」就只剩这条日志了。
-                state.v2v_log.warn(
-                    "submit",
-                    Some((clip.id, clip.prompt_code.as_str())),
-                    format!(
-                        "改投 {label_ch}：丢弃已提交单 {}（{}），此单不再轮询",
-                        clip.submit_id.as_deref().unwrap_or("无 submit_id"),
-                        if ev.billed() {
-                            format!("已扣 {paid} 额度，不可撤回")
-                        } else {
-                            "未产生额度消耗".into()
-                        }
-                    ),
-                    None,
-                );
-                if repo::requeue_for_run(&state.db, *id, now).await? {
+                let snap = repo::snapshot(&mut *tx, *id).await?;
+                // 丢弃的是**读到的那一单**：`expect_submit` 把它钉进 WHERE 里，
+                // 认领不到就整条跳过，绝不会误伤一单人没看过的新提交。
+                if repo::requeue_for_run(&mut *tx, *id, clip.submit_id.as_deref(), now).await? {
                     out.abandoned += 1;
                     if ev.billed() {
                         out.abandoned_credit += paid;
                     }
                     last_code = clip.prompt_code.clone();
                     direct.push(*id);
+                    // 账要记，但记在提交之后（见 `ledger` 的注释）。
+                    ledger.push((
+                        clip.id,
+                        clip.prompt_code.clone(),
+                        format!(
+                            "改投 {label_ch}：丢弃已提交单 {}（{}），此单不再轮询",
+                            clip.submit_id.as_deref().unwrap_or("无 submit_id"),
+                            if ev.billed() {
+                                format!("已扣 {paid} 额度，不可撤回")
+                            } else {
+                                "未产生额度消耗".into()
+                            }
+                        ),
+                    ));
                     if let Some(s) = snap {
                         out.undo.push(V2vUndoEntry::from_snapshot(s, None));
                     }
@@ -1489,7 +1500,7 @@ pub async fn switch_v2v_channel(
 
     if !direct.is_empty() {
         let n = repo::set_params(
-            &state.db,
+            &mut *tx,
             &direct,
             norm.model_version.as_deref(),
             norm.duration,
@@ -1500,6 +1511,12 @@ pub async fn switch_v2v_channel(
         // 丢弃的那些刚被 `requeue_for_run` 推回 ready，所以它们也在这次 UPDATE 的射程里；
         // `switched` 只算「本来就没花钱」的那部分，两个数字加起来才是 `n`。
         out.switched = (n - out.abandoned).max(0);
+    }
+    tx.commit().await?;
+    for (id, code, msg) in ledger {
+        state
+            .v2v_log
+            .warn("submit", Some((id, code.as_str())), msg, None);
     }
 
     let changed = out.switched + out.abandoned;
@@ -1552,6 +1569,21 @@ pub async fn switch_v2v_channel(
             ),
             _ => {}
         }
+    }
+    // **撤销令牌要在 drain 之后再筛一遍**。上面那一推多半当场就把改投的条目发了出去
+    // （换通道最常见的动机正是「原来那条队排不动」，新通道通常有空位），而一条已经重新
+    // 提交出去的 clip 是撤不回来的 —— `undo_v2v` 会拒绝它（撤回去等于抹掉新单的
+    // submit_id，那单额度已扣、即梦还在跑）。带着一张按下去必然失败的「撤销」pill 走，
+    // 比不给撤销更糟：人以为自己还有退路。
+    if !out.undo.is_empty() {
+        let ids: Vec<i64> = out.undo.iter().map(|e| e.clip_id).collect();
+        let resubmitted: std::collections::HashSet<i64> = repo::get_many(&state.db, &ids)
+            .await?
+            .into_iter()
+            .filter(|c| c.submit_id.is_some())
+            .map(|c| c.id)
+            .collect();
+        out.undo.retain(|e| !resubmitted.contains(&e.clip_id));
     }
     emit_changed(&state.db, &app, None).await;
     Ok(out)
@@ -1774,8 +1806,11 @@ static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// **不做** `autofill::tick`：那是自主下新单、自主花钱。一个叫「刷新」的按钮不该顺手
 /// 替人买东西；下一个 tick 自会跑到它。
 ///
-/// **做**一次余额查询：余额也是远端回传值，而这是唯一会走网络拿它的地方（`v2v_balance`
-/// 无缓存）。放在最后、失败不影响任何东西。
+/// **不做**余额查询：余额确实也是远端回传值，但它没有推送通道 —— 在这里查一次，
+/// 结果除了进日志哪儿也去不了（`CreditInfo` 没有对应事件，Store 里的 `credit` 只在
+/// 进页面时加载一次）。那等于每次刷新白起一个 CLI 进程，而顶栏余额照旧是进页面那一刻
+/// 的旧值。改由前端在收到「本轮刷完」之后重拉一次 `v2v_credit_stats` —— 同样一个进程，
+/// 但余额与在跑任务的实扣额度一起落到界面上。
 #[tauri::command]
 #[specta::specta]
 pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResult<i64> {
@@ -1845,8 +1880,6 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
         {
             log.error("submit", None, format!("本地队列补位失败：{e}"), None);
         }
-        // 余额也是远端回传值，顺手刷新；拉不到不算错（掉线/未登录是常态）。
-        let _ = dreamina::user_credit(&s.bin, &log).await;
         emit_changed(&pool, &app, None).await;
         REFRESHING.store(false, Ordering::SeqCst);
         let _ = V2vRefresh {
@@ -1906,6 +1939,12 @@ pub struct V2vUndoEntry {
     pub finished_at: Option<i64>,
     pub reviewed_at: Option<i64>,
     pub attempt: i64,
+    /// 三项生成参数。换通道那条路径会**同时**丢弃一单已付费任务并改写参数，
+    /// 不把它们写回去，撤销出来的就是「提交单属于旧通道、库里却记着新通道」的行
+    /// —— 而通道正是并发空位的分桶键（见 `repo::ClipSnapshot` 的注释）。
+    pub model_version: Option<String>,
+    pub duration: Option<i64>,
+    pub video_resolution: Option<String>,
     /// 「不通过」时写进废纸篓的那一行。撤销即删掉它 —— 文件本来就没物理删，
     /// 所以这一步是干净的（清空废纸篓才会真删，而那时人已经确认过一次了）。
     pub trash_id: Option<i64>,
@@ -1934,6 +1973,9 @@ impl V2vUndoEntry {
             finished_at: s.finished_at,
             reviewed_at: s.reviewed_at,
             attempt: s.attempt,
+            model_version: s.model_version,
+            duration: s.duration,
+            video_resolution: s.video_resolution,
             trash_id,
         }
     }
@@ -1960,6 +2002,9 @@ impl V2vUndoEntry {
             finished_at: self.finished_at,
             reviewed_at: self.reviewed_at,
             attempt: self.attempt,
+            model_version: self.model_version.clone(),
+            duration: self.duration,
+            video_resolution: self.video_resolution.clone(),
         }
     }
 }
@@ -2266,11 +2311,49 @@ fn action_label(verb: &str, n: i64, code: &str) -> String {
     }
 }
 
+/// 人在确认框上点了「仍要重跑 / 仍要删除」时，一并交回**当时那张卡上写着已经花过钱的
+/// 那几条**。后端据此复核：动手这一刻真正已计费的集合若超出了这份名单，就整批拒绝。
+///
+/// ## 为什么这道闸必须在 Rust
+///
+/// 「重跑」与「删除」都会丢弃已付费的在跑任务，而确认框上那句「其中 N 条已经花过钱」
+/// 算的是**前端快照**。人读那张卡要几秒，这几秒里本地待发队列完全可能把其中一条发出去
+/// —— 于是卡上写着「3 条已花钱」，按下去实际丢掉的是 4 条。原先后端发现这种情况也只是
+/// 记一行日志照删不误，IPC 里根本没有「人已确认放弃付费任务」这个参数，等于把一个花钱
+/// 的判断整个留在了前端（违背铁律 1）。
+///
+/// 风险**没有**升级时不打扰人：名单里多列了几条（那几条同期出片了、或被判死了）不算
+/// 冲突，人当时愿意付的代价只多不少。
+fn ack_covers_billed(rows: &[repo::ClipRow], ack_paid: &[i64]) -> Result<(), AppError> {
+    let missed: Vec<&repo::ClipRow> = rows
+        .iter()
+        .filter(|c| {
+            c.stage == "run" && runner::Evidence::from_clip(c).billed() && !ack_paid.contains(&c.id)
+        })
+        .collect();
+    if missed.is_empty() {
+        return Ok(());
+    }
+    let credit: i64 = missed
+        .iter()
+        .map(|c| c.credit_count.or(c.submit_credit).unwrap_or(0))
+        .sum();
+    let codes: Vec<&str> = missed.iter().map(|c| c.prompt_code.as_str()).collect();
+    Err(AppError::InvalidInput(format!(
+        "这一批的代价在你确认之后变高了：{} 又被提交并扣了 {credit} 额度（共 {} 条），\
+         而刚才那张确认卡上没有它们。已整批取消，什么都没动 —— 请重新看一遍再决定。",
+        codes.join("、"),
+        missed.len(),
+    )))
+}
+
 /// 重跑（同提示词）/ 退回改写 / 继续等待。
 ///
 /// 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
 /// 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
 /// 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
+///
+/// `ack_paid`：见 [`ack_covers_billed`]。只有 `run` 模式会丢弃付费任务，故只有它复核。
 #[tauri::command]
 #[specta::specta]
 pub async fn requeue_v2v_clips(
@@ -2278,6 +2361,7 @@ pub async fn requeue_v2v_clips(
     app: AppHandle,
     ids: Vec<i64>,
     mode: String,
+    ack_paid: Vec<i64>,
 ) -> AppResult<V2vAction> {
     let verb = match mode.as_str() {
         "run" => "已重排待提交",
@@ -2290,6 +2374,10 @@ pub async fn requeue_v2v_clips(
         }
     };
     let now = now_unix();
+    // 复核在**一行都还没动之前**：这一批要么整批过、要么整批不动。
+    if mode == "run" {
+        ack_covers_billed(&repo::get_many(&state.db, &ids).await?, &ack_paid)?;
+    }
     let mut n = 0i64;
     let mut undo: Vec<V2vUndoEntry> = Vec::new();
     let mut last_code = String::new();
@@ -2323,7 +2411,12 @@ pub async fn requeue_v2v_clips(
             }
         }
         let ok = match mode.as_str() {
-            "run" => repo::requeue_for_run(&state.db, id, now).await?,
+            // 钉住读到的那一单：从复核到这一行之间，本地队列仍可能提交它，
+            // 那时丢弃的就不是人确认过的那一单了（同 `switch_v2v_channel`）。
+            "run" => {
+                let expect = row.as_ref().and_then(|c| c.submit_id.as_deref());
+                repo::requeue_for_run(&state.db, id, expect, now).await?
+            }
             "rewrite" => repo::requeue_for_rewrite(&state.db, id, now).await?,
             _ => repo::resume_timed_out(&state.db, id, now).await?,
         };
@@ -2370,13 +2463,18 @@ pub async fn requeue_v2v_clips(
 }
 
 /// 从流水线移除（不想给这张图做视频了）。作品本体不受影响。
+///
+/// `ack_paid`：见 [`ack_covers_billed`]。删除比重跑更彻底 —— 它是 `DELETE FROM`，
+/// 没有废纸篓也没有撤销令牌，而它同样会带走一条还在即梦那边跑着的付费任务。
 #[tauri::command]
 #[specta::specta]
 pub async fn remove_v2v_clips(
     state: State<'_, AppState>,
     app: AppHandle,
     ids: Vec<i64>,
+    ack_paid: Vec<i64>,
 ) -> AppResult<i64> {
+    ack_covers_billed(&repo::get_many(&state.db, &ids).await?, &ack_paid)?;
     let n = repo::remove(&state.db, &ids).await?;
     refresh_handoff(&state.db, &app).await;
     Ok(n)
@@ -2414,6 +2512,9 @@ mod tests {
             finished_at: Some(990),
             reviewed_at: None,
             attempt: 2,
+            model_version: Some("seedance2.0fast".into()),
+            duration: Some(5),
+            video_resolution: Some("720p".into()),
         };
         let entry = V2vUndoEntry::from_snapshot(snap.clone(), Some(42));
         let wire = serde_json::to_string(&entry).unwrap();
@@ -2434,6 +2535,11 @@ mod tests {
         assert_eq!(out.queue_idx, snap.queue_idx);
         assert_eq!(out.attempt, snap.attempt);
         assert_eq!(out.reviewed_at, snap.reviewed_at);
+        // 三项生成参数：换通道那条路径同时丢弃付费单并改写参数，漏掉它们的话，
+        // 撤销出来的是「提交单属于旧通道、库里却记着新通道」的行，而通道是并发分桶键。
+        assert_eq!(out.model_version, snap.model_version);
+        assert_eq!(out.duration, snap.duration);
+        assert_eq!(out.video_resolution, snap.video_resolution);
         // 载荷字段须 camelCase（specta 序列化配置统一保证，这里守住不被手改破坏）。
         assert!(wire.contains("\"clipId\""), "{wire}");
         assert!(wire.contains("\"videoPath\""), "{wire}");

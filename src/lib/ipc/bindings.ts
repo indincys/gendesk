@@ -1271,8 +1271,11 @@ async unqueueV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
  * **不做** `autofill::tick`：那是自主下新单、自主花钱。一个叫「刷新」的按钮不该顺手
  * 替人买东西；下一个 tick 自会跑到它。
  * 
- * **做**一次余额查询：余额也是远端回传值，而这是唯一会走网络拿它的地方（`v2v_balance`
- * 无缓存）。放在最后、失败不影响任何东西。
+ * **不做**余额查询：余额确实也是远端回传值，但它没有推送通道 —— 在这里查一次，
+ * 结果除了进日志哪儿也去不了（`CreditInfo` 没有对应事件，Store 里的 `credit` 只在
+ * 进页面时加载一次）。那等于每次刷新白起一个 CLI 进程，而顶栏余额照旧是进页面那一刻
+ * 的旧值。改由前端在收到「本轮刷完」之后重拉一次 `v2v_credit_stats` —— 同样一个进程，
+ * 但余额与在跑任务的实扣额度一起落到界面上。
  */
 async pollV2vNow() : Promise<Result<number, AppError>> {
     try {
@@ -1299,10 +1302,12 @@ async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<V2vAction, A
  * 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
  * 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
  * 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
+ * 
+ * `ack_paid`：见 [`ack_covers_billed`]。只有 `run` 模式会丢弃付费任务，故只有它复核。
  */
-async requeueV2vClips(ids: number[], mode: string) : Promise<Result<V2vAction, AppError>> {
+async requeueV2vClips(ids: number[], mode: string, ackPaid: number[]) : Promise<Result<V2vAction, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("requeue_v2v_clips", { ids, mode }) };
+    return { status: "ok", data: await TAURI_INVOKE("requeue_v2v_clips", { ids, mode, ackPaid }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1329,10 +1334,13 @@ async undoV2v(entries: V2vUndoEntry[]) : Promise<Result<number, AppError>> {
 },
 /**
  * 从流水线移除（不想给这张图做视频了）。作品本体不受影响。
+ * 
+ * `ack_paid`：见 [`ack_covers_billed`]。删除比重跑更彻底 —— 它是 `DELETE FROM`，
+ * 没有废纸篓也没有撤销令牌，而它同样会带走一条还在即梦那边跑着的付费任务。
  */
-async removeV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
+async removeV2vClips(ids: number[], ackPaid: number[]) : Promise<Result<number, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_v2v_clips", { ids }) };
+    return { status: "ok", data: await TAURI_INVOKE("remove_v2v_clips", { ids, ackPaid }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -4039,6 +4047,12 @@ lastSweepAt: number | null }
  * 一条 clip 的撤销原料 = 改动前的整份快照（+ 不通过时产生的废纸篓行）。
  */
 export type V2vUndoEntry = { clipId: number; stage: string; videoPrompt: string | null; submitId: string | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; creditCount: number | null; errorType: string | null; errorMessage: string | null; genStatus: string | null; queueIdx: number | null; polledAt: number | null; submittedAt: number | null; finishedAt: number | null; reviewedAt: number | null; attempt: number; 
+/**
+ * 三项生成参数。换通道那条路径会**同时**丢弃一单已付费任务并改写参数，
+ * 不把它们写回去，撤销出来的就是「提交单属于旧通道、库里却记着新通道」的行
+ * —— 而通道正是并发空位的分桶键（见 `repo::ClipSnapshot` 的注释）。
+ */
+modelVersion: string | null; duration: number | null; videoResolution: string | null; 
 /**
  * 「不通过」时写进废纸篓的那一行。撤销即删掉它 —— 文件本来就没物理删，
  * 所以这一步是干净的（清空废纸篓才会真删，而那时人已经确认过一次了）。

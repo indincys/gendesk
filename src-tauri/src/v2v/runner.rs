@@ -550,7 +550,7 @@ pub async fn submit_batch(
                     },
                     None,
                 );
-                repo::mark_failed(pool, clip.id, kind, &msg, now_unix()).await?;
+                repo::mark_failed(pool, clip.id, None, kind, &msg, now_unix()).await?;
                 sum.failed += 1;
                 if sum.first_error.is_none() {
                     sum.first_error = Some(msg);
@@ -1096,6 +1096,7 @@ pub async fn sweep_once(
                 let _ = repo::mark_swept(
                     pool,
                     clip.id,
+                    &submit_id,
                     &q.gen_status,
                     q.credit_count,
                     q.benefit_type.as_deref(),
@@ -1119,9 +1120,17 @@ pub async fn sweep_once(
                         // 采样要在 `mark_polled` **之前**：那一句会把 clip 行里的
                         // 上一个位次覆盖掉，而「与上次比是不是倒退了」正要拿它作比较。
                         record_position(pool, clip, &full, now, log).await;
-                        let _ =
-                            repo::mark_polled(pool, clip.id, &full.gen_status, full.queue_idx, now)
-                                .await;
+                        let _ = repo::mark_polled(
+                            pool,
+                            clip.id,
+                            &submit_id,
+                            &full.gen_status,
+                            full.queue_idx,
+                            full.credit_count,
+                            full.benefit_type.as_deref(),
+                            now,
+                        )
+                        .await;
                         // 位次问到了 = 这份回体是权威的，settle 里那次幽灵确认查询
                         // 就不必再发一遍。
                         q = full;
@@ -1264,7 +1273,7 @@ async fn query_and_settle(
             log.warn("poll", who, format!("查询失败，下轮重试：{e}"), None);
             // 失败也要记「问过了」，否则退避对失败路径完全失效：CLI 一旦不可用，
             // 每个 tick 都会为每条起一个必然失败的进程。
-            let _ = repo::mark_poll_attempt(pool, clip.id, now).await;
+            let _ = repo::mark_poll_attempt(pool, clip.id, submit_id, now).await;
             sum.still_running += 1;
             return Ok(());
         }
@@ -1273,7 +1282,17 @@ async fn query_and_settle(
     // 采样在落库之前（理由同 `sweep_once` 里那处：要拿库里的上一个位次做对比）。
     record_position(pool, clip, &q, now, log).await;
     // 状态原文落库：切页/重启后看板仍答得出「这条在排队还是在跑」。
-    let _ = repo::mark_polled(pool, clip.id, &q.gen_status, q.queue_idx, now).await;
+    let _ = repo::mark_polled(
+        pool,
+        clip.id,
+        submit_id,
+        &q.gen_status,
+        q.queue_idx,
+        q.credit_count,
+        q.benefit_type.as_deref(),
+        now,
+    )
+    .await;
     settle(
         pool,
         dirs,
@@ -1310,6 +1329,16 @@ async fn settle(
 ) -> AppResult<()> {
     let who = Some((clip.id, clip.prompt_code.as_str()));
     let now = now_unix();
+    // 结算的**每一次写入都要指名这一单**（`repo::OWNED`）。问一条即梦任务要走网络，
+    // 手动刷新逐条问下来是几十秒到几分钟的事，而人在这段时间里完全可以重跑或改投这一行
+    // —— 那时 `submit_id` 已经换成了另一单 B。拿 A 的回体按 `id` 写回去，会把 B 写成
+    // `rev`/`fail`，于是 `list_running` 再也捞不到 B：一条**已经扣过费、即梦那边还在跑**
+    // 的任务当场失联，而界面上那一行摆着 A 的成片，看起来一切正常。
+    //
+    // `list_running` 保证了走到这里的行都有 submit_id；没有的话本轮什么都不做。
+    let Some(expect) = clip.submit_id.as_deref() else {
+        return Ok(());
+    };
     // 只在**状态变了**时记日志。每轮把在跑的「还在 querying」全记一遍，
     // 等于用「一切正常」把真正的报错挤出缓冲窗口。
     if clip.gen_status.as_deref() != Some(q.gen_status.as_str()) {
@@ -1329,10 +1358,7 @@ async fn settle(
             // 整表扫描没有下载动作，故出片的条目一定要在这里单发一次带
             // `--download_dir` 的查询才能拿到本地路径。
             let q = if q.video_path.is_none() {
-                let Some(sid) = clip.submit_id.as_deref() else {
-                    return Ok(());
-                };
-                match dreamina::query(bin, sid, Some(&dirs.clips()), log, who).await {
+                match dreamina::query(bin, expect, Some(&dirs.clips()), log, who).await {
                     Ok(full) => full,
                     Err(e) => {
                         log.warn("media", who, format!("取回成片失败，下轮重试：{e}"), None);
@@ -1350,25 +1376,36 @@ async fn settle(
                 return Ok(());
             };
             let (video, poster) = clip_paths(dirs, clip.id);
-            if let Err(e) = std::fs::rename(src, &video) {
+            // **落盘分两步，中间夹着所有权 CAS**。成片按主键命名（`clip{id}.mp4`），
+            // 而这一行的主人可能已经在查询期间换成了另一单 —— 直接改名到最终位置，
+            // 就可能盖掉那一单已经交付的成片。故先落到本单专属的临时名。
+            let staged = dirs
+                .clips()
+                .join(format!(".settling-clip{}-{expect}.mp4", clip.id));
+            if let Err(e) = std::fs::rename(src, &staged) {
                 log.warn(
                     "media",
                     who,
                     format!("成片改名失败，下轮重试：{e}"),
-                    Some(format!("{src} → {}", video.display())),
+                    Some(format!("{src} → {}", staged.display())),
                 );
                 sum.still_running += 1;
                 return Ok(());
             }
             // 封面 = 首帧缩略图的**副本**。image2video 的第一帧就是这张图，
             // 语义上正确，而且不必依赖 ffmpeg 抽帧。
+            //
+            // 封面不必跟着走两步：它是这张作品首帧的副本，同一行的任何一单写出来的
+            // 都是同一张图，盖掉谁都不丢东西。
             let poster_out = (!clip.thumb_path.is_empty()
                 && std::fs::copy(&clip.thumb_path, &poster).is_ok())
             .then(|| poster.to_string_lossy().to_string());
-            repo::mark_ready_for_review(
+            // 先按临时名入库：CAS 万一没过，最终位置就一个字都不能碰。
+            let owned = repo::mark_ready_for_review(
                 pool,
                 clip.id,
-                &video.to_string_lossy(),
+                expect,
+                &staged.to_string_lossy(),
                 poster_out.as_deref(),
                 q.width,
                 q.height,
@@ -1379,6 +1416,27 @@ async fn settle(
                 now,
             )
             .await?;
+            if !owned {
+                // 这一行已经不归本单了。A 的成片没有主人，收掉 —— 但**必须出声**：
+                // 那一单的额度已经扣了，而人多半以为自己只是「重跑了一下」。
+                let _ = std::fs::remove_file(&staged);
+                log.warn(
+                    "poll",
+                    who,
+                    format!(
+                        "结算落空：查询提交单 {expect} 期间，这一条已被重跑或改投，\
+                         它的成片没有归属，已丢弃（该单额度已扣，不可撤回）"
+                    ),
+                    None,
+                );
+                return Ok(());
+            }
+            // 库里认下了这一单 → 这一行此刻归我们，最终位置可以安全就位。
+            // 就位失败也不回滚：库里指着的临时文件确实存在、放得出来，
+            // 而把已经写下的「待验收」再撤回去只会凭空多一条「出片了却看不到」。
+            if std::fs::rename(&staged, &video).is_ok() {
+                let _ = repo::set_video_path(pool, clip.id, &video.to_string_lossy()).await;
+            }
             log.info(
                 "media",
                 who,
@@ -1425,7 +1483,7 @@ async fn settle(
                     .submit_queued_at
                     .or(clip.first_submitted_at)
                     .unwrap_or(now);
-                repo::requeue_after_reject(pool, clip.id, queued_at, now).await?;
+                repo::requeue_after_reject(pool, clip.id, expect, queued_at, now).await?;
                 log.warn(
                     "submit",
                     who,
@@ -1440,7 +1498,7 @@ async fn settle(
                 return Ok(());
             }
             log.error("poll", who, format!("即梦判定失败：{reason}"), None);
-            repo::mark_failed(pool, clip.id, "provider", &reason, now).await?;
+            repo::mark_failed(pool, clip.id, Some(expect), "provider", &reason, now).await?;
             sum.failed += 1;
         }
         Outcome::Running => {
@@ -1458,8 +1516,11 @@ async fn settle(
                             let _ = repo::mark_polled(
                                 pool,
                                 clip.id,
+                                expect,
                                 &full.gen_status,
                                 full.queue_idx,
+                                full.credit_count,
+                                full.benefit_type.as_deref(),
                                 now,
                             )
                             .await;
@@ -1492,7 +1553,7 @@ async fn settle(
                     q.gen_status
                 );
                 log.error("poll", who, format!("幽灵单：{msg}"), None);
-                repo::mark_failed(pool, clip.id, "phantom", &msg, now).await?;
+                repo::mark_failed(pool, clip.id, Some(expect), "phantom", &msg, now).await?;
                 sum.failed += 1;
             } else if is_timed_out(clip.submitted_at, now, timeout_secs) {
                 // 文案要指向「继续等待」而不是「重跑」：额度已经扣了，
@@ -1504,7 +1565,7 @@ async fn settle(
                     q.gen_status
                 );
                 log.error("poll", who, format!("超时：{msg}"), None);
-                repo::mark_failed(pool, clip.id, "timeout", &msg, now).await?;
+                repo::mark_failed(pool, clip.id, Some(expect), "timeout", &msg, now).await?;
                 sum.failed += 1;
             } else {
                 sum.still_running += 1;
@@ -2164,15 +2225,22 @@ mod tests {
             .await
             .unwrap();
         let reject = "api error: ret=1310, message=ExceedConcurrencyLimit, logid=x";
-        repo::mark_failed(&pool, ids[0], "provider", reject, 500)
+        repo::mark_failed(&pool, ids[0], Some("a"), "provider", reject, 500)
             .await
             .unwrap();
-        repo::mark_failed(&pool, ids[1], "provider", reject, 500)
+        repo::mark_failed(&pool, ids[1], Some("b"), "provider", reject, 500)
             .await
             .unwrap();
-        repo::mark_failed(&pool, ids[2], "provider", "content policy violation", 500)
-            .await
-            .unwrap();
+        repo::mark_failed(
+            &pool,
+            ids[2],
+            Some("c"),
+            "provider",
+            "content policy violation",
+            500,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 1);
         assert_eq!(

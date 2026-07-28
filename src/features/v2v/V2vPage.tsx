@@ -188,7 +188,8 @@ export function V2vPage() {
    */
   const [confirmRerun, setConfirmRerun] = useState<{
     ids: number[];
-    paid: number;
+    /** 卡上写着「已经花过钱」的那几条。确认时原样交回后端复核（见 `requeue`）。 */
+    ackPaid: number[];
     credit: number;
     advanceFrom?: number;
   } | null>(null);
@@ -289,15 +290,25 @@ export function V2vPage() {
     [channels, filter.channel],
   );
 
-  // ── 动作 ─────────────────────────────────────────────
-  const guard = useCallback(async (fn: () => Promise<void>) => {
-    if (busyRef.current) return;
+  /**
+   * 重入锁 + 统一报错。**返回值要能区分「做成了」与「没做成」**。
+   *
+   * 它吞掉异常（那是它的活：每个动作各写一遍 try/catch 只会漏），于是 `await guard(...)`
+   * 在失败时和成功时长得一模一样 —— 而串在后面的动作里有会花钱的（换通道成功之后接
+   * 提交确认卡）。原先无条件往下走：换通道失败或一条都没换成时，人照样会看到一张按原
+   * 通道参数算好的提交卡，按下去就是往那条本来要逃离的队里再塞一单。
+   *
+   * 故：成功回 `fn` 的返回值，被重入锁挡住或抛了错回 `undefined`。
+   */
+  const guard = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    if (busyRef.current) return undefined;
     busyRef.current = true;
     setBusy(true);
     try {
-      await fn();
+      return await fn();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
+      return undefined;
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -345,11 +356,18 @@ export function V2vPage() {
     [guard, advance, reload, clearSel],
   );
 
+  /**
+   * `ackPaid` = 刚才那张确认卡上写着「已经花过钱」的那几条。
+   *
+   * 后端拿它复核**动手这一刻**真正已计费的集合：人读那张卡的几秒里，本地待发队列完全
+   * 可能又发出去一条，那时卡上的数字已经不作数了。超出名单就整批拒绝、一行不动，
+   * 让人重新看一遍 —— 判据在 Rust（铁律 1），这里只负责如实交回人看过什么。
+   */
   const requeue = useCallback(
-    (ids: number[], mode: "run" | "rewrite" | "wait", advanceFrom?: number) =>
+    (ids: number[], mode: "run" | "rewrite" | "wait", advanceFrom?: number, ackPaid?: number[]) =>
       guard(async () => {
         if (ids.length === 0) return;
-        const res = await unwrap(commands.requeueV2vClips(ids, mode));
+        const res = await unwrap(commands.requeueV2vClips(ids, mode, ackPaid ?? []));
         if (res.changed === 0) {
           toast(
             mode === "wait"
@@ -395,7 +413,8 @@ export function V2vPage() {
       }
       setConfirmRerun({
         ids,
-        paid: paid.length,
+        // 卡上写着已花钱的正是这几条 —— 原样交回后端复核（见 `requeue` 的注释）。
+        ackPaid: paid.map((r) => r.clip.id),
         credit: paid.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0),
         ...(advanceFrom == null ? {} : { advanceFrom }),
       });
@@ -486,6 +505,7 @@ export function V2vPage() {
   );
 
   /** 换通道。免费的那些与要丢弃提交单的那些，由面板上的复选框分开。 */
+  /** 换成功回 `true` —— 「改投并去提交」要靠它决定接不接提交卡（见 `guard` 的注释）。 */
   const switchChannel = useCallback(
     (ids: number[], p: ChannelParams, abandon: boolean) =>
       guard(async () => {
@@ -495,7 +515,7 @@ export function V2vPage() {
         setSwitching(null);
         if (res.switched + res.abandoned === 0) {
           toast("这些条目当前阶段不允许换通道");
-          return;
+          return false;
         }
         // 撤销令牌只含被丢弃的那些（纯参数改动撤不回来，换回去本来就免费）——
         // 所以没有丢弃时不摆那个「撤销」pill，免得人以为它能把通道换回去。
@@ -507,6 +527,7 @@ export function V2vPage() {
         );
         clearSel();
         await reload();
+        return true;
       }),
     [guard, reload, clearSel],
   );
@@ -529,7 +550,11 @@ export function V2vPage() {
         // 第一条 —— 逐条清理时那意味着每删一条都要重新滚回原来的位置。
         const from = rows.length === 1 ? rows[0]?.clip.id : undefined;
         if (from != null) advance(from);
-        const n = await unwrap(commands.removeV2vClips(ids));
+        // 删除同样会带走还在跑的付费任务，同样把卡上写着已花钱的那几条交回复核。
+        const ackPaid = rows
+          .filter((r) => r.stage === "run" && r.clip.billed)
+          .map((r) => r.clip.id);
+        const n = await unwrap(commands.removeV2vClips(ids, ackPaid));
         toast(n > 0 ? `已从流水线删除 ${n} 条（图与作品记录仍在）` : "这些条目已经不在流水线里了");
         setConfirmRemove(null);
         clearSel();
@@ -988,11 +1013,14 @@ export function V2vPage() {
           // 它要调 `openSubmit`，而那个 hook 定义在 `switchChannel` 之后（依赖 `byId`）。
           // 接的是**提交确认卡**而不是直接放行：提交即扣费且不可撤回，而这张卡通篇在说
           // 「换通道免费」，在它后面直接放行等于让人在一张写着「不花钱」的卡上花掉钱。
+          // **只有确实换成了才接提交卡**。`guard` 吞异常，失败与成功在这里长得一样，
+          // 而这张卡通篇在说「换通道免费」—— 换失败之后弹一张按原通道参数算好的提交卡，
+          // 人按下去就是往那条本来要逃离的队里再塞一单，且这一下是真花钱。
           onConfirm={(p, abandon, andSubmit) => {
             const ids = switching.map((r) => r.clip.id);
             const holding = switching.filter((r) => r.action === "submit").map((r) => r.clip.id);
-            void switchChannel(ids, p, abandon).then(() => {
-              if (andSubmit && holding.length > 0) void openSubmit(holding);
+            void switchChannel(ids, p, abandon).then((ok) => {
+              if (ok === true && andSubmit && holding.length > 0) void openSubmit(holding);
             });
           }}
         />
@@ -1008,14 +1036,14 @@ export function V2vPage() {
 
       {confirmRerun && (
         <ConfirmModal
-          title={`重跑 ${confirmRerun.ids.length} 条 · 其中 ${confirmRerun.paid} 条已经花过钱`}
-          desc={`这 ${confirmRerun.paid} 条即梦已经收下并扣了 ${confirmRerun.credit} 额度，且不可撤回。重跑会丢弃原提交单 —— 那几条视频即梦还在跑，但我们此后再也取不回来，下次确认提交是第二份钱。想换条队而不是重抽的话，用「换通道」。`}
+          title={`重跑 ${confirmRerun.ids.length} 条 · 其中 ${confirmRerun.ackPaid.length} 条已经花过钱`}
+          desc={`这 ${confirmRerun.ackPaid.length} 条即梦已经收下并扣了 ${confirmRerun.credit} 额度，且不可撤回。重跑会丢弃原提交单 —— 那几条视频即梦还在跑，但我们此后再也取不回来，下次确认提交是第二份钱。想换条队而不是重抽的话，用「换通道」。`}
           confirmLabel="仍要重跑"
           danger
           onConfirm={() => {
             const c = confirmRerun;
             setConfirmRerun(null);
-            void requeue(c.ids, "run", c.advanceFrom);
+            void requeue(c.ids, "run", c.advanceFrom, c.ackPaid);
           }}
           onClose={() => setConfirmRerun(null)}
         />

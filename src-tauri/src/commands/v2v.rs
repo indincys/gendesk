@@ -1403,6 +1403,7 @@ pub async fn switch_v2v_channel(
         video_resolution: Some(video_resolution.clone()),
         session: None,
     })?;
+    let s = load_settings(&state.db).await?;
     let label_ch = dreamina::short_label(&model_version);
     let now = now_unix();
 
@@ -1497,6 +1498,40 @@ pub async fn switch_v2v_channel(
             ),
             None,
         );
+    }
+
+    // **把本地队列往前推一格** —— 换通道最常见的动机就是「那条队排不动了，换条空的」，
+    // 而换过去之后新通道多半正好有空位。不在这里推的话，那些条目要干等到下一轮扫描
+    // （最多 10 分钟）才动，而人刚刚做完一个明确的动作、正盯着屏幕 ——「换了通道
+    // 怎么没反应」就是这么来的（实测：5 条改投到一条空闲的 2.0Mini 上，原地不动）。
+    //
+    // 这里发出去**不需要再确认**：它们的 `submit_queued_at` 还在，也就是人早就点过
+    // 「确认提交」放过行了（0028 的全部意思就是「你点一次，剩下的自动排队接上」）。
+    // 换通道不改变「已放行」这件事，只改变它排哪条队。新旧通道的差价由换通道面板在
+    // 按下确认**之前**摆出来。
+    //
+    // 与 `poll_v2v_now` 里那处同源；一条通道提交失败不连坐其余（`drain_queue` 内部保证）。
+    if changed > 0 {
+        match runner::drain_queue(
+            &state.db,
+            &s.bin,
+            &s.defaults(),
+            s.max_in_flight,
+            &state.v2v_log,
+        )
+        .await
+        {
+            // 刚发出去的单子要过一会儿才有队列位次（实测健康单 25 秒内才拿到），
+            // 故请求一次补扫而不是立刻扫 —— 同 `submit_v2v_clips` 的处置。
+            Ok(sum) if sum.submitted > 0 => runner::request_sweep_soon(now_unix()),
+            Err(e) => state.v2v_log.error(
+                "submit",
+                None,
+                format!("换通道后本地队列补位失败：{e}"),
+                None,
+            ),
+            _ => {}
+        }
     }
     emit_changed(&state.db, &app, None).await;
     Ok(out)

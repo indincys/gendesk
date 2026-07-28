@@ -2006,6 +2006,76 @@ mod tests {
         assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 2);
     }
 
+    /// 换通道之后，**新通道那条队必须当场往前推一格**（0032）。
+    ///
+    /// 这条守的是实跑里真实发生过的一次「换了通道怎么没反应」：5 条已放行的条目从排满的
+    /// 2.0fast 改投到一条**空闲**的 2.0mini 上，然后原地不动 —— 因为
+    /// `switch_v2v_channel` 只发了 `emit_changed`、从没调 `drain_queue`，那些条目要干等到
+    /// 下一轮扫描（最多 10 分钟）。而人换通道的动机恰恰是「那条队排不动了」，
+    /// 此刻正盯着屏幕。
+    ///
+    /// 这里测的是那个不变量本身（改完通道调一次 drain 就该动新通道那条队），
+    /// 命令层只是把这两步接起来。
+    #[tokio::test]
+    async fn switching_onto_an_idle_channel_moves_it_forward_at_once() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        let log = Activity::silent();
+
+        // 默认通道：一条在跑占满唯一的位子，另一条已放行、排在本地。
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::healthy("busy", 8),
+            400,
+        )
+        .await
+        .unwrap();
+        repo::mark_submit_queued(&pool, &[ids[1]], 401)
+            .await
+            .unwrap();
+        assert_eq!(
+            drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+                .await
+                .unwrap()
+                .submitted
+                + drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+                    .await
+                    .unwrap()
+                    .failed,
+            0,
+            "换通道之前：默认通道没空位，这一条推不动"
+        );
+
+        // 改投到一条一条都没在跑的通道上。
+        repo::set_params(
+            &pool,
+            &[ids[1]],
+            Some("seedance2.0mini"),
+            Some(5),
+            Some("720p"),
+            500,
+        )
+        .await
+        .unwrap();
+        let after = repo::get(&pool, ids[1]).await.unwrap().unwrap();
+        assert_eq!(
+            after.submit_queued_at,
+            Some(401),
+            "换通道不该重置放行时刻（否则换一次就被罚到新队队尾）"
+        );
+
+        // 现在 drain 必须动它 —— bin 不存在，故这一下记成 failed 而不是静静跳过，
+        // 断言的是「它确实被取出来发了」。
+        let sum = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+            .await
+            .unwrap();
+        assert_eq!(
+            sum.failed, 1,
+            "改投到空闲通道后必须当场发出去，而不是等下一轮扫描"
+        );
+    }
+
     /// 一条通道排满了，**另一条通道照发**（0031）。
     ///
     /// 这条测试守的是这一版的核心不变量，而它正是上一版真实发生的故障：库里 78 条

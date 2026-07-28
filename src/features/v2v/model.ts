@@ -174,25 +174,29 @@ export function channelOf(c: ClipView, eff: EffectiveParams | null): string {
 }
 
 /**
- * 工作台的**唯一**筛选：要么按动作切一屏，要么按通道切一屏。
+ * 工作台的筛选：**动作 × 通道的交集**，两维各有各的控件。
  *
- * ## 为什么不是「动作 × 通道」的交集
+ * ## 为什么是交集
  *
- * 两者是**两个维度**：动作沿流程切（拿它怎么办），通道沿队列切（它排在哪条队上）。
- * 做成交集之后侧栏会同时亮着两行，而那两行的高亮长得一模一样 —— 人读到的是
- * 「选了两样东西」，读不出「其中一样在缩小另一样」。更要命的是空屏：交集为空时
- * 界面只能说「这一档在这条通道上没有条目」，而人得自己回想是哪两个条件叠出来的。
+ * 「2.0Fast 上这 12 条等着放行」是这一页最常问的一句话，而它只有交集答得出来。
  *
- * 单选之后每一行的数字就是点进去会看到的条数，一个不多一个不少 —— 侧栏那两列数
- * 从「可能被另一维削掉一截」变回了字面意思。
+ * 单选试过一版，问题不在语义而在**控件长在哪**：那时两维摞在侧栏同一列里，
+ * 九行里任何两行的高亮长得一模一样，人读到的是「选了两样东西」，读不出「其中一样
+ * 在缩小另一样」。现在动作在侧栏（流程导航）、通道在列表顶上（就贴着被它筛的那张表），
+ * 两个控件从位置到形状都不一样，「这一屏是这两个条件叠出来的」不必解释。
  *
- * ## 代价
+ * ## 交集不许把数字变成谎话
  *
- * 「2.0Fast 上这 12 条待放行」这种批量不再筛得出来。补偿在底坞：勾选之后
- * 「这一档」的按钮按**勾选的那一批**派生（同一动作才出按钮），所以那件事仍做得成，
- * 只是要先勾。
+ * 交集最容易出的错是「侧栏写 12，点进去 3 条」。所以两处计数都是**分面计数**：
+ * 每个数字都按**另一维当前的选择**算，于是它恒等于「点它之后会看到的条数」——
+ * 侧栏那六个数按当前通道算，通道片那三个数按当前动作算。判据单点 `matchFilter`。
  */
-export type Filter = { kind: "action"; key: NextAction } | { kind: "channel"; key: string };
+export interface Filter {
+  /** 流程档。**恒有一个** —— 工作台整页回答的就是「这一档还剩多少活」。 */
+  action: NextAction;
+  /** 通道。`null` = 不按通道筛（看这一档的全部）。 */
+  channel: string | null;
+}
 
 /**
  * 侧栏动作卡的六行。
@@ -617,20 +621,20 @@ export function deriveRows(
 }
 
 /**
- * 筛选是否命中。
+ * 筛选是否命中 —— 动作与通道的**交集**。
  *
  * 收 `Row` 而不是 `Stage`：幽灵判定要看队列位次与扣费回执，那是整行的事 ——
- * 一条 `run` 的幽灵单归「处理异常」，而单看阶段只看得出它在跑。
+ * 一条 `run` 的幽灵单归「异常」，而单看阶段只看得出它在跑。
  *
- * 按通道筛时**已定案的不进来**（`done` = pass/rej）。工作台整页回答的是「还剩多少活」，
- * 六档动作里本来就没有「已定案」那一格；通道这一维要是把它们放进来，同一个界面会
- * 按你选的维度给出两种「在制」的定义，而多出来的那些条目一个也动不了
- * （成片在成片页、毙掉的成片在废纸篓）。
+ * 「已定案」不必在这里额外拦：六档动作里本来就没有那一格（`WORKBENCH_ACTIONS`），
+ * 而 `action` 恒是其中之一，故 pass/rej 从定义上就进不来。
+ *
+ * 这是**唯一**的判据。两处分面计数（侧栏六个数、通道片三个数）也调它，
+ * 所以「数字」与「点进去看到的条目」不可能分叉。
  */
 export function matchFilter(r: Row, f: Filter): boolean {
-  return f.kind === "action"
-    ? r.action === f.key
-    : (r.modelFull ?? "") === f.key && isLive(r.stage);
+  if (r.action !== f.action) return false;
+  return f.channel == null || (r.modelFull ?? "") === f.channel;
 }
 
 /**
@@ -671,12 +675,11 @@ export function removalRisk(r: Row): RemovalRisk {
 
 /** 当前筛选的「脸」—— 标题、一句话、以及它那个颜色。 */
 export interface FilterFace {
+  /** 「验收」，或叠了通道时的「验收 · 2.0Fast」。 */
   label: string;
-  /** 副标题：动作是「拿它怎么办」，通道是这条队的全貌摘要。 */
+  /** 副标题：这一档「拿它怎么办」；叠了通道时前面加一句它被缩到了哪条队上。 */
   sub: string;
-  /** 通道配色序号（`data-tone`）。动作没有，用 `color`。 */
-  tone: number | null;
-  /** 动作的色，取自 `ACTION_META.dot`。通道为空串 —— 它的色由 `tone` 下发。 */
+  /** 动作的色，取自 `ACTION_META.dot` —— 主轴恒是动作，故颜色永远跟着它走。 */
   color: string;
   /** 语气：决定标题与计数用哪支强调色。 */
   mood: "er" | "rev" | "acc" | "t3";
@@ -685,35 +688,37 @@ export interface FilterFace {
 /**
  * 筛选 → 它在三处（列表栏头 / 摘要卡 / 底坞）要显示的同一套身份。
  *
- * 单点在这里，是因为这三处**必须同色同名**：栏头写「待验收」而摘要卡写别的颜色时，
+ * 单点在这里，是因为这三处**必须同色同名**：栏头写「验收」而摘要卡写别的颜色时，
  * 人第一反应是自己点错了。
+ *
+ * 叠了通道时颜色**仍取动作的**：一屏只该有一个主色，而主轴是流程
+ * （侧栏那六档才是这一页的骨架）。通道是缩小范围的第二个条件，它的身份由标题里
+ * 那半截名字和列表顶上那枚亮着的片子承担。
  */
 export function filterFace(f: Filter, channels: Channel[]): FilterFace {
-  if (f.kind === "action") {
-    const m = ACTION_META[f.key];
-    const mood: FilterFace["mood"] =
-      m.fg === "var(--er)"
-        ? "er"
-        : m.fg === "var(--st-rev)"
-          ? "rev"
-          : m.fg === "var(--t3)"
-            ? "t3"
-            : "acc";
-    return { label: m.label, sub: m.note, tone: null, color: m.dot, mood };
-  }
-  const c = channels.find((x) => x.key === f.key);
+  const m = ACTION_META[f.action];
+  const mood: FilterFace["mood"] =
+    m.fg === "var(--er)"
+      ? "er"
+      : m.fg === "var(--st-rev)"
+        ? "rev"
+        : m.fg === "var(--t3)"
+          ? "t3"
+          : "acc";
+  if (f.channel == null) return { label: m.label, sub: m.note, color: m.dot, mood };
   // 通道会在最后一条走完之后从清单里消失，而筛选还指着它。此时说实话，
   // 不回落到某条别的通道上 —— 那会让人以为自己看的是刚才那条队。
-  if (!c) {
-    return {
-      label: f.key === "" ? "CLI 默认" : shortModel(f.key),
-      sub: "这条通道上已经没有在制的条目了",
-      tone: null,
-      color: "var(--t3)",
-      mood: "t3",
-    };
-  }
-  return { label: c.label, sub: c.headline, tone: c.tone, color: "", mood: c.headlineTone };
+  const c = channels.find((x) => x.key === f.channel);
+  const name = c?.label ?? (f.channel === "" ? "CLI 默认" : shortModel(f.channel));
+  return {
+    label: `${m.label} · ${name}`,
+    sub:
+      c == null
+        ? "这条通道上已经没有条目了 —— 再点一次那枚片子看全部"
+        : `只看 ${name} 这条队 · ${m.note}`,
+    color: m.dot,
+    mood,
+  };
 }
 
 /** 在跑的排最前，然后等得最久的；再同则按 id 定死（否则每次重渲染顺序会漂）。 */
@@ -959,16 +964,14 @@ export interface SliceSummary {
   unpriced: number;
   /** 这一屏里等得最久的那条（秒）。0 = 没有一条在等。 */
   oldestWait: number;
-  /** 通道构成（堆叠条 + chips）。顺序与 `buildChannels` 一致。 */
-  channels: { key: string; label: string; tone: number; n: number }[];
   /**
-   * 动作构成，顺序同 `WORKBENCH_ACTIONS`。
+   * 通道构成（堆叠条 + chips）。顺序与 `buildChannels` 一致。
    *
-   * 按通道筛出来的一屏里，「这一屏由哪几条通道组成」是个恒等式（就一条），
-   * 该问的是**这条队上的活分成哪几种**。两种构成用同一根堆叠条画，
-   * 由调用方按当前筛的是哪一维选一个 —— 两根一起画等于把答案埋进两条一样的条子里。
+   * **只有这一种构成**：筛选改成交集之后，一屏恒是**一个动作**，所以「这一屏分成哪几种
+   * 动作」是个恒等式，画出来是一整条纯色。这里唯一还值得问的是「这一档分散在哪几条队上」。
+   * （叠了通道时它同样退化成一条，故调用方那时整块不画。）
    */
-  actions: { key: NextAction; label: string; dot: string; n: number }[];
+  channels: { key: string; label: string; tone: number; n: number }[];
 }
 
 export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
@@ -988,8 +991,6 @@ export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
     const k = r.modelFull ?? "";
     n.set(k, (n.get(k) ?? 0) + 1);
   }
-  const byAction = new Map<NextAction, number>();
-  for (const r of rows) byAction.set(r.action, (byAction.get(r.action) ?? 0) + 1);
   return {
     count: rows.length,
     billed,
@@ -1000,12 +1001,6 @@ export function sliceSummary(rows: Row[], channels: Channel[]): SliceSummary {
     channels: channels
       .filter((c) => (n.get(c.key) ?? 0) > 0)
       .map((c) => ({ key: c.key, label: c.label, tone: c.tone, n: n.get(c.key) ?? 0 })),
-    actions: WORKBENCH_ACTIONS.filter((a) => (byAction.get(a) ?? 0) > 0).map((a) => ({
-      key: a,
-      label: ACTION_META[a].label,
-      dot: ACTION_META[a].dot,
-      n: byAction.get(a) ?? 0,
-    })),
   };
 }
 

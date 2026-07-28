@@ -4,6 +4,7 @@ import {
   MINE,
   type NextAction,
   type Row,
+  WORKBENCH_ACTIONS,
   buildChannels,
   carryParams,
   deriveRows,
@@ -523,13 +524,13 @@ describe("下一步动作", () => {
     expect(ghost.phantomLive).toBe(true);
     expect(ghost.action).toBe("fix");
     expect(MINE).toContain(ghost.action);
-    expect(matchFilter(ghost, { kind: "action", key: "wait" })).toBe(false);
+    expect(matchFilter(ghost, { action: "wait", channel: null })).toBe(false);
   });
 });
 
 describe("筛选", () => {
-  const only = (rows: Row[], key: NextAction) =>
-    rows.filter((r) => matchFilter(r, { kind: "action", key }));
+  const only = (rows: Row[], action: NextAction) =>
+    rows.filter((r) => matchFilter(r, { action, channel: null }));
 
   /**
    * v0.24.0 起筛选片就是动作本身，`mine` / `all` / `rej` 三个聚合片随主轴搬进侧栏一起
@@ -593,7 +594,9 @@ describe("筛选", () => {
       clip({ id: 3, modelVersion: "seedance2.0fast", stage: "rej" }),
       clip({ id: 4, modelVersion: "seedance2.0fast_vip", stage: "rev" }),
     ]);
-    const f = { kind: "channel", key: "seedance2.0fast" } as const;
+    // 筛选是**交集**（v0.24.0 修订）：这一屏 = 验收档 ∩ 2.0Fast 通道。
+    // pass/rej 从定义上进不来 —— `action` 恒是六档在制之一。
+    const f = { action: "review", channel: "seedance2.0fast" } as const;
     expect(rows.filter((r) => matchFilter(r, f)).map((r) => r.clip.id)).toEqual([1]);
   });
 
@@ -612,9 +615,15 @@ describe("筛选", () => {
     const ch = buildChannels(rows, MODELS).find((c) => c.key === "seedance2.0fast");
     expect(ch?.rows).toHaveLength(3);
     expect(ch?.live).toBe(1);
-    expect(
-      rows.filter((r) => matchFilter(r, { kind: "channel", key: "seedance2.0fast" })),
-    ).toHaveLength(ch?.live ?? -1);
+    // `live` 数的是这条队上**没走完的全部**（跨档），故它等于「把六档逐个叠上这条通道
+    // 之后命中的条数之和」。快捷片上写的是分面计数（只算当前那一档），两者不是一个数
+    // —— `live` 只用来给三格排位次，位置不该随着换档跳。
+    const acrossActions = WORKBENCH_ACTIONS.reduce(
+      (n, action) =>
+        n + rows.filter((r) => matchFilter(r, { action, channel: "seedance2.0fast" })).length,
+      0,
+    );
+    expect(acrossActions).toBe(ch?.live);
   });
 });
 
@@ -622,8 +631,8 @@ describe("筛选", () => {
  * 筛选的「脸」—— 列表栏头 / 摘要卡 / 底坞三处读的是同一份，故它们必然同名同色。
  */
 describe("筛选的身份（filterFace）", () => {
-  it("按动作筛：标题是档名，副行是「拿它怎么办」", () => {
-    const face = filterFace({ kind: "action", key: "review" }, []);
+  it("只筛动作时：标题是档名，副行是「拿它怎么办」", () => {
+    const face = filterFace({ action: "review", channel: null }, []);
     // 档名从「待验收」改成「验收」（v0.24.0 修订）：六档统一成两个字的流程位置
     // （异常 / 缺词 / 就绪 / 远端 / 队列 / 验收），侧栏那一列读下来就是流水线本身。
     // 断言跟着改的是**这一个字符串**，不是这条测试要守的规则 —— 规则仍是
@@ -633,31 +642,35 @@ describe("筛选的身份（filterFace）", () => {
     expect(face.sub).toContain("判");
     // 验收是琥珀档：语气色不能跟蓝色的「就绪」混成一种。
     expect(face.mood).toBe("rev");
-    expect(face.tone).toBeNull();
+    expect(face.color).toBe(ACTION_META.review.dot);
   });
 
-  it("按通道筛：标题是通道简写，副行是这条队的全貌，配色跟 buildChannels 同源", () => {
+  /**
+   * 叠上通道之后**颜色仍取动作的**：一屏只该有一个主色，而主轴是流程。
+   * 通道的身份由标题后半截和列表顶上那枚亮着的片子承担。
+   */
+  it("叠上通道：标题带上通道名，颜色与语气仍跟着动作走", () => {
     const rows = derive([
       clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
       clip({ id: 2, modelVersion: "seedance2.0fast", stage: "fail", videoPath: null }),
     ]);
     const chs = buildChannels(rows, MODELS);
-    const face = filterFace({ kind: "channel", key: "seedance2.0fast" }, chs);
-    expect(face.label).toBe("2.0Fast");
-    expect(face.sub).toContain("条出了异常");
-    expect(face.tone).toBe(chs.find((c) => c.key === "seedance2.0fast")?.tone);
-    // 有异常时语气是红的 —— 与 headlineTone 同源，不另编一套。
-    expect(face.mood).toBe("er");
+    const face = filterFace({ action: "review", channel: "seedance2.0fast" }, chs);
+    expect(face.label).toBe("验收 · 2.0Fast");
+    expect(face.sub).toContain("2.0Fast");
+    expect(face.color).toBe(ACTION_META.review.dot);
+    expect(face.mood).toBe("rev");
   });
 
   /**
-   * 最后一条走完之后通道会从清单里消失，而筛选还指着它。此时说实话，**不回落到
-   * 某条别的通道上** —— 那会让人以为自己看的还是刚才那条队，而屏幕上换了一批条目。
+   * 最后一条走完之后通道会从清单里消失，而筛选还钉着它。此时说实话并指出出路，
+   * **不回落到某条别的通道上** —— 那会让人以为自己看的还是刚才那条队。
    */
-  it("通道空掉之后不冒充别的通道", () => {
-    const face = filterFace({ kind: "channel", key: "seedance2.0mini" }, []);
-    expect(face.sub).toContain("没有在制的条目");
-    expect(face.tone).toBeNull();
+  it("通道空掉之后不冒充别的通道，并指出怎么退出来", () => {
+    const face = filterFace({ action: "review", channel: "seedance2.0mini" }, []);
+    expect(face.label).toBe("验收 · 2.0Mini");
+    expect(face.sub).toContain("没有条目");
+    expect(face.sub).toContain("再点一次");
   });
 });
 
@@ -932,29 +945,6 @@ describe("这一屏的账（sliceSummary）", () => {
     expect(s.channels[0]?.n).toBe(1);
     // 配色与通道卡同源，不在这里另算一遍。
     expect(s.channels[0]?.tone).toBe(chs.find((c) => c.key === "seedance2.0fast")?.tone);
-  });
-
-  /**
-   * 按通道筛出来的一屏里，「由哪几条通道组成」是个恒等式（就一条）—— 该问的是
-   * **这条队上的活分成哪几种**。所以同一根堆叠条要能画另一维，且顺序恒定
-   * （按 `WORKBENCH_ACTIONS`），否则两条条目的比例一变，色段就跟着换位置。
-   */
-  it("动作构成按固定序给出，只列真的有的那几档", () => {
-    const rows = derive([
-      clip({ id: 1, modelVersion: "seedance2.0fast", stage: "rev" }),
-      clip({ id: 2, modelVersion: "seedance2.0fast", stage: "rev" }),
-      clip({
-        id: 3,
-        modelVersion: "seedance2.0fast",
-        stage: "fail",
-        errorType: "timeout",
-        videoPath: null,
-      }),
-    ]);
-    const s = sliceSummary(rows, buildChannels(rows, MODELS));
-    // 「处理异常」在 WORKBENCH_ACTIONS 里排在「待验收」之前，故它在前 —— 与条数无关。
-    expect(s.actions.map((a) => a.key)).toEqual(["fix", "review"]);
-    expect(s.actions.map((a) => a.n)).toEqual([1, 2]);
   });
 });
 

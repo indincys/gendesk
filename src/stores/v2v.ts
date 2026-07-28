@@ -85,17 +85,8 @@ interface V2vState {
   coarseNow: number;
 
   // ── 筛选与选择（UI 态） ─────────────────────────────
-  /** **一次只有一个**（见 `Filter` 的注释）—— 动作与通道是两个维度，不做交集。 */
+  /** 动作 × 通道的**交集**（见 `Filter` 的注释）。两维各有各的控件。 */
   filter: Filter;
-  /**
-   * 上一次选过的**动作**档。
-   *
-   * 通道筛选的入口现在是顶栏那排灯与列表顶上那排快捷片（侧栏只剩流程六档），
-   * 而两维互斥 —— 所以按通道筛完之后必须有一条路走回来。再点一次那枚通道片就回到
-   * 这一档：不必去侧栏找「刚才我在哪一档」，也不必凭空多一枚「全部」按钮
-   * （它答不出「全部什么」）。
-   */
-  lastAction: NextAction;
   sel: Set<number>;
   /**
    * 「按住 Shift 选一段」的锚点 —— 上一次**单独**点中的那一行。
@@ -116,8 +107,9 @@ interface V2vState {
   reload: () => Promise<void>;
   reloadHandoff: () => Promise<void>;
   reloadEff: () => Promise<void>;
-  setFilter: (f: Filter) => void;
-  /** 通道快捷片：点已选中的那一枚回到上一次的动作档（见 `lastAction`）。 */
+  /** 换流程档（侧栏）。**保留通道那一维** —— 交集的意义就在这里。 */
+  setAction: (a: NextAction) => void;
+  /** 通道快捷片：点已选中的那一枚 = 取消通道这一维，回到看这一档的全部。 */
   toggleChannel: (key: string) => void;
   setCur: (id: number | null) => void;
   setSel: (fn: (cur: Set<number>) => Set<number>) => void;
@@ -160,8 +152,7 @@ export const useV2vStore = create<V2vState>((set, get) => ({
   // 直接写死 `submit` 会让一个手上全是待验收的人一进来看到空列表 —— 所以这里存一个
   // 占位值，`enter()` 拿到数据后按 `WORKBENCH_ACTIONS` 的序落到第一个有条目的档，
   // 与旧的「一进来看到等你动手的」同义，且不会出现「默认档是空的」。
-  filter: { kind: "action", key: "review" },
-  lastAction: "review",
+  filter: { action: "review", channel: null },
   sel: new Set(),
   anchor: null,
   cur: null,
@@ -238,10 +229,12 @@ export const useV2vStore = create<V2vState>((set, get) => ({
 
     // 默认档：只在**当前这一屏是空的**时候才自动挪（见 `filter` 的注释）。
     // 每次进页面都强行重置的话，切出去看一眼成片再回来，人刚选好的筛选就没了。
+    // 通道那一维一并清掉：上一轮留下的通道多半在这一轮已经跑空了，
+    // 带着它去找「第一个不为空的档」会挑出一个人根本没在看的组合。
     const rows = selectRows(get());
     if (!rows.some((r) => matchFilter(r, get().filter))) {
       const first = WORKBENCH_ACTIONS.find((a) => rows.some((r) => r.action === a));
-      if (first) set({ filter: { kind: "action", key: first }, lastAction: first });
+      if (first) set({ filter: { action: first, channel: null } });
     }
 
     const un = await subscribeV2v({
@@ -282,21 +275,22 @@ export const useV2vStore = create<V2vState>((set, get) => ({
     };
   },
 
-  // 换筛选就把光标、勾选与锚点清掉：它们指向的条目多半已经不在这一屏里了，
+  // 换任一维都把光标、勾选与锚点清掉：它们指向的条目多半已经不在这一屏里了，
   // 留着会让底坞按钮作用在一批看不见的条目上。
-  setFilter: (filter) =>
-    set({
-      filter,
-      ...(filter.kind === "action" ? { lastAction: filter.key } : {}),
+  setAction: (action) =>
+    set((c) => ({
+      filter: { action, channel: c.filter.channel },
       cur: null,
       sel: new Set(),
       anchor: null,
-    }),
-  toggleChannel: (key) => {
-    const s = get();
-    const on = s.filter.kind === "channel" && s.filter.key === key;
-    s.setFilter(on ? { kind: "action", key: s.lastAction } : { kind: "channel", key });
-  },
+    })),
+  toggleChannel: (key) =>
+    set((c) => ({
+      filter: { action: c.filter.action, channel: c.filter.channel === key ? null : key },
+      cur: null,
+      sel: new Set(),
+      anchor: null,
+    })),
   setCur: (cur) => set({ cur }),
   setSel: (fn) => set((c) => ({ sel: fn(c.sel) })),
   setAnchor: (anchor) => set({ anchor }),
@@ -369,24 +363,74 @@ export function selectTopChannels(s: V2vState): Channel[] {
   return top;
 }
 
-let countsMemo: { key: Row[]; counts: Record<NextAction, number> } | null = null;
+let countsMemo: { key: unknown[]; counts: Record<NextAction, number> } | null = null;
 
 /**
- * 每一档的计数 —— 全流水线的，与当前筛选无关。
+ * 侧栏六档的**分面计数**：每个数 = 在**当前通道**下，这一档有多少条。
  *
- * 筛选改成单选之后这条不再需要论证：侧栏每一行的数字**就是**点进去会看到的条数。
- * 交集时代它得刻意不跟着通道走（否则选了 2.0Fast 之后「处理异常 0」会把另一条队上
- * 那 4 条异常整个藏起来），代价是那个数字与点进去看到的条数对不上。现在两者同义。
+ * ## 为什么必须跟着通道走
+ *
+ * 因为它就是「点它之后会看到的条数」。筛选是交集，若这里报全流水线的数，
+ * 侧栏会写着 12 而点进去只有 3 —— 一个数字与它自己的按钮对不上，比没有这个数字更糟。
+ *
+ * ## 它带来的那个风险，以及为什么可以接受
+ *
+ * 钉住一条通道之后「异常 0」意味着「**这条通道上**没有异常」，别的队上那 4 条看不见。
+ * 这不是藏起来：通道片就亮在列表顶上、档名里也写着「异常 · 2.0Fast」，再点一次那枚片子
+ * 就回到全部。而反过来（数字不跟着通道走）没有任何一处能补救 —— 那时人点进去看到 3 条，
+ * 只会认为界面坏了。
  */
 export function selectActionCounts(s: V2vState): Record<NextAction, number> {
   const rows = selectRows(s);
-  if (countsMemo && countsMemo.key === rows) return countsMemo.counts;
+  const key = [rows, s.filter.channel];
+  if (
+    countsMemo &&
+    countsMemo.key.length === key.length &&
+    countsMemo.key.every((v, i) => v === key[i])
+  ) {
+    return countsMemo.counts;
+  }
   const counts = Object.fromEntries(WORKBENCH_ACTIONS.map((a) => [a, 0])) as Record<
     NextAction,
     number
   >;
-  for (const r of rows) if (r.action in counts) counts[r.action] += 1;
-  countsMemo = { key: rows, counts };
+  // 判据走 `matchFilter`，与列表**同一个函数** —— 各写一遍就是让两个数字迟早分叉。
+  for (const a of WORKBENCH_ACTIONS) {
+    counts[a] = rows.filter((r) => matchFilter(r, { action: a, channel: s.filter.channel })).length;
+  }
+  countsMemo = { key, counts };
+  return counts;
+}
+
+let chCountsMemo: { key: unknown[]; counts: Map<string, number> } | null = null;
+
+/**
+ * 通道快捷片的**分面计数**：每个数 = 在**当前动作**下，这条通道有多少条。
+ *
+ * 与上面那一组严格对称：两处都按「另一维当前的选择」算，于是两处的数字都恒等于
+ * 「点它之后会看到的条数」。
+ *
+ * 注意这与 `Channel.live`（这条通道上还没走完的全部）**不是一个数**，也不该是：
+ * 片子上写的必须是它自己那一下的结果。`live` 仍然管排序（`topChannels`），
+ * 那是为了让三格的位置别随着换档跳来跳去。
+ */
+export function selectChannelCounts(s: V2vState): Map<string, number> {
+  const rows = selectRows(s);
+  const key = [rows, s.filter.action];
+  if (
+    chCountsMemo &&
+    chCountsMemo.key.length === key.length &&
+    chCountsMemo.key.every((v, i) => v === key[i])
+  ) {
+    return chCountsMemo.counts;
+  }
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if (r.action !== s.filter.action) continue;
+    const k = r.modelFull ?? "";
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  chCountsMemo = { key, counts };
   return counts;
 }
 
@@ -404,7 +448,7 @@ let visibleMemo: { key: unknown[]; rows: Row[] } | null = null;
  */
 export function selectVisible(s: V2vState): Row[] {
   const all = selectRows(s);
-  const key = [all, s.filter.kind, s.filter.key];
+  const key = [all, s.filter.action, s.filter.channel];
   if (
     visibleMemo &&
     visibleMemo.key.length === key.length &&

@@ -27,14 +27,14 @@ import { useShallow } from "zustand/react/shallow";
  */
 export function V2vNavCards() {
   const filter = useV2vStore((s) => s.filter);
-  const setFilter = useV2vStore((s) => s.setFilter);
+  const setAction = useV2vStore((s) => s.setAction);
   const counts = useV2vStore(useShallow(selectActionCounts));
 
   return (
     <div className="navfl">
       {WORKBENCH_ACTIONS.map((a) => {
         const m = ACTION_META[a];
-        const on = filter.kind === "action" && filter.key === a;
+        const on = filter.action === a;
         const n = counts[a] ?? 0;
         return (
           <button
@@ -45,7 +45,7 @@ export function V2vNavCards() {
             // 落到 `--tone` 上 —— 胶囊那一套规则只认这个变量。
             style={{ "--tone": m.dot } as CSSProperties}
             title={m.note}
-            onClick={() => setFilter({ kind: "action", key: a })}
+            onClick={() => setAction(a)}
           >
             <span className="fpill">{m.label}</span>
             <span className="f1" />

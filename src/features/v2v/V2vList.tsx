@@ -19,10 +19,16 @@ export function pickMode(e: { shiftKey: boolean; metaKey: boolean; ctrlKey: bool
  * 通道从侧栏搬到了这里（v0.24.0 修订）。它筛的就是下面这张表，所以它该长在表上面 ——
  * 在侧栏时它和流程六档摞成一列九行，而那九行里任何两行的关系都得靠人自己回想。
  *
- * 只留**用得最多的三条**（`topChannels`，与顶栏那排状态灯同一份）：格数固定，
- * 位置就稳得住；要全部通道去顶栏那排灯的悬停说明，或者干脆按流程看。
- * 再点一次已选中的那一枚 = 回到上一次的流程档（`toggleChannel`），
- * 所以不需要一枚答不出「全部什么」的「全部」按钮。
+ * 它与侧栏那一档是**交集**：站在「验收」上点 2.0Fast，看到的就是待验收里走这条队的那些。
+ * 两个控件在位置和形状上都不一样，所以「这一屏是两个条件叠出来的」不必解释 ——
+ * 当初做成单选，问题从来不在语义，而在两维摞成了同一列。
+ *
+ * 片子上的数是**分面计数**（`selectChannelCounts`）：按当前这一档算，所以它恒等于
+ * 「点它之后会看到的条数」。它与 `Channel.live`（这条队上没走完的全部）不是一个数，
+ * 后者只用来排三格的位次 —— 位置不该随着换档跳来跳去。
+ *
+ * 只留**用得最多的三条**：格数固定，位置就稳得住；要全部通道去顶栏那排灯的悬停说明。
+ * 再点一次已选中的那一枚 = 取消通道这一维，所以不需要一枚「全部」按钮。
  *
  * ## 一行只有四样东西
  *
@@ -40,6 +46,7 @@ export function V2vList({
   rows,
   channels,
   top,
+  chCounts,
   filter,
   face,
   curId,
@@ -53,6 +60,8 @@ export function V2vList({
   channels: Channel[];
   /** 快捷筛选的前三条通道。空数组 = 一条通道都没有，那排片子整个不出现。 */
   top: Channel[];
+  /** 每条通道在**当前这一档**下有多少条 —— 片子上写的就是它。 */
+  chCounts: Map<string, number>;
   filter: Filter;
   face: FilterFace;
   curId: number | null;
@@ -67,11 +76,7 @@ export function V2vList({
 
   return (
     <div className="vlist">
-      <div
-        className="vlisthd"
-        {...(face.tone == null ? {} : { "data-tone": face.tone })}
-        style={{ "--tone": face.color === "" ? undefined : face.color } as CSSProperties}
-      >
+      <div className="vlisthd" style={{ "--tone": face.color } as CSSProperties}>
         <span className="dot" />
         <span className="fs13 fw6 nowrap">{face.label}</span>
         <span className="n">{rows.length} 条</span>
@@ -81,19 +86,22 @@ export function V2vList({
       {top.length > 0 && (
         <div className="chq">
           {top.map((c) => {
-            const on = filter.kind === "channel" && filter.key === c.key;
+            const on = filter.channel === c.key;
+            const n = chCounts.get(c.key) ?? 0;
             return (
               <button
                 key={c.key || "(default)"}
                 type="button"
-                className={cn("chqi", on && "on", c.live === 0 && !on && "zero")}
+                className={cn("chqi", on && "on", n === 0 && !on && "zero")}
                 data-tone={c.tone}
                 title={[
                   c.key === "" ? "设置里没写默认型号，走 CLI 默认" : c.key,
                   c.note,
                   c.headline,
                   c.title,
-                  on ? "\n再点一次回到刚才那一档" : "\n只看这条通道上还没走完的条目",
+                  on
+                    ? "\n再点一次取消通道筛选，看这一档的全部"
+                    : `\n把「${face.label.split(" · ")[0]}」这一档再缩到这条通道上`,
                 ]
                   .filter((s) => s !== "")
                   .join("\n")}
@@ -101,8 +109,8 @@ export function V2vList({
               >
                 <i />
                 <span className="nm">{c.label}</span>
-                {/* 数的是**还没走完的**，不是这条通道历史上的全部 —— 点进去看到的就是这些。 */}
-                <span className="n">{c.live}</span>
+                {/* 分面计数：按当前这一档算，所以它就是点下去会看到的条数。 */}
+                <span className="n">{n}</span>
               </button>
             );
           })}
@@ -140,13 +148,13 @@ export function V2vList({
             onCheck={() => onCheck(r.clip.id)}
           />
         ))}
-        {/* 空屏必须说清是**哪一个**筛选空了 —— 一次只有一个条件，
-            不必让人回想是哪两个条件叠出来的。 */}
+        {/* 空屏必须说清是**哪几个**条件叠空的，并指出最可能被忘掉的那一个：
+            钉住的通道。它就亮在上面，但人换了几次档之后往往已经不记得自己钉过。 */}
         {rows.length === 0 && (
           <div className="vlistempty">
-            {filter.kind === "action"
+            {filter.channel == null
               ? "这一档现在没有条目 —— 左边换一档。"
-              : "这条通道上已经没有在制的条目了 —— 再点一次那枚通道片回到刚才那一档。"}
+              : "这一档在这条通道上没有条目 —— 再点一次上面那枚亮着的通道片，看这一档的全部。"}
           </div>
         )}
       </div>

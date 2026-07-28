@@ -36,6 +36,7 @@ export function V2vLedger({
   face,
   handoff,
   rewriteTotal,
+  channelLive,
   activity,
   badGroup,
   busy,
@@ -58,6 +59,8 @@ export function V2vLedger({
    * 而这条警报存在的全部意义是「收了一半」，谎报一次它就再也没人信了。
    */
   rewriteTotal: number;
+  /** 当前钉住那条通道上还没走完的总条数（含别的档）。没钉通道时无意义。 */
+  channelLive: number;
   activity: ActivityEntry[];
   /** 这条通道上毙得最狠的那个组（≥3 条不通过才报）。 */
   badGroup: { name: string; rejected: number; ids: number[] } | null;
@@ -106,6 +109,7 @@ export function V2vLedger({
           filter={filter}
           handoff={handoff}
           rewriteTotal={rewriteTotal}
+          channelLive={channelLive}
           badGroup={badGroup}
           busy={busy}
           onRewriteGroup={onRewriteGroup}
@@ -145,6 +149,7 @@ function SliceCard({
   filter,
   handoff,
   rewriteTotal,
+  channelLive,
   badGroup,
   busy,
   onRewriteGroup,
@@ -155,6 +160,7 @@ function SliceCard({
   filter: Filter;
   handoff: HandoffStatus | null;
   rewriteTotal: number;
+  channelLive: number;
   badGroup: { name: string; rejected: number; ids: number[] } | null;
   busy: boolean;
   onRewriteGroup: (ids: number[]) => void;
@@ -162,30 +168,17 @@ function SliceCard({
 }) {
   const ge = slice.unpriced > 0 ? "≥ " : "";
   const err = handoff?.error ?? null;
-  const isRewrite = filter.kind === "action" && filter.key === "rewrite";
+  const isRewrite = filter.action === "rewrite";
   // 工单条数与待改写条数对不上，是「收了一半」唯一的可见症状 —— 在此之前没有任何
   // 一处会说这件事，而它的后果是有几条永远不会被改写。
   const mismatch = isRewrite && err == null && handoff != null && handoff.items !== rewriteTotal;
-  // 构成条画哪一维：按动作筛时问「这些分散在哪几条队上」，按通道筛时问
-  // 「这条队上的活分成哪几种」。另一维在那种情况下是恒等式，画出来是一整条纯色。
-  const comp =
-    filter.kind === "action"
-      ? slice.channels.map((c) => ({ key: c.key, label: c.label, tone: c.tone, color: "", n: c.n }))
-      : slice.actions.map((a) => ({
-          key: a.key,
-          label: a.label,
-          tone: null,
-          color: a.dot,
-          n: a.n,
-        }));
+  // 构成条只答一个问题：**这一档分散在哪几条队上**。
+  // 钉了通道之后它退化成一条纯色（就那一条队），那时整块不画 —— 一根单色条不回答
+  // 任何问题，只是把下面真要读的东西往下推。
+  const comp = filter.channel == null ? slice.channels : [];
 
   return (
-    <div
-      className="vsum"
-      data-mood={face.mood}
-      {...(face.tone == null ? {} : { "data-tone": face.tone })}
-      style={{ "--tone": face.color === "" ? undefined : face.color } as CSSProperties}
-    >
+    <div className="vsum" data-mood={face.mood} style={{ "--tone": face.color } as CSSProperties}>
       <div className="hd">
         <span className="dot" />
         <span className="ttl">{face.label}</span>
@@ -209,12 +202,12 @@ function SliceCard({
           <span className="k">最久已等</span>
           <span className="v">{slice.oldestWait === 0 ? "—" : fmtDur(slice.oldestWait)}</span>
         </div>
+        {/* 钉了通道之后「占用通道」恒是 1，那一格就白占了。换成这条队的全貌
+            （含别的档），因为那正是钉住它时想知道的下一件事。 */}
         <div className="tile">
-          <span className="k">{filter.kind === "action" ? "占用通道" : "涉及动作"}</span>
+          <span className="k">{filter.channel == null ? "占用通道" : "这条队在制"}</span>
           <span className="v">
-            {filter.kind === "action"
-              ? `${slice.channels.length} 条`
-              : `${slice.actions.length} 种`}
+            {filter.channel == null ? `${slice.channels.length} 条` : `${channelLive} 条`}
           </span>
         </div>
       </div>
@@ -223,23 +216,12 @@ function SliceCard({
         <div className="comp">
           <div className="bar">
             {comp.map((c) => (
-              <span
-                key={c.key || "(default)"}
-                {...(c.tone == null ? {} : { "data-tone": c.tone })}
-                style={
-                  { flex: c.n, "--tone": c.color === "" ? undefined : c.color } as CSSProperties
-                }
-              />
+              <span key={c.key || "(default)"} data-tone={c.tone} style={{ flex: c.n }} />
             ))}
           </div>
           <div className="chips">
             {comp.map((c) => (
-              <span
-                key={c.key || "(default)"}
-                className="cchip"
-                {...(c.tone == null ? {} : { "data-tone": c.tone })}
-                style={{ "--tone": c.color === "" ? undefined : c.color } as CSSProperties}
-              >
+              <span key={c.key || "(default)"} className="cchip" data-tone={c.tone}>
                 <i />
                 {c.label} {c.n}
               </span>
@@ -331,19 +313,33 @@ function ClipLedger({
       {hint && <div className={cn("vhint", hint.tone)}>{hint.text}</div>}
 
       <div className="vsec">这一条的账</div>
-      {/* 额度与其它七格**平级**。
-          它从前是左边一整块 84px 宽的大数字。那个体量买到的信息量与旁边一格完全一样
-          （一个数 + 一个标签），代价却是把这一栏最靠上的位置占掉三分之一，
-          于是「走的哪条队」「排在第几」这些同样要读的事被挤到了下面。
-          现在靠**颜色**分主次：预估用蓝（还能改主意），已扣用琥珀（钱已经出去了）。 */}
-      <div className="vfacts mt5">
+      {/* **Bento**：一格多宽由它装得下什么决定，不是九个一样大的方块。
+          九格等分时「第 1 次」「4h58m」这类三四个字符的值各占半行，把这一栏最靠上的
+          一屏撑掉一半，于是进度和日志每选一条都要先滚一屏。
+          现在按内容定档（六列栅格）：数字类 2 列一行摆三个 · 型号名 3 列 ·
+          submit_id 独占一整行（它是唯一真需要整行的值，截断了就没法对账）。
+          主次仍靠**颜色**不靠体积：预估蓝（还能改主意），已扣琥珀（钱已经出去了）。 */}
+      <div className="vbento mt5">
         <Fact
           k={c.billed ? "额度 · 已扣" : "额度 · 预估"}
           v={credit == null ? "—" : String(credit)}
           tone={c.billed ? "wr" : "acc"}
+          span={2}
           strong
         />
-        <Fact k="通道（我们发的）" v={row.modelFull ?? "跟随 CLI 默认"} />
+        {/* 还没提交出去的只有「什么时候进的队」可说 —— 那时「已等」按定义是 0，
+            摆一个 0 出来会被读成「刚刚才排上」。 */}
+        <Fact
+          k={row.waitSecs === 0 ? "入队" : "已等"}
+          v={row.waitSecs === 0 ? fmtClock(c.createdAt) : fmtDur(row.waitSecs)}
+          span={2}
+        />
+        <Fact
+          k="上次查询"
+          v={row.polledAgo == null ? "—" : `${fmtDur(row.polledAgo)}前`}
+          tone={row.polledAgo != null && row.polledAgo > 1800 ? "wr" : undefined}
+          span={2}
+        />
         <Fact
           k="规格"
           v={
@@ -351,31 +347,24 @@ function ClipLedger({
               ? `${row.resolution} · ${row.duration}s`
               : (row.resolution ?? "CLI 默认")
           }
+          span={2}
         />
-        <Fact k="计费型号（回执）" v={c.benefitType ?? "—"} />
-        <Fact k="submit_id" v={c.submitId ?? "—"} />
         {/* 两种位次的标签必须说清是谁的队 —— 本地排第 3 和即梦排第 4485 是完全不同的
             两件事，混成一个「第 N 位」会让人以为快轮到了。 */}
         <Fact
           k={row.action === "queued" ? "本地队列" : "即梦队列"}
           v={row.queuePos == null ? "—" : `第 ${row.queuePos} 位`}
-        />
-        {/* 还没提交出去的只有「什么时候进的队」可说 —— 那时「已等」按定义是 0，
-            摆一个 0 出来会被读成「刚刚才排上」。 */}
-        <Fact
-          k={row.waitSecs === 0 ? "入队" : "已等"}
-          v={row.waitSecs === 0 ? fmtClock(c.createdAt) : fmtDur(row.waitSecs)}
-        />
-        <Fact
-          k="上次查询"
-          v={row.polledAgo == null ? "—" : `${fmtDur(row.polledAgo)}前`}
-          tone={row.polledAgo != null && row.polledAgo > 1800 ? "wr" : undefined}
+          span={2}
         />
         <Fact
           k="尝试"
           v={`第 ${Math.max(1, c.attempt)} 次`}
           tone={c.attempt > 1 ? "wr" : undefined}
+          span={2}
         />
+        <Fact k="通道（我们发的）" v={row.modelFull ?? "跟随 CLI 默认"} span={3} />
+        <Fact k="计费型号（回执）" v={c.benefitType ?? "—"} span={3} />
+        <Fact k="submit_id" v={c.submitId ?? "—"} span={6} />
       </div>
 
       {/* 「进度」而不是「历程」：这一列要答的是「走到哪儿了、还剩几步」，
@@ -487,20 +476,25 @@ function fmtLogClock(unix: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** 一格账。`strong` 的那格靠字号与颜色（不是靠体积）把自己顶出来。 */
+/**
+ * 一格账。`span` 是它在六列栅格里占几列（bento 的全部机关就是这一个数）；
+ * `strong` 的那格靠字号与颜色（不是靠体积）把自己顶出来。
+ */
 function Fact({
   k,
   v,
   tone,
+  span,
   strong,
 }: {
   k: string;
   v: string;
   tone?: "wr" | "acc" | undefined;
+  span: number;
   strong?: boolean;
 }) {
   return (
-    <div className="vfact">
+    <div className="vfact" style={{ gridColumn: `span ${span}` }}>
       <div className="k">{k}</div>
       <div
         className={cn("v", strong && "hero", tone === "wr" && "wr2", tone === "acc" && "acc2")}

@@ -30,7 +30,13 @@ import {
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
-import { selectChannels, selectTopChannels, selectVisible, useV2vStore } from "@/stores/v2v";
+import {
+  selectChannelCounts,
+  selectChannels,
+  selectTopChannels,
+  selectVisible,
+  useV2vStore,
+} from "@/stores/v2v";
 import { Clapperboard, RefreshCw, Send } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -161,6 +167,7 @@ export function V2vPage() {
   const visible = useV2vStore(selectVisible);
   const channels = useV2vStore(selectChannels);
   const topCh = useV2vStore(selectTopChannels);
+  const chCounts = useV2vStore(selectChannelCounts);
 
   // ── 界面态 ───────────────────────────────────────────
   const [screen, setScreen] = useState<"list" | "review">("list");
@@ -266,14 +273,21 @@ export function V2vPage() {
   const slice = useMemo(() => sliceSummary(visible, channels), [visible, channels]);
   const face = useMemo(() => filterFace(filter, channels), [filter, channels]);
   // 「一组连毙 3 条」按**通道的全貌**算，不按这一屏算：毙掉的条目归 `done`，
-  // 而 `done` 无论按哪一维都进不了这一屏 —— 只看这一屏的话这条提示永远不会出现。
+  // 而 `done` 从定义上进不了这一屏（`action` 恒是六档之一）——
+  // 只看这一屏的话这条提示永远不会出现。
   const badGroup = useMemo(() => {
     const pool =
-      filter.kind === "channel"
-        ? (channels.find((c) => c.key === filter.key)?.rows ?? [])
-        : channels.flatMap((c) => c.rows);
+      filter.channel == null
+        ? channels.flatMap((c) => c.rows)
+        : (channels.find((c) => c.key === filter.channel)?.rows ?? []);
     return worstGroup(pool);
-  }, [channels, filter]);
+  }, [channels, filter.channel]);
+  /** 钉住那条通道上还没走完的总条数（含别的档）—— 摘要卡第三格。 */
+  const channelLive = useMemo(
+    () =>
+      filter.channel == null ? 0 : (channels.find((c) => c.key === filter.channel)?.live ?? 0),
+    [channels, filter.channel],
+  );
 
   // ── 动作 ─────────────────────────────────────────────
   const guard = useCallback(async (fn: () => Promise<void>) => {
@@ -866,6 +880,7 @@ export function V2vPage() {
             face={face}
             handoff={handoff}
             rewriteTotal={rewriteN}
+            channelLive={channelLive}
             activity={activity}
             badGroup={badGroup}
             busy={busy}
@@ -880,6 +895,7 @@ export function V2vPage() {
           rows={visible}
           channels={channels}
           top={topCh}
+          chCounts={chCounts}
           filter={filter}
           face={face}
           curId={curId}

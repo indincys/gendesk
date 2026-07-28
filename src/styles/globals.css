@@ -434,6 +434,7 @@ a:hover {
   margin: 5px 0 5px 11px;
 }
 .navrow {
+  position: relative;
   min-height: 26px;
   display: flex;
   align-items: center;
@@ -450,17 +451,36 @@ a:hover {
 .navrow:hover {
   background: oklch(93.5% 0.006 258 / 0.6);
 }
-/* 选中态只靠**胶囊变实心**（见 `.fpill.on`）+ 一层极淡的底。再加边框与投影的话，
-   九行里那一行会比侧栏上面十一条路由的选中态还重，主次就倒过来了。 */
+/**
+ * 选中靠**多一根色条 + 一层底**，不靠「让另外五行褪色」。
+ *
+ * 上一版是「选中的胶囊变实心、其余留 12% 淡底、计数为 0 的整行再压到 50% 不透明度」——
+ * 于是六行里通常有四五行是灰的，一眼扫过去这一列像是坏了一半。而这一列是**流程本身**，
+ * 每一档的颜色是它的身份（异常红 / 缺词灰蓝 / 就绪蓝 / 验收琥珀…），身份不该随着
+ * 「我此刻在看哪一档」忽明忽暗。
+ *
+ * 所以：**胶囊的颜色在任何状态下都一样**，选中的那一行左边多一根 3px 实色条、
+ * 底色略深、字加粗。计数为 0 只让**那个数字**淡下去 —— 0 是它自己要说的话。
+ */
+.navrow::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--tone, var(--acc));
+  opacity: 0;
+}
+.navrow.on::before {
+  opacity: 1;
+}
 .navrow.on {
-  background: color-mix(in oklch, var(--tone, var(--acc)) 8%, transparent);
+  background: color-mix(in oklch, var(--tone, var(--acc)) 11%, transparent);
 }
-/* 计数为 0 的压淡但**不禁用**：它仍然回答「这一类现在没有」，而那是好消息。 */
-.navrow.zero {
-  opacity: 0.5;
-}
-/* 一枚带色胶囊 = 这一档 / 这条通道的身份。色由 `--tone` 下发：动作走 `ACTION_META.dot`
-   经内联 style，通道走 `data-tone` —— 两条路都落在同一个变量上，故只有这一套规则。 */
+/* 一枚带色胶囊 = 这一档的身份。色由 `--tone` 下发（`ACTION_META.dot` 经内联 style）。
+   **不随选中态变** —— 见上面那段。 */
 .navrow .fpill {
   display: inline-flex;
   align-items: center;
@@ -470,13 +490,10 @@ a:hover {
   font-size: 11.5px;
   font-weight: 500;
   white-space: nowrap;
-  background: color-mix(in oklch, var(--tone, var(--acc)) 12%, transparent);
-  color: color-mix(in oklch, var(--tone, var(--acc)) 78%, black);
-  transition: background 0.1s, color 0.1s;
+  background: color-mix(in oklch, var(--tone, var(--acc)) 17%, transparent);
+  color: color-mix(in oklch, var(--tone, var(--acc)) 82%, black);
 }
 .navrow.on .fpill {
-  background: var(--tone, var(--acc));
-  color: #fff;
   font-weight: 600;
 }
 .navrow .n {
@@ -486,6 +503,10 @@ a:hover {
 }
 .navrow.on .n {
   color: color-mix(in oklch, var(--tone, var(--acc)) 72%, black);
+}
+/* 计数为 0：**只有数字**淡下去，胶囊的颜色一律常驻。 */
+.navrow.zero .n {
+  opacity: 0.4;
 }
 .sfoot {
   font-size: 10.5px;
@@ -3710,6 +3731,24 @@ a:hover {
   font-weight: 700;
   font-family: var(--mono);
 }
+/**
+ * Bento 栅格：六列，每格占几列由 `Fact` 的 `span` 决定。
+ *
+ * 九格等分（`.vfacts` 那种 1fr 1fr）时，「第 1 次」「4h58m」这类三四个字符的值各占
+ * 半行，把中栏最靠上的一屏撑掉一半 —— 于是进度和日志每选一条都要先滚一屏。
+ * 按内容定档之后同样九格只占四行，且窄的那几格并排读起来本来就更顺
+ * （额度 · 已等 · 上次查询是一组要对着看的数）。
+ *
+ * 内边距也比 `.vfacts` 紧一档：格子多了，每格省 2px 就是省一整行。
+ */
+.vbento {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+.vbento .vfact {
+  padding: 4px 7px;
+}
 
 /* 进度：done / now / soon 三态。未来那几步画出来但压淡 —— 一条缺词的条目
    光看「入队 09:14」答不出「后面还有几步、下一步归谁」。
@@ -4275,20 +4314,29 @@ a:hover {
   width: 7px;
   height: 7px;
   background: var(--ok);
-  box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent);
-  animation: chbrth 1.8s ease-in-out infinite;
+  /* 光晕是**静态**的（不参与动画），它只负责把这盏灯做得比另外两格显眼。 */
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ok) 20%, transparent);
+  animation: chbrth 1.6s ease-in-out infinite;
 }
-/* 光晕向外扩散再收回。只动 box-shadow 与自身透明度，不动 transform ——
-   胶囊里那几个数字是等宽对齐的，让灯改变行内尺寸会让整条随呼吸抖。 */
+/**
+ * 呼吸只动 `opacity` 与 `transform` —— **绝不动 box-shadow**。
+ *
+ * 这是一次实测事故：上一版把光晕做成了会扩散的 box-shadow 动画，结果整个窗口
+ * 每一个动画周期闪一次，闪得很厉害。原因是 box-shadow 属于**绘制**属性，改它必须
+ * 重新栅格化；而 `.app` 的底是一层铺满窗口的 `--ambient` 径向渐变，于是一颗 7px 的
+ * 灯每帧都把那层渐变连带刷一遍。opacity 与 transform 走合成器，不触发任何重绘。
+ *
+ * 缩放而不是变尺寸：胶囊里那几个数字是等宽对齐的，让灯改变行内尺寸会让整条随呼吸抖。
+ */
 @keyframes chbrth {
   0%,
   100% {
     opacity: 1;
-    box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 55%, transparent);
+    transform: scale(1);
   }
   50% {
-    opacity: 0.75;
-    box-shadow: 0 0 0 4px color-mix(in oklch, var(--ok) 0%, transparent);
+    opacity: 0.4;
+    transform: scale(0.62);
   }
 }
 .chpill .nm {

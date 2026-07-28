@@ -167,9 +167,9 @@ function ChannelPills({
   queue: QueueStats | null;
   auto: AutofillStatus | null;
 }) {
-  // 点通道灯 = 把工作台筛到那条通道，且**在跑的那几条排在最前**（`rankRows`，
-  // 恒定顺序不需要再切一次排序）—— 点这盏灯的理由就是「这条队上现在正在生成什么」。
-  // 再点一次回到刚才那一档（两维互斥，见 `Filter`）。
+  // 点通道灯 = 把**当前这一档**再缩到这条通道上（交集，见 `Filter`），且在跑的那几条
+  // 排在最前（`rankRows` 恒定，不需要再切一次排序）—— 点这盏灯的理由就是
+  // 「这条队上现在正在生成什么」。再点一次取消通道这一维。
   //
   // 它原来点开的是参数面板 —— 而人点一条状态灯时想的是「这条队上都有些什么」，
   // 不是「我要改默认参数」。两者都还在，只是各归各的入口（参数在中栏栏头 ⌥3）。
@@ -187,7 +187,7 @@ function ChannelPills({
           ch={ch}
           stat={stats.find((s) => s.modelVersion === ch.key)}
           auto={auto}
-          on={filter.kind === "channel" && filter.key === ch.key}
+          on={filter.channel === ch.key}
           onClick={() => toggleChannel(ch.key)}
         />
       ))}
@@ -245,7 +245,9 @@ function ChannelPill({
               auto?.blocked ? `当前停在「${auto.blocked}」。` : ""
             }`
           : "",
-        on ? "\n\n再点一次回到刚才那一档。" : "\n\n点一下只看这条通道，在跑的排最前。",
+        on
+          ? "\n\n再点一次取消通道筛选，看这一档的全部。"
+          : "\n\n点一下把当前这一档再缩到这条通道上，在跑的排最前。",
       ].join("")}
     >
       <span className="dot" />

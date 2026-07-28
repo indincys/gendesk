@@ -69,7 +69,7 @@ fn d_root() -> String {
     intake::default_root().to_string_lossy().to_string()
 }
 fn d_threshold() -> i64 {
-    500
+    100
 }
 
 impl Default for IntakeSettings {

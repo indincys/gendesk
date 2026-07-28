@@ -163,9 +163,9 @@ export function IntakeSection() {
           min={0}
           step={50}
           style={{ width: 110 }}
-          value={s.taskThreshold ?? 500}
+          value={s.taskThreshold ?? 100}
           onChange={(e) => setS({ ...s, taskThreshold: Number(e.target.value) })}
-          onBlur={() => void save({ taskThreshold: s.taskThreshold ?? 500 })}
+          onBlur={() => void save({ taskThreshold: s.taskThreshold ?? 100 })}
         />
         <span className="fs11 t3" style={{ lineHeight: 1.7 }}>
           单份工单超过这么多<b>张图</b>就不自动跑，转「待确认」——

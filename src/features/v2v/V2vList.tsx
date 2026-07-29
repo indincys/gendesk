@@ -1,6 +1,7 @@
+import { Tooltip } from "@/components/ui/Tooltip";
 import { type Channel, type Filter, type FilterFace, type Row, fmtDur } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
-import type { CSSProperties, MouseEvent } from "react";
+import { type CSSProperties, type MouseEvent, useEffect, useRef } from "react";
 
 /** 点一行时按住了什么键 —— 决定这一下是移光标、加选一条，还是选一整段。 */
 export type PickMode = "set" | "toggle" | "range";
@@ -9,6 +10,10 @@ export function pickMode(e: { shiftKey: boolean; metaKey: boolean; ctrlKey: bool
   if (e.shiftKey) return "range";
   if (e.metaKey || e.ctrlKey) return "toggle";
   return "set";
+}
+
+export function channelGridClass(count: number): string {
+  return cn("chq", count >= 4 && "tworow");
 }
 
 /**
@@ -27,8 +32,7 @@ export function pickMode(e: { shiftKey: boolean; metaKey: boolean; ctrlKey: bool
  * 「点它之后会看到的条数」。它与 `Channel.live`（这条队上没走完的全部）不是一个数，
  * 后者只用来排三格的位次 —— 位置不该随着换档跳来跳去。
  *
- * 只留**用得最多的三条**：格数固定，位置就稳得住；要全部通道去顶栏那排灯的悬停说明。
- * 再点一次已选中的那一枚 = 取消通道这一维，所以不需要一枚「全部」按钮。
+ * 全部通道都显示；四条及以上排成两行。再点一次已选中的那一枚 = 取消通道筛选。
  *
  * ## 一行只有四样东西
  *
@@ -58,7 +62,7 @@ export function V2vList({
 }: {
   rows: Row[];
   channels: Channel[];
-  /** 快捷筛选的前三条通道。空数组 = 一条通道都没有，那排片子整个不出现。 */
+  /** 全部通道。空数组 = 一条通道都没有，那排片子整个不出现。 */
   top: Channel[];
   /** 每条通道在**当前这一档**下有多少条 —— 片子上写的就是它。 */
   chCounts: Map<string, number>;
@@ -73,6 +77,14 @@ export function V2vList({
 }) {
   const toneOf = new Map(channels.map((c) => [c.key, c.tone]));
   const allIn = rows.length > 0 && rows.every((r) => sel.has(r.clip.id));
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (curId == null) return;
+    bodyRef.current
+      ?.querySelector<HTMLElement>(`[data-clip-id="${curId}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [curId]);
 
   return (
     <div className="vlist">
@@ -84,34 +96,30 @@ export function V2vList({
       </div>
 
       {top.length > 0 && (
-        <div className="chq">
+        <div className={channelGridClass(top.length)}>
           {top.map((c) => {
             const on = filter.channel === c.key;
             const n = chCounts.get(c.key) ?? 0;
+            const details = [c.key || "CLI 默认", c.note, c.headline, c.title]
+              .filter((text) => text !== "")
+              .join(" · ");
             return (
-              <button
+              <Tooltip
                 key={c.key || "(default)"}
-                type="button"
-                className={cn("chqi", on && "on", n === 0 && !on && "zero")}
-                data-tone={c.tone}
-                title={[
-                  c.key === "" ? "设置里没写默认型号，走 CLI 默认" : c.key,
-                  c.note,
-                  c.headline,
-                  c.title,
-                  on
-                    ? "\n再点一次取消通道筛选，看这一档的全部"
-                    : `\n把「${face.label.split(" · ")[0]}」这一档再缩到这条通道上`,
-                ]
-                  .filter((s) => s !== "")
-                  .join("\n")}
-                onClick={() => onChannel(c.key)}
+                content={`${details}${details ? " · " : ""}${on ? "再次点击取消筛选" : "点击筛选此通道"}`}
               >
-                <i />
-                <span className="nm">{c.label}</span>
-                {/* 分面计数：按当前这一档算，所以它就是点下去会看到的条数。 */}
-                <span className="n">{n}</span>
-              </button>
+                <button
+                  type="button"
+                  className={cn("chqi", on && "on", n === 0 && !on && "zero")}
+                  data-tone={c.tone}
+                  onClick={() => onChannel(c.key)}
+                >
+                  <i />
+                  <span className="nm">{c.label}</span>
+                  {/* 分面计数：按当前这一档算，所以它就是点下去会看到的条数。 */}
+                  <span className="n">{n}</span>
+                </button>
+              </Tooltip>
             );
           })}
         </div>
@@ -130,13 +138,9 @@ export function V2vList({
         <span className={cn("vbox", allIn && "on")}>{allIn ? "✓" : ""}</span>
         <span className="fs11 t3">{sel.size > 0 ? `已选 ${sel.size}` : "全选 ⌘A"}</span>
         <div className="f1" />
-        {/* 底坞的「这一屏」按钮作用在**勾选或整屏**上，所以这里必须说清现在是哪一种。 */}
-        <span className="fs10 t3 nowrap">
-          {sel.size > 0 ? "底部动作只作用于勾选的" : "⇧ 选一段 · ⌘ 点加选"}
-        </span>
       </div>
 
-      <div className="vlistbody">
+      <div className="vlistbody" ref={bodyRef} role="region" aria-label="任务条目">
         {rows.map((r) => (
           <ClipRow
             key={r.clip.id}
@@ -195,6 +199,7 @@ function ClipRow({
   return (
     <div
       className={cn("vlrow", cur && "cur", checked && "sel")}
+      data-clip-id={c.id}
       onClick={(e: MouseEvent) => onPick(pickMode(e))}
       onKeyDown={(e) => e.key === "Enter" && onPick("set")}
       role="button"
@@ -219,11 +224,7 @@ function ClipRow({
         <span className={cn("vbox", checked && "on")}>{checked ? "✓" : ""}</span>
       </span>
       <div className="bd">
-        <span className="code">
-          {c.promptCode}
-          {/* 重跑过的标出来：同一张图已经花过不止一份额度。 */}
-          {c.attempt > 1 && <span className="wr2"> ·{c.attempt}</span>}
-        </span>
+        <span className="code">{c.promptCode}</span>
         <span
           className={cn("sub", r.action === "rewrite" ? "t3" : toneClass(r.situationTone))}
           title={r.situation}

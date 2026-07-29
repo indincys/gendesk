@@ -292,60 +292,145 @@ pub async fn v2v_sessions(state: State<'_, AppState>) -> AppResult<Vec<SessionIn
     dreamina::sessions(&s.bin, &state.v2v_log).await
 }
 
-/// 额度台账：余额（远端）+ 已消耗（本地库）。
-///
-/// **两个数字来自两个地方，故不合并成一个「已用/总额」百分比**：余额是即梦那边的账户
-/// 真相（别处也可能在花它），消耗是本机这条流水线出片时收到的扣费回执。
-/// 编一个百分比出来会让两者的差异变得无法解释。
-#[derive(Debug, Clone, Default, Serialize, Type)]
+/// 消费报告范围。序列化值就是 IPC 接受的 `7d | 30d | all`，前端不能传任意字符串。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Type)]
+pub enum CreditRange {
+    #[serde(rename = "7d")]
+    SevenDays,
+    #[serde(rename = "30d")]
+    ThirtyDays,
+    #[serde(rename = "all")]
+    All,
+}
+
+impl CreditRange {
+    fn since(self, now: i64) -> Option<i64> {
+        match self {
+            Self::SevenDays => Some(now - 7 * 24 * 3600),
+            Self::ThirtyDays => Some(now - 30 * 24 * 3600),
+            Self::All => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct CreditStats {
-    /// 远端余额；查不到时为 None，原因在 `balanceError`（未登录 / 找不到 CLI）。
-    pub balance: Option<i64>,
-    pub balance_error: Option<String>,
-    pub user_id: Option<i64>,
-    pub vip_level: String,
-    /// 本机流水线累计消耗（只算收到扣费回执的条目）。
+pub struct CreditTrendPoint {
+    pub bucket: String,
+    pub spent: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCreditView {
+    pub channel_key: String,
+    pub label: String,
     pub spent_total: i64,
-    /// 近 7 天 / 近 24 小时（按出片时刻切窗）。
-    pub spent_week: i64,
-    pub spent_day: i64,
-    /// 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
     pub spent_pass: i64,
     pub spent_rej: i64,
     pub spent_pending: i64,
-    /// 计入统计的条数（有 credit_count 的）。
-    pub counted_clips: i64,
+    pub spent_failed_abandoned: i64,
+    pub events: i64,
+    pub reviewed: i64,
+    pub passed: i64,
+    pub pass_rate: Option<f64>,
+}
+
+/// 余额（远端）与消费（本机不可变账本）的统一读模型。`has_backfill` 表示包含存量
+/// 回填：升级前被删除或覆盖的尝试无法还原，界面不得把它冒充完整历史。
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vCreditReport {
+    pub balance: Option<i64>,
+    pub balance_error: Option<String>,
+    pub vip_level: String,
+    pub spent_total: i64,
+    pub spent_pass: i64,
+    pub spent_rej: i64,
+    pub spent_pending: i64,
+    pub spent_failed_abandoned: i64,
+    pub reviewed: i64,
+    pub passed: i64,
+    pub pass_rate: Option<f64>,
+    pub trend: Vec<CreditTrendPoint>,
+    pub channels: Vec<ChannelCreditView>,
+    pub has_backfill: bool,
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn v2v_credit_stats(state: State<'_, AppState>) -> AppResult<CreditStats> {
-    let s = load_settings(&state.db).await?;
-    let mut out = CreditStats::default();
-    // 余额查不到不该让整个面板打不开：没装 CLI / 没登录是常态，而本地消耗照样算得出。
-    match dreamina::user_credit(&s.bin, &state.v2v_log).await {
-        Ok(info) => {
-            out.balance = Some(info.total_credit);
-            out.user_id = info.user_id;
-            out.vip_level = info.vip_level;
-        }
-        Err(e) => out.balance_error = Some(format!("{e}")),
+pub async fn v2v_credit_report(
+    state: State<'_, AppState>,
+    range: CreditRange,
+) -> AppResult<V2vCreditReport> {
+    let settings = load_settings(&state.db).await?;
+    let (balance, balance_error, vip_level) =
+        match dreamina::user_credit(&settings.bin, &state.v2v_log).await {
+            Ok(info) => (Some(info.total_credit), None, info.vip_level),
+            Err(e) => (None, Some(format!("{e}")), String::new()),
+        };
+
+    let since = range.since(now_unix());
+    let rows = repo::credit_events_by_channel(&state.db, since).await?;
+    let mut channels = Vec::with_capacity(rows.len());
+    let mut spent_total = 0;
+    let mut spent_pass = 0;
+    let mut spent_rej = 0;
+    let mut spent_pending = 0;
+    let mut spent_failed_abandoned = 0;
+    let mut reviewed = 0;
+    let mut passed = 0;
+    for row in rows {
+        spent_total += row.spent_total;
+        spent_pass += row.spent_pass;
+        spent_rej += row.spent_rej;
+        spent_pending += row.spent_pending;
+        spent_failed_abandoned += row.spent_failed_abandoned;
+        reviewed += row.reviewed;
+        passed += row.passed;
+        channels.push(ChannelCreditView {
+            label: dreamina::short_label(&row.channel_key),
+            channel_key: row.channel_key,
+            spent_total: row.spent_total,
+            spent_pass: row.spent_pass,
+            spent_rej: row.spent_rej,
+            spent_pending: row.spent_pending,
+            spent_failed_abandoned: row.spent_failed_abandoned,
+            events: row.events,
+            reviewed: row.reviewed,
+            passed: row.passed,
+            pass_rate: (row.reviewed > 0).then(|| row.passed as f64 / row.reviewed as f64),
+        });
     }
-    for row in repo::credit_by_stage(&state.db).await? {
-        out.spent_total += row.spent;
-        out.counted_clips += row.clips;
-        match row.stage.as_str() {
-            "pass" => out.spent_pass += row.spent,
-            "rej" => out.spent_rej += row.spent,
-            // rev（待验收）与重跑后仍留着回执的条目都算「还没定论」。
-            _ => out.spent_pending += row.spent,
-        }
-    }
-    let now = now_unix();
-    out.spent_day = repo::credit_since(&state.db, now - 24 * 3600).await?;
-    out.spent_week = repo::credit_since(&state.db, now - 7 * 24 * 3600).await?;
-    Ok(out)
+    let trend = repo::credit_event_trend(&state.db, since, matches!(range, CreditRange::All))
+        .await?
+        .into_iter()
+        .map(|r| CreditTrendPoint {
+            bucket: r.bucket,
+            spent: r.spent,
+        })
+        .collect();
+    let has_backfill: bool =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM v2v_credit_events WHERE is_backfill=1")
+            .fetch_one(&state.db)
+            .await?
+            > 0;
+    Ok(V2vCreditReport {
+        balance,
+        balance_error,
+        vip_level,
+        spent_total,
+        spent_pass,
+        spent_rej,
+        spent_pending,
+        spent_failed_abandoned,
+        reviewed,
+        passed,
+        pass_rate: (reviewed > 0).then(|| passed as f64 / reviewed as f64),
+        trend,
+        channels,
+        has_backfill,
+    })
 }
 
 /// 队列观测。
@@ -541,7 +626,7 @@ pub struct QueueEntry {
     pub queue_idx: i64,
 }
 
-/// 排队轨迹（详情栏与观测面板共用一条命令，`clip_id` 为空即只要全局部分）。
+/// 单条任务的排队轨迹。`clip_id` 为空时仅返回内部聚合数据。
 #[tauri::command]
 #[specta::specta]
 pub async fn v2v_queue_trend(
@@ -627,38 +712,6 @@ pub async fn v2v_queue_trend(
         }
     };
     Ok((trend, trail))
-}
-
-/// 每日额度台账（观测面板那条折线）。
-///
-/// 它同时是一个实验的读数：见 `runner::snapshot_credit_if_new_day` ——
-/// 「每天登录送 80」能不能靠 CLI 自动到账，只能靠连着几天的 `delta` 来回答。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CreditDayView {
-    pub day: String,
-    pub balance: i64,
-    pub spent_since_prev: i64,
-    /// 凭空进账（余额差 + 期间本机花掉）。首条为 None —— 那天没有对比基准。
-    pub delta: Option<i64>,
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn v2v_credit_daily(
-    state: State<'_, AppState>,
-    days: i64,
-) -> AppResult<Vec<CreditDayView>> {
-    Ok(repo::recent_credit_days(&state.db, days.clamp(1, 365))
-        .await?
-        .into_iter()
-        .map(|r| CreditDayView {
-            day: r.day,
-            balance: r.balance,
-            spent_since_prev: r.spent_since_prev,
-            delta: r.delta,
-        })
-        .collect())
 }
 
 /// 常驻队列此刻的样子（看板顶部那条 pill 的数据源）。
@@ -1907,11 +1960,9 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct V2vAction {
-    /// 真正改动了的条数（幂等跳过的不算）。
     pub changed: i64,
-    /// 给人看的一句话：「已通过 3 条」。撤销 pill 上显示的就是它。
+    pub skipped: i64,
     pub label: String,
-    /// 撤销令牌；为空表示这次没有可撤销的东西。
     pub undo: Vec<V2vUndoEntry>,
 }
 
@@ -2076,6 +2127,7 @@ pub async fn review_v2v_clips(
     pass: bool,
 ) -> AppResult<V2vAction> {
     let now = now_unix();
+    let requested = ids.len() as i64;
     // 交付目录读一次即可：一轮验收里它不会变，而每条读一次要多几十次 DB 往返。
     let settings = load_settings(&state.db).await?;
     let mut n = 0i64;
@@ -2156,6 +2208,7 @@ pub async fn review_v2v_clips(
     }
     Ok(V2vAction {
         changed: n,
+        skipped: requested - n,
         label,
         undo,
     })
@@ -2347,89 +2400,56 @@ fn ack_covers_billed(rows: &[repo::ClipRow], ack_paid: &[i64]) -> Result<(), App
     )))
 }
 
-/// 重跑（同提示词）/ 退回改写 / 继续等待。
-///
-/// 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
-/// 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
-/// 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
-///
-/// `ack_paid`：见 [`ack_covers_billed`]。只有 `run` 模式会丢弃付费任务，故只有它复核。
-#[tauri::command]
-#[specta::specta]
-pub async fn requeue_v2v_clips(
-    state: State<'_, AppState>,
-    app: AppHandle,
+#[derive(Debug, Clone, Copy)]
+enum QueueAction {
+    Recover,
+    Rewrite,
+    Resume,
+}
+
+/// 三条命令共用的批量执行器。入口被拆开后，命令边界不再接受一个能把完成任务送回
+/// 生成队列的自由字符串；每一种动作都有独立且可测试的阶段白名单。
+async fn apply_queue_action(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
     ids: Vec<i64>,
-    mode: String,
-    ack_paid: Vec<i64>,
+    action: QueueAction,
 ) -> AppResult<V2vAction> {
-    let verb = match mode.as_str() {
-        "run" => "已重排待提交",
-        "rewrite" => "已退回改写",
-        "wait" => "已放回轮询",
-        other => {
-            return Err(AppError::InvalidInput(format!(
-                "未知重排模式：{other}（只接受 run / rewrite / wait）"
-            )))
-        }
-    };
+    let requested = ids.len() as i64;
     let now = now_unix();
-    // 复核在**一行都还没动之前**：这一批要么整批过、要么整批不动。
-    if mode == "run" {
-        ack_covers_billed(&repo::get_many(&state.db, &ids).await?, &ack_paid)?;
-    }
     let mut n = 0i64;
     let mut undo: Vec<V2vUndoEntry> = Vec::new();
     let mut last_code = String::new();
     for id in ids {
-        // 快照必须在改动之前取 —— 这三条路径都会清掉成片路径与扣费回执，
-        // 事后再取就只剩清干净的空壳，撤销回去等于把片子弄丢。
         let snap = repo::snapshot(&state.db, id).await?;
         let row = repo::get(&state.db, id).await?;
         let code = row
             .as_ref()
             .map(|c| c.prompt_code.clone())
             .unwrap_or_default();
-        // 重跑一条**即梦已经收过钱**的单子 = 丢弃那条已付费的视频（清 submit_id 之后
-        // `list_running` 再也认不出它），下次提交是第二份钱。护栏在界面上（确认框），
-        // 但账必须在这里记 —— 键盘、⌘K、以及将来任何新入口都绕不开这一行。
-        if mode == "run" {
-            if let Some(c) = row.as_ref().filter(|c| c.stage == "run") {
-                let ev = runner::Evidence::from_clip(c);
-                if ev.billed() {
-                    let paid = c.credit_count.or(c.submit_credit).unwrap_or(0);
-                    state.v2v_log.warn(
-                        "submit",
-                        Some((c.id, c.prompt_code.as_str())),
-                        format!(
-                            "重跑丢弃已提交单 {}（已扣 {paid} 额度，不可撤回），此单不再轮询",
-                            c.submit_id.as_deref().unwrap_or("无 submit_id"),
-                        ),
-                        None,
-                    );
-                }
-            }
-        }
-        let ok = match mode.as_str() {
-            // 钉住读到的那一单：从复核到这一行之间，本地队列仍可能提交它，
-            // 那时丢弃的就不是人确认过的那一单了（同 `switch_v2v_channel`）。
-            "run" => {
+        let ok = match (action, row.as_ref()) {
+            // 恢复只接受**没有可用输出**的失败态，以及 Rust 判定为未计费幽灵单的 run 态。
+            // rev/rej/pass 在结构上进不来，前端即便发错 ID 也不能完成后重跑。
+            (QueueAction::Recover, Some(c))
+                if (c.stage == "fail"
+                    && !(c.error_type.as_deref() == Some("timeout")
+                        && c.submit_id.as_deref().is_some_and(|s| !s.trim().is_empty())))
+                    || (c.stage == "run" && runner::clip_looks_phantom(c, now)) =>
+            {
                 let expect = row.as_ref().and_then(|c| c.submit_id.as_deref());
                 repo::requeue_for_run(&state.db, id, expect, now).await?
             }
-            "rewrite" => repo::requeue_for_rewrite(&state.db, id, now).await?,
-            _ => repo::resume_timed_out(&state.db, id, now).await?,
+            (QueueAction::Rewrite, Some(_)) => {
+                repo::requeue_for_rewrite(&state.db, id, now).await?
+            }
+            (QueueAction::Resume, Some(_)) => repo::resume_timed_out(&state.db, id, now).await?,
+            _ => false,
         };
         if ok {
             n += 1;
             last_code = code;
-            // **收回这条 clip 的废纸篓行**。重跑是就地的：`v2v_clips` 只有一行，
-            // 成片路径锚在 clip id 上（`clips/clip{id}.mp4`）。判过「不通过」的条目
-            // 重跑之后，新片子会落到与旧片子完全相同的路径，而废纸篓里那行还指着它
-            // —— 下一次清空废纸篓就会物理删掉一条还活着的成片。
-            //
-            // 代价是撤销这次重排后，那个文件不再有废纸篓行去回收它（最坏留下一个
-            // 孤儿文件）。与「删掉正在用的成片」不对等，选这一边。
+            // 退回改写后未来的新成片仍会落在同一 clip 路径，旧废纸篓行必须收回，
+            // 否则清空废纸篓会误删新片。
             let mut tx = state.db.begin().await?;
             let dropped = trash_repo::delete_by_clip(&mut tx, id).await?;
             tx.commit().await?;
@@ -2446,7 +2466,7 @@ pub async fn requeue_v2v_clips(
             }
         }
     }
-    if mode == "wait" && n > 0 {
+    if matches!(action, QueueAction::Resume) && n > 0 {
         state.v2v_log.info(
             "poll",
             None,
@@ -2454,12 +2474,51 @@ pub async fn requeue_v2v_clips(
             None,
         );
     }
-    refresh_handoff(&state.db, &app).await;
+    refresh_handoff(&state.db, app).await;
+    let verb = match action {
+        QueueAction::Recover => "已恢复",
+        QueueAction::Rewrite => "已退回改写",
+        QueueAction::Resume => "已继续等待",
+    };
     Ok(V2vAction {
         changed: n,
+        skipped: requested - n,
         label: action_label(verb, n, &last_code),
         undo,
     })
+}
+
+/// 恢复无输出的失败/中断任务。完成、已拒绝与待验收任务永远不接受。
+#[tauri::command]
+#[specta::specta]
+pub async fn recover_v2v_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<V2vAction> {
+    apply_queue_action(&state, &app, ids, QueueAction::Recover).await
+}
+
+/// 清掉旧视频提示词并回到改写。正在运行与已通过任务不接受。
+#[tauri::command]
+#[specta::specta]
+pub async fn rewrite_v2v_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<V2vAction> {
+    apply_queue_action(&state, &app, ids, QueueAction::Rewrite).await
+}
+
+/// 超时但仍持有 submit_id 的任务继续原单轮询，不重新提交、不再次扣费。
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_v2v_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<V2vAction> {
+    apply_queue_action(&state, &app, ids, QueueAction::Resume).await
 }
 
 /// 从流水线移除（不想给这张图做视频了）。作品本体不受影响。
@@ -2747,6 +2806,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.root(), handoff::default_root());
+    }
+
+    #[test]
+    fn credit_ranges_map_to_the_requested_windows() {
+        let now = 2_000_000_000;
+        assert_eq!(CreditRange::SevenDays.since(now), Some(now - 7 * 24 * 3600));
+        assert_eq!(
+            CreditRange::ThirtyDays.since(now),
+            Some(now - 30 * 24 * 3600)
+        );
+        assert_eq!(CreditRange::All.since(now), None);
     }
 
     // 损坏/缺失的设置 JSON 必须回落默认值，绝不让整页打不开。

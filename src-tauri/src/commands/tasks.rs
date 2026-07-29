@@ -1,4 +1,4 @@
-//! tasks 域命令（列表/详情/重试）。
+//! tasks 域命令（列表/详情/失败恢复）。
 
 use serde::Serialize;
 use specta::Type;
@@ -97,39 +97,59 @@ pub struct BulkTaskResult {
     pub skipped: i64,
 }
 
-/// 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
+/// 恢复单个无输出的失败任务，可先修改提示词。
 #[tauri::command]
 #[specta::specta]
-pub async fn retry_task(
+pub async fn recover_task(
     state: State<'_, AppState>,
     id: i64,
     edited_prompt: Option<String>,
-) -> AppResult<()> {
-    if let Some(text) = edited_prompt {
-        sqlx::query("UPDATE tasks SET prompt_text_snapshot = ?2 WHERE id = ?1")
+) -> AppResult<BulkTaskResult> {
+    let current: Option<(String, Option<String>, String)> =
+        sqlx::query_as("SELECT status, error_type, prompt_text_snapshot FROM tasks WHERE id = ?1")
             .bind(id)
-            .bind(text)
-            .execute(&state.db)
+            .fetch_optional(&state.db)
             .await?;
+    if let Some((status, Some(error_type), prompt)) = current {
+        let prompt_unchanged = match edited_prompt.as_deref() {
+            Some(edited) => edited.trim() == prompt.trim(),
+            None => true,
+        };
+        if status == "fail" && error_type == "ContentPolicy" && prompt_unchanged {
+            return Err(AppError::InvalidInput(
+                "违规任务必须修改提示词后才能恢复".into(),
+            ));
+        }
     }
-    repo::requeue(&state.db, id).await?;
-    state.engine.kick();
-    Ok(())
+    let affected = i64::from(repo::recover(&state.db, id, edited_prompt.as_deref()).await?);
+    if affected > 0 {
+        revive_batches(&state, &[id]).await?;
+    }
+    Ok(BulkTaskResult {
+        affected,
+        skipped: 1 - affected,
+    })
 }
 
-/// 重试全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
-/// 应走「改词重试」E34 单独处理）。跨全部批次，不再按批次划范围。
+/// 恢复全部失败任务。默认排除 ContentPolicy：原提示词再次提交不会改变结果，
+/// 这类必须逐条改词后恢复。
 #[tauri::command]
 #[specta::specta]
-pub async fn retry_failed_tasks(state: State<'_, AppState>) -> AppResult<i64> {
+pub async fn recover_failed_tasks(state: State<'_, AppState>) -> AppResult<BulkTaskResult> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status='fail'")
+        .fetch_one(&state.db)
+        .await?;
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM tasks WHERE status = 'fail' \
          AND (error_type IS NULL OR error_type != 'ContentPolicy')",
     )
     .fetch_all(&state.db)
     .await?;
-    requeue_and_revive(&state, &ids).await?;
-    Ok(ids.len() as i64)
+    let done = recover_and_revive(&state, &ids).await?;
+    Ok(BulkTaskResult {
+        affected: done.len() as i64,
+        skipped: total - done.len() as i64,
+    })
 }
 
 /// 回队 + 把它们所属的批次从 archived 拉回 running。
@@ -137,21 +157,26 @@ pub async fn retry_failed_tasks(state: State<'_, AppState>) -> AppResult<i64> {
 /// 归档是「这批没活了」的标记，回队等于又有活了。不改回来的话，退休扫描
 /// 会看见一个 archived 却还有 q 态任务的批次——虽然退休条件本身挡得住，
 /// 但那个状态本身就是在说谎。
-async fn requeue_and_revive(state: &State<'_, AppState>, ids: &[i64]) -> AppResult<()> {
+async fn recover_and_revive(state: &State<'_, AppState>, ids: &[i64]) -> AppResult<Vec<i64>> {
     if ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let done = repo::requeue_many(&state.db, ids).await?;
+    let done = repo::recover_many(&state.db, ids).await?;
     if done.is_empty() {
-        return Ok(());
+        return Ok(done);
     }
+    revive_batches(state, &done).await?;
+    Ok(done)
+}
+
+async fn revive_batches(state: &State<'_, AppState>, done: &[i64]) -> AppResult<()> {
     let ph = done.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "UPDATE batches SET status = 'running', archived_at = NULL
          WHERE id IN (SELECT DISTINCT batch_id FROM tasks WHERE id IN ({ph}))"
     );
     let mut q = sqlx::query(&sql);
-    for id in &done {
+    for id in done {
         q = q.bind(id);
     }
     q.execute(&state.db).await?;
@@ -159,13 +184,12 @@ async fn requeue_and_revive(state: &State<'_, AppState>, ids: &[i64]) -> AppResu
     Ok(())
 }
 
-/// 批量重试所选（任务队列的「重试所选」）。生成中/排队中的任务不参与，计入 skipped。
+/// 批量恢复所选。只有无输出的 fail 参与，其余全部计入 skipped。
 #[tauri::command]
 #[specta::specta]
-pub async fn retry_tasks(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<BulkTaskResult> {
+pub async fn recover_tasks(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<BulkTaskResult> {
     let total = ids.len() as i64;
-    let done = repo::requeue_many(&state.db, &ids).await?;
-    requeue_and_revive(&state, &done).await?;
+    let done = recover_and_revive(&state, &ids).await?;
     Ok(BulkTaskResult {
         affected: done.len() as i64,
         skipped: total - done.len() as i64,
@@ -215,20 +239,21 @@ async fn settle(state: &State<'_, AppState>, batches: &[i64]) {
     }
 }
 
-/// 重试全部因中断而失败的任务（error_type=Interrupted）。
+/// 恢复全部因中断而失败的任务（error_type=Interrupted）。
 #[tauri::command]
 #[specta::specta]
-pub async fn retry_interrupted_tasks(state: State<'_, AppState>) -> AppResult<i64> {
+pub async fn recover_interrupted_tasks(state: State<'_, AppState>) -> AppResult<BulkTaskResult> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM tasks WHERE status = 'fail' AND error_type = 'Interrupted'",
     )
     .fetch_all(&state.db)
     .await?;
-    for id in &ids {
-        repo::requeue(&state.db, *id).await?;
-    }
-    state.engine.kick();
-    Ok(ids.len() as i64)
+    let total = ids.len() as i64;
+    let done = recover_and_revive(&state, &ids).await?;
+    Ok(BulkTaskResult {
+        affected: done.len() as i64,
+        skipped: total - done.len() as i64,
+    })
 }
 
 /// 删除单个任务（「不需要了」）。生成中/重试中的任务不允许删除，避免与在途 worker 竞争；

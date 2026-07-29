@@ -1,3 +1,4 @@
+import { DescriptionHint, Tooltip } from "@/components/ui/Tooltip";
 import { V2vQueueTrail } from "@/features/v2v/V2vQueueTrail";
 import {
   type Filter,
@@ -11,7 +12,7 @@ import {
 } from "@/features/v2v/model";
 import type { ActivityEntry, HandoffStatus } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Activity, FolderOpen, ScrollText, SlidersHorizontal } from "lucide-react";
+import { FolderOpen, ScrollText, SlidersHorizontal } from "lucide-react";
 import { type CSSProperties, useMemo, useState } from "react";
 
 /**
@@ -41,7 +42,6 @@ export function V2vLedger({
   badGroup,
   busy,
   onRewriteGroup,
-  onObserve,
   onLog,
   onParams,
   onOpenHandoff,
@@ -66,7 +66,6 @@ export function V2vLedger({
   badGroup: { name: string; rejected: number; ids: number[] } | null;
   busy: boolean;
   onRewriteGroup: (ids: number[]) => void;
-  onObserve: () => void;
   onLog: () => void;
   onParams: () => void;
   onOpenHandoff: () => void;
@@ -76,30 +75,18 @@ export function V2vLedger({
       <div className="vledhd">
         <span className="fs13 fw6">这一条的账与进度</span>
         <div className="f1" />
-        {/* 三个面板入口。原型这一格是空的 —— 而观测（排产要看的排队趋势与额度分账）、
-            执行日志、默认参数都得有个够得着的地方，且 ⌥1/2/3 得有个能被看见的出处。 */}
-        <button
-          type="button"
-          className="btn xs gho"
-          onClick={onObserve}
-          title="队列趋势 · 每日额度 · 额度分账"
-        >
-          <Activity className="ic12" />
-          观测 ⌥1
-        </button>
-        <button type="button" className="btn xs gho" onClick={onLog} title="全部执行日志">
-          <ScrollText className="ic12" />
-          日志 ⌥2
-        </button>
-        <button
-          type="button"
-          className="btn xs gho"
-          onClick={onParams}
-          title="默认参数 · 会话 · 并发上限 · 常驻队列"
-        >
-          <SlidersHorizontal className="ic12" />
-          参数 ⌥3
-        </button>
+        <Tooltip content="全部执行日志 · 快捷键 ⌥2">
+          <button type="button" className="btn xs gho" onClick={onLog}>
+            <ScrollText className="ic12" />
+            日志
+          </button>
+        </Tooltip>
+        <Tooltip content="默认参数、会话、并发上限与常驻队列 · 快捷键 ⌥3">
+          <button type="button" className="btn xs gho" onClick={onParams}>
+            <SlidersHorizontal className="ic12" />
+            参数
+          </button>
+        </Tooltip>
       </div>
 
       <div className="vledbody">
@@ -118,9 +105,7 @@ export function V2vLedger({
 
         {row == null ? (
           <div className="fs11 t3" style={{ padding: "18px 2px", lineHeight: 1.8 }}>
-            右边点一条，看它的账与进度。
-            <br />
-            ↑↓ 换条 · ⌥\ 收起本栏。
+            选择任务查看账与进度。
           </div>
         ) : (
           <ClipLedger row={row} activity={activity} onLog={onLog} />
@@ -182,7 +167,9 @@ function SliceCard({
       <div className="hd">
         <span className="dot" />
         <span className="ttl">{face.label}</span>
-        <span className="sub nowrap ohide">{face.sub}</span>
+        {face.sub !== "" && (
+          <DescriptionHint label={`${face.label}说明`}>{face.sub}</DescriptionHint>
+        )}
         <div className="f1" />
         <span className="n">{slice.count} 条</span>
       </div>
@@ -205,7 +192,7 @@ function SliceCard({
         {/* 钉了通道之后「占用通道」恒是 1，那一格就白占了。换成这条队的全貌
             （含别的档），因为那正是钉住它时想知道的下一件事。 */}
         <div className="tile">
-          <span className="k">{filter.channel == null ? "占用通道" : "这条队在制"}</span>
+          <span className="k">{filter.channel == null ? "占用通道" : "通道未完成"}</span>
           <span className="v">
             {filter.channel == null ? `${slice.channels.length} 条` : `${channelLive} 条`}
           </span>
@@ -239,7 +226,7 @@ function SliceCard({
       {/* 交接对账 —— **只在对不上或写不出去时出现**。
           从前这里常驻一句「工单已写到交接目录（2 组 · 2 条）· 上次收录 30 分钟前」外加
           一个「打开交接目录」按钮。那句话在一切正常时不改变任何决定，而按钮在底坞里
-          原样有一个；两者合起来把这一档最要紧的那条例外（工单里 N 条、流水线里 M 条
+          原样有一个；两者合起来把这一档最要紧的那条例外（工单里 N 条、视频生成中 M 条
           对不上，差出来的那几条永远不会被改写）挤成了同一段落里的一小截。
           现在这一格空着就是「对得上」。 */}
       {isRewrite && (err != null || mismatch) && (
@@ -260,7 +247,7 @@ function SliceCard({
       )}
 
       {/* 连续毙掉三条以上多半不是「没抽中」，而是这一组的提示词本身有问题 ——
-          那时该做的是退回改写整组，而不是一条条重跑（每重跑一次都要再花一份钱）。 */}
+          那时该做的是退回改写整组，不能直接用原提示词再次提交。 */}
       {badGroup && (
         <div className="hoff er">
           「{badGroup.name}」这一组已有 {badGroup.rejected} 条不通过 —— 多半不是没抽中，
@@ -402,8 +389,11 @@ function ClipLedger({
 
       <div className="vsec">
         这一条的日志
+        <DescriptionHint label="日志保留说明">
+          执行日志仅保留本次运行最近 500 条；任务状态会持续保存在数据库中。
+        </DescriptionHint>
         <button type="button" className="lnk" onClick={onLog}>
-          ⌥2 全部日志
+          全部日志
         </button>
       </div>
       <div className="vlog">
@@ -411,10 +401,7 @@ function ClipLedger({
           // **空的时候说实话**。执行日志是进程内的环形缓冲（500 条、重启即清空），
           // 所以老条目在这里空着是常态而不是故障 —— 摆一个空框会让人以为「这条什么
           // 都没发生过」，而它的状态明明好好地存在库里。
-          <div className="none">
-            本次运行还没有这一条的日志 —— 执行日志只留最近 500 条、应用重启即清空
-            （每条的状态另存在库里，不会丢）。
-          </div>
+          <div className="none">暂无本次运行日志。</div>
         ) : (
           logs.map((l) => (
             <div key={l.seq} className={cn("lrow", l.level !== "info" && l.level)}>
@@ -516,13 +503,13 @@ export function hintFor(row: Row): { text: string; tone: "wr" | "er" } | null {
   if (row.signals.has("timeout")) {
     return {
       tone: "wr",
-      text: "超时只是我们这边不等了：额度已扣、即梦那边还在跑。点「继续等待」沿用原提交单；重跑等于再花一份钱买同一条视频。",
+      text: "超时只是本地停止等待：额度已扣、即梦仍在运行。使用「继续等待」沿用原提交单；恢复提交可能再次计费。",
     };
   }
   if (row.signals.has("phantom")) {
     return {
       tone: "er",
-      text: "两个信号同时缺席（无队列位次、无扣费回执）—— 即梦接了单但从未入队、从未计费。重跑不花钱。",
+      text: "无队列位次且无扣费回执：即梦未入队、未计费，可以恢复。",
     };
   }
   // 幽灵单的反面：那个是「查得出没花钱」，这个是「根本没查出话来」。
@@ -530,7 +517,7 @@ export function hintFor(row: Row): { text: string; tone: "wr" | "er" } | null {
   if (row.clip.errorType === "submit_timeout") {
     return {
       tone: "er",
-      text: "提交时 CLI 超时被终止，我们没拿到 submit_id —— 但这一单可能已经下出去并扣了费。先拿这条提示词去即梦的任务列表看看有没有同一条在跑，确认没有再重跑；直接重跑有再花一份钱的风险。",
+      text: "提交时 CLI 超时且没有 submit_id，但任务可能已经提交并计费。恢复前请先在即梦核对；再次提交可能重复计费。",
     };
   }
   if (row.slow) {

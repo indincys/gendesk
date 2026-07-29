@@ -481,15 +481,42 @@ pub async fn mark_poll_attempt(
 /// `first_submitted_at` 在这里**无条件**更新：走到这一步就是一个新的 submit_id，
 /// 从它开始重新计时才对。会被「继续等待」重置的是 `submitted_at`（那条路径不换单，
 /// 故不动 `first_submitted_at`）—— 两列的分工全部体现在这个差别上。
+#[cfg(test)]
 pub async fn mark_submitted(
     pool: &SqlitePool,
     id: i64,
     receipt: &crate::v2v::dreamina::SubmitReceipt,
     now: i64,
 ) -> Result<(), sqlx::Error> {
+    mark_submitted_inner(pool, id, receipt, None, now).await
+}
+
+/// 生产提交路径：除回执外一并钉住这一次实际使用的模型通道。
+///
+/// 条目在提交前可以一直“跟随默认”；提交后若仍保留空型号，用户随后修改默认设置会让
+/// 一条已经在 A 通道运行的任务看起来像在 B 通道。消费事件触发器也必须在同一条 UPDATE
+/// 中看到真实通道，才能把这笔账记到正确的分类下。
+pub async fn mark_submitted_on(
+    pool: &SqlitePool,
+    id: i64,
+    receipt: &crate::v2v::dreamina::SubmitReceipt,
+    channel: &str,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    mark_submitted_inner(pool, id, receipt, Some(channel), now).await
+}
+
+async fn mark_submitted_inner(
+    pool: &SqlitePool,
+    id: i64,
+    receipt: &crate::v2v::dreamina::SubmitReceipt,
+    channel: Option<&str>,
+    now: i64,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE v2v_clips SET stage='run', submit_id=?2, submitted_at=?3, updated_at=?3,
              first_submitted_at=?3, submit_credit=?4, submit_status=?5,
+             model_version=COALESCE(?6, model_version),
              attempt = attempt + 1, error_type=NULL, error_message=NULL,
              gen_status=NULL, queue_idx=NULL, polled_at=NULL
          WHERE id=?1",
@@ -499,6 +526,7 @@ pub async fn mark_submitted(
     .bind(now)
     .bind(receipt.credit_count)
     .bind(&receipt.gen_status)
+    .bind(channel)
     .execute(pool)
     .await?;
     Ok(())
@@ -677,17 +705,10 @@ pub async fn set_export_path(
     Ok(())
 }
 
-/// 重跑同提示词：**rev/rej/fail/run** → ready，清掉上一轮的成片引用。
+/// 无输出恢复/改投：**fail/run** → ready，清掉上一份无成片提交引用。
 ///
-/// 视频不通过多半是**没抽中**而不是提示词不对，故这是不通过后的默认动作。
-/// 清 video_path/poster_path 是必须的：旧文件由调用方搬进废纸篓，这里不能再指着它。
-///
-/// ## `run` 也在射程里，而那一格是花钱的
-///
-/// （这里原来的注释只写了 `rev/rej/fail`，与 SQL 不符 —— 而差的正是唯一会花钱的那一格。）
-///
-/// `run` 必须留着，因为有两类调用是对的：**幽灵单重跑**（从未计费，重跑免费）与
-/// `switch_v2v_channel` 的**放弃并改投**（人已经在确认框里看过代价）。
+/// `run` 只供 Rust 已判定未计费的幽灵单恢复，或带费用确认的改通道流程；待验收、拒绝和
+/// 已通过任务在 SQL 白名单上进不来，不能用同一提示词直接再次提交。
 ///
 /// 但对一条即梦**已经收过钱**的单子，这条 SQL 会把 `submit_id` 与 `credit_count` 一起
 /// 清掉 —— 此后 `list_running`（要求 `submit_id IS NOT NULL`）再也认不出它，那条已付费
@@ -700,8 +721,7 @@ pub async fn set_export_path(
 /// `expect_submit` 就是那道闸的另一半：调用方读到哪一单、就对哪一单动手。
 /// `Some(sid)` = 这一行的 `submit_id` 必须仍是 `sid`，否则一行不改（人在确认框上犹豫的
 /// 那几秒里，本地队列可能已经把它提交出去了，或者轮询已经把它结算掉了 —— 那时丢弃的
-/// 就不再是人看过的那一单）。`None` = 不设约束，给 `rev`/`rej`/`fail` 那些本来就没有
-/// 在跑提交单的路径用。
+/// 就不再是人看过的那一单）。`None` = 不设提交单约束，只供无输出失败恢复使用。
 pub async fn requeue_for_run<'e, E>(
     ex: E,
     id: i64,
@@ -717,7 +737,7 @@ where
                 width=NULL, height=NULL, fps=NULL, duration_sec=NULL, credit_count=NULL,
                 error_type=NULL, error_message=NULL, finished_at=NULL, reviewed_at=NULL,
                 gen_status=NULL, queue_idx=NULL, polled_at=NULL, updated_at=?2
-          WHERE id=?1 AND stage IN ('rev','rej','fail','run')
+          WHERE id=?1 AND stage IN ('fail','run')
             AND (?3 IS NULL OR submit_id IS ?3)",
     )
     .bind(id)
@@ -731,7 +751,7 @@ where
 /// 继续等待：把判了超时、但**提交单还在**的条目放回 run，让轮询器重新认领。
 ///
 /// 这条路径的存在理由是钱：超时判定只是我们这边不等了，即梦那边任务还在跑、额度已经扣了。
-/// 而 [`requeue_for_run`] 会清掉 `submit_id` —— 那意味着重提一次、再花一份钱买同一条视频。
+/// 而 [`requeue_for_run`] 会清掉 `submit_id` —— 那意味着恢复后再提交、再花一份钱。
 /// 实测 19 条在 45 分钟被判超时时，`dreamina list_task` 里它们全都还是 `querying`。
 ///
 /// 重置 `submitted_at` 是必须的：不重置的话下一轮立刻又判超时，按钮点了等于没点。
@@ -739,7 +759,7 @@ where
 /// 事故当天看板因此显示「最久已等 10 小时 54 分」，而那只是从按下这个按钮算起的。
 ///
 /// 只放 `timeout`：`phantom` 那类没进队列、没扣费，「继续等待」对它毫无意义
-/// （再等一万年也不会出片），该走的是重跑。
+/// （再等一万年也不会出片），该走的是无输出恢复。
 pub async fn resume_timed_out(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, sqlx::Error> {
     let res = sqlx::query(
         "UPDATE v2v_clips
@@ -755,7 +775,10 @@ pub async fn resume_timed_out(pool: &SqlitePool, id: i64, now: i64) -> Result<bo
     Ok(res.rows_affected() > 0)
 }
 
-/// 退回改写：任何非 pass 态 → rewrite，清掉旧的视频提示词让 skill 重写。
+/// 退回改写：未提交或没有可用成片的终态 → rewrite。
+///
+/// `run` 明确不在射程内：那一格可能已经扣费，清 submit_id 会把仍在即梦手上的任务
+/// 变成孤儿。正在运行的改投必须走带费用确认的换通道命令。
 pub async fn requeue_for_rewrite(
     pool: &SqlitePool,
     id: i64,
@@ -768,7 +791,7 @@ pub async fn requeue_for_rewrite(
                 credit_count=NULL, error_type=NULL, error_message=NULL,
                 finished_at=NULL, reviewed_at=NULL,
                 gen_status=NULL, queue_idx=NULL, polled_at=NULL, updated_at=?2
-          WHERE id=?1 AND stage <> 'pass'",
+          WHERE id=?1 AND stage IN ('rewrite','ready','rev','rej','fail')",
     )
     .bind(id)
     .bind(now)
@@ -836,31 +859,6 @@ pub async fn finish_histogram(
     Ok(out)
 }
 
-/// 额度消耗台账（一行一阶段）。
-///
-/// **消耗只认 `credit_count`**，那是即梦给的实际扣费回执，不是我们按单价表算出来的估值。
-///
-/// 0026 起它在**整表扫描**里就落库（实测排队中的条目在 `list_task` 里已带
-/// `credit_count`），不必等到出片 —— 钱本来就是在提交那一刻扣的。故在跑（run）的条目
-/// 现在也会带着自己的账出现在这份台账里，归入「未定论」那一档：它确实花掉了，
-/// 只是还不知道值不值。
-#[derive(Debug, Clone, FromRow)]
-pub struct CreditRow {
-    pub stage: String,
-    pub spent: i64,
-    pub clips: i64,
-}
-
-/// 按阶段汇总消耗；`since` 之后完成的另算一份（近 7 天 / 今日）。
-pub async fn credit_by_stage(pool: &SqlitePool) -> Result<Vec<CreditRow>, sqlx::Error> {
-    sqlx::query_as::<_, CreditRow>(
-        "SELECT stage, COALESCE(SUM(credit_count),0) AS spent, COUNT(credit_count) AS clips
-           FROM v2v_clips WHERE credit_count IS NOT NULL GROUP BY stage",
-    )
-    .fetch_all(pool)
-    .await
-}
-
 /// `since` 之后出片的消耗合计（按 `finished_at`，即扣费回执到手的时刻）。
 pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Error> {
     let (n,): (i64,) = sqlx::query_as(
@@ -871,6 +869,103 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     .fetch_one(pool)
     .await?;
     Ok(n)
+}
+
+/// 不可变消费事件按通道的汇总。`since=None` 表示全部历史。
+#[derive(Debug, Clone, FromRow)]
+pub struct CreditChannelRow {
+    pub channel_key: String,
+    pub spent_total: i64,
+    pub spent_pass: i64,
+    pub spent_rej: i64,
+    pub spent_pending: i64,
+    pub spent_failed_abandoned: i64,
+    pub passed: i64,
+    pub reviewed: i64,
+    pub events: i64,
+}
+
+pub async fn credit_events_by_channel(
+    pool: &SqlitePool,
+    since: Option<i64>,
+) -> Result<Vec<CreditChannelRow>, sqlx::Error> {
+    sqlx::query_as::<_, CreditChannelRow>(
+        "WITH submissions AS (
+           SELECT s.submit_id, s.channel_key, s.charged_at,
+                  COALESCE(
+                    (SELECT c.credits FROM v2v_credit_events c
+                      WHERE c.submit_id=s.submit_id AND c.event_type='charge'
+                      ORDER BY c.id DESC LIMIT 1),
+                    s.credits
+                  ) AS credits,
+                  COALESCE(
+                    (SELECT o.event_type FROM v2v_credit_events o
+                      WHERE o.submit_id=s.submit_id
+                        AND o.event_type IN ('pending','pass','rej','failed','abandoned')
+                      ORDER BY o.id DESC LIMIT 1),
+                    'pending'
+                  ) AS outcome
+             FROM v2v_credit_events s
+            WHERE s.event_type='submit'
+         )
+         SELECT channel_key,
+                COALESCE(SUM(credits),0) AS spent_total,
+                COALESCE(SUM(CASE WHEN outcome='pass' THEN credits ELSE 0 END),0) AS spent_pass,
+                COALESCE(SUM(CASE WHEN outcome='rej' THEN credits ELSE 0 END),0) AS spent_rej,
+                COALESCE(SUM(CASE WHEN outcome='pending' THEN credits ELSE 0 END),0)
+                  AS spent_pending,
+                COALESCE(SUM(CASE WHEN outcome IN ('failed','abandoned')
+                                  THEN credits ELSE 0 END),0) AS spent_failed_abandoned,
+                COALESCE(SUM(CASE WHEN outcome='pass' THEN 1 ELSE 0 END),0) AS passed,
+                COALESCE(SUM(CASE WHEN outcome IN ('pass','rej') THEN 1 ELSE 0 END),0)
+                  AS reviewed,
+                COUNT(*) AS events
+           FROM submissions
+          WHERE credits IS NOT NULL AND (?1 IS NULL OR charged_at >= ?1)
+          GROUP BY channel_key
+          ORDER BY spent_total DESC, channel_key",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// 消费趋势点。近 7/30 天按日，全部历史按月。
+#[derive(Debug, Clone, FromRow)]
+pub struct CreditTrendRow {
+    pub bucket: String,
+    pub spent: i64,
+}
+
+pub async fn credit_event_trend(
+    pool: &SqlitePool,
+    since: Option<i64>,
+    monthly: bool,
+) -> Result<Vec<CreditTrendRow>, sqlx::Error> {
+    let bucket = if monthly { "%Y-%m" } else { "%Y-%m-%d" };
+    sqlx::query_as::<_, CreditTrendRow>(
+        "WITH submissions AS (
+           SELECT s.charged_at,
+                  COALESCE(
+                    (SELECT c.credits FROM v2v_credit_events c
+                      WHERE c.submit_id=s.submit_id AND c.event_type='charge'
+                      ORDER BY c.id DESC LIMIT 1),
+                    s.credits
+                  ) AS credits
+             FROM v2v_credit_events s
+            WHERE s.event_type='submit'
+         )
+         SELECT strftime(?2, charged_at, 'unixepoch', 'localtime') AS bucket,
+                COALESCE(SUM(credits),0) AS spent
+           FROM submissions
+          WHERE credits IS NOT NULL AND (?1 IS NULL OR charged_at >= ?1)
+          GROUP BY bucket
+          ORDER BY bucket",
+    )
+    .bind(since)
+    .bind(bucket)
+    .fetch_all(pool)
+    .await
 }
 
 // ─────────────────────── 排队位次轨迹（0029）───────────────────────
@@ -1001,22 +1096,6 @@ pub async fn insert_credit_day(pool: &SqlitePool, row: &CreditDay) -> Result<boo
     .execute(pool)
     .await?;
     Ok(r.rows_affected() > 0)
-}
-
-/// 最近 n 天的快照，按日期正序（观测面板那条折线）。
-pub async fn recent_credit_days(
-    pool: &SqlitePool,
-    limit: i64,
-) -> Result<Vec<CreditDay>, sqlx::Error> {
-    let mut rows = sqlx::query_as::<_, CreditDay>(
-        "SELECT day, at, balance, spent_since_prev, delta FROM v2v_credit_daily
-          ORDER BY day DESC LIMIT ?1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    rows.reverse();
-    Ok(rows)
 }
 
 /// 验收通过了却没交付到输出目录的条数（成片库徽章）。
@@ -2020,10 +2099,10 @@ mod tests {
         assert_eq!(snap.video_path.as_deref(), Some("/clips/1.mp4"));
         assert_eq!(snap.credit_count, Some(8));
 
-        // 误按了「重跑」：成片引用与扣费回执被清空。
-        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
+        // 退回改写会清空成片引用；撤销必须能整份恢复。
+        assert!(requeue_for_rewrite(&pool, id, 500).await.unwrap());
         let after = get(&pool, id).await.unwrap().unwrap();
-        assert_eq!(after.stage, "ready");
+        assert_eq!(after.stage, "rewrite");
         assert!(after.video_path.is_none());
         assert!(after.credit_count.is_none());
 
@@ -2211,9 +2290,21 @@ mod tests {
     #[tokio::test]
     async fn settling_an_old_submit_cannot_hijack_the_row_after_a_rerun() {
         let (pool, _d) = test_pool().await;
-        let id = seed_reviewable(&pool, 1).await; // 走到 rev，提交单是 sub-1
-                                                  // 人点了重跑 → 重新提交，这一行现在属于 sub-2。
-        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
+            .await
+            .unwrap();
+        // 改投时放弃 sub-1，随后重新提交，这一行现在属于 sub-2。
+        assert!(requeue_for_run(&pool, id, Some("sub-1"), 500)
+            .await
+            .unwrap());
         mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-2", 8), 600)
             .await
             .unwrap();
@@ -2302,60 +2393,17 @@ mod tests {
         assert_eq!(row.queue_idx, Some(4485));
     }
 
-    // 重跑清干净上一轮成片引用，但保留视频提示词（重跑 = 同提示词再抽一次）。
+    // 有可用输出的任务不能送回生成队列；不通过只能退回改写。
     #[tokio::test]
-    async fn requeue_for_run_keeps_prompt_clears_media() {
+    async fn requeue_for_run_never_accepts_completed_output() {
         let (pool, _d) = test_pool().await;
-        seed_work(&pool, 1).await;
-        enqueue_one(&pool, 1).await;
-        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        let mut tx = pool.begin().await.unwrap();
-        apply_rewrite(
-            &mut tx,
-            id,
-            "视频提示词",
-            Some("seedance2.0fast"),
-            Some(5),
-            None,
-            200,
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 300)
-            .await
-            .unwrap();
-        mark_ready_for_review(
-            &pool,
-            id,
-            "sub-1",
-            "/clips/1.mp4",
-            Some("/clips/1.jpg"),
-            Some(960),
-            Some(960),
-            Some(24.0),
-            Some(4.0),
-            Some(44),
-            None,
-            400,
-        )
-        .await
-        .unwrap();
+        let id = seed_reviewable(&pool, 1).await;
         assert!(set_reviewed(&pool, id, "rej", 500).await.unwrap());
 
-        assert!(requeue_for_run(&pool, id, None, 600).await.unwrap());
+        assert!(!requeue_for_run(&pool, id, None, 600).await.unwrap());
         let row = get(&pool, id).await.unwrap().unwrap();
-        assert_eq!(row.stage, "ready");
-        assert_eq!(
-            row.video_prompt.as_deref(),
-            Some("视频提示词"),
-            "重跑必须保留提示词（同提示词再抽一次）"
-        );
-        assert_eq!(row.model_version.as_deref(), Some("seedance2.0fast"));
-        assert!(row.video_path.is_none(), "旧成片引用须清空");
-        assert!(row.poster_path.is_none(), "旧封面引用须清空");
-        assert!(row.submit_id.is_none(), "旧 submit_id 须清空");
-        assert_eq!(row.attempt, 1, "attempt 只在真正提交时递增");
+        assert_eq!(row.stage, "rej");
+        assert!(row.video_path.is_some(), "已有输出不得被清空");
     }
 
     // 退回改写清掉视频提示词，让 skill 重写。
@@ -3045,10 +3093,9 @@ mod tests {
         assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "fail");
     }
 
-    // 额度台账按阶段分账：成片 / 未通过（白花的）/ 还没定论。
-    // 没有 credit_count 的条目不计入 —— 钱花没花，只有出片那一刻才有回执。
+    // 旧快照仍服务内部每日余额核对；没有 credit_count 的条目不计入。
     #[tokio::test]
-    async fn credit_ledger_splits_by_stage_and_ignores_unbilled() {
+    async fn credit_since_uses_actual_receipts_and_ignores_unbilled() {
         let (pool, _d) = test_pool().await;
         for w in 1..=3 {
             seed_work(&pool, w).await;
@@ -3085,18 +3132,253 @@ mod tests {
         set_reviewed(&pool, ids[0], "pass", 3_000).await.unwrap();
         set_reviewed(&pool, ids[1], "rej", 3_000).await.unwrap();
 
-        let m: std::collections::HashMap<String, i64> = credit_by_stage(&pool)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| (r.stage, r.spent))
-            .collect();
-        assert_eq!(m.get("pass"), Some(&44));
-        assert_eq!(m.get("rej"), Some(&66), "未通过的额度照样花掉了");
-        assert_eq!(m.len(), 2, "没有扣费回执的条目不得计入");
         // 按出片时刻切窗：1_000 那条落在窗外。
         assert_eq!(credit_since(&pool, 1_500).await.unwrap(), 66);
         assert_eq!(credit_since(&pool, 0).await.unwrap(), 110);
+    }
+
+    #[tokio::test]
+    async fn credit_events_are_append_only_idempotent_and_survive_clip_deletion() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+
+        mark_submitted_on(
+            &pool,
+            id,
+            &SubmitReceipt::healthy("ledger-1", 8),
+            "channel-a",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        // 同一回体再次落库只会命中唯一索引，不会复制同一事实。
+        mark_submitted_on(
+            &pool,
+            id,
+            &SubmitReceipt::healthy("ledger-1", 8),
+            "channel-a",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        let before: Vec<(i64, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, event_type, credits FROM v2v_credit_events ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .filter(|(_, kind, _)| kind == "submit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            before
+                .iter()
+                .filter(|(_, kind, credit)| kind == "charge" && *credit == Some(8))
+                .count(),
+            1
+        );
+
+        // 后续拿到更准确的额度时追加新事实；旧行不被改写。
+        sqlx::query("UPDATE v2v_clips SET credit_count=44, updated_at=1700000100 WHERE id=?1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let after: Vec<(i64, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, event_type, credits FROM v2v_credit_events ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after[..before.len()], before);
+        assert!(after
+            .iter()
+            .any(|(_, kind, credit)| kind == "charge" && *credit == Some(44)));
+
+        remove(&pool, &[id]).await.unwrap();
+        let rows = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].channel_key, "channel-a");
+        assert_eq!(rows[0].spent_total, 44);
+        assert_eq!(rows[0].spent_failed_abandoned, 44);
+        assert_eq!(rows[0].events, 1, "一次提交只算一笔消费");
+    }
+
+    #[tokio::test]
+    async fn resumed_submission_moves_from_failed_to_pending_then_abandoned() {
+        let (pool, _d) = test_pool().await;
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        mark_submitted_on(
+            &pool,
+            id,
+            &SubmitReceipt::healthy("resume-ledger", 18),
+            "channel-a",
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        mark_failed(
+            &pool,
+            id,
+            Some("resume-ledger"),
+            "timeout",
+            "等待超时",
+            1_700_000_100,
+        )
+        .await
+        .unwrap();
+        let failed = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(failed[0].spent_failed_abandoned, 18);
+
+        assert!(resume_timed_out(&pool, id, 1_700_000_200).await.unwrap());
+        let pending = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(pending[0].spent_pending, 18);
+        assert_eq!(pending[0].spent_failed_abandoned, 0);
+
+        remove(&pool, &[id]).await.unwrap();
+        let abandoned = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(abandoned[0].spent_pending, 0);
+        assert_eq!(abandoned[0].spent_failed_abandoned, 18);
+    }
+
+    #[tokio::test]
+    async fn credit_event_report_conserves_categories_ranges_and_pass_rate_inputs() {
+        let (pool, _d) = test_pool().await;
+        let cases = [
+            (1, "pass-1", "channel-a", 10, "pass", 1_700_000_000),
+            (2, "rej-1", "channel-a", 20, "rej", 1_700_086_400),
+            (3, "fail-1", "channel-b", 30, "fail", 1_700_172_800),
+            (4, "pending-1", "channel-b", 40, "pending", 1_700_259_200),
+        ];
+        for (work, submit, channel, credit, outcome, at) in cases {
+            seed_work(&pool, work).await;
+            enqueue_one(&pool, work).await;
+            let id = list_by_stages(&pool, &["rewrite"])
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| c.work_id == work)
+                .unwrap()
+                .id;
+            mark_submitted_on(
+                &pool,
+                id,
+                &SubmitReceipt::healthy(submit, credit),
+                channel,
+                at,
+            )
+            .await
+            .unwrap();
+            match outcome {
+                "pass" | "rej" => {
+                    mark_ready_for_review(
+                        &pool,
+                        id,
+                        submit,
+                        "/v.mp4",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(credit),
+                        None,
+                        at + 10,
+                    )
+                    .await
+                    .unwrap();
+                    set_reviewed(&pool, id, outcome, at + 20).await.unwrap();
+                }
+                "fail" => {
+                    mark_failed(&pool, id, Some(submit), "provider", "失败", at + 20)
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        let rows = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let total: i64 = rows.iter().map(|r| r.spent_total).sum();
+        let categories: i64 = rows
+            .iter()
+            .map(|r| r.spent_pass + r.spent_rej + r.spent_pending + r.spent_failed_abandoned)
+            .sum();
+        assert_eq!(total, 100);
+        assert_eq!(categories, total, "四类之和必须守恒");
+        assert_eq!(rows.iter().map(|r| r.passed).sum::<i64>(), 1);
+        assert_eq!(rows.iter().map(|r| r.reviewed).sum::<i64>(), 2);
+
+        let recent = credit_events_by_channel(&pool, Some(1_700_172_800))
+            .await
+            .unwrap();
+        assert_eq!(recent.iter().map(|r| r.spent_total).sum::<i64>(), 70);
+        let daily = credit_event_trend(&pool, None, false).await.unwrap();
+        assert!(!daily.is_empty());
+        assert_eq!(daily.iter().map(|r| r.spent).sum::<i64>(), 100);
+        let monthly = credit_event_trend(&pool, None, true).await.unwrap();
+        assert_eq!(monthly.iter().map(|r| r.spent).sum::<i64>(), 100);
+    }
+
+    #[tokio::test]
+    async fn credit_event_migration_backfills_existing_clips() {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE v2v_clips (
+               id INTEGER PRIMARY KEY, submit_id TEXT, model_version TEXT,
+               first_submitted_at INTEGER, submitted_at INTEGER, finished_at INTEGER,
+               created_at INTEGER, updated_at INTEGER, reviewed_at INTEGER,
+               credit_count INTEGER, submit_credit INTEGER, stage TEXT
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO v2v_clips VALUES
+             (1,'legacy-submit','legacy-channel',100,NULL,200,10,300,300,12,NULL,'pass')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0033_v2v_credit_events.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let events: Vec<(String, i64, String, i64)> = sqlx::query_as(
+            "SELECT event_type, is_backfill, channel_key, COALESCE(credits,0)
+               FROM v2v_credit_events ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ("submit".into(), 1, "legacy-channel".into(), 12),
+                ("pass".into(), 1, "legacy-channel".into(), 0),
+            ]
+        );
+        let rows = credit_events_by_channel(&pool, None).await.unwrap();
+        assert_eq!(rows[0].spent_pass, 12);
+        assert_eq!(rows[0].passed, 1);
+        assert_eq!(rows[0].reviewed, 1);
     }
 
     // 一天只记第一次。**故意不是 UPSERT**：当天第二次写会用一个更晚的余额覆盖掉，
@@ -3150,10 +3432,6 @@ mod tests {
             Some(80),
             "花掉的加回来之后，剩下的就是每日进账"
         );
-
-        let recent = recent_credit_days(&pool, 14).await.unwrap();
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].day, "2026-07-28", "折线要按日期正序");
     }
 
     // 采样保留期是观测窗口：到期的裁掉，窗口内的一个都不能少。
@@ -3192,18 +3470,24 @@ mod tests {
     async fn count_running_matches_list_running_exactly() {
         let (pool, _d) = test_pool().await;
         assert_eq!(count_running(&pool).await.unwrap(), 0);
-        let id = seed_reviewable(&pool, 1).await; // 走到 rev，已不在 run
-        assert_eq!(count_running(&pool).await.unwrap(), 0);
-        // 退回去重跑再提交一次 → 回到 run 且有 submit_id。
-        assert!(requeue_for_run(&pool, id, None, 400).await.unwrap());
-        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-2", 8), 500)
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-1", 8), 500)
             .await
             .unwrap();
         assert_eq!(count_running(&pool).await.unwrap(), 1);
         assert_eq!(list_running(&pool).await.unwrap().len(), 1);
         // run 但**没有** submit_id（= 提交到一半被杀的孤儿）两边都必须同时不数它：
         // 退回 ready 再认领一次，就停在「已认领、还没拿到 submit_id」那一格。
-        assert!(requeue_for_run(&pool, id, None, 700).await.unwrap());
+        assert!(requeue_for_run(&pool, id, Some("sub-1"), 700)
+            .await
+            .unwrap());
         assert_eq!(claim_ready(&pool, &[id], 700).await.unwrap().len(), 1);
         assert_eq!(count_running(&pool).await.unwrap(), 0);
         assert_eq!(list_running(&pool).await.unwrap().len(), 0);
@@ -3217,8 +3501,14 @@ mod tests {
     #[tokio::test]
     async fn discarding_a_submit_only_touches_the_one_that_was_read() {
         let (pool, _d) = test_pool().await;
-        let id = seed_reviewable(&pool, 1).await;
-        assert!(requeue_for_run(&pool, id, None, 500).await.unwrap());
+        seed_work(&pool, 1).await;
+        enqueue_one(&pool, 1).await;
+        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
+        let mut tx = pool.begin().await.unwrap();
+        apply_rewrite(&mut tx, id, "视频提示词", None, None, None, 200)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
         mark_submitted(&pool, id, &SubmitReceipt::healthy("sub-new", 8), 600)
             .await
             .unwrap();

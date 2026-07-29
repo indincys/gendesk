@@ -8,18 +8,18 @@ import {
   deriveRows,
   matchFilter,
   rankRows,
-  topChannels,
+  statusChannels,
 } from "@/features/v2v/model";
 import {
   type ActivityEntry,
   type AutofillStatus,
   type ClipView,
-  type CreditStats,
   type EffectiveParams,
   type HandoffStatus,
   type ModelInfo,
   type QueueStats,
   type StageCounts,
+  type V2vCreditReport,
   type V2vRefresh,
   type V2vTick,
   commands,
@@ -29,7 +29,7 @@ import {
 import { create } from "zustand";
 
 /**
- * 视频流水线的镜像与筛选态（Zustand 只做事件镜像与 UI 态，业务真相在 Rust）。
+ * 视频生成的镜像与筛选态（Zustand 只做事件镜像与 UI 态，业务真相在 Rust）。
  *
  * ## 为什么它比「一个徽章计数」大得多（v0.24.0）
  *
@@ -46,7 +46,7 @@ import { create } from "zustand";
  *
  * ## 变更动作不在这里
  *
- * 提交 / 验收 / 重跑 / 换通道 / 收录改写都留在页面：它们要串 toast、确认卡、
+ * 提交 / 验收 / 恢复 / 换通道 / 收录改写都留在页面：它们要串 toast、确认卡、
  * 判完之后把光标推到下一条。搬进来只会让 store 变成第二个页面。
  */
 
@@ -68,7 +68,7 @@ interface V2vState {
   models: ModelInfo[];
   eff: EffectiveParams | null;
   queue: QueueStats | null;
-  credit: CreditStats | null;
+  credit: V2vCreditReport | null;
   handoff: HandoffStatus | null;
   autofill: AutofillStatus | null;
   tick: V2vTick | null;
@@ -220,7 +220,7 @@ export const useV2vStore = create<V2vState>((set, get) => ({
     void s.reloadEff();
     void s.reloadHandoff();
     // 余额要跑一次 CLI（秒级），与页面主体并行加载，拉不到就少显示一段。
-    void unwrap(commands.v2vCreditStats())
+    void unwrap(commands.v2vCreditReport("30d"))
       .then((credit) => set({ credit }))
       .catch(() => {});
     void unwrap(commands.v2vActivity())
@@ -264,7 +264,7 @@ export const useV2vStore = create<V2vState>((set, get) => ({
         const wasActive = get().refresh?.active === true;
         set({ refresh });
         if (wasActive && !refresh.active) {
-          void unwrap(commands.v2vCreditStats())
+          void unwrap(commands.v2vCreditReport("30d"))
             .then((credit) => set({ credit }))
             .catch(() => {});
         }
@@ -395,7 +395,8 @@ export function selectChannels(s: V2vState): Channel[] {
   return channels;
 }
 
-let topMemo: { key: Channel[]; top: Channel[] } | null = null;
+let topMemo: { key: Channel[]; stats: QueueStats["channels"] | undefined; top: Channel[] } | null =
+  null;
 
 /**
  * 顶栏那排状态灯与列表顶上那排快捷筛选片读的**同一份**前三通道。
@@ -405,9 +406,10 @@ let topMemo: { key: Channel[]; top: Channel[] } | null = null;
  */
 export function selectTopChannels(s: V2vState): Channel[] {
   const channels = selectChannels(s);
-  if (topMemo && topMemo.key === channels) return topMemo.top;
-  const top = topChannels(channels);
-  topMemo = { key: channels, top };
+  if (topMemo && topMemo.key === channels && s.queue?.channels === topMemo.stats)
+    return topMemo.top;
+  const top = statusChannels(channels, s.queue?.channels ?? []);
+  topMemo = { key: channels, stats: s.queue?.channels, top };
   return top;
 }
 

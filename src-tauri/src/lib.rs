@@ -85,14 +85,14 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::pause_queue,
             commands::batches::resume_queue,
             commands::tasks::list_tasks,
-            commands::tasks::retry_task,
-            commands::tasks::retry_failed_tasks,
+            commands::tasks::recover_task,
+            commands::tasks::recover_failed_tasks,
             commands::tasks::delete_task,
             commands::tasks::delete_tasks,
             commands::tasks::cancel_tasks,
-            commands::tasks::retry_tasks,
+            commands::tasks::recover_tasks,
             commands::tasks::delete_failed_tasks,
-            commands::tasks::retry_interrupted_tasks,
+            commands::tasks::recover_interrupted_tasks,
             commands::tasks::count_interrupted,
             // review 域
             commands::review::list_pending_review,
@@ -119,7 +119,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::intake::confirm_intake_job,
             commands::intake::open_intake_dir,
             commands::intake::pick_intake_root,
-            // v2v 域（图生视频流水线）
+            // v2v 域（视频生成）
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,
             commands::v2v::pick_handoff_root,
@@ -130,10 +130,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::v2v_models,
             commands::v2v::v2v_credit,
             commands::v2v::v2v_balance,
-            commands::v2v::v2v_credit_stats,
+            commands::v2v::v2v_credit_report,
             commands::v2v::v2v_queue_stats,
             commands::v2v::v2v_queue_trend,
-            commands::v2v::v2v_credit_daily,
             commands::v2v::v2v_autofill_status,
             commands::v2v::v2v_away_digest,
             commands::v2v::v2v_mark_seen,
@@ -156,7 +155,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::unqueue_v2v_clips,
             commands::v2v::poll_v2v_now,
             commands::v2v::review_v2v_clips,
-            commands::v2v::requeue_v2v_clips,
+            commands::v2v::recover_v2v_clips,
+            commands::v2v::rewrite_v2v_clips,
+            commands::v2v::resume_v2v_clips,
             commands::v2v::undo_v2v,
             commands::v2v::remove_v2v_clips,
             commands::v2v::open_clips_output_dir,
@@ -291,15 +292,18 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
-        // single-instance 必须最先注册（保护任务队列与号池，禁双开）。
-        //
-        // 窗口现在会被藏起来（关窗 = 收起，见 `shell`），于是「再打开一次 app」就成了
-        // 把它叫回来的主要路径 —— 而原来这里只 `set_focus`，对一个隐藏的窗口毫无作用：
-        // 表现是双击图标什么都不发生，与「进程已经死了」一模一样。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let app_builder = tauri::Builder::default();
+    // single-instance 必须最先注册（保护任务队列与号池，禁双开）。唯一例外是显式指定了
+    // 隔离数据目录的调试验收实例：它与生产库完全分开，且必须能和正式应用并排打开。
+    let app_builder = if debug_data_dir_override().is_some() {
+        app_builder
+    } else {
+        app_builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             shell::show_main_window(app);
         }))
+    };
+
+    app_builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -371,6 +375,28 @@ fn fatal_dialog(message: &str) {
         .show();
 }
 
+/// 调试构建允许把数据根钉到隔离目录，供桌面 WebView 验收使用。
+///
+/// 发布构建忽略该变量，避免一个外部环境变量把真实用户数据悄悄切到别处。开发验收则
+/// 必须有这条逃生口：直接启动应用会打开生产库，任何批量操作测试都会污染真实任务。
+fn debug_data_dir_override() -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("GENDESK_DATA_DIR") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn app_data_dir(app: &tauri::App) -> Result<std::path::PathBuf, tauri::Error> {
+    if let Some(path) = debug_data_dir_override() {
+        return Ok(path);
+    }
+    app.path().app_data_dir()
+}
+
 /// setup 钩子中所有可失败的初始化步骤。抽出为独立函数，使调用方能把失败
 /// 转成干净退出，而非让 Tauri 在 setup 返回 `Err` 时内部 panic（abort → 崩溃弹窗）。
 ///
@@ -378,7 +404,7 @@ fn fatal_dialog(message: &str) {
 /// 报 `VersionMissing`；此前该错误经 `?` 上抛 → Tauri panic → SIGABRT。
 fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 数据目录 + 日志 + DB 池 + 密钥存储 + 引擎，装配为 AppState。
-    let data_dir = app.path().app_data_dir()?;
+    let data_dir = app_data_dir(app)?;
     let dirs = Arc::new(files::DataDirs::new(&data_dir));
     dirs.init()?;
 

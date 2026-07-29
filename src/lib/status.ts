@@ -15,7 +15,7 @@ export function statusVisual(status: string): StatusVisual {
     case "run":
       return { label: "生成中", badgeClass: "b-blue", spinner: true };
     case "retry":
-      return { label: "重试中", badgeClass: "b-blue", spinner: true };
+      return { label: "自动恢复", badgeClass: "b-blue", spinner: true };
     case "rev":
       return { label: "待验收", badgeClass: "b-amber", spinner: false };
     case "pass":
@@ -184,7 +184,7 @@ export function errorLabel(errorType?: string | null): string {
     case "Auth":
       return "Key 已失效";
     case "Interrupted":
-      return "因中断请重试";
+      return "因中断待恢复";
     default:
       return "生成失败";
   }

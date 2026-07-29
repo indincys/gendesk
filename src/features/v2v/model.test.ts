@@ -15,10 +15,11 @@ import {
   rankRows,
   removalRisk,
   sliceSummary,
+  statusChannels,
   topChannels,
   trailOf,
 } from "@/features/v2v/model";
-import type { ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
+import type { ChannelStat, ClipView, EffectiveParams, ModelInfo } from "@/lib/ipc";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -274,7 +275,7 @@ describe("本地待发队列（0028）", () => {
         polledAt: NOW - 30,
       }),
     ]);
-    expect(r?.situation).toBe("已出片 · 正在取回到本地，失败会自动重试");
+    expect(r?.situation).toBe("已出片 · 正在取回到本地，失败会自动恢复");
     expect(r?.situation).not.toContain("即梦在跑");
     // 已经扣过费了，所以它绝不该被当成幽灵单（那句话会说「重跑不花钱」）。
     expect(r?.phantomLive).toBe(false);
@@ -342,10 +343,10 @@ describe("超时与幽灵的处置必须相反", () => {
     expect(r?.situation).toContain("继续等待");
   });
 
-  it("判死的幽灵单说「免费重跑 · 从未计费」", () => {
+  it("判死的幽灵单说「可恢复 · 从未计费」", () => {
     const [r] = derive([clip({ stage: "fail", errorType: "phantom", videoPath: null })]);
     expect(r?.signals.has("phantom")).toBe(true);
-    expect(r?.situation).toContain("免费重跑");
+    expect(r?.situation).toContain("可恢复");
     expect(r?.credit).toBe(0);
   });
 
@@ -503,11 +504,6 @@ describe("信号", () => {
 
     // 空白串等同于没有 —— 交付路径是从文件系统回来的，别指望它只会是 null。
     expect(derive([clip({ stage: "pass", exportPath: "  " })])[0]?.situation).toContain("未交付");
-  });
-
-  it("重跑过 = 尝试次数 > 1（同一张图已经花过不止一份额度）", () => {
-    expect(derive([clip({ attempt: 2 })])[0]?.signals.has("rerun")).toBe(true);
-    expect(derive([clip({ attempt: 1 })])[0]?.signals.has("rerun")).toBe(false);
   });
 });
 
@@ -1163,6 +1159,54 @@ describe("快捷通道（topChannels）", () => {
     expect(top.map((c) => c.key)).toEqual(["a", "b"]);
     expect(top[0]?.live).toBe(0);
   });
+});
+
+describe("状态栏通道（statusChannels）", () => {
+  const stat = (modelVersion: string, running: number, queued = 0): ChannelStat => ({
+    modelVersion,
+    label: modelVersion,
+    vip: false,
+    running,
+    limit: 1,
+    observedLimit: null,
+    queued,
+    ready: 0,
+    frontQueueIdx: null,
+    oldestWait: 0,
+    autoRunning: 0,
+    autofill: false,
+  });
+
+  it("超过三条活跃通道时全部保留", () => {
+    const rows = derive(
+      ["a", "b", "c", "d", "e"].map((modelVersion, i) =>
+        clip({ id: i + 1, modelVersion, stage: "run", videoPath: null }),
+      ),
+    );
+    const channels = buildChannels(rows, MODELS);
+    const shown = statusChannels(
+      channels,
+      ["a", "b", "c", "d", "e"].map((key) => stat(key, 1)),
+    );
+    expect(shown.map((c) => c.key)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("活跃不足三条时用高频空闲通道补足", () => {
+    const rows = derive([
+      clip({ id: 1, modelVersion: "a", stage: "run", videoPath: null }),
+      clip({ id: 2, modelVersion: "b", stage: "pass" }),
+      clip({ id: 3, modelVersion: "b", stage: "pass" }),
+      clip({ id: 4, modelVersion: "c", stage: "pass" }),
+    ]);
+    const shown = statusChannels(buildChannels(rows, MODELS), [stat("a", 1)]);
+    expect(shown.map((c) => c.key)).toEqual(["a", "b", "c"]);
+  });
+});
+
+it("六个视频阶段使用互不重复的稳定颜色", () => {
+  const colors = WORKBENCH_ACTIONS.map((action) => ACTION_META[action].dot);
+  expect(colors).toHaveLength(6);
+  expect(new Set(colors).size).toBe(6);
 });
 
 describe("换通道时的参数带过去（carryParams）", () => {

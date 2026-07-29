@@ -678,13 +678,13 @@ impl Timeout {
     fn message(self, ms: u128) -> String {
         let secs = self.duration().as_secs();
         match self {
-            Self::Read => format!("即梦 CLI 超过 {secs} 秒没有响应，已终止（{ms}ms）。只读查询，未产生任何副作用，下一轮会自动重试。"),
+            Self::Read => format!("即梦 CLI 超过 {secs} 秒没有响应，已终止（{ms}ms）。只读查询，未产生任何副作用，下一轮会自动恢复。"),
             Self::Download => format!("即梦 CLI 下载成片超过 {secs} 秒未完成，已终止（{ms}ms）。成片仍在即梦那边，下一轮会重新下载，不额外花钱。"),
             Self::Submit => format!(
                 "即梦 CLI 提交超过 {secs} 秒没有响应，已终止（{ms}ms）。\
                  **这一单可能已经下出去并扣了费，而 submit_id 随进程一起丢了。**\
-                 重跑等于再花一份钱 —— 先用这条提示词去即梦的任务列表核对有没有同一条在跑，\
-                 确认没有再重跑。"
+                 恢复等于再花一份钱 —— 先用这条提示词去即梦的任务列表核对有没有同一条在跑，\
+                 确认没有再恢复。"
             ),
             #[cfg(test)]
             Self::Custom(_) => format!("即梦 CLI 超过 {secs} 秒没有响应，已终止（{ms}ms）。"),

@@ -69,9 +69,7 @@ export function V2vPreview({
           {meta.label}
         </span>
         <div className="f1" />
-        <span className="fs11 t3 nowrap">
-          {total === 0 ? "这一档是空的" : `第 ${index} / ${total} 条 · ↑↓ 换条`}
-        </span>
+        <span className="fs11 t3 nowrap">{total === 0 ? "空" : `${index} / ${total}`}</span>
         <div className="seg">
           <span
             className={cn("sgi", !asFrame && "on", !video && "dis")}
@@ -114,7 +112,6 @@ export function V2vPreview({
             {c.fps != null && ` · ${Math.round(c.fps)}fps`}
           </span>
           <div className="f1" />
-          <span className="mono">{video && frame ? "F 对照首帧 · ⏎ 全屏看片" : ""}</span>
         </div>
       </div>
     </div>

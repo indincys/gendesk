@@ -255,8 +255,8 @@ export function WorksPage() {
     const ids = [...sel];
     try {
       const n = await unwrap(commands.enqueueWorksV2v(ids));
-      if (n === 0) toast("所选作品都已在视频流水线里");
-      else toast.success(`已加入视频流水线 ${n} 条`);
+      if (n === 0) toast("所选作品都已在视频生成中");
+      else toast.success(`已加入视频生成 ${n} 条`);
       exitSelect();
       void load();
       if (n > 0) go("v2v");
@@ -287,10 +287,10 @@ export function WorksPage() {
               className="btn sm"
               disabled={sel.size === 0}
               onClick={batchToPipeline}
-              title="加入视频流水线（正常无需手动：用途=图生视频的组，验收通过即自动入队）"
+              title="加入视频生成"
             >
               <Clapperboard className="ic12" />
-              加入视频流水线
+              加入视频生成
             </button>
             <button
               type="button"
@@ -589,7 +589,7 @@ export function WorksPage() {
                     onClick={async () => {
                       try {
                         await unwrap(commands.enqueueWorksV2v([detail.id]));
-                        toast.success("已加入视频流水线");
+                        toast.success("已加入视频生成");
                         setDetail(null);
                         void load();
                       } catch (e) {
@@ -598,7 +598,7 @@ export function WorksPage() {
                     }}
                   >
                     <Clapperboard className="ic12" />
-                    加入视频流水线
+                    加入视频生成
                   </button>
                 )}
               </div>

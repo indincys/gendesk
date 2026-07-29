@@ -1,5 +1,6 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
+import { DescriptionHint } from "@/components/ui/Tooltip";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { IntakeSection } from "@/features/settings/IntakeSection";
 import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
@@ -133,7 +134,7 @@ export function SettingsPage() {
   const enabledCount = keys.filter((k) => k.enabled).length;
 
   return (
-    <PageScaffold title="设置" caption="API Key · 调度与重试 · 输出 · 通用">
+    <PageScaffold title="设置" caption="API Key · 调度 · 输出 · 通用">
       <div className="swrap">
         {/* ---------------- API Key（任务4：默认折叠） ---------------- */}
         <section className="sec">
@@ -260,14 +261,18 @@ export function SettingsPage() {
           )}
         </section>
 
-        {/* ---------------- 调度与重试 ---------------- */}
+        {/* ---------------- 调度与自动恢复 ---------------- */}
         <section className="sec">
           <div className="sechead">
-            <span className="fw6 fs13">调度与重试</span>
+            <span className="fw6 fs13">调度</span>
+            <DescriptionHint label="调度方式说明">
+              平均轮询会均匀使用可用 Key；成功率优先会先用历史成功率较高的 Key。
+            </DescriptionHint>
           </div>
           <div className="fx gap10">
             <div
               className={cn("rc", settings?.scheduleStrategy === "round_robin" && "on")}
+              title="任务平均分配到全部可用 Key"
               onClick={() =>
                 updateSettings({
                   scheduleStrategy: "round_robin",
@@ -279,12 +284,10 @@ export function SettingsPage() {
               }
             >
               <div className="fw5 fs13">平均轮询</div>
-              <div className="fs11 t3 mt4" style={{ lineHeight: 1.6 }}>
-                任务平均分配到全部可用 Key，吞吐稳定，适合各 Key 质量接近的场景
-              </div>
             </div>
             <div
               className={cn("rc", settings?.scheduleStrategy === "success_rate" && "on")}
+              title="优先使用历史成功率较高的 Key"
               onClick={() =>
                 updateSettings({
                   scheduleStrategy: "success_rate",
@@ -296,13 +299,13 @@ export function SettingsPage() {
               }
             >
               <div className="fw5 fs13">成功率优先</div>
-              <div className="fs11 t3 mt4" style={{ lineHeight: 1.6 }}>
-                优先调度历史成功率更高的 Key，失败自动切换，适合 Key 质量参差的场景
-              </div>
             </div>
           </div>
           <div className="fx ac gap10 mt14 wrap">
-            <span className="fs12 t2 nowrap">失败重试次数</span>
+            <span className="fs12 t2 nowrap">自动恢复次数</span>
+            <DescriptionHint label="自动恢复说明">
+              超时、限流或违规时切换可用 Key 再试；次数用尽后保留失败原因，等待人工处理。
+            </DescriptionHint>
             <Stepper
               value={settings?.retryCount ?? 1}
               min={0}
@@ -317,9 +320,6 @@ export function SettingsPage() {
                 })
               }
             />
-            <span className="fs11 t3">
-              超时 / 限流 / 违规默认各自动重试 1 次并切换可用 Key；再次失败则中断并保留错误原因
-            </span>
           </div>
           <div className="fx ac gap10 mt14 wrap">
             <span className="fs12 t2 nowrap">连续失败自动暂停</span>
@@ -339,9 +339,8 @@ export function SettingsPage() {
                 onChange={(v) => updateSettings({ globalFailThreshold: v })}
               />
             )}
-            <span className="fs11 t3">
-              跨全部 Key
-              连续这么多个任务失败即自动暂停队列并系统通知，避免无人值守时烧完额度；关闭则不熔断
+            <span className="fs11" style={{ color: "var(--wr2)" }}>
+              达到阈值后自动暂停，防止持续消耗
             </span>
           </div>
         </section>

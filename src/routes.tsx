@@ -72,7 +72,7 @@ export const ROUTES: readonly RouteDef[] = [
   },
   {
     key: "v2v",
-    label: "视频流水线",
+    label: "视频生成",
     shortcut: null,
     group: "make",
     component: V2vPage,

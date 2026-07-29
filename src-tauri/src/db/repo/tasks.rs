@@ -328,18 +328,25 @@ pub async fn mark_fail(
     Ok(())
 }
 
-/// 重新入队（fail/retry/rev → q），清错误，保留 retry_count。
-/// 用于手动/中断重试，以及验收页「微调重试」（rev 重新生成）。
-pub async fn requeue(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(
+/// 恢复一个无输出的失败任务（fail → q），清错误，保留自动恢复计数。
+///
+/// `rev/pass/rej` 明确不接受：它们已经有输出或已完成验收，不能借这个命令重新生成。
+pub async fn recover(
+    pool: &SqlitePool,
+    id: i64,
+    edited_prompt: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
         "UPDATE tasks SET status = 'q', error_type = NULL, error_message = NULL, updated_at = ?2
-         WHERE id = ?1 AND status IN ('fail','retry','rev')",
+             , prompt_text_snapshot = COALESCE(?3, prompt_text_snapshot)
+         WHERE id = ?1 AND status = 'fail'",
     )
     .bind(id)
     .bind(now_unix())
+    .bind(edited_prompt)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
 /// 删除单个任务（「不需要了」）。生成中/重试中的任务拒绝删除（返回 None），避免与在途
@@ -428,25 +435,24 @@ pub async fn delete_tasks_where(
     Ok((n, batches))
 }
 
-/// 按 id 批量回队（fail/retry/rev → q）。返回真正回队的 id（供调用方恢复批次状态）。
-pub async fn requeue_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<i64>, sqlx::Error> {
+/// 按 id 批量恢复失败任务。违规任务必须逐条改词，批量入口不接受；返回数据库真正更新的 id。
+pub async fn recover_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<i64>, sqlx::Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT id FROM tasks WHERE id IN ({ph}) AND status IN ('fail','retry','rev','pass','rej')"
+        "UPDATE tasks
+            SET status='q', error_type=NULL, error_message=NULL, updated_at=?
+          WHERE id IN ({ph}) AND status='fail'
+            AND (error_type IS NULL OR error_type <> 'ContentPolicy')
+          RETURNING id"
     );
-    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    let mut q = sqlx::query_scalar::<_, i64>(&sql).bind(now_unix());
     for id in ids {
         q = q.bind(id);
     }
-    let hit = q.fetch_all(pool).await?;
-    for id in &hit {
-        // 逐条走 requeue：它另有 pass/rej 不可回队的守卫，绕开它就等于两套规则。
-        requeue(pool, *id).await?;
-    }
-    Ok(hit)
+    q.fetch_all(pool).await
 }
 
 /// 一次退休扫描的账。
@@ -629,7 +635,7 @@ pub async fn recover_interrupted(pool: &SqlitePool) -> Result<Vec<i64>, sqlx::Er
     if !ids.is_empty() {
         sqlx::query(
             "UPDATE tasks SET status = 'fail', error_type = 'Interrupted',
-                error_message = '上次退出时任务被中断，任务现场已保留，可点击重试继续', updated_at = ?1
+                error_message = '上次退出时任务被中断，任务现场已保留，可点击恢复继续', updated_at = ?1
              WHERE status IN ('run','retry')",
         )
         .bind(now_unix())
@@ -870,6 +876,34 @@ mod tests {
         // 在途任务仍在，不被误删。
         assert!(get_task(&pool, ids[0]).await.unwrap().is_some());
         assert!(get_task(&pool, ids[1]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_only_updates_failed_tasks_and_reports_real_ids() {
+        let (pool, _d) = test_pool().await;
+        let (_bid, ids) = seed(&pool, 6).await;
+        set_status(&pool, ids[0], "fail").await.unwrap();
+        set_status(&pool, ids[1], "fail").await.unwrap();
+        sqlx::query("UPDATE tasks SET error_type='ContentPolicy' WHERE id=?1")
+            .bind(ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_status(&pool, ids[2], "rev").await.unwrap();
+        set_status(&pool, ids[3], "pass").await.unwrap();
+        set_status(&pool, ids[4], "rej").await.unwrap();
+        set_status(&pool, ids[5], "run").await.unwrap();
+
+        let done = recover_many(&pool, &ids).await.unwrap();
+        assert_eq!(done, vec![ids[0]], "只返回真正更新成功的失败任务");
+        for id in &ids[1..] {
+            assert_ne!(
+                get_task(&pool, *id).await.unwrap().unwrap().status,
+                "q",
+                "待验收、完成和在途任务都不得被恢复入口送回生成队列"
+            );
+        }
+        assert!(!recover(&pool, ids[3], None).await.unwrap());
     }
 
     #[tokio::test]

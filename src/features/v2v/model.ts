@@ -59,7 +59,7 @@ export const ACTION_META: Record<
     label: "异常",
     // 这一档里混着代价完全相反的两类，而它们长得一模一样 —— 所以这句话只说
     // 「先看花没花钱」，不替其中任何一类下结论。
-    note: "重跑前先看花没花钱：没扣过的免费，扣过的是第二份钱",
+    note: "无输出任务可恢复；可能已经计费的任务先核对远端",
     fg: "var(--er)",
     dot: "var(--sg-fail)",
   },
@@ -88,7 +88,7 @@ export const ACTION_META: Record<
     label: "队列",
     note: "已放行 · 在等这条通道的空位，出一条自动补一条",
     fg: "var(--t3)",
-    dot: "var(--sg-ready)",
+    dot: "var(--sg-queued)",
   },
   wait: {
     // 「远端」= 东西在即梦那边。这一档存在的意义是与前面几档形成对照 ——
@@ -219,7 +219,7 @@ export const WORKBENCH_ACTIONS: NextAction[] = ACTION_ORDER.filter((a) => a !== 
  * 六个信号全部参与 `situation` 与详情栏那几句方向性提示，底坞的按钮组也读它们
  * 决定该摆「免费重跑」还是「继续等待」。少的只是「按信号筛一屏」这个入口。
  */
-export type SignalKey = "phantom" | "timeout" | "slow" | "rerun" | "vip" | "auto";
+export type SignalKey = "phantom" | "timeout" | "slow" | "vip" | "auto";
 
 /**
  * 列表的排序 —— **只有一种，没有开关**。
@@ -514,7 +514,6 @@ export function deriveRows(
     if (isPhantom) signals.add("phantom");
     if (isTimeout) signals.add("timeout");
     if (slow) signals.add("slow");
-    if (c.attempt > 1) signals.add("rerun");
     if (vip) signals.add("vip");
     if (c.autoSubmitted) signals.add("auto");
 
@@ -524,19 +523,19 @@ export function deriveRows(
     let situation: string;
     let situationTone: Row["situationTone"] = "t3";
     if (phantomLive) {
-      situation = "疑幽灵单 · 没入队也没扣费，重跑不花钱";
+      situation = "疑幽灵单 · 没入队也没扣费，可恢复";
       situationTone = "er";
     } else if (slow) {
       situation = `等待异常 · 已超同通道中位数 ${SLOW_FACTOR} 倍，别手动催`;
       situationTone = "wr";
     } else if (stage === "run" && c.awaitingDownload) {
       // 即梦已经做完了，卡的是**下载**（`query_result --download_dir` 走 CLI 自己的
-      // 30 秒 HTTP 超时，大文件或网络抖动就会失败，下一轮自动重试）。
+      // 30 秒 HTTP 超时，大文件或网络抖动就会失败，下一轮自动恢复）。
       //
       // 没有这一格的话，这一行会掉进下面那条「位次问不到」——而它根本没在跑，
       // `queue_idx` 的 0 是「已出队」不是位次。人看到的会是一条「即梦在跑」挂在
       // 那里好几轮，而真相是片子早就好了、钱也扣完了，只差最后一步落盘。
-      situation = "已出片 · 正在取回到本地，失败会自动重试";
+      situation = "已出片 · 正在取回到本地，失败会自动恢复";
       situationTone = "wr";
     } else if (stage === "run") {
       // 位次是排队几小时里**唯一**有意义的进度：「第 4485 位」和「第 12 位」是两件
@@ -559,13 +558,13 @@ export function deriveRows(
       situation = "继续等待 · 额度已扣，即梦还在跑";
       situationTone = "er";
     } else if (stage === "fail" && c.errorType === "phantom") {
-      situation = "免费重跑 · 从未计费";
+      situation = "可恢复 · 从未计费";
       situationTone = "er";
     } else if (stage === "fail" && c.errorType === "submit_timeout") {
       // 与上一条正好相反：幽灵单是「确认没花钱」，这一条是「不知道花没花」。
       // 提交的 CLI 被超时杀掉之前可能已经下过单，而 submit_id 随进程没了。
       // 直接重跑是这一格里最贵的一个误操作，所以这句话必须说「先核对」。
-      situation = "提交超时 · 可能已扣费，核对后再决定重跑";
+      situation = "提交超时 · 可能已扣费，核对后再恢复";
       situationTone = "er";
     } else if (stage === "fail") {
       situation = `失败 · ${c.errorType ?? "原因见执行日志"}`;
@@ -923,6 +922,26 @@ export function topChannels(channels: Channel[], n: number = TOP_CHANNELS): Chan
 }
 
 /**
+ * 顶栏通道：活跃通道一条都不截断；少于三条时再用常用空闲通道补位。
+ */
+export function statusChannels(
+  channels: Channel[],
+  stats: readonly ChannelStat[],
+  minimum: number = TOP_CHANNELS,
+): Channel[] {
+  const activeKeys = new Set(
+    stats.filter((s) => s.running > 0 || s.queued > 0).map((s) => s.modelVersion),
+  );
+  const active = channels.filter((c) => activeKeys.has(c.key));
+  if (active.length >= minimum) return active;
+  const fillers = topChannels(
+    channels.filter((c) => !activeKeys.has(c.key)),
+    minimum - active.length,
+  );
+  return [...active, ...fillers];
+}
+
+/**
  * 侧栏通道行的副行 —— 只说**这条队此刻堵没堵**，或**它贵在哪**。
  *
  * 「并发已满」排在 vip 前面：前者是此刻会改变决策的事（新单发不出去，该换条队），
@@ -1148,7 +1167,7 @@ export function trailOf(row: Row): TrailStep[] {
           key: "review",
           at: "—",
           what: "等你判定",
-          sub: st === "rev" ? "空格 通过 · X 不通过 · R 重跑" : "",
+          sub: "",
           state: st === "rev" ? "now" : "soon",
           tone: st === "rev" ? "rev" : "dim",
         },

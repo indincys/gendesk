@@ -94,7 +94,7 @@ export type {
   InboxIngestEvent,
   SheetChangedEvent,
   ExportProgressEvent,
-  // 视频流水线（图生视频）
+  // 视频生成（图生视频）
   ClipView,
   StageCounts,
   V2vSettings,
@@ -109,8 +109,10 @@ export type {
   ResPrice,
   SessionInfo,
   CreditInfo,
-  CreditStats,
-  CreditDayView,
+  CreditRange,
+  CreditTrendPoint,
+  ChannelCreditView,
+  V2vCreditReport,
   EffectiveParams,
   QueueStats,
   ChannelStat,
@@ -263,7 +265,7 @@ export async function subscribeIntakeProgress(
 }
 
 /**
- * 订阅视频流水线事件（阶段变化 / 已提交条目的轮询进度）。
+ * 订阅视频生成事件（阶段变化 / 已提交条目的轮询进度）。
  * 返回反订阅函数；非 Tauri 环境为 no-op。
  */
 export async function subscribeV2v(handlers: {

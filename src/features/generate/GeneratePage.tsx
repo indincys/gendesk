@@ -782,7 +782,7 @@ export function GeneratePage() {
               <span className="mono"> {wireParamsLabel(wire)}</span>
               <br />
               抽卡 ×{draws} = 每个组合请求 {draws} 次（每次 <span className="mono">n=1</span>
-              ，各自独立重试与验收）；去水印/元数据处理在本机执行，不进请求。
+              ，各自独立自动恢复与验收）；去水印/元数据处理在本机执行，不进请求。
             </div>
           </div>
         )}
@@ -820,7 +820,7 @@ export function GeneratePage() {
                   : `${combos} 组合 = ${taskTotal}`
               }
             />
-            <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含失败重试）`} />
+            <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含自动恢复）`} />
             <SummaryLine
               label="预计耗时"
               value={etaLabel(confirm.avgSec, taskTotal, enabledKeys)}

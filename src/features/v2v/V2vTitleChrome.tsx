@@ -1,7 +1,10 @@
+import { Tooltip } from "@/components/ui/Tooltip";
+import { V2vCreditModal } from "@/features/v2v/V2vCreditModal";
 import { type Channel, fmtAgo, fmtSpan } from "@/features/v2v/model";
 import { type AutofillStatus, type QueueStats, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { selectTopChannels, useV2vStore } from "@/stores/v2v";
+import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +24,7 @@ export function V2vTitleChrome() {
   // 「12 秒前」要自己走字，否则一个静止的读数比没有还误导。这个秒表只让已经收到的
   // 时间戳继续走，不去后端要数据 —— 它不是轮询。
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [showCredit, setShowCredit] = useState(false);
   useEffect(() => {
     const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(t);
@@ -35,9 +39,17 @@ export function V2vTitleChrome() {
         <ChannelPills queue={queue} auto={auto} />
       </div>
       <RefreshButton now={now} />
-      <div className="pill bal">
-        余额 <b>{balance ?? "—"}</b>
-      </div>
+      <Tooltip content="查看近期消费趋势、通道消费分类与验收通过率">
+        <button
+          type="button"
+          className="pill bal"
+          aria-haspopup="dialog"
+          onClick={() => setShowCredit(true)}
+        >
+          余额 <b>{balance ?? "—"}</b>
+        </button>
+      </Tooltip>
+      {showCredit && <V2vCreditModal onClose={() => setShowCredit(false)} />}
     </>
   );
 }
@@ -76,50 +88,45 @@ function RefreshButton({ now }: { now: number }) {
   const done = refresh?.done ?? 0;
   const total = refresh?.total ?? 0;
 
-  const label = busy
-    ? total > 0
-      ? `正在查 ${done}/${total}`
-      : "正在刷新"
-    : sweptAgo == null
-      ? "刷新 · 还没查过"
-      : `刷新 · 上次查询 ${fmtAgo(sweptAgo)}`;
+  const label = busy && total > 0 ? `刷新中 ${done}/${total}` : busy ? "刷新中" : "刷新";
+  const details = [
+    "立即查询队列位次、生成状态、额度与成片",
+    sweptAgo == null ? "尚未查询过即梦" : `上次查询：${fmtAgo(sweptAgo)}`,
+    `远端 ${running} 条`,
+    off ? "后台轮询已关闭" : "后台轮询已开启",
+    beat != null && beat > 30 ? `后台已 ${fmtAgo(beat)}没有心跳` : null,
+    error ? `上一轮出错：${error}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <button
-      type="button"
-      className={cn("refbtn", busy && "busy", off && "off", bad && "bad")}
-      disabled={busy}
-      onClick={() => {
-        // **不走页面那把重入锁**：那是给「会改状态、不能连点」的动作用的，而刷新要跑
-        // 几十秒，用它锁住整页等于刷新期间什么都干不了。命令本身立刻返回（活儿在 Rust
-        // 后台），重入由 Rust 侧的 `REFRESHING` 闸挡，界面这边只把按钮置灰。
-        void unwrap(commands.pollV2vNow())
-          .then((n) => {
-            // **进度一律只从事件来**，不在这里乐观地写一个 `active: true`。Rust 在
-            // spawn 之前就发了第一帧，而命令返回值走的是另一条通道 —— 一轮很快的刷新
-            // （在跑 0 条）完全可能先收到终帧、再收到这个 `.then()`，那样写下去就是把
-            // 已经结束的那一轮复活成「正在刷新」，按钮从此一直转下去。
-            if (n === 0) toast("即梦手上没有在跑的条目 —— 本地队列里那些它还不知道");
-          })
-          .catch((e) => {
-            if (e instanceof Error) toast.error(e.message);
-          });
-      }}
-      title={[
-        "点一下立刻逐条问一遍即梦：队列位次、生成状态、扣费额度、已出的片，全部现取。",
-        `即梦手上 ${running} 条${running > 0 ? "（本地队列里那些即梦还不知道，问不到）" : ""}`,
-        off
-          ? "后台轮询开关是关的 —— 不影响手动刷新，也不影响已扣额度的任务"
-          : "后台自己也在扫（含 VIP 5 分钟一次、全非 VIP 10 分钟一次）",
-        beat != null && beat > 30 ? `后台已 ${fmtAgo(beat)}没有心跳` : null,
-        error ? `上一轮出错：${error}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n")}
-    >
-      <span className="dot" />
-      {label}
-    </button>
+    <Tooltip content={details}>
+      <button
+        type="button"
+        className={cn("pill refbtn", busy && "busy", off && "off", bad && "bad")}
+        disabled={busy}
+        onClick={() => {
+          // **不走页面那把重入锁**：那是给「会改状态、不能连点」的动作用的，而刷新要跑
+          // 几十秒，用它锁住整页等于刷新期间什么都干不了。命令本身立刻返回（活儿在 Rust
+          // 后台），重入由 Rust 侧的 `REFRESHING` 闸挡，界面这边只把按钮置灰。
+          void unwrap(commands.pollV2vNow())
+            .then((n) => {
+              // **进度一律只从事件来**，不在这里乐观地写一个 `active: true`。Rust 在
+              // spawn 之前就发了第一帧，而命令返回值走的是另一条通道 —— 一轮很快的刷新
+              // （在跑 0 条）完全可能先收到终帧、再收到这个 `.then()`，那样写下去就是把
+              // 已经结束的那一轮复活成「正在刷新」，按钮从此一直转下去。
+              if (n === 0) toast("远端没有运行中的任务");
+            })
+            .catch((e) => {
+              if (e instanceof Error) toast.error(e.message);
+            });
+        }}
+      >
+        <RefreshCw className={cn("ic12", busy && "spin")} />
+        {label}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -216,68 +223,51 @@ function ChannelPill({
   // 常驻队列只写进悬停说明，**不另占一格**：它是「谁放行的」这条元信息，
   // 与「这条通道现在什么状况」不是一个问题，挤在同一排会把后者稀释掉。
   const mine = auto?.enabled === true && stat?.autofill === true;
+  const details = [
+    `${ch.label} 通道`,
+    queueing ? `最靠前任务排在第 ${front} 位` : running > 0 ? `${running} 条生成中` : "远端空闲",
+    stat != null && stat.oldestWait > 0 ? `最久已等 ${fmtSpan(stat.oldestWait)}` : null,
+    `本地队列 ${queued} 条`,
+    stat != null && stat.ready > 0 ? `待放行 ${stat.ready} 条` : null,
+    `未完成 ${ch.live} 条`,
+    stat != null ? `并发上限 ${stat.limit}` : null,
+    mine ? `常驻队列目标 ${auto?.depth} 条` : null,
+    on ? "再次点击取消筛选" : "点击筛选此通道",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <button
-      type="button"
-      className={cn("chpill", on && "on", running > 0 ? "live" : queued > 0 ? "hold" : "idle")}
-      onClick={onClick}
-      title={[
-        `${ch.label} 通道（${ch.key || "设置里没指定型号，实际通道由 CLI 挑"}）。`,
-        "即梦按模型通道各排各的队 —— 这条排满了，别的通道照样发得出去。",
-        queueing
-          ? `\n远端：最靠前那一单排在第 ${front} 位。`
-          : running > 0
-            ? `\n远端：${running} 条在生成中（还没问到排队位次）。`
-            : "\n远端：这条通道上暂时没有在跑的任务。",
-        stat != null && stat.oldestWait > 0 ? `最久那条已等 ${fmtSpan(stat.oldestWait)}。` : "",
-        `\n本地：${queued} 条已放行、正等这条通道的空位（出一条自动补一条，不必再点提交）`,
-        stat != null && stat.ready > 0 ? `；另有 ${stat.ready} 条还等着你点「确认提交」。` : "。",
-        `\n这条通道上还没走完的共 ${ch.live} 条。`,
-        stat != null ? `\n同时在跑上限 ${stat.limit} 条` : "",
-        stat == null
-          ? ""
-          : stat.observedLimit != null
-            ? "（本次运行实测出来的：再多发即梦会以 ExceedConcurrencyLimit 拒收）。"
-            : "（可在参数面板里调整）。",
-        mine
-          ? `\n常驻队列配在这条通道上：目标 ${auto?.depth} 条在跑，其中 ${stat?.autoRunning ?? 0} 条是它放的。${
-              auto?.blocked ? `当前停在「${auto.blocked}」。` : ""
-            }`
-          : "",
-        on
-          ? "\n\n再点一次取消通道筛选，看这一档的全部。"
-          : "\n\n点一下把当前这一档再缩到这条通道上，在跑的排最前。",
-      ].join("")}
-    >
-      <span className="dot" />
-      {/* VIP 不另挂标签：`short_label` 已经把它写进名字里（「2.0Fast VIP」），
-          再挂一个「VIP」小牌子就是同一件事说两遍。 */}
-      <span className="nm">{ch.label}</span>
-      {queueing ? (
-        <>
-          <span className="k">前方排队</span>
-          <span className="n nque">{front}</span>
-        </>
-      ) : running > 0 ? (
-        <>
-          <span className="k">任务中</span>
-          <span className="n nrun">{running}</span>
-        </>
-      ) : queued === 0 ? (
-        // 远端与本地都空着的那一格必须仍说点什么，否则一枚只剩通道名的胶囊
-        // 看着像是坏了。在制条数回答的正是「这条队还留着多少活」。
-        <>
-          <span className="k">在制</span>
-          <span className="n">{ch.live}</span>
-        </>
-      ) : null}
-      {queued > 0 && (
-        <>
-          <span className="k">本地队列</span>
-          <span className="n nloc">{queued}</span>
-        </>
-      )}
-    </button>
+    <Tooltip content={details}>
+      <button
+        type="button"
+        className={cn("chpill", on && "on", running > 0 ? "live" : queued > 0 ? "hold" : "idle")}
+        onClick={onClick}
+      >
+        <span className="dot" />
+        {/* VIP 不另挂标签：`short_label` 已经把它写进名字里（「2.0Fast VIP」），
+            再挂一个「VIP」小牌子就是同一件事说两遍。 */}
+        <span className="nm">{ch.label}</span>
+        {queueing ? (
+          <>
+            <span className="k">远端</span>
+            <span className="n nque">{front}</span>
+          </>
+        ) : running > 0 ? (
+          <>
+            <span className="k">生成</span>
+            <span className="n nrun">{running}</span>
+          </>
+        ) : queued === 0 ? (
+          <span className="k">空闲</span>
+        ) : null}
+        {queued > 0 && (
+          <>
+            <span className="k">本地</span>
+            <span className="n nloc">{queued}</span>
+          </>
+        )}
+      </button>
+    </Tooltip>
   );
 }

@@ -1,13 +1,7 @@
-import {
-  type CreditInfo,
-  type ModelInfo,
-  type SessionInfo,
-  type V2vSettings,
-  commands,
-  unwrap,
-} from "@/lib/ipc";
+import { DescriptionHint } from "@/components/ui/Tooltip";
+import { type ModelInfo, type SessionInfo, type V2vSettings, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, Check, FolderOpen, RefreshCw } from "lucide-react";
+import { AlertTriangle, Check, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,9 +18,7 @@ import { toast } from "sonner";
 export function V2vSection() {
   const [s, setS] = useState<V2vSettings | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [credit, setCredit] = useState<CreditInfo | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
-  const [checking, setChecking] = useState(false);
   /** 当前设置实际会执行哪个文件（后端探测结果）；null = 没找到。 */
   const [resolved, setResolved] = useState<string | null>(null);
   /** 当前生效的成片交付目录（留空时是回落后的默认，故要问后端而不是显示空串）。 */
@@ -67,21 +59,6 @@ export function V2vSection() {
     if (p.clipsOutputDir !== undefined) refreshClipsDir();
   };
 
-  const checkCredit = async () => {
-    setChecking(true);
-    try {
-      setCredit(await unwrap(commands.v2vCredit()));
-      // 顺带把会话列表取回来：这两件事都要跑一次 CLI，而人点「查余额」的时机
-      // 恰好就是「CLI 现在是通的」那一刻。
-      setSessions(await unwrap(commands.v2vSessions()).catch(() => []));
-    } catch (e) {
-      setCredit(null);
-      toast.error(String(e));
-    } finally {
-      setChecking(false);
-    }
-  };
-
   useEffect(() => {
     // 会话列表不阻塞渲染；读不到就退化成手填数字（下面那个 input 仍在）。
     void unwrap(commands.v2vSessions())
@@ -95,12 +72,17 @@ export function V2vSection() {
   return (
     <section className="sec">
       <div className="sechead">
-        <span className="fw6 fs13">图生视频</span>
-        <span className="pcap">交接目录 · 即梦 CLI · 默认生成参数</span>
+        <span className="fw6 fs13">视频生成</span>
+        <span className="pcap">目录 · CLI · 默认参数</span>
       </div>
 
-      <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-        交接目录 · Claude Code / Codex 侧的 skill 读写这里
+      <div className="fx ac gap4" style={{ marginBottom: 6 }}>
+        <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+          交接目录
+        </span>
+        <DescriptionHint label="交接目录说明">
+          待改写工单写入 v2v/待改写；skill 将结果写回 v2v/已改写，GenDesk 会自动收录。
+        </DescriptionHint>
       </div>
       <div className="fx ac gap10">
         <div className="pathwell f1">{s.handoffRoot}</div>
@@ -116,17 +98,13 @@ export function V2vSection() {
           更改目录
         </button>
       </div>
-      <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
-        待改写的工单自动写到 <span className="chip">v2v/待改写/</span>（队列一变就重写，
-        <b>不需要点任何导出</b>）；skill 把改写结果写回{" "}
-        <span className="chip">v2v/已改写/&lt;组&gt;/rewrite.jsonl</span>，GenDesk 监听收录。
-        <br />
-        skill 只做一件事：把生图提示词改写成图生视频提示词。
-        <b>提交、轮询、下载、重试、验收都在 GenDesk 里</b>——那些不是智能任务。
-      </div>
-
-      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-        成片交付目录 · 验收通过即拷到这里
+      <div className="fx ac gap4 mt14" style={{ marginBottom: 6 }}>
+        <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+          成片目录
+        </span>
+        <DescriptionHint label="成片目录说明">
+          验收通过后按组名与编号复制到这里；应用内成片仍会保留。
+        </DescriptionHint>
       </div>
       <div className="fx ac gap10">
         <div className="pathwell f1">{clipsDir || "—"}</div>
@@ -151,17 +129,13 @@ export function V2vSection() {
           打开
         </button>
       </div>
-      <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
-        验收通过的成片按 <span className="chip">&lt;组名&gt;/&lt;编号&gt;_&lt;日期&gt;.mp4</span>{" "}
-        拷到这里。成片是 B-roll 素材，下游是剪辑而不是发布 —— 所以它该落在你自己的工作目录里。
-        {s.clipsOutputDir?.trim() ? "" : "（当前是默认位置）"}
-        <br />
-        流水线内部那份 <span className="chip">clips/</span> 一直保留（封面、重跑、撤销都指着它），
-        这里是<b>拷贝</b>不是搬移；删掉交付出去的那份还能在成片页「重新交付」。
-      </div>
-
-      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-        即梦 CLI
+      <div className="fx ac gap4 mt14" style={{ marginBottom: 6 }}>
+        <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+          即梦 CLI
+        </span>
+        <DescriptionHint label="CLI 路径说明">
+          留空时自动探测；从访达启动可能读不到终端 PATH，探测失败时请选择绝对路径。
+        </DescriptionHint>
       </div>
       <div className="fx ac gap10">
         <input
@@ -182,19 +156,9 @@ export function V2vSection() {
           <FolderOpen className="ic12" />
           选择文件
         </button>
-        <button type="button" className="btn sm gho" disabled={checking} onClick={checkCredit}>
-          <RefreshCw className="ic12" />
-          查余额
-        </button>
-        {credit != null && (
-          <>
-            <span className="bdg b-green">{credit.totalCredit} 额度</span>
-            {credit.vipLevel && <span className="chip">{credit.vipLevel}</span>}
-          </>
-        )}
       </div>
       {/* 「路径填什么」不该由人回答：直接把解析结果摆出来，说清实际会执行哪个文件。 */}
-      <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
+      <div className="fs11 t3 mt6">
         {resolved ? (
           <span className="fx ac gap6">
             <Check className="ic12" style={{ color: "var(--ok)" }} />
@@ -203,15 +167,9 @@ export function V2vSection() {
         ) : (
           <span className="fx ac gap6" style={{ color: "var(--wr)" }}>
             <AlertTriangle className="ic12" />
-            没探测到即梦 CLI。终端里跑 <span className="chip">which dreamina</span>
-            ，把输出用「选择文件」选中或粘贴到上面。
+            未找到即梦 CLI
           </span>
         )}
-        <br />
-        留空即自动探测（PATH 与 <span className="chip">~/.local/bin</span> 等常见安装位置）。
-        <b>从访达启动的应用拿不到终端的 PATH</b>，所以「终端里能跑」不等于这里能找到 ——
-        探测不到时填绝对路径最稳。需先在终端跑一次 <span className="chip">dreamina login</span>{" "}
-        完成授权。
       </div>
 
       <div className="fx ac gap10 mt14">
@@ -230,9 +188,9 @@ export function V2vSection() {
             关
           </span>
         </div>
-        <span className="fs11 t3">
-          关掉后已提交的条目不再自动取回（排查时用）；额度已扣的任务不会丢，重新打开即接着轮询。
-        </span>
+        <DescriptionHint label="后台轮询说明">
+          关闭后停止自动取回；已提交任务不会丢失，重新开启后继续查询。
+        </DescriptionHint>
       </div>
 
       {/* 超时上限。默认不限 —— 判死一条还在跑的任务代价是钱（额度已扣、即梦那边照跑），
@@ -252,15 +210,19 @@ export function V2vSection() {
           <option value={12}>12 小时</option>
           <option value={24}>24 小时</option>
         </select>
-        <span className="fs11 t3" style={{ lineHeight: 1.7 }}>
-          即梦排队可能很久（实测提交 72 分钟后仍在 <span className="chip">querying</span>）。
-          <b>不限</b>意味着睡前提交、第二天醒来收片；轮询会自动退避（等满一小时后每 10
-          分钟才问一次），挂着不费什么。
-        </span>
+        <DescriptionHint label="超时规则说明">
+          即梦排队可能持续数小时；不限会持续等待，轮询频率会自动降低。
+        </DescriptionHint>
+        {s.timeoutHours != null && <span className="bdg b-amber">超时后恢复可能再次计费</span>}
       </div>
 
-      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-        默认生成参数
+      <div className="fx ac gap4 mt14" style={{ marginBottom: 6 }}>
+        <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
+          默认生成参数
+        </span>
+        <DescriptionHint label="默认参数说明">
+          只影响新任务；改写结果给出的单条参数优先。
+        </DescriptionHint>
       </div>
       <div className="fx ac gap10 wrap">
         <select
@@ -342,12 +304,6 @@ export function V2vSection() {
             onBlur={() => void save({ session: s.session ?? null })}
           />
         )}
-      </div>
-      <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
-        改写 skill 若对某一条给了具体建议（这条动势大就给 8 秒），
-        <b>以它为准</b>——那是看过图之后的判断，这里的值只作兜底。
-        <br />
-        视频流水线页顶部的「生成参数」按同一份设置显示<b>实际会发出去的命令行</b>与额度用量。
       </div>
     </section>
   );

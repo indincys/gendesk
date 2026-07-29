@@ -347,7 +347,7 @@ async fn filter_live_clip_files(
             tracing::warn!(
                 trash_id = r.id,
                 clip_id = ?r.ref_id,
-                "废纸篓项指向的成片文件仍被活着的 clip 引用（多半是判过不通过又重跑了），跳过物理删除"
+                "废纸篓项指向的成片文件仍被活着的 clip 引用（多半是判过不通过后又恢复或改投），跳过物理删除"
             );
             continue;
         }

@@ -492,23 +492,23 @@ async listTasks(batchId: number | null, statusGroup: string | null, page: number
 }
 },
 /**
- * 手动重试单个失败任务（可携带微调提示词写入快照，R8）。
+ * 恢复单个无输出的失败任务，可先修改提示词。
  */
-async retryTask(id: number, editedPrompt: string | null) : Promise<Result<null, AppError>> {
+async recoverTask(id: number, editedPrompt: string | null) : Promise<Result<BulkTaskResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_task", { id, editedPrompt }) };
+    return { status: "ok", data: await TAURI_INVOKE("recover_task", { id, editedPrompt }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * 重试全部失败任务（E06：默认排除违规类 ContentPolicy——原样重试必再违规，
- * 应走「改词重试」E34 单独处理）。跨全部批次，不再按批次划范围。
+ * 恢复全部失败任务。默认排除 ContentPolicy：原提示词再次提交不会改变结果，
+ * 这类必须逐条改词后恢复。
  */
-async retryFailedTasks() : Promise<Result<number, AppError>> {
+async recoverFailedTasks() : Promise<Result<BulkTaskResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_failed_tasks") };
+    return { status: "ok", data: await TAURI_INVOKE("recover_failed_tasks") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -553,11 +553,11 @@ async cancelTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
 }
 },
 /**
- * 批量重试所选（任务队列的「重试所选」）。生成中/排队中的任务不参与，计入 skipped。
+ * 批量恢复所选。只有无输出的 fail 参与，其余全部计入 skipped。
  */
-async retryTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
+async recoverTasks(ids: number[]) : Promise<Result<BulkTaskResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_tasks", { ids }) };
+    return { status: "ok", data: await TAURI_INVOKE("recover_tasks", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -575,11 +575,11 @@ async deleteFailedTasks() : Promise<Result<number, AppError>> {
 }
 },
 /**
- * 重试全部因中断而失败的任务（error_type=Interrupted）。
+ * 恢复全部因中断而失败的任务（error_type=Interrupted）。
  */
-async retryInterruptedTasks() : Promise<Result<number, AppError>> {
+async recoverInterruptedTasks() : Promise<Result<BulkTaskResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_interrupted_tasks") };
+    return { status: "ok", data: await TAURI_INVOKE("recover_interrupted_tasks") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -963,9 +963,9 @@ async v2vBalance() : Promise<Result<number | null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async v2vCreditStats() : Promise<Result<CreditStats, AppError>> {
+async v2vCreditReport(range: CreditRange) : Promise<Result<V2vCreditReport, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_stats") };
+    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_report", { range }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -980,19 +980,11 @@ async v2vQueueStats() : Promise<Result<QueueStats, AppError>> {
 }
 },
 /**
- * 排队轨迹（详情栏与观测面板共用一条命令，`clip_id` 为空即只要全局部分）。
+ * 单条任务的排队轨迹。`clip_id` 为空时仅返回内部聚合数据。
  */
 async v2vQueueTrend(hours: number, clipId: number | null) : Promise<Result<[QueueTrend, ClipQueueTrail], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_queue_trend", { hours, clipId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async v2vCreditDaily(days: number) : Promise<Result<CreditDayView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_daily", { days }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1297,17 +1289,33 @@ async reviewV2vClips(ids: number[], pass: boolean) : Promise<Result<V2vAction, A
 }
 },
 /**
- * 重跑（同提示词）/ 退回改写 / 继续等待。
- * 
- * 默认是重跑：视频不通过多半是**没抽中**而不是提示词不对。
- * 但**判了超时的条目默认应当是「继续等待」**：超时只是我们这边不等了，即梦那边任务
- * 还在跑、额度已经扣了，而重跑会清掉 submit_id = 再花一份钱买同一条视频。
- * 
- * `ack_paid`：见 [`ack_covers_billed`]。只有 `run` 模式会丢弃付费任务，故只有它复核。
+ * 恢复无输出的失败/中断任务。完成、已拒绝与待验收任务永远不接受。
  */
-async requeueV2vClips(ids: number[], mode: string, ackPaid: number[]) : Promise<Result<V2vAction, AppError>> {
+async recoverV2vClips(ids: number[]) : Promise<Result<V2vAction, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("requeue_v2v_clips", { ids, mode, ackPaid }) };
+    return { status: "ok", data: await TAURI_INVOKE("recover_v2v_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 清掉旧视频提示词并回到改写。正在运行与已通过任务不接受。
+ */
+async rewriteV2vClips(ids: number[]) : Promise<Result<V2vAction, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rewrite_v2v_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 超时但仍持有 submit_id 的任务继续原单轮询，不重新提交、不再次扣费。
+ */
+async resumeV2vClips(ids: number[]) : Promise<Result<V2vAction, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_v2v_clips", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2412,6 +2420,7 @@ planned: number; failed: number; sheetId: number | null;
  * 当日涉及的 SKU 编码（去重，最多 6 个，供格子悬停展示）。
  */
 skus: string[] }
+export type ChannelCreditView = { channelKey: string; label: string; spentTotal: number; spentPass: number; spentRej: number; spentPending: number; spentFailedAbandoned: number; events: number; reviewed: number; passed: number; passRate: number | null }
 /**
  * 一条即梦通道此刻的样子（0031）。
  * 
@@ -2622,17 +2631,6 @@ export type CreateSkuInput = { code: string; styleName: string; productName: str
  */
 folderAlias: string | null }
 /**
- * 每日额度台账（观测面板那条折线）。
- * 
- * 它同时是一个实验的读数：见 `runner::snapshot_credit_if_new_day` ——
- * 「每天登录送 80」能不能靠 CLI 自动到账，只能靠连着几天的 `delta` 来回答。
- */
-export type CreditDayView = { day: string; balance: number; spentSincePrev: number; 
-/**
- * 凭空进账（余额差 + 期间本机花掉）。首条为 None —— 那天没有对比基准。
- */
-delta: number | null }
-/**
  * 账号与余额（`user_credit` 的完整回体）。
  * 
  * 不只取 `total_credit`：「走的是哪个账号、什么等级」与「还剩多少」是同一个问题的两半，
@@ -2640,33 +2638,10 @@ delta: number | null }
  */
 export type CreditInfo = { totalCredit: number; userId: number | null; userName: string; vipLevel: string }
 /**
- * 额度台账：余额（远端）+ 已消耗（本地库）。
- * 
- * **两个数字来自两个地方，故不合并成一个「已用/总额」百分比**：余额是即梦那边的账户
- * 真相（别处也可能在花它），消耗是本机这条流水线出片时收到的扣费回执。
- * 编一个百分比出来会让两者的差异变得无法解释。
+ * 消费报告范围。序列化值就是 IPC 接受的 `7d | 30d | all`，前端不能传任意字符串。
  */
-export type CreditStats = { 
-/**
- * 远端余额；查不到时为 None，原因在 `balanceError`（未登录 / 找不到 CLI）。
- */
-balance: number | null; balanceError: string | null; userId: number | null; vipLevel: string; 
-/**
- * 本机流水线累计消耗（只算收到扣费回执的条目）。
- */
-spentTotal: number; 
-/**
- * 近 7 天 / 近 24 小时（按出片时刻切窗）。
- */
-spentWeek: number; spentDay: number; 
-/**
- * 分账：成片 / 未通过（= 白花的）/ 待验收（还没定论）。
- */
-spentPass: number; spentRej: number; spentPending: number; 
-/**
- * 计入统计的条数（有 credit_count 的）。
- */
-countedClips: number }
+export type CreditRange = "7d" | "30d" | "all"
+export type CreditTrendPoint = { bucket: string; spent: number }
 export type DashboardView = { date: string; sheetId: number | null; status: string | null; plan: number; published: number; failed: number; suspect: number; pending: number; platforms: PlatformStat[]; accounts: AccountStat[]; hasReport: boolean; 
 /**
  * 同步链路（F9）：导出时刻 / 执行器首次回写 / 最近一次回写（Unix 秒）。
@@ -3936,19 +3911,7 @@ state: string; version: string | null }
  * 折中是：Rust 在动手**之前**取整份快照、封进令牌交给前端保管，撤销时原样传回，
  * 由 Rust 校验并写回。前端只当一个信封，令牌里每一个字段都是 Rust 自己写的。
  */
-export type V2vAction = { 
-/**
- * 真正改动了的条数（幂等跳过的不算）。
- */
-changed: number; 
-/**
- * 给人看的一句话：「已通过 3 条」。撤销 pill 上显示的就是它。
- */
-label: string; 
-/**
- * 撤销令牌；为空表示这次没有可撤销的东西。
- */
-undo: V2vUndoEntry[] }
+export type V2vAction = { changed: number; skipped: number; label: string; undo: V2vUndoEntry[] }
 /**
  * `v2v://activity` —— 执行日志新增一条。
  */
@@ -3961,6 +3924,11 @@ export type V2vChanged = { counts: StageCounts;
  * 本次变动涉及的 clip（前端可据此做局部刷新）；批量操作时可能为空。
  */
 clipId: number | null }
+/**
+ * 余额（远端）与消费（本机不可变账本）的统一读模型。`has_backfill` 表示包含存量
+ * 回填：升级前被删除或覆盖的尝试无法还原，界面不得把它冒充完整历史。
+ */
+export type V2vCreditReport = { balance: number | null; balanceError: string | null; vipLevel: string; spentTotal: number; spentPass: number; spentRej: number; spentPending: number; spentFailedAbandoned: number; reviewed: number; passed: number; passRate: number | null; trend: CreditTrendPoint[]; channels: ChannelCreditView[]; hasBackfill: boolean }
 /**
  * `v2v://progress` —— 已提交条目的轮询进度（队列位次 / 状态原文）。
  */

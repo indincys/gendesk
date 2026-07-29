@@ -67,6 +67,7 @@
   --sg-rewrite: oklch(84% 0.008 260);
   --sg-ready: var(--acc);
   --sg-run: oklch(70% 0.13 250);
+  --sg-queued: oklch(72% 0.14 52);
   --sg-rev: oklch(75% 0.13 80);
   --sg-pass: oklch(62% 0.12 155);
   --sg-rej: oklch(88% 0.006 260);
@@ -259,16 +260,20 @@ a:hover {
   font-family: inherit;
   animation: pop 0.3s;
 }
-/* 顶栏那颗余额 —— 中性配色（它不是一个待办，只是一个读数），且不可点。 */
+/* 顶栏余额：中性状态胶囊，点击查看消费报告。 */
 .pill.bal {
   border-color: var(--line);
   background: var(--panel);
   color: var(--t3);
-  cursor: default;
+  cursor: pointer;
   animation: none;
   box-shadow: var(--sh1);
   flex: none;
   white-space: nowrap;
+}
+.pill.bal:hover {
+  color: var(--t1);
+  border-color: var(--line2);
 }
 .pill.bal b {
   font: 600 12px var(--mono);
@@ -433,6 +438,10 @@ a:hover {
   gap: 1px;
   margin: 5px 0 5px 11px;
 }
+.navfl > .tipwrap {
+  display: flex;
+  width: 100%;
+}
 .navrow {
   position: relative;
   min-height: 26px;
@@ -525,6 +534,7 @@ a:hover {
 }
 .main {
   flex: 1;
+  min-height: 0;
   min-width: 0;
   background: linear-gradient(180deg, #fff, oklch(99.4% 0.002 255));
   border: 1px solid var(--line);
@@ -2822,9 +2832,6 @@ a:hover {
 .mb8 {
   margin-bottom: 8px;
 }
-.fs16 {
-  font-size: 16px;
-}
 .t1 {
   color: var(--t1);
 }
@@ -3859,14 +3866,6 @@ a:hover {
   background: var(--accbg);
 }
 
-/* 按钮上的行内键位提示（比 .kbd 更轻，不抢按钮本身的字）。 */
-.kh {
-  font-family: var(--mono);
-  font-weight: 500;
-  font-size: 10px;
-  opacity: 0.7;
-}
-
 /* ── 右侧详情栏 ───────────────────────────────────────── */
 .vinsp {
   width: 268px;
@@ -4012,6 +4011,7 @@ a:hover {
   flex: 1;
   min-height: 0;
   display: flex;
+  overflow: hidden;
 }
 
 /* ── 左栏：预览 ─────────────────────────────────────── */
@@ -4412,8 +4412,7 @@ a:hover {
   box-shadow: 0 0 0 3px oklch(58% 0.18 257 / 0.16);
 }
 
-/* 这一条的日志。执行日志是进程内的环形缓冲（500 条、重启即清空），
-   所以老条目在这里空着是常态 —— 空态那句话必须把这件事说出来。 */
+/* 这一条的日志。保留策略通过标题旁的说明按钮给出，空态只报告当前状态。 */
 .vlog {
   margin-top: 4px;
   border-radius: 9px;
@@ -4491,6 +4490,7 @@ a:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   background: oklch(99.2% 0.002 255);
 }
 .vlisthd {
@@ -4514,10 +4514,7 @@ a:hover {
   font: 600 12px var(--mono);
   color: var(--t3);
 }
-/* 通道快捷筛选条 —— 挨着被它筛的那张表。
-   固定三格（`topChannels`，与顶栏那排状态灯同一份）：格数会变的筛选器等于每天要
-   重认一次位置，而认错一次的代价是看错一条队的占用。选中态靠**实心**，
-   不靠边框加投影 —— 它就在列表栏头下面，比栏头还重就把主次弄反了。 */
+/* 通道快捷筛选条 —— 挨着被它筛的那张表。四条及以上固定排两行。 */
 .chq {
   flex: none;
   display: flex;
@@ -4530,6 +4527,19 @@ a:hover {
 }
 .chq::-webkit-scrollbar {
   display: none;
+}
+.chq.tworow {
+  display: grid;
+  grid-template-rows: repeat(2, 21px);
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  align-items: center;
+}
+.chq > .tipwrap,
+.chstrip > .tipwrap,
+.vdock > .tipwrap,
+.tbar > .tipwrap {
+  flex: none;
 }
 .chqi {
   display: inline-flex;
@@ -4594,7 +4604,9 @@ a:hover {
 .vlistbody {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .vlistempty {
   font-size: 11px;
@@ -4668,19 +4680,10 @@ a:hover {
   border-top: 1px solid var(--line);
   background: linear-gradient(180deg, oklch(99.2% 0.002 255), oklch(97.4% 0.003 255));
   flex-wrap: wrap;
+  justify-content: center;
 }
-.vdock .gl {
-  font: 600 9.5px var(--mono);
-  letter-spacing: 0.07em;
-  color: var(--t3);
-  flex: none;
-}
-.vdock .sep {
-  width: 1px;
-  height: 24px;
-  background: var(--line2);
-  flex: none;
-  margin: 0 4px;
+.vdock .btn {
+  border-radius: 99px;
 }
 
 /* 窄屏：中栏收成抽屉，覆盖在预览之上。
@@ -4814,7 +4817,7 @@ a:hover {
 .chstrip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
   flex: 0 1 auto;
   overflow-x: auto;
@@ -4828,8 +4831,8 @@ a:hover {
   display: inline-flex;
   flex: none;
   align-items: baseline;
-  gap: 5px;
-  padding: 2px 9px 3px;
+  gap: 3px;
+  padding: 2px 7px 3px;
   border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--panel);
@@ -4890,7 +4893,7 @@ a:hover {
   font-size: 10px;
   font-weight: 500;
   color: var(--t3);
-  margin-left: 3px;
+  margin-left: 1px;
 }
 /* 要读的那个数。等宽避免逐秒跳动时整条抖，比标签大一档、粗一档。
    颜色由 nque / nrun / nloc 决定 —— 三个数是三件事，同色等于让人自己去读标签。 */
@@ -5257,18 +5260,12 @@ a:hover {
    它取代了原来那颗只读的心跳 pill —— 那颗显示的是 6 秒一次的心跳，
    而真正问即梦是 5/10 分钟一次，于是它最擅长的事是让人以为数据很新鲜。 */
 .refbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 500;
   color: var(--t3);
-  background: var(--inset);
-  border: 1px solid var(--line);
-  border-radius: 99px;
-  padding: 3px 9px;
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: var(--sh1);
+  animation: none;
   white-space: nowrap;
-  cursor: pointer;
 }
 .refbtn:hover:not(:disabled) {
   color: var(--t1);
@@ -5277,61 +5274,211 @@ a:hover {
 .refbtn:disabled {
   cursor: default;
 }
-.refbtn .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 99px;
-  background: var(--ok);
-  flex: none;
+.refbtn.off {
+  color: var(--t3);
 }
-.refbtn.off .dot {
-  background: var(--t3);
-}
-.refbtn.bad .dot {
-  background: var(--er);
+.refbtn.bad {
+  color: var(--er);
+  border-color: var(--erln);
 }
 /* 刷新中：点这里的人正在怀疑它卡住了，所以「在动」必须是看得见的。 */
 .refbtn.busy {
   color: var(--acc2);
   border-color: var(--acc);
 }
-.refbtn.busy .dot {
-  background: var(--acc);
-  animation: brth 1.2s ease-in-out infinite;
-}
 
-/* 队列观测条：回答「还在动吗」。 */
-.qbar {
-  margin: 10px 18px 0;
-  padding: 10px 12px;
+/* 余额与消费：三枚范围胶囊、趋势与通道分账。 */
+.cranges {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border-radius: 99px;
   background: var(--inset);
+}
+.crange {
+  height: 23px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 99px;
+  background: transparent;
+  color: var(--t3);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.crange.on {
+  background: var(--panel);
+  color: var(--acc2);
+  box-shadow: var(--sh1);
+}
+.creditreport {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.creditmetrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.creditmetric {
+  min-width: 0;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
+  background: var(--sub);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
-/* 观测面板里嵌用时不要外边距（弹窗自己有内边距）。 */
-.qbar.flat {
-  margin: 0;
+.creditmetric > span {
+  font-size: 10px;
+  color: var(--t3);
 }
-.qwarn {
-  color: var(--wr);
+.creditmetric > b {
+  font: 700 19px var(--mono);
+  color: var(--t1);
 }
-/* 逐小时出片趋势的小柱图。用 flex 而非 canvas：12 根柱子不值得引一套绘图。 */
-.spark {
+.creditsection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.creditsectionhd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--t2);
+}
+.credittrend {
+  height: 126px;
+  padding: 10px 8px 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sub);
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  height: 22px;
+  gap: 4px;
+  overflow-x: auto;
+}
+.credittrendcol {
+  height: 100%;
+  min-width: 18px;
   flex: 1;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  cursor: default;
 }
-.sparkb {
-  flex: 1 1 0;
-  min-width: 2px;
-  background: var(--line);
-  border-radius: 2px 2px 0 0;
+.credittrend > .tipwrap {
+  min-width: 18px;
+  height: 100%;
+  flex: 1;
 }
-.sparkb.on {
+.credittrend > .tipwrap > .credittrendcol {
+  width: 100%;
+}
+.credittrendbar {
+  width: min(18px, 76%);
+  min-height: 4px;
+  border-radius: 4px 4px 2px 2px;
   background: var(--acc);
+}
+.credittrendcol > span {
+  font: 500 8.5px var(--mono);
+  color: var(--t3);
+  white-space: nowrap;
+}
+.creditchannels {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.creditrow {
+  padding: 10px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.creditrow:last-child {
+  border-bottom: 0;
+}
+.creditrowhd {
+  display: grid;
+  grid-template-columns: 1fr auto 100px;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 11px;
+}
+.creditsegments {
+  width: 100%;
+  height: 7px;
+  margin-top: 7px;
+  padding: 0;
+  border: 0;
+  border-radius: 99px;
+  overflow: hidden;
+  display: flex;
+  background: var(--inset);
+}
+.creditrow > .tipwrap {
+  display: block;
+}
+.creditsegments > span[data-tone="pass"],
+.creditlegend i[data-tone="pass"] {
+  background: var(--sg-pass);
+}
+.creditsegments > span[data-tone="rej"],
+.creditlegend i[data-tone="rej"] {
+  background: var(--sg-rej);
+}
+.creditsegments > span[data-tone="pending"],
+.creditlegend i[data-tone="pending"] {
+  background: var(--sg-rev);
+}
+.creditsegments > span[data-tone="failed"],
+.creditlegend i[data-tone="failed"] {
+  background: var(--sg-fail);
+}
+.creditlegend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-top: 7px;
+  font: 500 9.5px var(--mono);
+  color: var(--t3);
+}
+.creditlegend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.creditlegend i {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+}
+.creditempty {
+  flex: 1;
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t3);
+  font-size: 11px;
 }
 
 /* 执行日志：一行一条，时间与阶段定宽，正文自适应换行。 */
@@ -5372,19 +5519,6 @@ a:hover {
   text-decoration: underline;
 }
 
-/* 额度小格：四列一行，窄了自动折。 */
-.statgrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-.statcell {
-  background: var(--inset);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 8px 10px;
-  min-width: 0;
-}
 .spin {
   animation: rot 0.8s linear infinite;
 }
@@ -5518,4 +5652,46 @@ a:hover {
   color: var(--t3);
   font-size: 11.5px;
   margin-top: 2px;
+}
+.tipwrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.tipbubble {
+  position: fixed;
+  z-index: 80;
+  width: max-content;
+  max-width: 320px;
+  padding: 7px 9px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--t1);
+  box-shadow: var(--sh2);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.55;
+  white-space: normal;
+  pointer-events: none;
+  animation: tipin 120ms ease;
+}
+.hintbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: var(--t3);
+}
+.hintbtn:hover,
+.hintbtn:focus-visible {
+  color: var(--t1);
+  background: var(--sub);
+}
+@keyframes tipin {
+  from {
+    opacity: 0;
+  }
 }

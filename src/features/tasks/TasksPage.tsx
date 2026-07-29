@@ -36,7 +36,7 @@ export function TasksPage() {
   // E04：总进度 ETA 估算所需——历史单张均值 + 有效并发。
   const [avgSec, setAvgSec] = useState<number | null>(null);
   const [concurrency, setConcurrency] = useState(0);
-  // E34：改词重试目标 + 编辑文本。
+  // E34：改词后恢复目标 + 编辑文本。
   const [rewordTarget, setRewordTarget] = useState<TaskView | null>(null);
   const [rewordText, setRewordText] = useState("");
   // E35：展开查看原始报错的失败行。
@@ -104,7 +104,7 @@ export function TasksPage() {
 
   const failedCount = counts.fail;
   const violationCount = failByType.get("ContentPolicy") ?? 0;
-  const retryableFailed = failedCount - violationCount;
+  const recoverableFailed = failedCount - violationCount;
 
   const togglePause = async () => {
     const next = !paused;
@@ -118,9 +118,9 @@ export function TasksPage() {
     }
   };
 
-  const retryAllFailed = async () => {
-    const n = await unwrap(commands.retryFailedTasks());
-    toast(`已重试 ${n} 个失败任务`);
+  const recoverAllFailed = async () => {
+    const res = await unwrap(commands.recoverFailedTasks());
+    toast(`已恢复 ${res.affected} 个任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
     await refresh();
   };
 
@@ -140,9 +140,10 @@ export function TasksPage() {
     }
   };
 
-  // ── 多选批量操作（中止 / 删除 / 重试） ────────────────────────────
-  // 可重试的终态：失败/待验收/已通过/未通过（生成中与排队不参与重试）。
-  const RETRYABLE = new Set(["fail", "rev", "pass", "rej"]);
+  // ── 多选批量操作（恢复 / 中止 / 删除） ────────────────────────────
+  // 只有无输出的失败任务可恢复；待验收、通过与拒绝都已有输出，不再重新生成。
+  const isRecoverable = (task: TaskView) =>
+    task.status === "fail" && task.errorType !== "ContentPolicy";
   // 可中止的只有排队态：请求一旦发出去钱就花了，硬掐只会让结果无处可写。
   const ABORTABLE = new Set(["q"]);
   const clearSel = () => {
@@ -187,7 +188,7 @@ export function TasksPage() {
   };
   // 选中任务里各类可操作的数量（供按钮显示与禁用）。
   const selTasks = tasks.filter((t) => sel.has(t.id));
-  const selRetryable = selTasks.filter((t) => RETRYABLE.has(t.status)).length;
+  const selRecoverable = selTasks.filter(isRecoverable).length;
   const selAbortable = selTasks.filter((t) => ABORTABLE.has(t.status)).length;
 
   /**
@@ -198,28 +199,28 @@ export function TasksPage() {
    * 跳过数一律报出来：中止放过在途、删除放过生成中，「我选了 30 个怎么只没了 22 个」
    * 如果没人解释，下一步就是再点一次。
    */
-  const runBulk = async (kind: "retry" | "delete" | "cancel") => {
+  const runBulk = async (kind: "recover" | "delete" | "cancel") => {
     const ids = [...sel];
     if (ids.length === 0) return;
     try {
       const res = await unwrap(
-        kind === "retry"
-          ? commands.retryTasks(ids)
+        kind === "recover"
+          ? commands.recoverTasks(ids)
           : kind === "delete"
             ? commands.deleteTasks(ids)
             : commands.cancelTasks(ids),
       );
-      const verb = kind === "retry" ? "已重试" : kind === "delete" ? "已删除" : "已中止";
+      const verb = kind === "recover" ? "已恢复" : kind === "delete" ? "已删除" : "已中止";
       const why =
-        kind === "retry"
-          ? "生成中/排队中不可重试"
+        kind === "recover"
+          ? "只有无输出的失败任务可恢复"
           : kind === "delete"
             ? "生成中不可删除"
             : "已开跑或已完成，中止不了";
       toast(
         `${verb} ${res.affected} 个任务${res.skipped > 0 ? ` · ${res.skipped} 个跳过（${why}）` : ""}`,
       );
-      if (kind !== "retry") dropTasks(ids);
+      if (kind !== "recover") dropTasks(ids);
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     } finally {
@@ -229,19 +230,20 @@ export function TasksPage() {
     }
   };
 
-  const retryInterrupted = async () => {
-    const n = await unwrap(commands.retryInterruptedTasks());
-    toast(`已重试 ${n} 个中断任务`);
+  const recoverInterrupted = async () => {
+    const res = await unwrap(commands.recoverInterruptedTasks());
+    toast(`已恢复 ${res.affected} 个中断任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
     setInterrupted(0);
     await refresh();
   };
 
-  const retryOne = async (t: TaskView) => {
-    await unwrap(commands.retryTask(t.id, null));
+  const recoverOne = async (t: TaskView) => {
+    const res = await unwrap(commands.recoverTask(t.id, null));
+    if (res.affected === 0) toast("任务状态已变化，未恢复");
     await refresh();
   };
 
-  // E34：改词重试——预填快照，确认后按编辑文本回队重生。
+  // E34：改词后恢复——预填快照，确认后按编辑文本恢复失败任务。
   const openReword = (t: TaskView) => {
     setRewordTarget(t);
     setRewordText(t.promptTextSnapshot);
@@ -251,9 +253,13 @@ export function TasksPage() {
     if (!t) return;
     const edited = rewordText.trim() !== t.promptTextSnapshot.trim() ? rewordText : null;
     try {
-      await unwrap(commands.retryTask(t.id, edited));
+      const res = await unwrap(commands.recoverTask(t.id, edited));
+      if (res.affected === 0) {
+        toast("任务状态已变化，未恢复");
+        return;
+      }
       setRewordTarget(null);
-      toast(edited ? "已按改后的提示词重新生成" : "已重新生成");
+      toast(edited ? "已改词并恢复" : "已恢复");
       await refresh();
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
@@ -274,9 +280,9 @@ export function TasksPage() {
       case "Auth":
         return { label: "检查设置", run: () => go("settings") };
       case "ContentPolicy":
-        return { label: "改词重试", run: () => openReword(t) };
+        return { label: "改词后恢复", run: () => openReword(t) };
       default:
-        return { label: "重试", run: () => void retryOne(t) };
+        return { label: "恢复", run: () => void recoverOne(t) };
     }
   };
 
@@ -288,7 +294,7 @@ export function TasksPage() {
   const showProgress = total > 0 && remaining > 0;
 
   return (
-    <PageScaffold title="任务队列" caption="全部在制任务 · 事件推送 250ms 节流">
+    <PageScaffold title="任务队列" caption="全部任务">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
         <div className="fx ac gap6">
           <SumBadge cls="b-gray" n={counts.q} label="待处理" />
@@ -314,13 +320,11 @@ export function TasksPage() {
             <button
               type="button"
               className="btn sm gho"
-              onClick={retryAllFailed}
-              disabled={retryableFailed === 0}
-              title={
-                violationCount > 0 ? "违规任务不会被批量重试，请对其单独「改词重试」" : undefined
-              }
+              onClick={recoverAllFailed}
+              disabled={recoverableFailed === 0}
+              title={violationCount > 0 ? "违规任务需要修改提示词后逐条恢复" : undefined}
             >
-              重试全部失败 · {retryableFailed}
+              恢复全部失败 · {recoverableFailed}
               {violationCount > 0 && <span className="fs10 t3">（不含违规 {violationCount}）</span>}
             </button>
             <button type="button" className="btn sm gho" onClick={deleteAllFailed}>
@@ -354,9 +358,7 @@ export function TasksPage() {
             <span
               key={type}
               className={cn("chip", type === "ContentPolicy" && "dng")}
-              title={
-                type === "ContentPolicy" ? "违规任务请「改词重试」，不参与批量重试" : undefined
-              }
+              title={type === "ContentPolicy" ? "违规任务需要修改提示词后逐条恢复" : undefined}
             >
               {errorLabel(type)} · {n}
             </span>
@@ -381,8 +383,8 @@ export function TasksPage() {
           <span className="f1">
             {interrupted} 个任务因上次退出被中断 — 任务现场已保留，排队任务未清空，可直接继续。
           </span>
-          <button type="button" className="btn sm" onClick={retryInterrupted}>
-            重试中断任务
+          <button type="button" className="btn sm" onClick={recoverInterrupted}>
+            恢复中断任务
           </button>
           <button type="button" className="icb" onClick={() => setIntDismissed(true)}>
             ×
@@ -425,11 +427,11 @@ export function TasksPage() {
           <button
             type="button"
             className="btn sm"
-            disabled={selRetryable === 0}
-            title={selRetryable === 0 ? "所选中无可重试任务（生成中/排队不可重试）" : undefined}
-            onClick={() => void runBulk("retry")}
+            disabled={selRecoverable === 0}
+            title={selRecoverable === 0 ? "所选中没有无输出的失败任务" : undefined}
+            onClick={() => void runBulk("recover")}
           >
-            重试所选{selRetryable > 0 ? ` · ${selRetryable}` : ""}
+            恢复所选{selRecoverable > 0 ? ` · ${selRecoverable}` : ""}
           </button>
           <button
             type="button"
@@ -469,7 +471,7 @@ export function TasksPage() {
           <span>提示词</span>
           <span>Key</span>
           <span>进度 / 结果</span>
-          <span className="tc">重试</span>
+          <span className="tc">自动恢复</span>
           <span />
         </div>
         {visible.map((t, idx) => {
@@ -568,15 +570,15 @@ export function TasksPage() {
                   <>
                     {t.errorType === "ContentPolicy" ? (
                       <button type="button" className="btn pri sm" onClick={() => openReword(t)}>
-                        改词重试
+                        改词后恢复
                       </button>
                     ) : (
                       <>
-                        <button type="button" className="btn sm gho" onClick={() => retryOne(t)}>
-                          重试
+                        <button type="button" className="btn sm gho" onClick={() => recoverOne(t)}>
+                          恢复
                         </button>
                         <button type="button" className="btn sm gho" onClick={() => openReword(t)}>
-                          改词重试
+                          改词后恢复
                         </button>
                       </>
                     )}
@@ -592,9 +594,6 @@ export function TasksPage() {
         {tasks.length === 0 && (
           <div className="bigempty">
             <div className="fs13 fw5 t2">当前没有任务</div>
-            <div className="fs12 t3">
-              跑完并验收干净的批次会自动退出历史 —— 去生成页开一批，或让 skill 投一份工单进来
-            </div>
             <button type="button" className="btn mt10" onClick={() => go("generate")}>
               去生成
             </button>
@@ -604,7 +603,7 @@ export function TasksPage() {
 
       {rewordTarget && (
         <Modal
-          title="改词重试"
+          title="改词后恢复"
           width="w420"
           onClose={() => setRewordTarget(null)}
           footer={
@@ -613,8 +612,22 @@ export function TasksPage() {
               <button type="button" className="btn sm" onClick={() => setRewordTarget(null)}>
                 取消
               </button>
-              <button type="button" className="btn pri sm" onClick={() => void submitReword()}>
-                重新生成
+              <button
+                type="button"
+                className="btn pri sm"
+                disabled={
+                  rewordTarget.errorType === "ContentPolicy" &&
+                  rewordText.trim() === rewordTarget.promptTextSnapshot.trim()
+                }
+                title={
+                  rewordTarget.errorType === "ContentPolicy" &&
+                  rewordText.trim() === rewordTarget.promptTextSnapshot.trim()
+                    ? "违规任务必须先修改提示词"
+                    : undefined
+                }
+                onClick={() => void submitReword()}
+              >
+                恢复任务
               </button>
             </>
           }
@@ -627,7 +640,7 @@ export function TasksPage() {
             )}
           </div>
           <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-            提示词（可修改后重试）
+            提示词
           </div>
           <textarea
             className="ta"
@@ -637,9 +650,9 @@ export function TasksPage() {
             // biome-ignore lint/a11y/noAutofocus: 弹窗即为改词而生，聚焦符合预期
             autoFocus
           />
-          <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
-            确认后该任务按改后的提示词回队重新出图；未改动则按原文重试。通过验收后改后版本会写回提示词库。
-          </div>
+          {rewordTarget.errorType !== "ContentPolicy" && (
+            <div className="fs11 t3 mt6">未修改时将按原提示词恢复。</div>
+          )}
         </Modal>
       )}
 
@@ -669,7 +682,7 @@ export function TasksPage() {
       {confirmBulk === "delete" && (
         <ConfirmModal
           title={`删除所选 ${sel.size} 个任务`}
-          desc="将删除所选任务及其生成记录（生成中/重试中的任务会被跳过）。已通过归档的作品不受影响。此操作不可撤销。"
+          desc="将删除所选任务及其生成记录（生成中/自动恢复中的任务会被跳过）。已通过归档的作品不受影响。此操作不可撤销。"
           confirmLabel="删除所选"
           danger
           onConfirm={() => void runBulk("delete")}
@@ -680,7 +693,7 @@ export function TasksPage() {
       {confirmBulk === "cancel" && (
         <ConfirmModal
           title={`中止所选 ${selAbortable} 个排队任务`}
-          desc="只会掐掉尚未开跑的排队任务。已经发出请求的（生成中/重试中）会继续跑完——那份钱在请求发出的那一刻就花了，中止它只会让结果无处可写。作品与已完成任务不变。"
+          desc="只会中止尚未开跑的排队任务。已经发出请求的任务会继续完成；费用已在请求发出时产生。作品与已完成任务不变。"
           confirmLabel="中止排队任务"
           danger
           onConfirm={() => void runBulk("cancel")}

@@ -1,3 +1,4 @@
+import { Tooltip } from "@/components/ui/Tooltip";
 import { ACTION_META, WORKBENCH_ACTIONS } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
 import { selectActionCounts, useV2vStore } from "@/stores/v2v";
@@ -37,20 +38,20 @@ export function V2vNavCards() {
         const on = filter.action === a;
         const n = counts[a] ?? 0;
         return (
-          <button
-            key={a}
-            type="button"
-            className={cn("navrow", on && "on", n === 0 && !on && "zero")}
-            // 色直接来自 `ACTION_META.dot`（与行内色点、摘要卡同源），经内联 style
-            // 落到 `--tone` 上 —— 胶囊那一套规则只认这个变量。
-            style={{ "--tone": m.dot } as CSSProperties}
-            title={m.note}
-            onClick={() => setAction(a)}
-          >
-            <span className="fpill">{m.label}</span>
-            <span className="f1" />
-            <span className="n">{n}</span>
-          </button>
+          <Tooltip key={a} content={m.note}>
+            <button
+              type="button"
+              className={cn("navrow", on && "on", n === 0 && !on && "zero")}
+              // 色直接来自 `ACTION_META.dot`（与行内色点、摘要卡同源），经内联 style
+              // 落到 `--tone` 上 —— 胶囊那一套规则只认这个变量。
+              style={{ "--tone": m.dot } as CSSProperties}
+              onClick={() => setAction(a)}
+            >
+              <span className="fpill">{m.label}</span>
+              <span className="f1" />
+              <span className="n">{n}</span>
+            </button>
+          </Tooltip>
         );
       })}
     </div>

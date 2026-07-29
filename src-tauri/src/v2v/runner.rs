@@ -453,7 +453,16 @@ pub async fn submit_batch(
         );
         match dreamina::submit(bin, Path::new(&clip.image_path), prompt, &opts, log, who).await {
             Ok(receipt) => {
-                if let Err(e) = persist_submit(pool, clip.id, &receipt, log, who).await {
+                if let Err(e) = persist_submit(
+                    pool,
+                    clip.id,
+                    &receipt,
+                    opts.model_version.as_deref().unwrap_or(""),
+                    log,
+                    who,
+                )
+                .await
+                {
                     // 落库彻底失败：钱已经扣了，而 submit_id 只剩日志这一处凭证。
                     // 绝不 `?` 冒泡 —— 那会连带中止整批（后面每条都还没提交，
                     // 白白挡住），而这一条的 submit_id 会随内存一起消失。
@@ -463,7 +472,7 @@ pub async fn submit_batch(
                         format!(
                             "已提交但落库失败 · submit_id {} · {e}。\
                              这一单的额度已经扣了，凭证只剩这条日志 —— \
-                             重跑会再花一份钱，先用这个 id 去即梦查一次。",
+                             恢复会再花一份钱，先用这个 id 去即梦查一次。",
                             receipt.submit_id
                         ),
                         None,
@@ -544,7 +553,7 @@ pub async fn submit_batch(
                     "submit",
                     who,
                     if kind == SUBMIT_TIMEOUT {
-                        format!("提交超时，已终止 CLI：{msg} 这一条已判到「处理异常」等你核对 —— 请勿直接重跑。")
+                        format!("提交超时，已终止 CLI：{msg} 这一条已判到「处理异常」等你核对 —— 请勿直接恢复。")
                     } else {
                         format!("提交失败：{msg}")
                     },
@@ -749,13 +758,14 @@ async fn persist_submit(
     pool: &SqlitePool,
     id: i64,
     receipt: &dreamina::SubmitReceipt,
+    channel: &str,
     log: &Activity,
     who: Option<(i64, &str)>,
 ) -> Result<(), String> {
     const TRIES: u32 = 3;
     let mut last = String::new();
     for attempt in 1..=TRIES {
-        match repo::mark_submitted(pool, id, receipt, now_unix()).await {
+        match repo::mark_submitted_on(pool, id, receipt, channel, now_unix()).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last = format!("{e}");
@@ -1424,7 +1434,7 @@ async fn settle(
                     "poll",
                     who,
                     format!(
-                        "结算落空：查询提交单 {expect} 期间，这一条已被重跑或改投，\
+                        "结算落空：查询提交单 {expect} 期间，这一条已被恢复或改投，\
                          它的成片没有归属，已丢弃（该单额度已扣，不可撤回）"
                     ),
                     None,
@@ -1548,7 +1558,7 @@ async fn settle(
                 // 幽灵单说「没扣费，可以直接重跑」。指错方向的代价是真金白银。
                 let msg = format!(
                     "即梦接了单但未入队：提交后 {} 仍拿不到队列位次，也没有计费回执\
-                     （末次状态 {}）。这单没有扣额度，直接「重跑」即可，不会重复扣费。",
+                     （末次状态 {}）。这单没有扣额度，可直接「恢复」，不会重复扣费。",
                     fmt_dur(clip.submitted_at.map_or(0, |t| now - t)),
                     q.gen_status
                 );
@@ -1560,7 +1570,7 @@ async fn settle(
                 // 而重跑会清掉 submit_id = 再花一份钱买同一条视频。
                 let msg = format!(
                     "提交后 {} 小时仍未出片（末次状态 {}）。额度已扣、即梦那边可能还在跑，\
-                     建议先「继续等待」；确认不会出片了再重跑。",
+                     建议先「继续等待」；确认不会出片了再恢复。",
                     timeout_secs.unwrap_or(0) / 3600,
                     q.gen_status
                 );
@@ -2838,7 +2848,7 @@ mod tests {
             .unwrap();
         let log = Activity::silent();
         let receipt = dreamina::SubmitReceipt::healthy("sub-evidence-only", 8);
-        let err = persist_submit(&pool, 1, &receipt, &log, Some((1, "GG-0001")))
+        let err = persist_submit(&pool, 1, &receipt, "", &log, Some((1, "GG-0001")))
             .await
             .unwrap_err();
         assert!(!err.is_empty());

@@ -1,6 +1,6 @@
 import { Modal } from "@/components/ui/Modal";
+import { DescriptionHint } from "@/components/ui/Tooltip";
 import {
-  type CreditStats,
   type EffectiveParams,
   type ModelInfo,
   type QueueStats,
@@ -9,7 +9,6 @@ import {
   commands,
   unwrap,
 } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
 import { AlertTriangle, Check, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -32,9 +31,6 @@ import { toast } from "sonner";
  *   故显示的是**归一化之后**的三件套，外加一条与真正 exec 同源的示例命令行。
  * - **哪个通道**：`--session` 原来只是个裸数字输入框。这里直接列出即梦的会话。
  *   会话是账号级的，故它**只**在这里 —— 不做成每条可改。
- * - **积分额度 / 用量**：余额来自远端账户，消耗来自本机出片时收到的扣费回执。
- *   **不合并成一个百分比** —— 两个数字来自两个地方，编一个比值出来会让它们的差异
- *   变得无法解释（别处也可能在花同一个账户的额度）。
  */
 export function V2vParamsPanel({
   models,
@@ -48,9 +44,8 @@ export function V2vParamsPanel({
 }) {
   const [s, setS] = useState<V2vSettings | null>(null);
   const [eff, setEff] = useState<EffectiveParams | null>(null);
-  const [stats, setStats] = useState<CreditStats | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
-  const [loadingCredit, setLoadingCredit] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const reload = useCallback(async () => {
@@ -62,25 +57,15 @@ export function V2vParamsPanel({
     setEff(e);
   }, []);
 
-  const refreshCredit = useCallback(async () => {
-    setLoadingCredit(true);
-    try {
-      setStats(await unwrap(commands.v2vCreditStats()));
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setLoadingCredit(false);
-    }
-  }, []);
-
   useEffect(() => {
     void reload().catch(() => {});
-    // 余额与会话都要跑一次 CLI（秒级），故与面板主体并行加载，不挡住渲染。
-    void refreshCredit();
+    void unwrap(commands.v2vBalance())
+      .then(setBalance)
+      .catch(() => setBalance(null));
     void unwrap(commands.v2vSessions())
       .then(setSessions)
       .catch(() => setSessions([]));
-  }, [reload, refreshCredit]);
+  }, [reload]);
 
   const save = async (p: Partial<V2vSettings>) => {
     if (!s) return;
@@ -109,18 +94,14 @@ export function V2vParamsPanel({
       width="w700"
       onClose={onClose}
       headerExtra={
-        stats?.balance != null ? (
-          <span className="bdg b-green">余额 {stats.balance}</span>
+        balance != null ? (
+          <span className="bdg b-green">余额 {balance}</span>
         ) : (
           <span className="chip">余额 —</span>
         )
       }
       footer={
         <>
-          <span className="fs11 t3">
-            这里改的是**新条目的默认值**。要改已在列表里的条目：选中它们用底栏的参数条，
-            或在右侧详情栏改单条。
-          </span>
           <div className="f1" />
           <button type="button" className="btn sm pri" onClick={onClose}>
             完成
@@ -189,12 +170,9 @@ export function V2vParamsPanel({
             <AlertTriangle className="ic12" /> {eff.error}
           </div>
         ) : (
-          <div className="fs11 t3 mt8" style={{ lineHeight: 1.8 }}>
+          <div className="fs11 t3 mt8">
             {eff?.usesCliDefaults ? (
-              <>
-                当前<b>一个高级参数都不发</b>，模型、时长、分辨率全由即梦 CLI
-                自己决定（最稳，也不把模型名锁死在我们这边）。
-              </>
+              <>跟随 CLI 默认</>
             ) : (
               <>
                 模型 <span className="chip">{eff?.modelVersion}</span> · 时长{" "}
@@ -207,12 +185,6 @@ export function V2vParamsPanel({
             )}
           </div>
         )}
-        {eff?.sampleCommand && (
-          <>
-            <div className="fs11 t3 mt8">提交时实际执行的命令（图片与提示词逐条替换）：</div>
-            <div className="cmdwell mt6">{eff.sampleCommand}</div>
-          </>
-        )}
         <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
           {eff?.resolvedBin ? (
             <span className="fx ac gap6">
@@ -222,27 +194,23 @@ export function V2vParamsPanel({
           ) : (
             <span className="fx ac gap6" style={{ color: "var(--wr)" }}>
               <AlertTriangle className="ic12" />
-              没探测到即梦 CLI —— 去设置页「图生视频」填它的绝对路径。
+              没探测到即梦 CLI —— 去设置页「视频生成」填它的绝对路径。
             </span>
           )}
         </div>
 
         {/* ── 同时在跑上限（即梦逐通道的并发闸门） ─────────── */}
-        <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-          同时在跑上限 · <b>每条通道</b>一次跑得下几条
-        </div>
-        <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 8 }}>
-          即梦按<b>模型通道</b>各排各的队（回体里的 <code>dreamina_matrix_queue_name</code>{" "}
-          逐通道不同），每条通道各有一个并发上限， 超出的会被它以{" "}
-          <code>ExceedConcurrencyLimit</code> 逐条拒掉（一分钱不扣，但任务也不跑）。 所以 GenDesk{" "}
-          <b>逐通道</b>只发得下的那几条，<b>其余留在本地排队，出一条自动补一条</b> ——
-          你点一次确认就够了，不必守着补单。
-          <br />
-          这个数字是<b>每条通道</b>的上限，不是全部通道加起来的：2.0Fast 排满了， 2.0Mini
-          照样发得出去。同一条通道内，手动放行与常驻队列<b>共用</b>这份配额。
+        <div
+          className="fs11 fw6 t3 mt14 fx ac gap4"
+          style={{ letterSpacing: ".05em", marginBottom: 6 }}
+        >
+          通道并发
+          <DescriptionHint label="通道并发说明">
+            每条通道分别限制并发；超过上限的任务留在本地等待
+          </DescriptionHint>
         </div>
         <div className="fx ac gap8 wrap">
-          <span className="fs11 t3">同时最多</span>
+          <span className="fs11 t3">每通道最多</span>
           <input
             className="inp sm"
             style={{ width: 64 }}
@@ -254,21 +222,18 @@ export function V2vParamsPanel({
             onBlur={() => void save({ maxInFlight: s.maxInFlight ?? 1 })}
             disabled={busy}
           />
-          <span className="fs11 t3">条在即梦手上（每条通道各算各的）</span>
+          <span className="fs11 t3">条</span>
           {queue?.observedLimit != null && (
             <span className="bdg b-amber">
-              默认通道实测只跑得下 {queue.observedLimit} 条 —— 设得再大也按这个来
+              实测上限 {queue.observedLimit}
+              <DescriptionHint label="实测上限说明">
+                默认通道同时最多运行 {queue.observedLimit} 条，设置更高也会按该上限执行
+              </DescriptionHint>
             </span>
           )}
           {(queue?.queued ?? 0) > 0 && (
             <span className="fs11 t3">当前本地排队共 {queue?.queued} 条</span>
           )}
-        </div>
-        <div className="fs11 t3" style={{ lineHeight: 1.8, marginTop: 6 }}>
-          默认 1 是实测值：一批 9 条 <code>seedance2.0fast</code> 同时提交，只有 1 条真的入队。
-          往小了猜只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费），
-          往大了猜是一批片子集体躺进「处理异常」。真撞上拒收时这里会
-          <b>按通道各自</b>往下收敛 —— 一条通道撞了墙不影响其它通道。
         </div>
         {/* 逐通道现状：这个上限是按通道算的，那就必须能当场看到每条通道各占了多少。 */}
         {(queue?.channels?.length ?? 0) > 0 && (
@@ -285,18 +250,14 @@ export function V2vParamsPanel({
         {/* ── 常驻队列（自动补单） ───────────────────────── */}
         {af && (
           <>
-            <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
-              常驻队列 · 非 VIP 自动补单
-            </div>
-            <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 8 }}>
-              非 VIP 通道实测排在四千多位、要等几小时，而 VIP 同规格贵 5.5 倍 ——
-              买到的只是不排队。所以<b>「等」这件事本身是免费的</b>，只要队列不空着，
-              过夜就能低成本攒下片子。这条队列保持 N 条在跑，完成一条自动补一条；
-              待提交的存量见底时发系统通知，好让你提前安排新的。
-              <br />
-              它只跑自己配的那条通道，与你手动放行到<b>同一条通道</b>的那些共用上面那个在跑上限
-              （别的通道跑得再满也不占它的配额），且
-              <b>不会碰你已经放行、正在本地排队的条目</b>。
+            <div
+              className="fs11 fw6 t3 mt14 fx ac gap4"
+              style={{ letterSpacing: ".05em", marginBottom: 6 }}
+            >
+              常驻队列
+              <DescriptionHint label="常驻队列说明">
+                保持指定数量的非 VIP 任务运行，完成一条后自动补一条
+              </DescriptionHint>
             </div>
             <div className="fx ac gap8 wrap">
               <label className="fx ac gap6 fs12">
@@ -373,11 +334,7 @@ export function V2vParamsPanel({
                 }
                 onBlur={() => void save({ autofill: af })}
               />
-              <span className="fs11 t3">
-                {(af.dailyCredits ?? 0) > 0
-                  ? "（按提交时刻计，不是出片时刻 —— 否则一整天的额度能在任何一条出片之前提交光）"
-                  : "不限 —— 那意味着上限就是账户余额"}
-              </span>
+              <span className="fs11 t3">{(af.dailyCredits ?? 0) > 0 ? "额度" : "不限"}</span>
             </div>
           </>
         )}
@@ -416,72 +373,9 @@ export function V2vParamsPanel({
             <RefreshCw className="ic12" />
             刷新
           </button>
-          {sessions?.length === 0 && (
-            <span className="fs11 t3">读不到会话列表（未登录或 CLI 输出格式变了），可留默认</span>
-          )}
-        </div>
-        <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
-          会话是即梦那边归置生成历史的容器，只影响任务落在哪条历史里，不影响画面。
-        </div>
-
-        {/* ── 额度 ─────────────────────────────────────── */}
-        <div className="fx ac gap8 mt14" style={{ marginBottom: 6 }}>
-          <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
-            积分额度
-          </span>
-          <button
-            type="button"
-            className="btn xs gho"
-            disabled={loadingCredit}
-            onClick={() => void refreshCredit()}
-          >
-            <RefreshCw className={cn("ic12", loadingCredit && "spin")} />
-            刷新
-          </button>
-        </div>
-        {stats?.balanceError && (
-          <div className="fs11 mt6" style={{ color: "var(--wr)", lineHeight: 1.7 }}>
-            查不到余额：{stats.balanceError}
-          </div>
-        )}
-        <div className="statgrid">
-          <Stat label="账户余额" value={stats?.balance == null ? "—" : String(stats.balance)} />
-          <Stat label="累计已用" value={String(stats?.spentTotal ?? 0)} />
-          <Stat label="近 7 天" value={String(stats?.spentWeek ?? 0)} />
-          <Stat label="近 24 小时" value={String(stats?.spentDay ?? 0)} />
-        </div>
-        <div className="statgrid mt8">
-          <Stat label="成片（值回票价）" value={String(stats?.spentPass ?? 0)} tone="ok" />
-          <Stat label="未通过（白花的）" value={String(stats?.spentRej ?? 0)} tone="er" />
-          <Stat label="待验收（未定论）" value={String(stats?.spentPending ?? 0)} />
-          <Stat label="计入条数" value={String(stats?.countedClips ?? 0)} />
-        </div>
-        <div className="fs11 t3 mt8" style={{ lineHeight: 1.8 }}>
-          消耗只统计**出片时收到扣费回执**的条目 —— 提交那一刻并不知道这一条会花多少，
-          所以任何「预估用量」都是编的。
-          {stats?.vipLevel && (
-            <>
-              <br />
-              当前账号等级 <span className="chip">{stats.vipLevel}</span>
-              {stats.userId != null && <> · ID {stats.userId}</>}
-            </>
-          )}
+          {sessions?.length === 0 && <span className="fs11 t3">会话不可用</span>}
         </div>
       </div>
     </Modal>
-  );
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "er" }) {
-  return (
-    <div className="statcell">
-      <div className="fs10 t3 nowrap ohide">{label}</div>
-      <div
-        className="fs16 fw6"
-        style={{ color: tone === "ok" ? "var(--ok)" : tone === "er" ? "var(--er)" : undefined }}
-      >
-        {value}
-      </div>
-    </div>
   );
 }

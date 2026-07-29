@@ -1,3 +1,4 @@
+import { Tooltip } from "@/components/ui/Tooltip";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import type { Row } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -23,7 +24,6 @@ export function V2vReviewFlow({
   onSeek,
   onPass,
   onReject,
-  onRerun,
   onRewrite,
   onUndo,
   onExit,
@@ -38,7 +38,6 @@ export function V2vReviewFlow({
   onSeek: (clipId: number) => void;
   onPass: () => void;
   onReject: () => void;
-  onRerun: () => void;
   onRewrite: () => void;
   onUndo: () => void;
   onExit: () => void;
@@ -60,9 +59,11 @@ export function V2vReviewFlow({
         <div className="vrevhd">
           <span className="fw6 fs13">验收看片流</span>
           <div className="f1" />
-          <button type="button" className="btn sm gho vrevbtn" onClick={onExit}>
-            退出 ESC
-          </button>
+          <Tooltip content="退出看片流（Esc）">
+            <button type="button" className="btn sm gho vrevbtn" onClick={onExit}>
+              退出
+            </button>
+          </Tooltip>
         </div>
         <div className="f1 fx ac jc" style={{ justifyContent: "center" }}>
           <span className="fs13" style={{ color: "var(--rd-t2)" }}>
@@ -105,9 +106,11 @@ export function V2vReviewFlow({
           {cur.modelShort} ·{" "}
           {c.creditCount != null ? `${c.creditCount} 额度` : `${cur.estimate ?? "?"} 额度（估）`}
         </span>
-        <button type="button" className="btn sm gho vrevbtn" onClick={onExit}>
-          退出 ESC
-        </button>
+        <Tooltip content="退出看片流（Esc）">
+          <button type="button" className="btn sm gho vrevbtn" onClick={onExit}>
+            退出
+          </button>
+        </Tooltip>
       </div>
 
       <div className="vrevbody">
@@ -184,30 +187,32 @@ export function V2vReviewFlow({
       </div>
 
       <div className="vrevfoot">
-        <button type="button" className="btn sm vrevok" disabled={busy} onClick={onPass}>
-          通过 <span className="kh">空格</span>
-        </button>
-        <button type="button" className="btn sm vrevno" disabled={busy} onClick={onReject}>
-          不通过 <span className="kh">X</span>
-        </button>
-        <button type="button" className="btn sm vrevbtn" disabled={busy} onClick={onRerun}>
-          不通过并重跑 <span className="kh">R</span>
-        </button>
-        <button type="button" className="btn sm vrevbtn" disabled={busy} onClick={onRewrite}>
-          退回改写 <span className="kh">E</span>
-        </button>
+        <Tooltip content="通过（空格）">
+          <button type="button" className="btn sm vrevok" disabled={busy} onClick={onPass}>
+            通过
+          </button>
+        </Tooltip>
+        <Tooltip content="不通过（X）">
+          <button type="button" className="btn sm vrevno" disabled={busy} onClick={onReject}>
+            不通过
+          </button>
+        </Tooltip>
+        <Tooltip content="进入提示词改写流程（E）">
+          <button type="button" className="btn sm vrevbtn" disabled={busy} onClick={onRewrite}>
+            退回改写
+          </button>
+        </Tooltip>
         {undoLabel && (
           <span className="vrevundo">
             {undoLabel}
-            <button type="button" onClick={onUndo}>
-              撤销 U
-            </button>
+            <Tooltip content="撤销上一项验收（U）">
+              <button type="button" onClick={onUndo}>
+                撤销
+              </button>
+            </Tooltip>
           </span>
         )}
         <div className="f1" />
-        <span className="fs10 mono" style={{ color: "var(--rd-t3)" }}>
-          ←/→ 换条 · U 撤销 · ESC 退出
-        </span>
       </div>
     </div>
   );

@@ -275,9 +275,7 @@ export function V2vClipsPage() {
               <div className="fs13 fw5 t2">
                 {tab === "pass" ? "还没有验收通过的视频" : "没有未通过的记录"}
               </div>
-              <div className="fs12 t3" style={{ maxWidth: 420, lineHeight: 1.7 }}>
-                验收通过的视频会自动来到这一页；流水线工作台只留还在制的条目。
-              </div>
+              <div className="fs12 t3">验收通过的视频会自动进入这里。</div>
             </div>
           ) : (
             <div className="clipgrid">

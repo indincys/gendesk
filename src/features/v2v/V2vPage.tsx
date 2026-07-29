@@ -1,28 +1,24 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
-import { type DockHandlers, V2vDock } from "@/features/v2v/V2vDock";
+import { DescriptionHint } from "@/components/ui/Tooltip";
+import { type DockHandlers, V2vDock, reviewScope } from "@/features/v2v/V2vDock";
 import { V2vLedger, worstGroup } from "@/features/v2v/V2vLedger";
 import { type PickMode, V2vList } from "@/features/v2v/V2vList";
 import { V2vLogPanel } from "@/features/v2v/V2vLogPanel";
 import { type Params, V2vParamPicker } from "@/features/v2v/V2vParamPicker";
 import { V2vParamsPanel } from "@/features/v2v/V2vParamsPanel";
 import { V2vPreview } from "@/features/v2v/V2vPreview";
-import { V2vQueuePanel } from "@/features/v2v/V2vQueuePanel";
-import { V2vCreditDaily, V2vQueueTrend } from "@/features/v2v/V2vQueueTrend";
 import { V2vReviewFlow } from "@/features/v2v/V2vReviewFlow";
 import {
   type Row,
   carryParams,
   creditPerSec,
   filterFace,
-  fmtAgo,
   removalRisk,
   sliceSummary,
 } from "@/features/v2v/model";
 import {
-  type CreditStats,
   type ModelInfo,
   type SubmitPreview,
-  type V2vTick,
   type V2vUndoEntry,
   commands,
   subscribeV2v,
@@ -33,7 +29,7 @@ import { useUiStore } from "@/stores/ui";
 import {
   selectChannelCounts,
   selectChannels,
-  selectTopChannels,
+  selectRows,
   selectVisible,
   useV2vStore,
 } from "@/stores/v2v";
@@ -42,7 +38,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
- * 视频流水线工作台（v0.24.0 按 Claude Design 原型重做）。
+ * 视频生成工作台。
  *
  * ## 三处结构性判断
  *
@@ -64,8 +60,8 @@ import { toast } from "sonner";
  *
  * ## 键盘
  *
- * ↑/↓（或 ←/→、J/K）换条 · 空格 通过 · X 不通过 · R 重跑 · E 退回改写 · W 继续等待 ·
- * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 账与进度栏 · ⌥1/2/3 观测/日志/参数。
+ * ↑/↓（或 ←/→、J/K）换条 · 空格 通过 · X 不通过 · E 退回改写 · W 继续等待 ·
+ * U 撤销 · F 对照首帧 · ⏎ 全屏看片 · ⌘⏎ 确认提交 · ⌥\ 账与进度栏 · ⌥2/3 日志/参数。
  */
 
 /**
@@ -100,16 +96,16 @@ function RemoveConfirm({
     <ConfirmModal
       title={
         one
-          ? `从流水线删掉 ${one.clip.promptCode}`
-          : `从流水线删掉 ${rows.length} 条${risky > 0 ? ` · 其中 ${risky} 条即梦收下过` : ""}`
+          ? `从视频生成删掉 ${one.clip.promptCode}`
+          : `从视频生成删掉 ${rows.length} 条${risky > 0 ? ` · 其中 ${risky} 条即梦收下过` : ""}`
       }
       desc={[
-        "删掉之后这张图不再走视频流水线（图本身与作品记录不受影响，只是不会再自动回到这里）。",
+        "删除后不再为这张图生成视频；图片与作品记录不受影响。",
         rows.length - risky > 0
           ? `其中 ${rows.length - risky} 条即梦从未收下过 —— 丢的只是已经写好的视频提示词。`
           : "",
         held.length > 0
-          ? `${held.length} 条即梦已经收下${credit > 0 ? `、已扣 ${credit} 额度` : ""}：删掉之后我们再也认不出那几单，片子取不回来，额度也退不了。想换条队重跑的话用「换通道」。`
+          ? `${held.length} 条即梦已经收下${credit > 0 ? `、已扣 ${credit} 额度` : ""}：删掉之后我们再也认不出那几单，片子取不回来，额度也退不了。需要改投时使用「改通道」。`
           : "",
         unknown.length > 0
           ? `${unknown.length} 条提交时 CLI 超时被杀，我们没拿到 submit_id —— 单可能已经下出去并扣了费，删掉就永远对不上账了。`
@@ -145,11 +141,9 @@ export function V2vPage() {
   const models = useV2vStore((s) => s.models);
   const handoff = useV2vStore((s) => s.handoff);
   const autofill = useV2vStore((s) => s.autofill);
-  const credit = useV2vStore((s) => s.credit);
   const queue = useV2vStore((s) => s.queue);
   const tick = useV2vStore((s) => s.tick);
   const activity = useV2vStore((s) => s.activity);
-  const coarseNow = useV2vStore((s) => s.coarseNow);
 
   const filter = useV2vStore((s) => s.filter);
   const sel = useV2vStore((s) => s.sel);
@@ -165,31 +159,32 @@ export function V2vPage() {
   const toggleLedger = useV2vStore((s) => s.toggleLedger);
 
   const visible = useV2vStore(selectVisible);
+  const allRows = useV2vStore(selectRows);
   const channels = useV2vStore(selectChannels);
-  const topCh = useV2vStore(selectTopChannels);
   const chCounts = useV2vStore(selectChannelCounts);
 
   // ── 界面态 ───────────────────────────────────────────
   const [screen, setScreen] = useState<"list" | "review">("list");
+  const [reviewIds, setReviewIds] = useState<Set<number> | null>(null);
   const [showFrame, setShowFrame] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [showParams, setShowParams] = useState(false);
-  const [showObserve, setShowObserve] = useState(false);
   const [cmdPreview, setCmdPreview] = useState<{ ids: number[]; data: SubmitPreview } | null>(null);
   /** 换通道面板要处置的行。 */
   const [switching, setSwitching] = useState<Row[] | null>(null);
   /** 「改参数」面板要处置的行。 */
   const [editing, setEditing] = useState<Row[] | null>(null);
-  /**
-   * 重跑前的确认：只在选中里**确实有已扣费的在跑条目**时才出现。
-   *
-   * 幽灵单与未计费的在跑条目不弹 —— 它们重跑本来就免费，多一次确认只会训练出
-   * 盲点头的习惯，等真正要花钱的那次弹出来时就没人读了。
-   */
-  const [confirmRerun, setConfirmRerun] = useState<{
+  /** 失败恢复可能再次扣费或处于提交结果未知态，这两类必须确认。 */
+  const [confirmRecover, setConfirmRecover] = useState<{
     ids: number[];
-    /** 卡上写着「已经花过钱」的那几条。确认时原样交回后端复核（见 `requeue`）。 */
-    ackPaid: number[];
+    risky: number;
+    credit: number;
+    advanceFrom?: number;
+  } | null>(null);
+  /** 退回改写若会放弃仍可能有效的远端提交，必须先把损失摆在确认卡上。 */
+  const [confirmRewrite, setConfirmRewrite] = useState<{
+    ids: number[];
+    risky: number;
     credit: number;
     advanceFrom?: number;
   } | null>(null);
@@ -221,9 +216,7 @@ export function V2vPage() {
       // 订阅建立失败（事件通道没起来）时这个 promise 会 reject。不接住的话是一条
       // 未处理的 rejection —— 而它唯一的症状是「这一页从此不自己刷新了」，
       // 一句报错都没有。
-      .catch((e) =>
-        toast.error(`视频流水线没能开始监听事件：${e instanceof Error ? e.message : e}`),
-      );
+      .catch((e) => toast.error(`视频生成监听失败：${e instanceof Error ? e.message : e}`));
     return () => cleanup?.();
   }, [enter]);
 
@@ -242,13 +235,13 @@ export function V2vPage() {
     return () => un?.();
   }, []);
 
-  const byId = useMemo(() => new Map(visible.map((r) => [r.clip.id, r])), [visible]);
+  const byId = useMemo(() => new Map(allRows.map((r) => [r.clip.id, r])), [allRows]);
   const curRow = (cur == null ? null : byId.get(cur)) ?? visible[0] ?? null;
   const curId = curRow?.clip.id ?? null;
   const curIndex = curId == null ? 0 : visible.findIndex((r) => r.clip.id === curId) + 1;
 
-  /** 待验收序列（受当前筛选影响）—— 看片流走的就是它。 */
-  const revList = useMemo(() => visible.filter((r) => r.stage === "rev"), [visible]);
+  /** 进入看片流时钉住显式 ID，避免勾选范围被忽略或后续新任务混入本轮。 */
+  const revList = useMemo(() => reviewScope(visible, reviewIds), [visible, reviewIds]);
   const revIndex = curId == null ? -1 : revList.findIndex((r) => r.clip.id === curId);
 
   // 交接状态跟着**待改写条数**刷新。
@@ -348,41 +341,10 @@ export function V2vPage() {
             ? { ...t, passed: t.passed + res.changed }
             : { ...t, killed: t.killed + res.changed },
         );
-        toast(pass ? res.label : `${res.label}（成片进废纸篓）`);
-        if (advanceFrom != null) advance(advanceFrom);
-        else clearSel();
-        await reload();
-      }),
-    [guard, advance, reload, clearSel],
-  );
-
-  /**
-   * `ackPaid` = 刚才那张确认卡上写着「已经花过钱」的那几条。
-   *
-   * 后端拿它复核**动手这一刻**真正已计费的集合：人读那张卡的几秒里，本地待发队列完全
-   * 可能又发出去一条，那时卡上的数字已经不作数了。超出名单就整批拒绝、一行不动，
-   * 让人重新看一遍 —— 判据在 Rust（铁律 1），这里只负责如实交回人看过什么。
-   */
-  const requeue = useCallback(
-    (ids: number[], mode: "run" | "rewrite" | "wait", advanceFrom?: number, ackPaid?: number[]) =>
-      guard(async () => {
-        if (ids.length === 0) return;
-        const res = await unwrap(commands.requeueV2vClips(ids, mode, ackPaid ?? []));
-        if (res.changed === 0) {
-          toast(
-            mode === "wait"
-              ? "没有可继续等待的条目（只有判了超时且提交单还在的才行）"
-              : "这些条目当前阶段不允许该操作",
-          );
-          return;
-        }
-        setUndo({ label: res.label, entries: res.undo });
         toast(
-          mode === "wait"
-            ? `${res.label}（沿用原提交单，不再扣额度）`
-            : mode === "run"
-              ? `${res.label}（需再次确认提交，会重新扣费）`
-              : res.label,
+          `${pass ? res.label : `${res.label}（成片进废纸篓）`}${
+            res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""
+          }`,
         );
         if (advanceFrom != null) advance(advanceFrom);
         else clearSel();
@@ -391,35 +353,87 @@ export function V2vPage() {
     [guard, advance, reload, clearSel],
   );
 
-  /**
-   * 重跑的入口 —— 已扣费的在跑条目先弹确认。
-   *
-   * `requeue_for_run` 会把 `submit_id` 与 `credit_count` 一起清掉，此后 `list_running`
-   * 再也认不出那一单：即梦还在跑、钱已经扣了，片子却永远取不回来，下次提交是第二份钱。
-   *
-   * 判据用 Rust 下发的 `clip.billed`（`Evidence::billed`，读五处证据），不在这里拿
-   * `creditCount != null` 凑：前端只看得见其中两个字段，少读一处的后果是对着一条
-   * 已经扣过钱的单子说「重跑不花钱」。没扣过费的（幽灵单、被并发上限弹回的）
-   * **不弹** —— 它们重跑本来就免费。
-   */
-  const rerun = useCallback(
+  const queueAction = useCallback(
+    (ids: number[], mode: "rewrite" | "resume", advanceFrom?: number) =>
+      guard(async () => {
+        if (ids.length === 0) return;
+        const res = await unwrap(
+          mode === "resume" ? commands.resumeV2vClips(ids) : commands.rewriteV2vClips(ids),
+        );
+        if (res.changed === 0) {
+          toast(mode === "resume" ? "没有可继续等待的任务" : "没有可退回改写的任务");
+          return;
+        }
+        setUndo({ label: res.label, entries: res.undo });
+        toast(
+          `${res.label}${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}${
+            mode === "resume" ? "（沿用原提交单，不再扣额度）" : ""
+          }`,
+        );
+        if (advanceFrom != null) advance(advanceFrom);
+        else clearSel();
+        await reload();
+      }),
+    [guard, advance, reload, clearSel],
+  );
+
+  const doRecover = useCallback(
+    (ids: number[], advanceFrom?: number) =>
+      guard(async () => {
+        const res = await unwrap(commands.recoverV2vClips(ids));
+        if (res.changed === 0) {
+          toast("没有可恢复的无输出任务");
+          return;
+        }
+        setUndo({ label: res.label, entries: res.undo });
+        toast(`${res.label} · 跳过 ${res.skipped}`);
+        if (advanceFrom != null) advance(advanceFrom);
+        else clearSel();
+        await reload();
+      }),
+    [guard, advance, reload, clearSel],
+  );
+
+  const recover = useCallback(
     (ids: number[], advanceFrom?: number) => {
-      const paid = ids
-        .map((id) => byId.get(id))
-        .filter((r): r is Row => r != null && r.stage === "run" && r.clip.billed);
-      if (paid.length === 0) {
-        void requeue(ids, "run", advanceFrom);
+      const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => r != null);
+      const risky = rows.filter((r) => r.clip.billed || r.clip.errorType === "submit_timeout");
+      if (risky.length === 0) {
+        void doRecover(ids, advanceFrom);
         return;
       }
-      setConfirmRerun({
+      setConfirmRecover({
         ids,
-        // 卡上写着已花钱的正是这几条 —— 原样交回后端复核（见 `requeue` 的注释）。
-        ackPaid: paid.map((r) => r.clip.id),
-        credit: paid.reduce((a, r) => a + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0),
+        risky: risky.length,
+        credit: risky.reduce((sum, r) => sum + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0),
         ...(advanceFrom == null ? {} : { advanceFrom }),
       });
     },
-    [byId, requeue],
+    [byId, doRecover],
+  );
+
+  const rewrite = useCallback(
+    (ids: number[], advanceFrom?: number) => {
+      const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => r != null);
+      const risky = rows.filter(
+        (r) =>
+          r.stage === "fail" &&
+          ((r.clip.submitId ?? "").trim() !== "" ||
+            r.clip.billed ||
+            r.clip.errorType === "submit_timeout"),
+      );
+      if (risky.length === 0) {
+        void queueAction(ids, "rewrite", advanceFrom);
+        return;
+      }
+      setConfirmRewrite({
+        ids,
+        risky: risky.length,
+        credit: risky.reduce((sum, r) => sum + (r.clip.creditCount ?? r.clip.submitCredit ?? 0), 0),
+        ...(advanceFrom == null ? {} : { advanceFrom }),
+      });
+    },
+    [byId, queueAction],
   );
 
   /** 提交确认：把**即将执行的真实命令行**与这一下要花的额度摆在点确认之前。 */
@@ -612,7 +626,7 @@ export function V2vPage() {
 
   // ── 看片流的单条判定（键盘与按钮共用） ────────────────
   const judgeCurrent = useCallback(
-    (kind: "pass" | "rej" | "rerun" | "rewrite" | "wait") => {
+    (kind: "pass" | "rej" | "rewrite" | "wait") => {
       const r = curRow;
       if (!r) return;
       const id = r.clip.id;
@@ -622,35 +636,28 @@ export function V2vPage() {
       } else if (kind === "rej") {
         if (r.stage !== "rev") return;
         void review([id], false, id);
-      } else if (kind === "rerun") {
-        // `R` 键与按钮走同一条路 —— 护栏若只挂在按钮上，最快的那个入口就是敞开的。
-        rerun([id], id);
       } else if (kind === "rewrite") {
-        void requeue([id], "rewrite", id);
+        rewrite([id], id);
       } else {
-        void requeue([id], "wait", id);
+        void queueAction([id], "resume", id);
       }
     },
-    [curRow, review, requeue, rerun],
+    [curRow, review, rewrite, queueAction],
   );
 
   const move = useCallback(
     (d: 1 | -1) => {
-      if (visible.length === 0) return;
-      const at = curId == null ? -1 : visible.findIndex((r) => r.clip.id === curId);
-      const next = visible[Math.max(0, Math.min(visible.length - 1, (at < 0 ? 0 : at) + d))];
+      const list = screen === "review" ? revList : visible;
+      if (list.length === 0) return;
+      const at = curId == null ? -1 : list.findIndex((r) => r.clip.id === curId);
+      const next = list[Math.max(0, Math.min(list.length - 1, (at < 0 ? 0 : at) + d))];
       if (next) setCur(next.clip.id);
     },
-    [visible, curId, setCur],
+    [screen, revList, visible, curId, setCur],
   );
 
   const modalOpen =
-    cmdPreview != null ||
-    showLog ||
-    showParams ||
-    showObserve ||
-    editing != null ||
-    switching != null;
+    cmdPreview != null || showLog || showParams || editing != null || switching != null;
 
   // ── 键盘 ─────────────────────────────────────────────
   useEffect(() => {
@@ -661,7 +668,8 @@ export function V2vPage() {
       if (useUiStore.getState().helpOpen) return;
       if (e.metaKey || e.ctrlKey) {
         // 弹层开着时整页让路：那时 ⌘A 是想选中弹层里的文字，⌘⏎ 是想确认那张卡。
-        if (modalOpen || confirmRerun != null || confirmRemove != null) return;
+        if (modalOpen || confirmRecover != null || confirmRewrite != null || confirmRemove != null)
+          return;
         // ⌘⏎ 确认提交：勾选的待提交条目，或（没勾时）当前光标那一条。
         if (e.key === "Enter") {
           e.preventDefault();
@@ -680,12 +688,9 @@ export function V2vPage() {
         }
         return;
       }
-      // ⌥1/2/3 与 ⌥\ 用 e.code：macOS 上 Alt 会把 key 改写成 ¡ / « 之类的符号。
+      // ⌥2/3 与 ⌥\ 用 e.code：macOS 上 Alt 会把 key 改写成符号。
       if (e.altKey) {
-        if (e.code === "Digit1") {
-          e.preventDefault();
-          setShowObserve(true);
-        } else if (e.code === "Digit2") {
+        if (e.code === "Digit2") {
           e.preventDefault();
           setShowLog(true);
         } else if (e.code === "Digit3") {
@@ -697,11 +702,13 @@ export function V2vPage() {
         }
         return;
       }
-      if (modalOpen || confirmRerun != null || confirmRemove != null) return;
+      if (modalOpen || confirmRecover != null || confirmRewrite != null || confirmRemove != null)
+        return;
 
       if (e.key === "Escape") {
         if (screen === "review") {
           e.preventDefault();
+          setReviewIds(null);
           setScreen("list");
         } else if (sel.size > 0) {
           // 勾了一批之后没有别的路把它们放下 —— 而底坞那几个批量按钮全都跟着勾选走，
@@ -723,7 +730,12 @@ export function V2vPage() {
         // 全屏看片只对**待验收**成立：别的阶段要么没有成片，要么已经定案，
         // 进去会得到一块空画面加一排点不动的按钮。
         if (screen === "list" && curRow?.stage === "rev") {
+          const ids =
+            sel.size > 0
+              ? visible.filter((r) => sel.has(r.clip.id) && r.stage === "rev").map((r) => r.clip.id)
+              : [curRow.clip.id];
           setTally({ passed: 0, killed: 0 });
+          setReviewIds(new Set(ids));
           setScreen("review");
         }
         return;
@@ -750,10 +762,6 @@ export function V2vPage() {
         judgeCurrent("rej");
         return;
       }
-      if (e.key === "r" || e.key === "R") {
-        judgeCurrent("rerun");
-        return;
-      }
       if (e.key === "e" || e.key === "E") {
         judgeCurrent("rewrite");
         return;
@@ -775,7 +783,8 @@ export function V2vPage() {
   }, [
     screen,
     modalOpen,
-    confirmRerun,
+    confirmRecover,
+    confirmRewrite,
     confirmRemove,
     move,
     judgeCurrent,
@@ -793,13 +802,16 @@ export function V2vPage() {
 
   const handlers: DockHandlers = {
     onSubmit: (ids) => void openSubmit(ids),
-    onReview: (id, pass) => void review([id], pass, id),
-    onRerun: (ids) => rerun(ids, ids.length === 1 ? ids[0] : undefined),
-    onRequeueRewrite: (ids) => void requeue(ids, "rewrite", ids.length === 1 ? ids[0] : undefined),
-    onResume: (ids) => void requeue(ids, "wait", ids.length === 1 ? ids[0] : undefined),
+    onReview: (ids, pass) => void review(ids, pass, ids.length === 1 ? ids[0] : undefined),
+    onRecover: (ids) => recover(ids, ids.length === 1 ? ids[0] : undefined),
+    onRequeueRewrite: (ids) => rewrite(ids, ids.length === 1 ? ids[0] : undefined),
+    onResume: (ids) => void queueAction(ids, "resume", ids.length === 1 ? ids[0] : undefined),
     onUnqueue: (ids) => void unqueue(ids),
-    onEnterReview: () => {
+    onEnterReview: (ids) => {
       setTally({ passed: 0, killed: 0 });
+      setReviewIds(new Set(ids));
+      const first = ids[0];
+      if (first != null) setCur(first);
       setScreen("review");
     },
     onIngest: () => void ingest(),
@@ -860,14 +872,6 @@ export function V2vPage() {
           }}
         />
       )}
-      {showObserve && (
-        <ObserveModal
-          tick={tick}
-          now={coarseNow}
-          credit={credit}
-          onClose={() => setShowObserve(false)}
-        />
-      )}
     </>
   );
 
@@ -876,11 +880,8 @@ export function V2vPage() {
       <div className="col f1 ohide">
         <div className="bigempty">
           <Clapperboard className="ic" style={{ width: 26, height: 26, opacity: 0.5 }} />
-          <div className="fs13 fw5 t2">流水线是空的</div>
-          <div className="fs12 t3" style={{ maxWidth: 460, lineHeight: 1.7 }}>
-            给提示词组标上用途「图生视频」（导入 txt 时就能选），该组的图
-            <b>验收通过即自动入队</b>，不需要回作品库找出来再点导出。
-          </div>
+          <div className="fs13 fw5 t2">暂无视频生成任务</div>
+          <div className="fs12 t3">图片验收通过后会自动进入这里。</div>
         </div>
         {panels}
       </div>
@@ -909,8 +910,7 @@ export function V2vPage() {
             activity={activity}
             badGroup={badGroup}
             busy={busy}
-            onRewriteGroup={(ids) => void requeue(ids, "rewrite")}
-            onObserve={() => setShowObserve(true)}
+            onRewriteGroup={(ids) => void queueAction(ids, "rewrite")}
             onLog={() => setShowLog(true)}
             onParams={() => setShowParams(true)}
             onOpenHandoff={openHandoff}
@@ -919,7 +919,7 @@ export function V2vPage() {
         <V2vList
           rows={visible}
           channels={channels}
-          top={topCh}
+          top={channels}
           chCounts={chCounts}
           filter={filter}
           face={face}
@@ -948,7 +948,7 @@ export function V2vPage() {
 
       <V2vDock
         row={curRow}
-        visible={visible}
+        rows={allRows}
         sel={sel}
         running={tick?.running ?? 0}
         busy={busy}
@@ -967,10 +967,12 @@ export function V2vPage() {
           onSeek={setCur}
           onPass={() => judgeCurrent("pass")}
           onReject={() => judgeCurrent("rej")}
-          onRerun={() => judgeCurrent("rerun")}
           onRewrite={() => judgeCurrent("rewrite")}
           onUndo={doUndo}
-          onExit={() => setScreen("list")}
+          onExit={() => {
+            setReviewIds(null);
+            setScreen("list");
+          }}
         />
       )}
 
@@ -1034,18 +1036,37 @@ export function V2vPage() {
         />
       )}
 
-      {confirmRerun && (
+      {confirmRecover && (
         <ConfirmModal
-          title={`重跑 ${confirmRerun.ids.length} 条 · 其中 ${confirmRerun.ackPaid.length} 条已经花过钱`}
-          desc={`这 ${confirmRerun.ackPaid.length} 条即梦已经收下并扣了 ${confirmRerun.credit} 额度，且不可撤回。重跑会丢弃原提交单 —— 那几条视频即梦还在跑，但我们此后再也取不回来，下次确认提交是第二份钱。想换条队而不是重抽的话，用「换通道」。`}
-          confirmLabel="仍要重跑"
+          title={`恢复 ${confirmRecover.ids.length} 条 · ${confirmRecover.risky} 条可能再次计费`}
+          desc={`这些任务没有可用输出，但其中 ${confirmRecover.risky} 条已计费或提交结果未知${
+            confirmRecover.credit > 0 ? `（已记录 ${confirmRecover.credit} 额度）` : ""
+          }。恢复后需要重新提交，可能再次扣费。`}
+          confirmLabel="确认恢复"
           danger
           onConfirm={() => {
-            const c = confirmRerun;
-            setConfirmRerun(null);
-            void requeue(c.ids, "run", c.advanceFrom, c.ackPaid);
+            const c = confirmRecover;
+            setConfirmRecover(null);
+            void doRecover(c.ids, c.advanceFrom);
           }}
-          onClose={() => setConfirmRerun(null)}
+          onClose={() => setConfirmRecover(null)}
+        />
+      )}
+
+      {confirmRewrite && (
+        <ConfirmModal
+          title={`退回改写 ${confirmRewrite.ids.length} 条 · ${confirmRewrite.risky} 条仍有远端提交`}
+          desc={`其中 ${confirmRewrite.risky} 条仍持有提交单或计费记录${
+            confirmRewrite.credit > 0 ? `（已记录 ${confirmRewrite.credit} 额度）` : ""
+          }。继续会停止跟踪原提交；即梦可能仍在运行，已消费额度无法撤回。`}
+          confirmLabel="仍要退回改写"
+          danger
+          onConfirm={() => {
+            const c = confirmRewrite;
+            setConfirmRewrite(null);
+            void queueAction(c.ids, "rewrite", c.advanceFrom);
+          }}
+          onClose={() => setConfirmRewrite(null)}
         />
       )}
 
@@ -1109,9 +1130,6 @@ function ParamEditModal({
       onClose={onClose}
       footer={
         <>
-          <span className="fs11 t3">
-            提交之后再改不会重新生效 —— 那条视频用的是提交那一刻的参数。
-          </span>
           <div className="f1" />
           <button type="button" className="btn sm gho" onClick={onClose}>
             取消
@@ -1127,20 +1145,14 @@ function ParamEditModal({
           <span className="fs11 fw6 t3 nowrap">改成</span>
           <V2vParamPicker models={models} value={p} onChange={setP} disabled={busy} />
         </div>
-        {!uniform && (
-          <div className="fs11 t3 mb8" style={{ lineHeight: 1.8 }}>
-            选中的条目原参数不一致 —— 上面填的这一套会**整体覆盖**它们，不是逐条保持。
-            留空的那一项表示「跟随全局默认」，同样会覆盖掉原来写死的值。
-          </div>
-        )}
+        {!uniform && <div className="fs11 t3 mb8">所选参数不一致，将统一覆盖。</div>}
         <div className="costbar">
           <div className="fs12">
-            这 {rows.length} 条都还没提交出去，所以改参数**不涉及任何额度**。
+            未提交 {rows.length} 条：<b>改参数不消耗额度</b>
           </div>
-          <div className="fs11 t3">
-            模型留空 = 跟随设置里的全局默认（也就是常驻队列捡得走的那一档）；
-            写死型号之后这些条目就不再被自动补单捡走了。
-          </div>
+          <DescriptionHint label="参数作用域说明">
+            模型留空会跟随全局默认；写死型号后不再进入常驻队列候选。只允许修改未提交任务。
+          </DescriptionHint>
         </div>
       </div>
     </Modal>
@@ -1351,10 +1363,7 @@ function SubmitConfirm({
             这些条目全部跑完的总数，不是现在就要花掉的。
           </div>
         </div>
-        <div className="fs12 t2 mb8" style={{ lineHeight: 1.7 }}>
-          下面是<b>即将执行的完整命令行</b>（与真正 exec 的参数同源）。
-          「我设了却没生效」这类怀疑只能靠把真实请求摆在确认之前来消除。
-        </div>
+        <div className="fs12 t2 mb8">提交命令</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {preview.commands.map((line, i) => (
             <div key={`${i}-${line.slice(0, 24)}`} className="cmdwell">
@@ -1528,50 +1537,31 @@ function ChannelSwitchModal({
         </div>
 
         {target && (carried.durationChanged || carried.resolutionChanged) && (
-          <div className="fs11 wr2 mb8" style={{ lineHeight: 1.8 }}>
-            这条通道接不了原来的规格，已经夹到最近的合法值：
+          <div className="fs11 wr2 mb8">
+            已调整为通道支持的规格：
             {carried.durationChanged && ` 时长 ${wantDur}s → ${carried.duration}s`}
             {carried.resolutionChanged && ` 分辨率 ${wantRes} → ${carried.resolution}`}
-            。上面还能再改。
           </div>
         )}
-        {mixed && (
-          <div className="fs11 t3 mb8">
-            选中的条目原参数不一致 —— 上面填的这一套会**整体覆盖**它们，不是逐条保持。
-          </div>
-        )}
+        {mixed && <div className="fs11 t3 mb8">所选参数不一致，将统一覆盖。</div>}
 
         {/* 「换完之后会怎样」——这是人点这个按钮时真正在问的问题，而它逐堆答案完全不同。
             放在花钱那一段**之前**：先答「它会不会跑起来」，再答「要花多少」。 */}
         <div className="costbar mb8">
           <div className="fs11 fw6 t3">换完之后</div>
           {queued.length > 0 && (
-            <div className="fs12">
-              <b>{queued.length} 条已放行的 → 直接排到新通道上，什么都不用再点</b>
-              ，出空位自动发。它们带着原来的放行时刻插队，不会被罚到队尾。
-            </div>
+            <div className="fs12">已放行 {queued.length} 条：自动进入新通道队列</div>
           )}
-          {holding.length > 0 && (
-            <div className="fs12">
-              <b>{holding.length} 条就绪的 → 仍然停在「等你点确认提交」</b>
-              。用下面那个「改投并去提交」可以换完直接进确认卡（那一步才扣费）。
-            </div>
-          )}
+          {holding.length > 0 && <div className="fs12">就绪 {holding.length} 条：仍需确认提交</div>}
           {noPrompt.length > 0 && (
-            <div className="fs12 wr2" style={{ lineHeight: 1.8 }}>
-              <b>{noPrompt.length} 条缺词的 → 换完还是发不出去</b>
-              ：它们连视频提示词都还没有，而即梦要的就是提示词。得先去 Claude Code / Codex 里跑
-              v2v-rewrite 把提示词写回来，那之后才谈得上提交。 换通道这一步对它们仍然有效 ——
-              只是生效要等到提交那一刻。
-            </div>
+            <div className="fs12 wr2">缺词 {noPrompt.length} 条：仍需先改写</div>
           )}
         </div>
 
         <div className="costbar mb8">
           {free.length > 0 && (
             <div className="fs12">
-              <b>{free.length} 条还在本地队列 / 就绪 / 缺词</b> —— 即梦对它们一无所知，
-              <b>一分钱没扣</b>，换通道免费。
+              未提交 {free.length} 条：<b>换通道不消耗额度</b>
             </div>
           )}
           {live.length > 0 && (
@@ -1579,9 +1569,8 @@ function ChannelSwitchModal({
               <b>{live.length} 条已经提交给即梦</b>
               {paid.length > 0 ? (
                 <>
-                  ，其中 {paid.length} 条<b>确实扣了 {paidCredit} 额度且不可撤回</b>
-                  。改投等于丢弃它们 —— 那几条视频即梦还在跑，但我们此后再也取不回来， 新通道上要
-                  <b>再花一份钱</b>。
+                  ，其中 {paid.length} 条<b>已扣 {paidCredit} 额度且不可撤回</b>
+                  。改投会放弃原提交单，新通道需要再次计费。
                 </>
               ) : (
                 <>，但一处计费证据都没有（幽灵单 / 被并发上限弹回的），改投不花钱。</>
@@ -1597,17 +1586,9 @@ function ChannelSwitchModal({
               </label>
             </div>
           )}
-          {locked > 0 && (
-            <div className="fs11 t3">
-              另有 {locked} 条已出片或已定案，换通道对它们没有意义，会跳过。
-            </div>
-          )}
+          {locked > 0 && <div className="fs11 t3">已出片或已定案 {locked} 条：跳过</div>}
           {autofillOn && leavingPool > 0 && (
-            <div className="fs11 wr2" style={{ lineHeight: 1.8 }}>
-              其中 {leavingPool} 条现在跟随全局默认通道，换过去等于**给它们写死型号** ——
-              常驻队列只捡没写死型号的，所以这 {leavingPool} 条从此不会再被自动补单捡走。
-              要放回去：底坞「改参数」里把模型选回「跟随全局默认」。
-            </div>
+            <div className="fs11 wr2">{leavingPool} 条将写死型号，不再进入常驻队列候选。</div>
           )}
           {target && (
             <div className="fs11 t3">
@@ -1618,97 +1599,5 @@ function ChannelSwitchModal({
         </div>
       </div>
     </Modal>
-  );
-}
-
-/** 观测面板（⌥1）：队列进度 + 心跳 + 额度分账。 */
-function ObserveModal({
-  tick,
-  now,
-  credit,
-  onClose,
-}: {
-  tick: V2vTick | null;
-  now: number;
-  credit: CreditStats | null;
-  onClose: () => void;
-}) {
-  return (
-    <Modal
-      title="队列观测"
-      width="w700"
-      onClose={onClose}
-      headerExtra={
-        // 「上次查询」读 `lastSweepAt`（真实问过即梦的时刻），不是心跳时刻 ——
-        // 同顶栏那个按钮的理由：两者差一个数量级，混用就是在说数据比实际新鲜。
-        <span className="chip">
-          {tick == null
-            ? "等待首轮心跳"
-            : `${tick.running} 在跑 · 上次查询 ${
-                tick.lastSweepAt == null ? "还没查过" : fmtAgo(Math.max(0, now - tick.lastSweepAt))
-              }`}
-        </span>
-      }
-      footer={
-        <>
-          <span className="fs11 t3">
-            排队位次按轮询节拍采样落库，保留 30 天；额度快照一天一条。
-          </span>
-          <div className="f1" />
-          <button type="button" className="btn sm pri" onClick={onClose}>
-            完成
-          </button>
-        </>
-      }
-    >
-      <div style={{ padding: 4 }}>
-        <V2vQueuePanel tick={tick} now={now} always />
-
-        {/* 排产用的两块。放在出片统计**之前**：那些是「已经花掉的」，
-            而这两块是「下一批什么时候发」——后者才是打开这个面板时要决定的事。 */}
-        <div className="vsec mt10">非 VIP 排队观测（近 7 天）</div>
-        <div className="mt5">
-          <V2vQueueTrend hours={7 * 24} />
-        </div>
-
-        <div className="vsec mt10">每日额度（近 14 天）</div>
-        <div className="mt5">
-          <V2vCreditDaily />
-        </div>
-
-        <div className="vsec mt10">额度分账</div>
-        <div className="statgrid mt5">
-          <Stat label="账户余额" value={credit?.balance == null ? "—" : String(credit.balance)} />
-          <Stat label="累计已用" value={String(credit?.spentTotal ?? 0)} />
-          <Stat label="近 7 天" value={String(credit?.spentWeek ?? 0)} />
-          <Stat label="近 24 小时" value={String(credit?.spentDay ?? 0)} />
-        </div>
-        <div className="statgrid mt8">
-          <Stat label="成片（值回票价）" value={String(credit?.spentPass ?? 0)} tone="ok" />
-          <Stat label="未通过（白花的）" value={String(credit?.spentRej ?? 0)} tone="er" />
-          <Stat label="待验收（未定论）" value={String(credit?.spentPending ?? 0)} />
-          <Stat label="计入条数" value={String(credit?.countedClips ?? 0)} />
-        </div>
-        {credit?.balanceError && (
-          <div className="fs11 mt8" style={{ color: "var(--wr)", lineHeight: 1.7 }}>
-            查不到余额：{credit.balanceError}
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "er" }) {
-  return (
-    <div className="statcell">
-      <div className="fs10 t3 nowrap ohide">{label}</div>
-      <div
-        className="fs16 fw6"
-        style={{ color: tone === "ok" ? "var(--ok)" : tone === "er" ? "var(--er)" : undefined }}
-      >
-        {value}
-      </div>
-    </div>
   );
 }

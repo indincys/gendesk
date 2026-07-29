@@ -63,6 +63,11 @@ pub const IMAGES: &str = "images";
 pub const ERROR_FILE: &str = "错误.txt";
 pub const HOLD_FILE: &str = "待确认.txt";
 pub const RESULT_FILE: &str = "结果.txt";
+/// 工单名撞上台账里已有的 jobId：去重挡住了它，**但这不是稳态**。
+/// 去重本身是对的（半份工单重放会造重复提示词、重复花钱），错的是不吭声——
+/// 一份带着 READY.txt、永远不会被处理、也没人知道为什么的工单，
+/// 正是 v0.16.0「操作信号全进了 tracing」那条教训的翻版。
+pub const DUPLICATE_FILE: &str = "重名未收录.txt";
 /// **确认的唯一表达**。设置页那个按钮做的事就是替你写下这个文件。
 pub const CONFIRM_FILE: &str = "确认.txt";
 

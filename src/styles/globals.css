@@ -1062,16 +1062,50 @@ a:hover {
   left: 0;
   width: 100%;
   box-sizing: border-box;
-  padding-top: 4px;
+  /* 上边不留 —— 卡片行的高度必须精确等于 `图高 + CARD_META_H + ROW_GAP`，
+     多出来的 4px 会让虚拟化算的位置一路比实际短。 */
+  padding-top: 0;
   padding-bottom: 12px;
 }
-/* 分组头行上方多留白（成组分隔清晰）；padding 计入 measureElement 量高，无 margin 折叠问题。 */
+/* 标题行**定高**：虚拟化按 ReviewPage 里的 DAY_HEAD_H / CLUSTER_HEAD_H 摆位，
+   而那一版不再回头测量。这里跟着内容长一个像素，相邻两行就会叠在一起。
+   （这正是上一版「分组头下面那行图被压住」的成因：估值 56，实际 66。） */
 .rvrow.head {
-  padding-top: 16px;
-}
-/* 首行贴顶（工具栏与首行间不留多余空隙）。 */
-.rvrow.first {
   padding-top: 0;
+  padding-bottom: 0;
+}
+.rvrow.head.day {
+  height: 50px;
+  padding: 18px 0 4px;
+}
+.rvrow.head.cluster {
+  height: 60px;
+  padding: 12px 0 12px;
+}
+/* 日期头：整宽 + 一条贯穿线。它要能在滚动里一眼扫到，故是这一页唯一带贯穿线的元素 ——
+   任务簇头再醒目一档就分不出哪个是上级了。与废纸篓的 `.trday` 是同一个形状。 */
+.rvday {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+}
+.rvday .d {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--t1);
+  flex: none;
+  letter-spacing: 0.01em;
+}
+.rvday .ln {
+  flex: 1;
+  height: 1px;
+  background: var(--line2);
+}
+.rvday .n {
+  font: 500 10.5px var(--mono);
+  color: var(--t3);
+  flex: none;
 }
 /* 验收齐行（justified）：一行共用行高，每格宽度按各自真实宽高比由 JS 算好后内联。
    高度与宽度都在渲染前确定，故虚拟化不需要回测任何一行——滚动全程零重排。
@@ -1084,22 +1118,6 @@ a:hover {
 }
 .rjcard {
   flex: none;
-}
-/* 行高走 CSS 变量而不是给整行定高：卡片下面还有一行编号/参考图名，
-   把高度压在行上会让那行溢出到下一行的图上。 */
-.rjimg {
-  aspect-ratio: auto;
-  height: var(--rjh);
-  overflow: hidden;
-}
-.rjimg .thumbimg {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.rjimg .thumbfill {
-  height: 100%;
-  aspect-ratio: auto;
 }
 .rcard {
   position: relative;
@@ -1114,6 +1132,32 @@ a:hover {
 }
 /* 自然比例修饰：容器高度跟随内部 <img>（覆盖 .rcimg 的固定 1:1）。 */
 .rcnat {
+  aspect-ratio: auto;
+}
+/* ⚠️ 齐行修饰**必须排在 `.rcimg` 之后** —— 两者同为单类选择器，靠顺序定胜负。
+ *
+ * 这曾经是「验收页图片挤在一起、甚至互相重叠」的**真正成因**，而且从代码上看不出来：
+ * `.rjimg` 写在 `.rcimg` 前面时，后者的 `aspect-ratio: 1` 会赢。而这个盒子的高度是
+ * 定死的（`--rjh`），宽度是 auto —— 于是浏览器**按 1:1 从高度反推出宽度**，
+ * 得到一个与卡片宽度毫无关系的方图：卡片 82px 宽，里面的图 147px 宽。
+ * 一行七张各自超出一截，看上去就是「图与图糊在一起、还压到了隔壁」。
+ *
+ * 所以除了排序，这里再把 `width: 100%` 显式写死：宽度一旦是确定值，
+ * `aspect-ratio` 就不再参与任何计算，日后有人再调顺序也塌不了。
+ */
+.rjimg {
+  aspect-ratio: auto;
+  width: 100%;
+  height: var(--rjh);
+  overflow: hidden;
+}
+.rjimg .thumbimg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rjimg .thumbfill {
+  height: 100%;
   aspect-ratio: auto;
 }
 /* 缩略图元素（任务3）：按原图比例铺满列宽。z-index 盖住 .ph 的斜纹占位层。 */
@@ -1226,6 +1270,9 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 定高：卡片行的高度 = 图高 + 这一行（`CARD_META_H` = 20 + 6）。跟着内容长的话，
+     虚拟化算出来的位置就会比实际短一截，相邻两行当场叠在一起。 */
+  height: 20px;
   margin-top: 6px;
   min-width: 0;
 }
@@ -1287,11 +1334,32 @@ a:hover {
   font-weight: 600;
   color: var(--t1);
   letter-spacing: 0.01em;
-  padding: 7px 11px;
+  /* 定高（36 = 60 - 上下各 12 的行内边距）。见 `.rvrow.head` 的说明。 */
+  height: 36px;
+  padding: 0 11px;
   background: var(--sub);
   border: 1px solid var(--line);
   border-left: 3px solid var(--acc2);
   border-radius: 9px;
+}
+/* 段头上的时间与 skill —— 「这批是什么时候跑的、哪个 skill 写的词」。 */
+.rcltime {
+  flex: none;
+  font: 500 10.5px var(--mono);
+  color: var(--t2);
+}
+.rclskill {
+  flex: none;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 10px var(--mono);
+  color: var(--ok2);
+  background: var(--okbg);
+  border: 1px solid var(--okln);
+  border-radius: 5px;
+  padding: 1px 6px;
 }
 .rcltag {
   flex: none;
@@ -1778,31 +1846,503 @@ a:hover {
   background: var(--erbg);
 }
 
-/* ============================ 废纸篓 ============================ */
-.xrow {
+/* ============================ 废纸篓 ============================
+ * 工作台三块（同视频流水线那一页）：主区 ｜ 详情栏 ｜ 底坞。
+ * 主区两种布局共用同一条时间线与同一套段头（`.trday` / `.trclu`）——
+ * 换布局不该把人对时间线的记忆清零。
+ */
+.trwb {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+.trwbrow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.trmain {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px 28px;
+}
+
+/* skill 标：这批词是哪个 skill 写的。绿系与「来源」灰徽章拉开 ——
+   它答的是「谁写的」，而来源答的是「怎么进的废纸篓」，两件事。 */
+.sk {
+  font: 500 10px var(--mono);
+  color: var(--ok2);
+  background: var(--okbg);
+  border: 1px solid var(--okln);
+  border-radius: 5px;
+  padding: 1px 6px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 虚拟化容器：块由 translateY 摆位，故必须**定高**（见 `model.ts` 的 blockHeight）。
+   跟着内容长一个像素，相邻两块就会叠在一起 —— 而这一页最不能出的就是这个。 */
+.trvirt {
+  position: relative;
+  width: 100%;
+}
+.trblk {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.trblk.day {
+  height: 48px;
+  padding: 18px 0 4px;
+}
+.trblk.clu {
+  height: 44px;
+  padding: 6px 0;
+}
+.trblk.row {
+  padding-bottom: 12px;
+}
+
+/* ── 时间线段头 ─────────────────────────────────────── */
+/* 日期：整宽、带一条贯穿的细线。它要能在滚动里一眼扫到，所以是这一页唯一
+   带贯穿线的元素 —— 任务簇头再醒目一档就分不出哪个是上级了。 */
+.trday {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 54px;
-  padding: 6px 18px;
+  gap: 10px;
+  height: 26px;
+}
+.trday .d {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--t1);
+  flex: none;
+  letter-spacing: 0.01em;
+}
+.trday .ln {
+  flex: 1;
+  height: 1px;
+  background: var(--line2);
+}
+.trday .n {
+  font: 500 10.5px var(--mono);
+  color: var(--t3);
+  flex: none;
+}
+/* 任务簇：一次操作 / 一个批次。左侧强调条是「这里换任务了」的全部视觉负担 ——
+   段与段之间的断口主要由**排版**给（每簇末行右侧留白），色带只是确认。 */
+.trclu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--acc2);
+  border-radius: 8px;
+}
+.trclu .tm {
+  font: 600 11px var(--mono);
+  color: var(--t2);
+  flex: none;
+}
+.trclu .bt {
+  font: 500 10px var(--mono);
+  color: var(--t3);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex: none;
+}
+.trclu .fc {
+  font-size: 11px;
+  color: var(--t3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 「选中本簇」按下去之后要看得出来 —— 全局 `.btn.on` 没有定义，这里就近补一条，
+   不去动别的页面已经长成的样子。 */
+.trclu .btn.on {
+  background: var(--accbg);
+  color: var(--acc2);
+}
+
+/* ── 网格（齐行，真实比例） ─────────────────────────── */
+/* 一行卡片：高度由 JS 算好后内联下发（每张的宽度同理），故渲染前就已定型，
+   图片落地不会把下面的行往下顶 —— 那正是滚动全程不抖的依据。 */
+.trrow {
+  display: flex;
+  align-items: flex-start;
+}
+.trtile {
+  position: relative;
+  flex: none;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--inset);
+  transition: box-shadow 0.15s, transform 0.12s;
+}
+/* 统一压饱和度：这一页上的每一张都已经被判过「不要了」，让它们和作品库一样鲜亮，
+   会让人误以为自己在浏览成果。悬停/选中/焦点时恢复原色 —— 那时人正要认真看它。 */
+.trthumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: grayscale(0.5);
+  opacity: 0.88;
+  transition: filter 0.15s, opacity 0.15s;
+}
+.trtile:hover .trthumb,
+.trtile.sel .trthumb,
+.trtile.focus .trthumb {
+  filter: none;
+  opacity: 1;
+}
+.trtile.sel {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
+  transform: scale(0.99);
+}
+.trtile.focus {
+  outline: 2px dashed var(--acc2);
+  outline-offset: 2px;
+}
+/* 图已随上一次清理走了，只剩记录。留一块占位而不是塌成 0 高：
+   塌掉的话这一行会缺一格，看上去像少删了什么。 */
+.trgone {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--t3);
+  background: repeating-linear-gradient(
+    -45deg,
+    oklch(30% 0.03 262 / 0.04) 0 2px,
+    transparent 2px 11px
+  );
+}
+.trck {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 7px;
+  background: #fff;
+  border: 1px solid var(--line2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  box-shadow: var(--sh1);
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 2;
+  flex: none;
+}
+.trtile:hover .trck,
+.trrow2:hover .trck {
+  opacity: 1;
+}
+.trck.on {
+  opacity: 1;
+  background: var(--acc);
+  border-color: var(--acc2);
+  color: #fff;
+}
+/* 编号压在图的下缘：它是找回一条具体记录的唯一抓手，而另起一行会把每格的
+   有效高度切掉一截 —— 网格上一屏能放几张，正是这一页的全部价值。 */
+.trcode {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  font: 500 10px var(--mono);
+  color: var(--t1);
+  background: oklch(100% 0 0 / 0.82);
+  border-radius: 5px;
+  padding: 1px 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+/* ── 列表 ───────────────────────────────────────────── */
+.trrow2 {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 10px 0 32px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
   transition: background 0.1s;
 }
-.xrow:hover {
+.trrow2 .trck {
+  top: 50%;
+  left: 6px;
+  margin-top: -10px;
+}
+.trrow2:hover {
   background: var(--sub);
 }
-.xrow.sel {
+.trrow2.sel {
   background: var(--accbg);
 }
-.xthumb {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
+.trrow2.focus {
+  outline: 2px dashed var(--acc2);
+  outline-offset: -2px;
+}
+.trmini {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
   border: 1px solid var(--line);
   flex: none;
-  filter: grayscale(0.55);
-  opacity: 0.85;
+  filter: grayscale(0.5);
+  opacity: 0.88;
+}
+
+/* ── 详情栏 ─────────────────────────────────────────── */
+.trside {
+  flex: none;
+  width: 322px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+.trsidehd {
+  height: 46px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.trsidebody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 13px 14px 18px;
+}
+.trsideempty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 28px;
+  text-align: center;
+  line-height: 1.7;
+}
+.trsidefoot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--sub);
+}
+.trbig {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  position: relative;
+  cursor: zoom-in;
+}
+.trbig img {
+  display: block;
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+.trbig .zi {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: oklch(100% 0 0 / 0.9);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t2);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.trbig:hover .zi {
+  opacity: 1;
+}
+.trbiggone {
+  border: 1px dashed var(--line2);
+  border-radius: 10px;
+  padding: 22px 14px;
+  text-align: center;
+  line-height: 1.7;
+}
+/* 两列元信息。用 dl 而不是一堆 div：这四行是不折不扣的键值对。 */
+.trmeta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  margin: 13px 0 4px;
+}
+.trmeta dt {
+  font-size: 11px;
+  color: var(--t3);
+  white-space: nowrap;
+}
+.trmeta dd {
+  font-size: 11.5px;
+  color: var(--t2);
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.trlab {
+  letter-spacing: 0.05em;
+  margin-top: 14px;
+}
+
+/* ── 底坞 ───────────────────────────────────────────── */
+.trdock {
+  flex: none;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, oklch(99.2% 0.002 255), oklch(97.4% 0.003 255));
+  flex-wrap: wrap;
+}
+.trdock .gl {
+  font: 600 9.5px var(--mono);
+  letter-spacing: 0.07em;
+  color: var(--t3);
+  flex: none;
+}
+
+/* ── 放大查看 ───────────────────────────────────────── */
+/* 暗场取验收精审那一套 token（`--rd-*`）：判「这张到底糊没糊」的条件必须一致，
+   否则同一张图在两个页面上会得出两个结论。 */
+.trlb {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--rd-bg);
+  animation: fin 0.13s;
+}
+.trlbhd {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--rd-line);
+  color: var(--rd-t1);
+  background: var(--rd-side);
+}
+/* 关闭按钮在暗场上要看得见 —— `.icb` 的默认色是给白底调的。 */
+.trlbhd .icb {
+  color: var(--rd-t2);
+}
+.trlbhd .icb:hover {
+  color: var(--rd-t1);
+  background: oklch(100% 0 0 / 0.12);
+}
+.trlbstage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 64px;
+}
+.trlbstage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  display: block;
+  cursor: default;
+}
+.trlbgone {
+  color: var(--rd-t2);
+}
+.trlbnav {
+  position: absolute;
+  top: 50%;
+  margin-top: -22px;
+  width: 44px;
+  height: 44px;
+  border-radius: 99px;
+  border: 1px solid var(--rd-line);
+  background: oklch(100% 0 0 / 0.1);
+  color: var(--rd-t1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.trlbnav:hover {
+  background: oklch(100% 0 0 / 0.2);
+}
+.trlbnav.l {
+  left: 12px;
+}
+.trlbnav.r {
+  right: 12px;
+}
+.trlbft {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--rd-line);
+  background: var(--rd-side);
+}
+/* 提示词原文在这一屏只占一行：人此刻在看图，那句话是佐证不是主体。 */
+.trlbtext {
+  font-size: 11.5px;
+  color: var(--rd-t2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 52%;
 }
 
 /* ============================ 设置页 ============================ */

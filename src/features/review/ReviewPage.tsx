@@ -1,7 +1,8 @@
 import { Modal } from "@/components/ui/Modal";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { moveByRow, packJustifiedRows } from "@/features/review/layout";
+import { type PackGroup, moveByRow, packGroups } from "@/features/_shared/justified";
+import { clusterTime, dayLabel, faceOf, groupByTimeline, hhmm } from "@/features/_shared/timeline";
 import { assetSrc, bg } from "@/lib/img";
 import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -15,6 +16,176 @@ function ratioOf(it: ReviewItemView): number {
   const w = it.resultWidth ?? 0;
   const h = it.resultHeight ?? 0;
   return w > 0 && h > 0 ? w / h : 1;
+}
+
+/** 卡片间距，参与齐行的宽度分配 —— 不算进去每行最后一张会被挤出边界。 */
+const GAP = 10;
+
+/**
+ * 行高的三个常量。**它们与 `globals.css` 里的固定高度是一对，改一处必须改另一处**。
+ *
+ * 这不是可有可无的洁癖：虚拟化按这几个数摆位，而这一版**不再回头测量**
+ * （见 `useVirtualizer` 处的说明）。算少了，相邻两行就真的叠在一起。
+ * 所以 `.rmeta` / `.rclhead` / `.rvday` 在 CSS 里都是**定高**的，不许跟着内容长。
+ */
+/** 卡片下方那一行编号（`.rmeta` 定高 20 + margin-top 6）。 */
+const CARD_META_H = 26;
+/** 行与行之间（`.rvrow` 的 padding-bottom）。 */
+const ROW_GAP = 12;
+/** 日期头整块（`.rvrow.head.day` 定高）。 */
+const DAY_HEAD_H = 50;
+/** 任务簇 / 分组头整块（`.rvrow.head.cluster` 定高）。 */
+const CLUSTER_HEAD_H = 60;
+
+/** 段头的两种内容。 */
+type ReviewHead =
+  | { kind: "day"; label: string; count: number }
+  | {
+      kind: "cluster";
+      /** 「批次」「参考图」「提示词组」「Key」「任务」—— 这一段是按什么分的。 */
+      tag: string;
+      name: string;
+      count: number;
+      /** 这一段发生在什么时候（`HH:MM` 或区间）。 */
+      time: string;
+      /** 写出这批词的 skill；混了就是「N 个 skill」，一条都没有则为 null。 */
+      skill: string | null;
+      /** 本段全部 id —— 「通过本组」直接用它，不必再按段键反查。 */
+      ids: number[];
+    };
+
+type ReviewSection = PackGroup<ReviewItemView, ReviewHead>;
+
+/** 一段里的 skill 归属。混了就报「N 个」而不是挑第一个。 */
+function skillOf(items: readonly ReviewItemView[]): string | null {
+  const set = new Set(items.map((i) => i.skill).filter((s): s is string => s != null && s !== ""));
+  if (set.size === 0) return null;
+  return set.size === 1 ? (([...set][0] ?? null) as string | null) : `${set.size} 个 skill`;
+}
+
+/**
+ * 按当前档把这一屏切成段。
+ *
+ * 「时间」档走两级（日 → 任务簇，判据与废纸篓同源）；其余四档一段一个键，
+ * 段头照样报**时间**与 **skill** —— 那两样在哪一档下都是人要问的。
+ */
+function buildSections(
+  items: readonly ReviewItemView[],
+  mode: "batch" | "time" | "ref" | "group" | "key",
+  now: number,
+): ReviewSection[] {
+  if (mode === "time") {
+    return groupByTimeline(items, {
+      at: (i) => i.createdAt,
+      clusterKey: (i) => i.batchId,
+      tieBreak: (i) => i.id,
+      now,
+    }).flatMap((day) =>
+      day.clusters.map((c, i) => ({
+        key: c.key,
+        heads: [
+          ...(i === 0 ? [{ kind: "day" as const, label: day.label, count: day.count }] : []),
+          {
+            kind: "cluster" as const,
+            tag: "任务",
+            // 一次任务里可能横跨几个提示词组，故报**组成**而不是挑一个组名。
+            name: faceOf(c.items, (x) => x.groupName) || "未分组",
+            count: c.items.length,
+            time: clusterTime(c),
+            skill: skillOf(c.items),
+            ids: c.items.map((x) => x.id),
+          },
+        ],
+        items: c.items,
+      })),
+    );
+  }
+
+  const tag = { batch: "批次", ref: "参考图", group: "提示词组", key: "Key" }[mode];
+  const keyOf = (i: ReviewItemView) =>
+    mode === "batch"
+      ? `#${i.batchId}`
+      : mode === "ref"
+        ? i.refName
+        : mode === "group"
+          ? i.groupName
+          : (i.keyAlias ?? "未标注 Key");
+
+  const arr = [...items];
+  if (mode === "batch") {
+    // 批次倒序（新批在上），批次内保持生成序。后端已是此序，这里显式排一遍，
+    // 使「仅看待定」筛掉部分项后顺序依然确定。
+    arr.sort((a, b) => b.batchId - a.batchId || a.id - b.id);
+  } else if (mode === "ref") {
+    arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
+  } else if (mode === "group") {
+    arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
+  } else {
+    // "~" 使无 Key（keyAlias 为空）项排到末尾。
+    arr.sort((a, b) => (a.keyAlias ?? "~").localeCompare(b.keyAlias ?? "~") || a.id - b.id);
+  }
+
+  const out: ReviewSection[] = [];
+  for (const it of arr) {
+    const k = keyOf(it);
+    const last = out[out.length - 1];
+    if (last && last.key === k) {
+      (last.items as ReviewItemView[]).push(it);
+      continue;
+    }
+    out.push({ key: k, heads: [], items: [it] });
+  }
+  return out.map((sec) => {
+    const items = sec.items as ReviewItemView[];
+    const times = items.map((i) => i.createdAt);
+    return {
+      ...sec,
+      heads: [
+        {
+          kind: "cluster" as const,
+          tag,
+          name: sec.key,
+          count: items.length,
+          time: clusterTime({
+            from: Math.min(...times),
+            to: Math.max(...times),
+          }),
+          skill: skillOf(items),
+          ids: items.map((i) => i.id),
+        },
+      ],
+    };
+  });
+}
+
+/** 段头。时间与 skill 是这一版新加的两样 —— 它们在哪一档下都是人要问的。 */
+function ClusterHead({
+  head,
+  onAccept,
+  onReject,
+}: {
+  head: Extract<ReviewHead, { kind: "cluster" }>;
+  onAccept: (ids: number[]) => void;
+  onReject: (ids: number[]) => void;
+}) {
+  return (
+    <div className="rclhead">
+      <span className="rcltag">{head.tag}</span>
+      <span className="rclname" title={head.name}>
+        {head.name}
+      </span>
+      <span className="rcltime">{head.time}</span>
+      {head.skill && <span className="rclskill">{head.skill}</span>}
+      <span className="rclcnt">{head.count} 张</span>
+      {/* T3：分段验收——对本段下全部项批量通过 / 移废纸篓。 */}
+      <button type="button" className="btn xs" onClick={() => onAccept(head.ids)}>
+        通过本组
+      </button>
+      <button type="button" className="btn xs gho dng" onClick={() => onReject(head.ids)}>
+        本组移废纸篓
+      </button>
+    </div>
+  );
 }
 
 // T1：单卡抽为 React.memo 组件——按键/选中/待定变化只重渲变化的 1–2 张，
@@ -55,6 +226,9 @@ const ReviewCard = memo(function ReviewCard({
     <div
       className={cn("rcard rjcard", selected && "sel", focused && "focus", pending && "pend")}
       style={{ width }}
+      title={[item.promptCode, item.groupName, item.skill, hhmm(item.createdAt)]
+        .filter(Boolean)
+        .join(" · ")}
       onClick={(e) => onCardClick(idx, e.shiftKey)}
       onDoubleClick={() => onZoom(idx)}
       // T2：指针跟随焦点——悬停即设焦点，令空格/回车作用于鼠标所指卡片而非默认第 0 张。
@@ -127,6 +301,10 @@ const ReviewCard = memo(function ReviewCard({
           <Maximize2 className="ic12" />
         </button>
       </div>
+      {/* 定高一行（`.rmeta`）：行高要在渲染前算得死，见 `CARD_META_H`。
+          **skill 不放在这里** —— 一格只有 80–150px 宽，再塞一枚标就会把编号与参考图名
+          一起挤没。它在段头上（那是「这批词谁写的」该被回答的地方）、在悬停提示里、
+          也在大图右栏里。 */}
       <div className="rmeta">
         <span className="pid">{item.promptCode}</span>
         <span className="fs10 t3 mono nowrap ohide">{item.refName}</span>
@@ -139,7 +317,7 @@ export function ReviewPage() {
   const [items, setItems] = useState<ReviewItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cols, setCols] = useState(5);
-  // E09：网格键盘焦点（索引进 displayed）。
+  // E09：网格键盘焦点（全局序号，索引进打包器给的 flat）。
   const [focus, setFocus] = useState(0);
   // E38：待定标记（纯 UI 态，不入库）——沉底 + 角标 + 可筛选。
   const [pending, setPending] = useState<Set<number>>(new Set());
@@ -148,7 +326,7 @@ export function ReviewPage() {
   // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
   // 默认按批次聚类：最近一批在最顶部，往下依次是更早的批次。
   const [sortMode, setSortMode] = useState<"batch" | "time" | "ref" | "group" | "key">("batch");
-  // E38：shift 范围多选锚点（索引进 displayed）。
+  // E38：shift 范围多选锚点（全局序号）。
   const lastClicked = useRef<number | null>(null);
   // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
   const [compareRef, setCompareRef] = useState(false);
@@ -161,6 +339,12 @@ export function ReviewPage() {
   // 「重试 + 微调提示词」目标（E01）：打开编辑框，确认后微调写快照并回队。
   const [retryTarget, setRetryTarget] = useState<ReviewItemView | null>(null);
   const [retryText, setRetryText] = useState("");
+  /**
+   * 「今天/昨天」的参照时刻。整页只取一次（进页面时），不跟着秒走：
+   * 跨零点时标题从「今天」变「昨天」是对的，但那要等下一次进页面 ——
+   * 每秒重算会让整棵派生树每秒重建一遍，而这一页可能挂着几百张图。
+   */
+  const [now] = useState(() => Math.floor(Date.now() / 1000));
   // 正在处理中的任务 id（防长按 ⏎ / 连点重复提交同一任务，后端另有幂等守卫兜底）。
   const inFlight = useRef<Set<number>>(new Set());
   // T1：虚拟化滚动容器（`.pbody` 承载滚动）。
@@ -277,78 +461,59 @@ export function ReviewPage() {
     [],
   );
 
-  // E38/E24：显示序——「仅看待定」筛选；按排序模式聚类；时间序下待定项稳定沉底。
-  const displayed = useMemo(() => {
-    const arr = onlyPending ? items.filter((i) => pending.has(i.id)) : [...items];
-    if (sortMode === "batch") {
-      // 批次倒序（新批在上），批次内保持生成序。后端已是此序，这里显式排一遍，
-      // 使「仅看待定」筛掉部分项后顺序依然确定。
-      arr.sort((a, b) => b.batchId - a.batchId || a.id - b.id);
-    } else if (sortMode === "ref") {
-      arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
-    } else if (sortMode === "group") {
-      arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
-    } else if (sortMode === "key") {
-      // "~" 使无 Key（keyAlias 为空）项排到末尾。
-      arr.sort((a, b) => (a.keyAlias ?? "~").localeCompare(b.keyAlias ?? "~") || a.id - b.id);
-    } else if (!onlyPending) {
-      // 时间序（后端已按批次倒序 + 组内 id 升序）：仅让待定项稳定沉底。
-      arr.sort((a, b) => Number(pending.has(a.id)) - Number(pending.has(b.id)));
-    }
-    return arr;
-  }, [items, pending, onlyPending, sortMode]);
-
-  // E24：聚类模式下某项所属的分段键（时间序无分段）。
-  const clusterKey = useCallback(
-    (it: ReviewItemView): string | null =>
-      sortMode === "batch"
-        ? `#${it.batchId}`
-        : sortMode === "ref"
-          ? it.refName
-          : sortMode === "group"
-            ? it.groupName
-            : sortMode === "key"
-              ? (it.keyAlias ?? "未标注 Key")
-              : null,
-    [sortMode],
+  /**
+   * 显示序与分段。
+   *
+   * ## 「时间」档现在是两级分段（日 → 任务簇），不再是一条平铺的流
+   *
+   * 从前它 `clusterKey` 返回 null —— 也就是**完全没有标题**：几百张图连成一片，
+   * 「这批是什么时候跑的」在这一页上一个字都没有。判据与废纸篓同源
+   * （`_shared/timeline`），于是同一批图在两页会被切成同样的段。
+   *
+   * ## 待定项不再沉底
+   *
+   * 那条老规则（时间序下把标记待定的稳定沉底）与时间轴直接打架：沉底之后它们会
+   * 落在一个与自己生成时刻无关的位置上，而这一档的全部意义就是位置=时刻。
+   * 待定仍有角标、仍能用「仅看待定」筛。
+   */
+  const filtered = useMemo(
+    () => (onlyPending ? items.filter((i) => pending.has(i.id)) : items),
+    [items, onlyPending, pending],
   );
 
-  // 任务7：每个分组的待验收张数（分组头右侧显示）。
-  const clusterCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    if (sortMode === "time") return m;
-    for (const it of displayed) {
-      const k = clusterKey(it);
-      if (k !== null) m.set(k, (m.get(k) ?? 0) + 1);
-    }
-    return m;
-  }, [displayed, sortMode, clusterKey]);
+  const sections = useMemo(() => buildSections(filtered, sortMode, now), [filtered, sortMode, now]);
 
-  // 齐行打包走抽出来的纯函数（`layout.ts`，另有测试）：算的是「每张占多宽、每行多高」，
-  // 而验收判的恰恰是构图与边缘，排错一格等于给人看了一张裁过的图。
-  // 容器左右各 14px 内边距，与 .rvscroll 一致。
-  // biome-ignore lint/correctness/useExhaustiveDependencies: measureW 决定行高，必须进依赖
-  const { rows, cardRow } = useMemo(
+  // 齐行打包走抽出来的纯函数（`_shared/justified.ts`，另有测试）：算的是「每张占多宽、
+  // 每行多高」，而验收判的恰恰是构图与边缘，排错一格等于给人看了一张裁过的图。
+  // 逐段分别打包 —— 一行绝不横跨两段，段与段之间才有看得见的断口。
+  const { blocks, cardRow, flat } = useMemo(
     () =>
-      packJustifiedRows(displayed, {
-        width: Math.max(240, measureW - 28),
+      packGroups(sections, {
+        width: Math.max(240, measureW),
         perRow: cols,
+        gap: GAP,
         ratioOf,
-        clusterKey,
-        counts: clusterCounts,
       }),
-    [displayed, cols, clusterKey, clusterCounts, measureW],
+    [sections, cols, measureW],
   );
 
-  // 行高**精确可算**（上面已经算好），故 estimateSize 就是真值：
-  // 虚拟化不必再回头测量任何一行，滚动全程零重排。
+  /**
+   * 行高**精确可算**，故 estimateSize 就是真值 —— 而这正是滚动不卡的全部依据。
+   *
+   * 这一版去掉了 `ref={virt.measureElement}`。它做两件事，两件都是坏的：
+   * 每一行渲染后读一次 `getBoundingClientRect`（滚动时是持续的强制同步布局，
+   * 就是那个卡顿），以及**在测量结果回来之前**按估值摆位 —— 而旧估值算少了：
+   * 卡片行少算了编号那一行的 8px、分组头行少算了 10px，于是相邻两行**真的会叠在
+   * 一起**，直到测量把它们推开。现在高度由 CSS 定死、由这里算死，两个毛病一起没了。
+   */
   const virt = useVirtualizer({
-    count: rows.length,
+    count: blocks.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (i) => {
-      const r = rows[i];
-      if (!r) return 220;
-      return r.kind === "header" ? 56 : r.h + 34; // +34 = 卡片下方编号行 + 行间距
+      const b = blocks[i];
+      if (!b) return CARD_META_H + ROW_GAP;
+      if (b.kind === "head") return b.head.kind === "day" ? DAY_HEAD_H : CLUSTER_HEAD_H;
+      return b.h + CARD_META_H + ROW_GAP;
     },
     overscan: 6,
   });
@@ -362,27 +527,26 @@ export function ReviewPage() {
       if (e.key === "Escape") return setZoom(null);
       if (e.key === "ArrowLeft") setZoom((z) => (z === null ? null : Math.max(0, z - 1)));
       else if (e.key === "ArrowRight")
-        setZoom((z) => (z === null ? null : Math.min(displayed.length - 1, z + 1)));
+        setZoom((z) => (z === null ? null : Math.min(flat.length - 1, z + 1)));
       else if (e.key === "Enter") {
-        const it = displayed[zoom];
+        const it = flat[zoom];
         if (it) void accept([it.id]);
       } else if (e.key === "Backspace") {
-        const it = displayed[zoom];
+        const it = flat[zoom];
         if (it) void reject([it.id]);
       } else if (e.key === "r" || e.key === "R") {
-        const it = displayed[zoom];
+        const it = flat[zoom];
         if (it) openRetry(it);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, displayed, accept, reject, retryTarget, openRetry]);
+  }, [zoom, flat, accept, reject, retryTarget, openRetry]);
 
   // 大图模式下列表变化后修正索引
   useEffect(() => {
-    if (zoom !== null && zoom >= displayed.length)
-      setZoom(displayed.length > 0 ? displayed.length - 1 : null);
-  }, [displayed, zoom]);
+    if (zoom !== null && zoom >= flat.length) setZoom(flat.length > 0 ? flat.length - 1 : null);
+  }, [flat, zoom]);
 
   // E08：切换到另一张图时复位参考图对比态。
   useEffect(() => {
@@ -418,11 +582,11 @@ export function ReviewPage() {
       // 避免 window 处理器与控件双触发、或方向键被滑块吞掉导致网格导航失灵。
       const el = e.target as HTMLElement | null;
       if (el?.closest("button, input, textarea, select, [contenteditable=true]")) return;
-      const n = displayed.length;
+      const n = flat.length;
       if (n === 0) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
-        setSel(new Set(displayed.map((i) => i.id)));
+        setSel(new Set(flat.map((i) => i.id)));
         return;
       }
       if (e.key === "ArrowRight") {
@@ -435,21 +599,21 @@ export function ReviewPage() {
         e.preventDefault();
         // 齐行下每行张数不固定，故上下移动要走行模型而不是「加减 cols」。
         // 保持列位：落到目标行里同样的第几张（不够就取最后一张）。
-        setFocus((f) => moveByRow(rows, cardRow, f, e.key === "ArrowDown" ? 1 : -1));
+        setFocus((f) => moveByRow(blocks, cardRow, f, e.key === "ArrowDown" ? 1 : -1));
       } else if (e.key === " ") {
         e.preventDefault();
-        const it = displayed[focus];
+        const it = flat[focus];
         if (it) toggleSel(it.id);
       } else if (e.key === "Enter") {
-        const ids = sel.size > 0 ? [...sel] : displayed[focus] ? [displayed[focus].id] : [];
+        const ids = sel.size > 0 ? [...sel] : flat[focus] ? [flat[focus].id] : [];
         if (ids.length) void accept(ids);
       } else if (e.key === "Backspace") {
-        const it = displayed[focus];
+        const it = flat[focus];
         if (it) void reject([it.id]);
       } else if (e.key === "z" || e.key === "Z") {
-        if (displayed[focus]) setZoom(focus);
+        if (flat[focus]) setZoom(focus);
       } else if (e.key === "s" || e.key === "S") {
-        const it = displayed[focus];
+        const it = flat[focus];
         if (it) togglePending(it.id);
       }
     };
@@ -458,9 +622,9 @@ export function ReviewPage() {
   }, [
     zoom,
     retryTarget,
-    displayed,
+    flat,
     focus,
-    rows,
+    blocks,
     cardRow,
     sel,
     accept,
@@ -471,8 +635,8 @@ export function ReviewPage() {
 
   // E09：焦点越界修正 + 滚动进视野（T1：虚拟化 scrollToIndex 定位所在行）。
   useEffect(() => {
-    if (focus >= displayed.length) setFocus(Math.max(0, displayed.length - 1));
-  }, [displayed, focus]);
+    if (focus >= flat.length) setFocus(Math.max(0, flat.length - 1));
+  }, [flat, focus]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: virt 实例稳定，仅在焦点/行模型变化时滚动
   useEffect(() => {
     const row = cardRow[focus];
@@ -489,18 +653,18 @@ export function ReviewPage() {
         setSel((s) => {
           const n = new Set(s);
           for (let i = a; i <= b; i++) {
-            const it = displayed[i];
+            const it = flat[i];
             if (it) n.add(it.id);
           }
           return n;
         });
       } else {
-        const it = displayed[idx];
+        const it = flat[idx];
         if (it) toggleSel(it.id);
         lastClicked.current = idx;
       }
     },
-    [displayed, toggleSel],
+    [flat, toggleSel],
   );
 
   // T1：卡片稳定回调（id/idx 基），保证 ReviewCard memo 生效。
@@ -509,22 +673,14 @@ export function ReviewPage() {
   const onZoom = useCallback((idx: number) => setZoom(idx), []);
   const onHover = useCallback((idx: number) => setFocus(idx), []);
 
-  // T3：分类验收——对某聚类键（ref/group/key）下全部 displayed 项批量通过 / 移废纸篓。
+  // T3：分段验收——对某一段下的全部项批量通过 / 移废纸篓。
   // 复用 accept/reject（含 inFlight 幂等守卫），触发既有自动转正/写回等副作用。
-  const clusterIds = useCallback(
-    (key: string) => displayed.filter((it) => clusterKey(it) === key).map((it) => it.id),
-    [displayed, clusterKey],
-  );
-  const acceptCluster = useCallback(
-    (key: string) => void accept(clusterIds(key)),
-    [accept, clusterIds],
-  );
-  const rejectCluster = useCallback(
-    (key: string) => void reject(clusterIds(key)),
-    [reject, clusterIds],
-  );
+  // 段头自己带着本段的 id 清单（`buildSections` 就是按它分的段），不必再按键反查 ——
+  // 反查要求「段键」在两处算得一模一样，而那正是最容易分叉的地方。
+  const acceptCluster = useCallback((ids: number[]) => void accept(ids), [accept]);
+  const rejectCluster = useCallback((ids: number[]) => void reject(ids), [reject]);
 
-  const zoomItem = zoom !== null ? displayed[zoom] : undefined;
+  const zoomItem = zoom !== null ? flat[zoom] : undefined;
 
   return (
     <PageScaffold title="图片验收" caption="按原图比例排版 · 网格粗筛 · 大图逐张精审">
@@ -616,50 +772,32 @@ export function ReviewPage() {
         <div className="pbody rvscroll" ref={parentRef}>
           <div className="rvirt" style={{ height: virt.getTotalSize() }}>
             {virt.getVirtualItems().map((v) => {
-              const row = rows[v.index];
-              if (!row) return null;
+              const b = blocks[v.index];
+              if (!b) return null;
               return (
                 <div
                   key={v.key}
                   data-index={v.index}
-                  ref={virt.measureElement}
-                  className={cn("rvrow", v.index === 0 && "first", row.kind === "header" && "head")}
+                  className={cn("rvrow", b.kind === "head" && `head ${b.head.kind}`)}
                   style={{ transform: `translateY(${v.start}px)` }}
                 >
-                  {row.kind === "header" ? (
-                    <div className="rclhead">
-                      <span className="rcltag">
-                        {sortMode === "batch"
-                          ? "批次"
-                          : sortMode === "ref"
-                            ? "参考图"
-                            : sortMode === "key"
-                              ? "Key"
-                              : "提示词组"}
-                      </span>
-                      <span className="rclname" title={row.key}>
-                        {row.key}
-                      </span>
-                      <span className="rclcnt">{row.count} 张</span>
-                      {/* T3：分类验收——对本聚类下全部项批量通过 / 移废纸篓（ref/group/key 三种都生效）。 */}
-                      <button
-                        type="button"
-                        className="btn xs"
-                        onClick={() => acceptCluster(row.key)}
-                      >
-                        通过本组
-                      </button>
-                      <button
-                        type="button"
-                        className="btn xs gho dng"
-                        onClick={() => rejectCluster(row.key)}
-                      >
-                        本组移废纸篓
-                      </button>
-                    </div>
+                  {b.kind === "head" ? (
+                    b.head.kind === "day" ? (
+                      <div className="rvday">
+                        <span className="d">{b.head.label}</span>
+                        <span className="ln" />
+                        <span className="n">{b.head.count} 张</span>
+                      </div>
+                    ) : (
+                      <ClusterHead
+                        head={b.head}
+                        onAccept={acceptCluster}
+                        onReject={rejectCluster}
+                      />
+                    )
                   ) : (
-                    <div className="rjrow" style={{ "--rjh": `${row.h}px` } as React.CSSProperties}>
-                      {row.items.map(({ it, idx, w }) => (
+                    <div className="rjrow" style={{ "--rjh": `${b.h}px` } as React.CSSProperties}>
+                      {b.items.map(({ it, idx, w }) => (
                         <ReviewCard
                           key={it.id}
                           item={it}
@@ -747,6 +885,11 @@ export function ReviewPage() {
                   <div className="fx ac gap6 wrap">
                     <span className="chip">{zoomItem.refName}</span>
                     {zoomItem.keyAlias && <span className="chip">{zoomItem.keyAlias}</span>}
+                    {/* 判一张图判不下来时，「这条词是谁写的、什么时候跑的」是接着要问的两件事。 */}
+                    {zoomItem.skill && <span className="sk">{zoomItem.skill}</span>}
+                    <span className="chip">
+                      {dayLabel(zoomItem.createdAt, now)} {hhmm(zoomItem.createdAt)}
+                    </span>
                   </div>
                   {refPath && (
                     <>
@@ -781,13 +924,13 @@ export function ReviewPage() {
                     ‹
                   </button>
                   <span className="mono fs11 t3 nowrap">
-                    {zoom !== null ? zoom + 1 : 0} / {displayed.length}
+                    {zoom !== null ? zoom + 1 : 0} / {flat.length}
                   </span>
                   <button
                     type="button"
                     className="icb"
                     onClick={() =>
-                      setZoom((z) => (z === null ? null : Math.min(displayed.length - 1, z + 1)))
+                      setZoom((z) => (z === null ? null : Math.min(flat.length - 1, z + 1)))
                     }
                   >
                     ›

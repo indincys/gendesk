@@ -63,6 +63,11 @@ pub const IMAGES: &str = "images";
 pub const ERROR_FILE: &str = "错误.txt";
 pub const HOLD_FILE: &str = "待确认.txt";
 pub const RESULT_FILE: &str = "结果.txt";
+/// 工单名撞上台账里已有的 jobId：去重挡住了它，**但这不是稳态**。
+/// 去重本身是对的（半份工单重放会造重复提示词、重复花钱），错的是不吭声——
+/// 一份带着 READY.txt、永远不会被处理、也没人知道为什么的工单，
+/// 正是 v0.16.0「操作信号全进了 tracing」那条教训的翻版。
+pub const DUPLICATE_FILE: &str = "重名未收录.txt";
 /// **确认的唯一表达**。设置页那个按钮做的事就是替你写下这个文件。
 pub const CONFIRM_FILE: &str = "确认.txt";
 
@@ -111,6 +116,11 @@ pub struct JobSpec {
     pub ref_group: Option<String>,
     /// 参考图是否只作本批附件（不进长期图库）。缺省 false。
     pub ephemeral: Option<bool>,
+    /// 写出这批词的 skill 名（0032）。工单级默认，组可各自覆盖。
+    ///
+    /// 标准 txt 路径写组头 `skill:`；这里是 job.json 逃生舱的等价物。
+    /// 不声明就没有 —— 下游不猜。
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -129,6 +139,8 @@ pub struct GroupSpec {
     pub prompts: Vec<String>,
     /// 组级参数（覆盖工单级）。
     pub params: ParamsSpec,
+    /// 组级 skill（覆盖工单级）。
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -497,6 +509,13 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                 extra_tags.push(p.clone());
             }
         }
+        // 组级优先、工单级兜底。空串当没写。
+        let skill = g
+            .skill
+            .clone()
+            .or_else(|| spec.skill.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         match (&g.file, g.prompts.is_empty()) {
             (Some(f), _) => {
                 let path = safe_join(dir, f)?;
@@ -517,6 +536,11 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                     }
                     if pg.prefix.is_none() {
                         pg.prefix = g.prefix.clone();
+                    }
+                    // txt 组头里写了 `skill:` 就以它为准（离词最近的那处声明），
+                    // 否则依次落回组级、工单级。
+                    if pg.skill.is_none() {
+                        pg.skill = skill.clone();
                     }
                     flat.push((pg, params.clone()));
                 }
@@ -549,6 +573,7 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                         tags: extra_tags,
                         prompts,
                         origin: GroupOrigin::Explicit,
+                        skill: skill.clone(),
                         ..Default::default()
                     },
                     params,

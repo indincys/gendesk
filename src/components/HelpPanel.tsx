@@ -50,6 +50,17 @@ export function HelpPanel() {
     ["⌥\\", "详情栏开关"],
     ["⌥1 / 2 / 3", "观测 / 日志 / 参数"],
   ];
+  // 废纸篓是「找回东西」的地方，所以主动作是**还原**而不是删除；
+  // ⌫ 走确认卡，按下去不会当场少任何东西。
+  const trashKeys: [string, string][] = [
+    ["↑ ↓ ← →", "移动光标（放大时 ← / → 换一条）"],
+    ["空格", "勾选 / 取消"],
+    ["⏎ / 双击", "放大查看"],
+    ["R", "还原回原位"],
+    ["⌫", "彻底删除（先确认）"],
+    [`${mod}A`, "全选"],
+    ["Esc", "退出放大 / 清除勾选"],
+  ];
 
   return (
     <div className="ovl" onClick={close}>
@@ -61,10 +72,12 @@ export function HelpPanel() {
             ×
           </button>
         </div>
-        <div className="mlist" style={{ display: "flex", gap: 24, padding: 16 }}>
+        {/* 四栏放不进一行，故允许换行 —— 挤成四列会让每条说明断成三行。 */}
+        <div className="mlist" style={{ display: "flex", flexWrap: "wrap", gap: 24, padding: 16 }}>
           <KeyList title="全局" items={globalKeys} />
           <KeyList title="图片验收" items={reviewKeys} />
           <KeyList title="视频流水线" items={v2vKeys} />
+          <KeyList title="废纸篓" items={trashKeys} />
         </div>
       </div>
     </div>
@@ -73,7 +86,7 @@ export function HelpPanel() {
 
 function KeyList({ title, items }: { title: string; items: [string, string][] }) {
   return (
-    <div className="f1" style={{ minWidth: 0 }}>
+    <div className="f1" style={{ minWidth: 190 }}>
       <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 8 }}>
         {title}
       </div>

@@ -63,6 +63,12 @@ pub struct ParsedGroup {
     pub size: Option<String>,
     pub format: Option<String>,
     pub draws: Option<i64>,
+    /// 组头 `skill:` —— 写出这一组词的 skill 名（0032）。
+    ///
+    /// 与其余组头一样是**位置绑定**：它属于紧跟其后的那个组。一份工单通常只有一个
+    /// skill，写一次就够；而一个把两个子 skill 的产出合成一份工单的调用方，
+    /// 也不必为此发两份单。None = 工单没声明，下游一律不猜。
+    pub skill: Option<String>,
 }
 
 /// 解析诊断（E37：行号级报错/提示，非致命）。
@@ -322,6 +328,11 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
                     IntakeHeader::Size => g.size = Some(value.to_string()),
                     IntakeHeader::Format => g.format = Some(value.to_string()),
                     IntakeHeader::Draws => g.draws = value.trim().parse::<i64>().ok(),
+                    // 只收下，不校验取值：skill 名是自由文本，我们没有一份名单可以对。
+                    // 空串当没写 —— `skill:` 后面什么都没有时，写一个空标进库毫无意义。
+                    IntakeHeader::Skill => {
+                        g.skill = Some(value.trim().to_string()).filter(|s| !s.is_empty());
+                    }
                     // 用途与自由标签共用 tags：并进去即被判为**显式**用途而非关键词预猜，
                     // 下游一处也不用改（受控取值的校验在命令边界，这里只负责收下）。
                     IntakeHeader::Purpose => {
@@ -652,6 +663,7 @@ enum IntakeHeader {
     Format,
     Draws,
     Purpose,
+    Skill,
 }
 
 /// 识别投单组头行 `键: 值`。与 [`parse_header`] 分开，因为两者的**作用域不同**。
@@ -671,6 +683,7 @@ fn parse_intake_header(line: &str) -> Option<(IntakeHeader, &str)> {
         "格式" | "输出格式" | "format" => IntakeHeader::Format,
         "抽卡" | "抽卡次数" | "draws" => IntakeHeader::Draws,
         "用途" | "purpose" | "purposes" => IntakeHeader::Purpose,
+        "skill" | "技能" | "产出skill" => IntakeHeader::Skill,
         _ => return None,
     };
     Some((header, value))
@@ -1267,6 +1280,37 @@ mod tests {
             texts(g),
             vec!["第一条完整提示词正文", "第二条完整提示词正文"]
         );
+    }
+
+    /// `skill:` 与其余组头一样是**位置绑定**：属于紧跟其后的那一组。
+    ///
+    /// 一批图整体歪掉时，人第一个要问的就是「这批词是哪个 skill 写的」；不写就是
+    /// 不写（None），下游一律不猜 —— 猜出来的来源比不说更糟。
+    #[test]
+    fn skill_header_is_bound_to_its_own_group() {
+        let doc = "\
+分组: 甲
+skill: prompts-ugc-real
+
+甲的正文
+
+分组: 乙
+
+乙的正文
+";
+        let out = parse(doc.as_bytes());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.groups[0].skill.as_deref(), Some("prompts-ugc-real"));
+        assert_eq!(out.groups[1].skill, None, "没写的组不许继承上一组的");
+        assert_eq!(texts(&out.groups[0]), vec!["甲的正文"]);
+    }
+
+    /// `skill:` 后面什么都没有 = 没写。写一个空标进库毫无意义，
+    /// 而界面对空串与 None 会显示成两种东西。
+    #[test]
+    fn an_empty_skill_header_is_the_same_as_not_writing_one() {
+        let out = parse("分组: 甲\nskill:   \n\n正文\n".as_bytes());
+        assert_eq!(out.groups[0].skill, None);
     }
 
     // 每组各自的挂靠与比例（收件侧据此拆多个批次）。

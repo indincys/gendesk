@@ -136,7 +136,19 @@ async fn ingest_dir(
     };
 
     // 2. 去重：任何状态的行都挡住重投（见 0023 表注释）。
+    //
+    //    挡住之后必须留痕。目录还在收件里、READY.txt 也在，说明有人正等着它跑；
+    //    静默返回会让这份工单永远停在「投了没反应」——没有回执、没有台账行、
+    //    设置页点「立即扫描」也什么都不显示。这正是 jobId 默认取目录名的代价：
+    //    同一天同一主题投第二次（`20260729-卡套-broll`）必然撞键。
+    //
+    //    只在**一个回执都没有**时写：已成功但移档失败的（有 结果.txt）、
+    //    已记 error / hold 的（有 错误.txt / 待确认.txt）都是稳态，不该被反复打扰。
     if repo::exists(&ctx.pool, &plan.job_id).await? {
+        if !has_receipt(dir) {
+            write_receipt(dir, super::DUPLICATE_FILE, &duplicate_text(&plan.job_id));
+            tracing::warn!(job_id = %plan.job_id, "工单名与台账重复，未收录");
+        }
         return Ok(None);
     }
 
@@ -374,6 +386,33 @@ fn write_receipt(dir: &Path, name: &str, body: &str) {
     if let Err(e) = std::fs::write(dir.join(name), body) {
         tracing::warn!(error = %e, file = %name, "写工单回执失败");
     }
+}
+
+/// 这份工单是否已经有过交代。用来区分「稳态的重复扫描」与「静默吞掉的重名工单」。
+fn has_receipt(dir: &Path) -> bool {
+    [
+        super::RESULT_FILE,
+        super::HOLD_FILE,
+        super::ERROR_FILE,
+        super::DUPLICATE_FILE,
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+}
+
+fn duplicate_text(job_id: &str) -> String {
+    format!(
+        "这份工单**没有收录**：工单名 `{job_id}` 与台账里已有的工单重名。\n\n\
+         jobId 默认取工单目录名，而它必须全局唯一——同一天、同一主题投第二次\n\
+         （比如两次都叫 `20260729-卡套-broll`）就会撞上。去重是有意的：\n\
+         它挡住的是「同一份工单被重放两次」，那会造出重复的提示词、重复的批次、\n\
+         重复的钱。但你这一份很可能是**新的内容套了个旧名字**。\n\n\
+         怎么办（二选一）：\n\
+         1. 想跑：把工单目录改个没用过的名字（末尾加时间戳最省事），\n\
+            删掉本文件后 READY.txt 保持在，下一轮扫描就会收录；\n\
+         2. 确认是重复投递、本来就不该跑：直接删掉整个工单目录。\n\n\
+         想查是哪一份占了这个名字：GenDesk 设置页「Claude Code 收件」的台账里搜这个名字。\n"
+    )
 }
 
 fn result_text(plan: &Plan, done: &Applied) -> String {
@@ -754,6 +793,53 @@ mod tests {
         make_job(home.path(), "job-1", doc, &["a.png"]);
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
         assert_eq!(count(&pool, "batches").await, 1, "同一工单只能建一个批次");
+    }
+
+    // 撞名被挡住可以，**不吭声不行**：目录还在、READY.txt 还在，就得有一份交代，
+    // 否则就是「投了没反应、扫描也没反应、日志里也找不着」。
+    #[tokio::test]
+    async fn duplicate_job_name_leaves_a_receipt() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 500);
+        let doc = "分组: 甲\n参考图: images/a.png\n\n甲1\n";
+        make_job(home.path(), "job-dup", doc, &["a.png"]);
+        assert_eq!(scan(&ctx, home.path()).await.unwrap().len(), 1);
+
+        // 新内容套了个用过的名字。
+        let dir = make_job(
+            home.path(),
+            "job-dup",
+            "分组: 乙\n参考图: images/a.png\n\n乙1\n",
+            &["a.png"],
+        );
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        let note = dir.join(super::super::DUPLICATE_FILE);
+        assert!(note.is_file(), "撞名必须留下回执");
+        assert!(std::fs::read_to_string(&note).unwrap().contains("job-dup"));
+        assert_eq!(count(&pool, "batches").await, 1, "撞名不得建第二个批次");
+    }
+
+    // 成功了但移档失败的工单会带着 结果.txt 留在收件里 —— 那是稳态，
+    // 每轮扫描都往里塞一份「重名」回执只会把人吓一跳。
+    #[tokio::test]
+    async fn duplicate_receipt_not_written_over_existing_result() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 500);
+        let doc = "分组: 甲\n参考图: images/a.png\n\n甲1\n";
+        make_job(home.path(), "job-kept", doc, &["a.png"]);
+        assert_eq!(scan(&ctx, home.path()).await.unwrap().len(), 1);
+
+        let dir = make_job(home.path(), "job-kept", doc, &["a.png"]);
+        std::fs::write(dir.join(super::super::RESULT_FILE), "已收录并开跑").unwrap();
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert!(
+            !dir.join(super::super::DUPLICATE_FILE).exists(),
+            "已有回执的工单不该再被打扰"
+        );
     }
 
     // 没有 READY.txt = skill 还在写，一律不碰（半份工单建出来的批次是错的）。

@@ -2839,6 +2839,14 @@ codeRange: string; isNewGroup: boolean;
  */
 inferred: boolean; 
 /**
+ * 写出这一组词的 skill（0032，来自组头 `skill:` 或 job.json）。
+ * 
+ * 它跟着预览走一趟前端再回来，而不是在收件侧直接写库：手工导入与工单收件共用
+ * 同一条落库路径（`commit_preview`），让其中一条绕过去，两条路就会开始分叉。
+ * 手工导入这一项恒为 null —— 不知道就别写。
+ */
+skill: string | null; 
+/**
  * 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
  * 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
  * 
@@ -3531,7 +3539,18 @@ refThumbPath: string | null; refImagePath: string | null;
  * 结果图真实像素（0027）。验收页按真实比例排版，行高在渲染前就要算得出来 ——
  * 等图片加载完再量，每张图落地都会把它下面的行往下顶一次，滚动时就是持续抖动。
  */
-resultWidth: number | null; resultHeight: number | null }
+resultWidth: number | null; resultHeight: number | null; 
+/**
+ * 任务创建时刻。验收页的「时间」档按它切日 / 任务簇。
+ * 
+ * 取 `created_at` 而不是 `updated_at`：后者会随重试、随状态迁移一路往后跳，
+ * 于是「这批是什么时候跑的」在同一批里会给出好几个互相矛盾的答案。
+ */
+createdAt: number; 
+/**
+ * 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
+ */
+skill: string | null }
 /**
  * 即梦会话（`--session` 的可选值）。
  */
@@ -3864,7 +3883,29 @@ imagePath: string | null; promptText: string | null; sourceLabel: string; delete
  * 能不能还原回原位。只有 0027 之前删掉的作品是 false（没留整行快照，还不回去），
  * 其余四类的行一直都在，还原就是把状态拨回来。
  */
-restorable: boolean }
+restorable: boolean; 
+/**
+ * 缩略图像素（0031）。网格按真实比例排版，行高要在渲染前算得出来 ——
+ * 等图片加载完再量，每张落地都会把下面的行往下顶一次。测不到就留 None，
+ * 前端拿一个中性比例兜底，绝不为了排版猜一个假尺寸。
+ */
+width: number | null; height: number | null; 
+/**
+ * 它当初属于哪一批（拿得到的话）。
+ * 
+ * 废纸篓的分段规则里，「不是同一批」与「隔了很久」同为切段依据 —— 只按时间切的话，
+ * 一次连着清两批的操作会被并成一段，而人来这一页恰恰是想认出「那次任务」。
+ * 三类拿得到（未通过任务 / 视频 / 作品快照），提示词与参考图没有批次概念。
+ */
+batchId: number | null; 
+/**
+ * 写出这条词的 skill（0032）。一批图整体歪掉时，第一个要问的就是它。
+ * 
+ * 三类顺着 `prompt_id` 找得回来（未通过任务 / 提示词本身 / 作品快照）。
+ * 参考图没有词；视频要再跳两张表（clip → 作品 → 词），而视频的词是 v2v 改写
+ * 出来的、不是生图 skill 写的，报生图 skill 反而是错的答案 —— 故两类留 None。
+ */
+skill: string | null }
 export type UpdateApiKeyPatch = { name: string | null; baseUrl: string | null; model: string | null; concurrencyLimit: number | null; 
 /**
  * None = 不改；Some(n>0) = 设为 n；Some(n<=0) = 清除限速（不限）。

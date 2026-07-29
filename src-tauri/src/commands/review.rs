@@ -35,6 +35,13 @@ pub struct ReviewItemView {
     /// 等图片加载完再量，每张图落地都会把它下面的行往下顶一次，滚动时就是持续抖动。
     pub result_width: Option<i64>,
     pub result_height: Option<i64>,
+    /// 任务创建时刻。验收页的「时间」档按它切日 / 任务簇。
+    ///
+    /// 取 `created_at` 而不是 `updated_at`：后者会随重试、随状态迁移一路往后跳，
+    /// 于是「这批是什么时候跑的」在同一批里会给出好几个互相矛盾的答案。
+    pub created_at: i64,
+    /// 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
+    pub skill: Option<String>,
 }
 
 /// 验收结果。
@@ -55,7 +62,7 @@ const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
         k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
         r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path,
-        t.result_width, t.result_height
+        t.result_width, t.result_height, t.created_at, p.skill
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id

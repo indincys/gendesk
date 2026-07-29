@@ -333,9 +333,17 @@ mod tests {
             .await
             .unwrap();
         for i in 1..=3 {
-            prompt_repo::insert_prompt(&mut tx, gid, &format!("GG-000{i}"), None, "t", "library")
-                .await
-                .unwrap();
+            prompt_repo::insert_prompt(
+                &mut tx,
+                gid,
+                &format!("GG-000{i}"),
+                None,
+                "t",
+                "library",
+                None,
+            )
+            .await
+            .unwrap();
         }
         tx.commit().await.unwrap();
 
@@ -420,7 +428,7 @@ mod tests {
         let gid = prompt_repo::create_group(&mut tx, "g", "GG", "", false)
             .await
             .unwrap();
-        prompt_repo::insert_prompt(&mut tx, gid, "GG-0001", None, "t", "library")
+        prompt_repo::insert_prompt(&mut tx, gid, "GG-0001", None, "t", "library", None)
             .await
             .unwrap();
         tx.commit().await.unwrap();

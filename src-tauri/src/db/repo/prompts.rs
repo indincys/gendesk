@@ -30,6 +30,8 @@ pub struct PromptRow {
     pub edited: i64,
     pub status: String,
     pub source: String,
+    /// 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
+    pub skill: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -104,6 +106,9 @@ pub async fn create_group(
 }
 
 /// 在事务中插入一条提示词。
+///
+/// `skill` = 写出这条词的 skill 名（0032）。手工导入传 None —— 不知道就别写，
+/// 界面对 None 不显示标，而一个猜出来的来源比不说更糟。
 pub async fn insert_prompt(
     conn: &mut SqliteConnection,
     group_id: i64,
@@ -111,17 +116,19 @@ pub async fn insert_prompt(
     title: Option<&str>,
     text: &str,
     source: &str,
+    skill: Option<&str>,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO prompts (group_id, code, title, text, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) RETURNING id",
+        "INSERT INTO prompts (group_id, code, title, text, source, skill, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) RETURNING id",
     )
     .bind(group_id)
     .bind(code)
     .bind(title)
     .bind(text)
     .bind(source)
+    .bind(skill)
     .bind(now)
     .fetch_one(&mut *conn)
     .await?;
@@ -419,7 +426,7 @@ mod tests {
 
     async fn seed_prompt(pool: &SqlitePool, group_id: i64, code: &str) -> i64 {
         let mut tx = pool.begin().await.unwrap();
-        let id = insert_prompt(&mut tx, group_id, code, None, "text", "library")
+        let id = insert_prompt(&mut tx, group_id, code, None, "text", "library", None)
             .await
             .unwrap();
         tx.commit().await.unwrap();

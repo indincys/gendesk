@@ -116,6 +116,11 @@ pub struct JobSpec {
     pub ref_group: Option<String>,
     /// 参考图是否只作本批附件（不进长期图库）。缺省 false。
     pub ephemeral: Option<bool>,
+    /// 写出这批词的 skill 名（0032）。工单级默认，组可各自覆盖。
+    ///
+    /// 标准 txt 路径写组头 `skill:`；这里是 job.json 逃生舱的等价物。
+    /// 不声明就没有 —— 下游不猜。
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -134,6 +139,8 @@ pub struct GroupSpec {
     pub prompts: Vec<String>,
     /// 组级参数（覆盖工单级）。
     pub params: ParamsSpec,
+    /// 组级 skill（覆盖工单级）。
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -502,6 +509,13 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                 extra_tags.push(p.clone());
             }
         }
+        // 组级优先、工单级兜底。空串当没写。
+        let skill = g
+            .skill
+            .clone()
+            .or_else(|| spec.skill.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         match (&g.file, g.prompts.is_empty()) {
             (Some(f), _) => {
                 let path = safe_join(dir, f)?;
@@ -522,6 +536,11 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                     }
                     if pg.prefix.is_none() {
                         pg.prefix = g.prefix.clone();
+                    }
+                    // txt 组头里写了 `skill:` 就以它为准（离词最近的那处声明），
+                    // 否则依次落回组级、工单级。
+                    if pg.skill.is_none() {
+                        pg.skill = skill.clone();
                     }
                     flat.push((pg, params.clone()));
                 }
@@ -554,6 +573,7 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                         tags: extra_tags,
                         prompts,
                         origin: GroupOrigin::Explicit,
+                        skill: skill.clone(),
                         ..Default::default()
                     },
                     params,

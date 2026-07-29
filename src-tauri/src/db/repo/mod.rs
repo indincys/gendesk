@@ -121,7 +121,7 @@ mod tests {
         for _ in 0..3 {
             let n = ids::allocate(&mut tx, "DZ").await.unwrap();
             let code = ids::format_code("DZ", n);
-            prompts::insert_prompt(&mut tx, gid, &code, None, "正文", "library")
+            prompts::insert_prompt(&mut tx, gid, &code, None, "正文", "library", None)
                 .await
                 .unwrap();
         }
@@ -382,9 +382,10 @@ mod tests {
             .unwrap();
         let n = ids::allocate(&mut tx, "DZ").await.unwrap();
         let code = ids::format_code("DZ", n);
-        let pid = prompts::insert_prompt(&mut tx, gid, &code, Some("小标题"), "正文", "library")
-            .await
-            .unwrap();
+        let pid =
+            prompts::insert_prompt(&mut tx, gid, &code, Some("小标题"), "正文", "library", None)
+                .await
+                .unwrap();
         let bid = tasks::create_batch(&mut tx, "/out", "{}").await.unwrap();
         let tid = tasks::insert_task(&mut tx, bid, rid, pid, "正文", 1)
             .await

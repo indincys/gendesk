@@ -20,6 +20,10 @@ pub struct TrashItemRow {
     pub deleted_at: i64,
     /// 还原载荷（0027）：行被真删掉的实体（作品）在此存整行快照。
     pub payload_json: Option<String>,
+    /// 缩略图像素（0031）。网格按真实比例排版，行高要在渲染前算得出来。
+    /// None = 还没测过（旧行）或那张图已经不在盘上。
+    pub thumb_w: Option<i64>,
+    pub thumb_h: Option<i64>,
 }
 
 pub struct NewTrashItem {
@@ -70,6 +74,19 @@ pub async fn count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trash_items")
         .fetch_one(pool)
         .await
+}
+
+/// 写回测出来的缩略图像素（0031）。测一次，此后不再测。
+///
+/// 写失败不该影响本次显示 —— 调用方忽略返回的错，下次进页面再补。
+pub async fn set_thumb_size(pool: &SqlitePool, id: i64, w: i64, h: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE trash_items SET thumb_w = ?2, thumb_h = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(w)
+        .bind(h)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 按 id 取出待清理项（供物理删文件 + 编号回收）。

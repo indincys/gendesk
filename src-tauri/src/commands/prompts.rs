@@ -44,6 +44,12 @@ pub struct ImportPreviewGroup {
     pub is_new_group: bool,
     /// 组名是猜的（文档没有显式分组标记，按行的形态推断）→ UI 标「疑似」并请用户确认。
     pub inferred: bool,
+    /// 写出这一组词的 skill（0032，来自组头 `skill:` 或 job.json）。
+    ///
+    /// 它跟着预览走一趟前端再回来，而不是在收件侧直接写库：手工导入与工单收件共用
+    /// 同一条落库路径（`commit_preview`），让其中一条绕过去，两条路就会开始分叉。
+    /// 手工导入这一项恒为 null —— 不知道就别写。
+    pub skill: Option<String>,
     /// 受控用途（当前只有「图生视频」）。**导入这一刻就该定下来**：一份 txt 是为一个用途
     /// 写的，这是唯一 100% 知道答案的时刻；等到验收后再回提示词库补标，等于把活推给以后。
     ///
@@ -275,6 +281,7 @@ pub(crate) async fn build_preview_from_parsed(
             count,
             is_new_group: is_new,
             inferred: g.origin == importer::GroupOrigin::Inferred,
+            skill: g.skill.clone(),
             purposes,
             purpose_inferred,
             prompts: g
@@ -364,6 +371,10 @@ pub async fn repreview_import(
             is_new_group: is_new,
             // 「疑似」由用户在预览里点确认才消，不因为改了别处而自动消失。
             inferred: g.inferred,
+            // 重算预览（用户改了名/拆了组）时原样带回：它是一件已经发生的事实，
+            // 与用户在预览里改了什么无关。丢掉它，工单收录路上重算一次预览
+            // 就会把整批词的来源抹成「不知道」。
+            skill: g.skill.clone(),
             purpose_inferred: g.purpose_inferred && !purposes.is_empty(),
             purposes,
             prompts: g.prompts.clone(),
@@ -529,6 +540,7 @@ pub(crate) async fn commit_preview(
                 p.title.as_deref(),
                 &p.text,
                 source,
+                pg.skill.as_deref().filter(|s| !s.trim().is_empty()),
             )
             .await?;
             inserted += 1;

@@ -219,6 +219,21 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 `is_phantom`，**确认查询失败就这一轮不判**——问不出话 ≠ 判死）。未知 `gen_status` 判 Running
 而非 Failed（判死会把已扣费正在跑的任务标死）。计费证据一律 `COALESCE` 写回，**只增不抹**。
 
+**图片网格（验收页 / 废纸篓）** — 两页共用 `_shared/justified.ts`（齐行排版）与
+`_shared/timeline.ts`（日 → 任务簇分段）。三条实测得出的约束：
+**① 齐行修饰必须排在基类之后**。`.rjimg{aspect-ratio:auto}` 写在 `.rcimg{aspect-ratio:1}`
+前面时后者赢（同为单类选择器，靠顺序定胜负），而这个盒子高度定死、宽度 auto ——
+浏览器按 1:1 **从高度反推宽度**，得到一个与卡片宽度无关的方图（卡片 82px、图 147px），
+一行七张各超一截，症状就是「图糊在一起还压到隔壁」。故 `.rjimg` 另把 `width:100%`
+显式写死，宽度一旦确定 `aspect-ratio` 就不再参与计算。
+**② 虚拟化的 `estimateSize` 必须是真值，且不许挂 `measureElement`**。逐行
+`getBoundingClientRect` 是滚动时的强制同步布局（那就是卡顿），而它回来之前按估值摆位
+—— 旧估值卡片行少算 8px、分组头少算 10px，于是相邻两行**真的叠在一起**。
+所以 `.rmeta`/`.rclhead`/`.rvday`/`.trblk` 一律**定高**，TS 侧的常量与 CSS 是一对，
+改一处必须改另一处。
+**③ 容器宽度只能取 `contentRect.width`**（ResizeObserver），不能拿 `clientWidth` 兜底
+—— 后者含左右内边距，每行会宽出一个 padding，最后一张被挤出边界。
+
 **事务粒度** — `accept_tasks` 明确**不做单事务**（与直觉相反）：拷贝无法回滚，第 150 张失败会把
 前 149 条作品记录回滚掉而文件已在 outputs/ 里；现在的顺序（先整批拷完、任一张失败就一行库都
 不写）反而更接近原子。
@@ -248,7 +263,8 @@ sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库�
 （比仅编译期检查更强），故未接入 `cargo sqlx prepare --check`。
 
 前端测试只覆盖**派生逻辑与机械规则**（`routes.test.ts` · `stores/settings.test.ts` ·
-`features/review/layout.ts` · `features/v2v/model.ts` · `styles/classnames.test.ts`）——
+`features/_shared/justified.ts` · `features/_shared/timeline.ts` · `features/v2v/model.ts` ·
+`features/trash/model.ts` · `styles/classnames.test.ts`）——
 业务真相在 Rust，测试也在 Rust，别为了补前端覆盖率去测 UI 壳。
 
 - **实现与审查分离**：实现完成后由**全新上下文**会话执行 `/code-review`（引擎/数据层用 high）。

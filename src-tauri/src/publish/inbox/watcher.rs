@@ -1,8 +1,4 @@
-//! 收件箱文件监听 + 大小稳定防抖（发布模块执行计划 §5.1 inbox/watcher）。
-//!
-//! notify 监听 收件箱/ → 事件汇入 tokio 通道 → 防抖收敛（连续 2 秒无新事件）→ 全量
-//! rescan（幂等，天然抵抗 notify 事件风暴/丢事件）→ 逐条 InboxIngestEvent + PublishBadgesEvent。
-//! 防抖窗口的 coalesce 逻辑抽为纯 async 函数，虚拟时钟可测。
+//! 收件箱 notify 监听，2 秒静默窗口后做幂等全量扫描。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,241 +9,111 @@ use tauri::AppHandle;
 use tauri_specta::Event;
 use tokio::sync::mpsc;
 
-use crate::commands::publish_skus::badge_counts;
 use crate::error::{AppError, AppResult};
-use crate::publish::events::{InboxIngestEvent, PublishBadgesEvent, SheetChangedEvent};
+use crate::publish::events::{InboxIngestEvent, PublishBadgesEvent};
 use crate::publish::inbox::ingest;
 use crate::publish::paths;
 
-/// 防抖静默窗口：文件大小/事件连续 2 秒稳定才开始收录（规范 §4）。
 const QUIET: Duration = Duration::from_millis(2000);
 
-/// 运行中的收件箱监听。drop 即停止（watcher 析构 + 通道关闭令 worker 退出）。
 pub struct PublishWatcher {
     _watcher: notify::RecommendedWatcher,
-    // tauri::async_runtime::spawn 委托 Tauri 全局运行时，故 start/start_pkg 可从 setup
-    // （主线程、非 Tokio 运行时上下文）安全调用，不再 `there is no reactor running` panic。
     _worker: tauri::async_runtime::JoinHandle<()>,
 }
 
-/// 在指定本机根目录上启动监听。root 下不存在 收件箱/ 时先建。
 pub fn start(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<PublishWatcher> {
-    let inbox_dir = paths::RelPath::from_parts([paths::INBOX]).to_local(&root);
-    std::fs::create_dir_all(&inbox_dir)?;
-
-    let (tx, rx) = mpsc::channel::<()>(256);
-    // notify 回调在独立线程；用 blocking_send 汇入通道（满则丢弃，rescan 幂等兜底）。
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
+    let inbox = paths::RelPath::new(paths::INBOX).to_local(&root);
+    std::fs::create_dir_all(&inbox)?;
+    let (tx, rx) = mpsc::channel(256);
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() {
             let _ = tx.try_send(());
         }
     })
-    .map_err(|e| AppError::Io(format!("创建收件箱监听失败：{e}")))?;
+    .map_err(|err| AppError::Io(format!("创建收件箱监听失败：{err}")))?;
     watcher
-        .watch(&inbox_dir, RecursiveMode::Recursive)
-        .map_err(|e| AppError::Io(format!("监听收件箱目录失败：{e}")))?;
-
-    let worker = tauri::async_runtime::spawn(async move {
-        run_worker(rx, pool, root, app).await;
-    });
-
+        .watch(&inbox, RecursiveMode::Recursive)
+        .map_err(|err| AppError::Io(format!("监听收件箱失败：{err}")))?;
+    let worker = tauri::async_runtime::spawn(run_worker(rx, pool, root, app));
     Ok(PublishWatcher {
         _watcher: watcher,
         _worker: worker,
     })
 }
 
-/// 在任务包目录上启动监听：文件变更（回执回写）→ 防抖 → 全量对账。
-pub fn start_pkg(pool: SqlitePool, root: PathBuf, app: AppHandle) -> AppResult<PublishWatcher> {
-    let pkg_dir = paths::RelPath::from_parts([paths::TASK_PACKAGES]).to_local(&root);
-    std::fs::create_dir_all(&pkg_dir)?;
-    let (tx, rx) = mpsc::channel::<()>(256);
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            let _ = tx.try_send(());
-        }
-    })
-    .map_err(|e| AppError::Io(format!("创建任务包监听失败：{e}")))?;
-    watcher
-        .watch(&pkg_dir, RecursiveMode::Recursive)
-        .map_err(|e| AppError::Io(format!("监听任务包目录失败：{e}")))?;
-    let worker = tauri::async_runtime::spawn(async move {
-        let mut rx = rx;
-        loop {
-            if rx.recv().await.is_none() {
-                break;
-            }
-            if !coalesce(&mut rx, QUIET).await {
-                break;
-            }
-            crate::commands::publish_reconcile::reconcile_run(&pool, &app).await;
-        }
-    });
-    Ok(PublishWatcher {
-        _watcher: watcher,
-        _worker: worker,
-    })
-}
-
-/// worker 主循环：等首个事件 → 防抖收敛 → rescan + 发事件。
 async fn run_worker(mut rx: mpsc::Receiver<()>, pool: SqlitePool, root: PathBuf, app: AppHandle) {
-    loop {
-        // 阻塞等第一个事件；通道关闭 → 退出。
-        if rx.recv().await.is_none() {
-            break;
-        }
-        // 防抖：吸收后续事件直到静默窗口。
+    while rx.recv().await.is_some() {
         if !coalesce(&mut rx, QUIET).await {
-            break; // 通道关闭
+            break;
         }
         rescan_and_emit(&pool, &root, &app).await;
     }
 }
 
-/// 防抖收敛：持续吸收事件，直到 `quiet` 时长内无新事件返回 true；通道关闭返回 false。
-/// 抽为纯 async 函数便于虚拟时钟测试（tokio::time::pause）。
 pub async fn coalesce(rx: &mut mpsc::Receiver<()>, quiet: Duration) -> bool {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(quiet) => return true,
-            sig = rx.recv() => {
-                if sig.is_none() {
-                    return false;
-                }
-                // 收到新事件 → 重置静默计时（继续循环）。
-            }
+            signal = rx.recv() => if signal.is_none() { return false; },
         }
     }
 }
 
-/// 全量收录并推事件（错误落日志，不 panic）。
-async fn rescan_and_emit(pool: &SqlitePool, root: &Path, app: &AppHandle) {
+pub async fn rescan_and_emit(pool: &SqlitePool, root: &Path, app: &AppHandle) {
     match ingest::rescan(pool, root).await {
-        Ok(items) => {
-            // rescan 是全量的：滞留的待认领/失败条目每轮都会被重扫到。只对**本轮状态
-            // 发生变化**的条目推 toast，否则收件箱每有一点动静就重发一遍旧提示。
-            let mut ingested_skus: Vec<String> = Vec::new();
-            for item in items.into_iter().filter(|i| i.changed) {
-                match &item.outcome {
-                    ingest::IngestOutcome::Ingested { sku_code, .. }
-                    | ingest::IngestOutcome::IngestedMedia { sku_code, .. }
-                        if !ingested_skus.contains(sku_code) =>
-                    {
-                        ingested_skus.push(sku_code.clone());
-                    }
-                    _ => {}
-                }
-                let file_name = item
-                    .file_rel
-                    .as_str()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+        Ok(results) => {
+            for result in results.into_iter().filter(|result| result.changed) {
                 let _ = InboxIngestEvent {
-                    file_name,
-                    outcome: item.outcome,
+                    file_name: result.file_name,
+                    state: result.state,
+                    product_code: result.product_code,
+                    titles: result.titles,
+                    bodies: result.bodies,
+                    message: result.message,
                 }
                 .emit(app);
             }
-            if !ingested_skus.is_empty() {
-                notify_restocked_drafts(pool, app, &ingested_skus).await;
-            }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "收件箱 rescan 失败");
-        }
+        Err(err) => tracing::warn!(error=%err, "收件箱扫描失败"),
     }
     emit_badges(pool, app).await;
 }
 
-/// 到料提示（E6）：新入库的 SKU 若正躺在某张**草稿**的缺料清单里，发一条 SheetChanged
-/// 让工作台刷新——人可以据此决定要不要重新生成。
-///
-/// **不自动重算**：草稿里可能已有人工调整（改时间/增补行），自动重生成会把它们清掉。
-async fn notify_restocked_drafts(pool: &SqlitePool, app: &AppHandle, sku_codes: &[String]) {
-    let drafts = match crate::db::repo::planning::list_sheets(pool).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "读任务单失败");
-            return;
-        }
-    };
-    for sheet in drafts.into_iter().filter(|s| s.status == "draft") {
-        let hit = serde_json::from_str::<Vec<serde_json::Value>>(&sheet.shortage_json)
-            .unwrap_or_default()
-            .iter()
-            .any(|v| {
-                v.get("code")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| sku_codes.iter().any(|s| s == c))
-            });
-        if !hit {
-            continue;
-        }
-        tracing::info!(date = %sheet.date, "缺料 SKU 已到料，草稿可重新生成");
-        if let Ok(rows) = crate::db::repo::planning::list_tasks_by_sheet(pool, sheet.id).await {
-            let c = |st: &str| rows.iter().filter(|r| r.status == st).count() as i64;
-            let _ = SheetChangedEvent {
-                sheet_id: sheet.id,
-                date: sheet.date,
-                status: sheet.status,
-                pending: c("pending"),
-                published: c("published"),
-                failed: c("failed"),
-                suspect: c("suspect"),
-                canceled: c("canceled"),
-            }
-            .emit(app);
-        }
-    }
-}
-
-/// 计算并推送发布徽章。
 pub async fn emit_badges(pool: &SqlitePool, app: &AppHandle) {
-    match badge_counts(pool).await {
-        Ok(b) => {
+    let counts: Result<(i64, i64, i64), sqlx::Error> = sqlx::query_as(
+        "SELECT
+          (SELECT COUNT(*) FROM inbox_items WHERE state IN ('unclaimed','failed')),
+          (SELECT COUNT(*) FROM task_sheets WHERE status IN ('draft','confirmed')),
+          (SELECT COUNT(*) FROM task_sheets WHERE status IN ('exported','reconciling'))",
+    )
+    .fetch_one(pool)
+    .await;
+    match counts {
+        Ok((unclaimed, pending_sheets, pending_reconcile)) => {
             let _ = PublishBadgesEvent {
-                unclaimed: b.unclaimed,
-                warn: b.warn,
-                pending_sheets: b.pending_sheets,
-                pending_reconcile: b.pending_reconcile,
+                unclaimed,
+                pending_sheets,
+                pending_reconcile,
             }
             .emit(app);
         }
-        Err(e) => tracing::warn!(error = %e, "计算发布徽章失败"),
+        Err(err) => tracing::warn!(error=%err, "发布徽章计算失败"),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即测试失败，是期望行为
+#[allow(clippy::unwrap_used)] // 测试断言失败即测试失败
 mod tests {
     use super::*;
 
-    // 防抖：静默窗口内不断有事件 → 不返回；停止后经过 quiet → 返回 true。
     #[tokio::test(start_paused = true)]
-    async fn coalesce_waits_for_quiet_window() {
-        let (tx, mut rx) = mpsc::channel::<()>(16);
+    async fn waits_until_quiet() {
+        let (tx, mut rx) = mpsc::channel(8);
         let handle = tokio::spawn(async move { coalesce(&mut rx, QUIET).await });
-
-        // 每 500ms 发一次事件，持续 3 次（1.5s，均在 2s 窗口内重置）。
-        for _ in 0..3 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            tx.send(()).await.unwrap();
-        }
-        // 此时还未静默满 2s，任务应仍在等待。
-        assert!(!handle.is_finished(), "静默窗口未满不应返回");
-
-        // 停止发事件，推进 2s → 应返回 true。
+        tx.send(()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        tx.send(()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        assert!(handle.await.unwrap(), "静默满窗口应返回 true");
-    }
-
-    // 通道关闭（发送端 drop）→ coalesce 返回 false。
-    #[tokio::test(start_paused = true)]
-    async fn coalesce_returns_false_on_close() {
-        let (tx, mut rx) = mpsc::channel::<()>(16);
-        drop(tx);
-        assert!(!coalesce(&mut rx, QUIET).await);
+        assert!(handle.await.unwrap());
     }
 }

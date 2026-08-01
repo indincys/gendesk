@@ -4,14 +4,11 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri_specta::Event;
 
-use crate::publish::inbox::ingest::IngestOutcome;
-
-/// `publish://badges`：资产库徽章（待认领 + 预警）、发布计划徽章（待确认 + 待核对）。
+/// `publish://badges`：资产库待认领、发布计划待确认与待核对。
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishBadgesEvent {
     pub unclaimed: i64,
-    pub warn: i64,
     pub pending_sheets: i64,
     pub pending_reconcile: i64,
 }
@@ -20,9 +17,12 @@ pub struct PublishBadgesEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(rename_all = "camelCase")]
 pub struct InboxIngestEvent {
-    /// 收录文件名（末段）。
     pub file_name: String,
-    pub outcome: IngestOutcome,
+    pub state: String,
+    pub product_code: Option<String>,
+    pub titles: i64,
+    pub bodies: i64,
+    pub message: String,
 }
 
 /// `publish://export-progress`：任务包导出进度（复制视频可达数百 MB，UI 需要交代）。

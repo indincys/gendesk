@@ -17,6 +17,8 @@ pub struct GroupRow {
     pub created_at: i64,
     /// 归档时间（0016）：非空表示已归档，生成页选择器默认不再列出。
     pub archived_at: Option<i64>,
+    /// 发布域 SKU 绑定。验收通过的作品据此自动进入对应图片素材库。
+    pub sku_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]

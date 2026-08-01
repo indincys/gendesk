@@ -87,7 +87,6 @@ const PLATFORM_ZH: Record<string, string> = {
   xhs: "小红书",
   kuaishou: "快手",
   shipinhao: "视频号",
-  bilibili: "B站",
   general: "通用",
 };
 

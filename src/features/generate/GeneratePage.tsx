@@ -421,6 +421,7 @@ export function GeneratePage() {
                       <i className="gdot" style={{ background: "var(--gc)" }} />
                       <span className="fw6 fs13 nowrap ohide">{g.name}</span>
                       <span className="chip">{g.prefix}</span>
+                      {g.skuCode && <span className="bdg b-green">SKU {g.skuCode}</span>}
                       {g.isTemp && <span className="bdg b-amber">临时</span>}
                       <div className="f1" />
                       <span className="grcnt">{nref > 0 ? `× ${nref} 图` : "未挂靠"}</span>

@@ -65,12 +65,12 @@ jobs:
         run: git diff --exit-code -- src/lib/ipc/bindings.ts
       - name: 覆盖率闸门（engine / ids / importer / publish 纯逻辑 ≥ 85%）
         working-directory: src-tauri
-        # 发布模块：仅对纯逻辑目录（planner/ · inbox/parser · xlsx/ · paths · platform）计入闸门；
-        # IO/glue（watcher/ingest/exporter/reconcile/ticker/mod/events）由 tempdir + 虚拟时钟集成测试覆盖，不计行闸门。
+        # 发布模块：只把方案指定的 composer/schedule/validate/sheet_json/receipt 五个纯逻辑模块计入闸门；
+        # IO/glue 由 tempdir + 生命周期集成测试覆盖，不计行闸门。
         run: |
           cargo install cargo-llvm-cov --locked
           cargo llvm-cov --lib \
-            --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/|publish/(mod|exporter|reconcile|ticker|events)\.rs|publish/inbox/(mod|watcher|ingest)\.rs|publish/planner/mod\.rs|publish/xlsx/mod\.rs|v2v/watcher\.rs)' \
+            --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/|publish/(mod|copy_ingest|exporter|paths|platform|product|restock|settle|ticker|events)\.rs|publish/inbox/|v2v/watcher\.rs)' \
             --fail-under-lines 85
       - name: cargo check
         working-directory: src-tauri

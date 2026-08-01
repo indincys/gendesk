@@ -3,17 +3,22 @@
 //! 业务真相只在 Rust：收件箱收录、套装编排、任务包导出、回执对账、看板日报。
 //! 与现有引擎调度器互不干扰——各异步链路汇入各自的串行工作者（单写者纪律的发布版）。
 
+pub mod composer;
+pub mod copy_ingest;
 pub mod events;
 pub mod exporter;
 pub mod inbox;
 pub mod paths;
-pub mod planner;
 pub mod platform;
-pub mod reconcile;
+pub mod product;
+pub mod receipt;
+#[allow(dead_code)] // 方案要求保留补料模板；后续补料入口接入前不参与运行时调用。
 pub mod restock;
-pub mod sku_mapping;
+pub mod schedule;
+pub mod settle;
+pub mod sheet_json;
 pub mod ticker;
-pub mod xlsx;
+pub mod validate;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -42,9 +47,8 @@ impl PublishState {
     /// 在给定本机根目录上（重）启动收件箱 + 任务包监听；旧监听随替换而 drop 停止。
     pub fn restart(&self, root: PathBuf) -> AppResult<()> {
         let inbox_w = inbox::watcher::start(self.pool.clone(), root.clone(), self.app.clone())?;
-        let pkg_w = inbox::watcher::start_pkg(self.pool.clone(), root, self.app.clone())?;
         if let Ok(mut guard) = self.watchers.lock() {
-            *guard = vec![inbox_w, pkg_w];
+            *guard = vec![inbox_w];
         }
         Ok(())
     }

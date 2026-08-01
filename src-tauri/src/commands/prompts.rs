@@ -155,6 +155,9 @@ pub struct GroupView {
     pub tags: Vec<String>,
     /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
     pub archived: bool,
+    /// 发布域 SKU 绑定。
+    pub sku_id: Option<i64>,
+    pub sku_code: Option<String>,
 }
 
 /// 列出全部提示词分组（含 active 提示词数 + 标签）。
@@ -166,6 +169,15 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
     for g in groups {
         let count = repo::count_in_group(&state.db, g.id).await?;
         let tags = repo::group_tags(&state.db, g.id).await?;
+        let sku_code = match g.sku_id {
+            Some(id) => {
+                sqlx::query_scalar("SELECT code FROM skus WHERE id=?1")
+                    .bind(id)
+                    .fetch_optional(&state.db)
+                    .await?
+            }
+            None => None,
+        };
         out.push(GroupView {
             id: g.id,
             name: g.name,
@@ -175,6 +187,8 @@ pub async fn list_prompt_groups(state: State<'_, AppState>) -> AppResult<Vec<Gro
             count,
             tags,
             archived: g.archived_at.is_some(),
+            sku_id: g.sku_id,
+            sku_code,
         });
     }
     Ok(out)

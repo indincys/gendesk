@@ -1,8 +1,8 @@
-//! 五平台枚举与中文名映射（发布模块执行计划 §0.4 / §5.1）。
+//! 四平台枚举与中文名映射（图文发布链路重构 §3.3）。
 //!
 //! 平台集合是**单点定义**：加平台 = 改此文件一处（+ migration 无涉）。
-//! 存储/矩阵键用小写 code（`douyin`…）；xlsx 单元格与 UI 一律显示中文（`zh()`）。
-//! 文本条目的平台标签 = 五平台 code + `general`（通用），见 [`text_platform_tag`]。
+//! 存储与 JSON 键用小写 code（`douyin`…）；UI 与任务包展示一律使用中文（`zh()`）。
+//! 文本条目的平台标签 = 四平台 code + `general`（通用），见 [`text_platform_tag`]。
 
 // 部分映射先于 P2 编排消费者落地；未使用项在对应任务接入后收紧。
 #![allow(dead_code)]
@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// 固定五平台枚举。序列化为小写 code，与 DB / 平台矩阵键一致。
+/// 固定四平台枚举。序列化为小写 code，与 DB / 平台矩阵键一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
@@ -18,7 +18,6 @@ pub enum Platform {
     Xhs,
     Kuaishou,
     Shipinhao,
-    Bilibili,
 }
 
 /// 文本条目「通用」标签（不属于任何具体平台）。
@@ -26,12 +25,11 @@ pub const GENERAL_TAG: &str = "general";
 
 impl Platform {
     /// 全部平台，顺序即 UI/矩阵展示序。
-    pub const ALL: [Platform; 5] = [
+    pub const ALL: [Platform; 4] = [
         Platform::Douyin,
         Platform::Xhs,
         Platform::Kuaishou,
         Platform::Shipinhao,
-        Platform::Bilibili,
     ];
 
     /// 存储 / 平台矩阵键（ASCII 小写）。
@@ -41,18 +39,16 @@ impl Platform {
             Platform::Xhs => "xhs",
             Platform::Kuaishou => "kuaishou",
             Platform::Shipinhao => "shipinhao",
-            Platform::Bilibili => "bilibili",
         }
     }
 
-    /// 中文显示名（xlsx 单元格 + UI）。
+    /// 中文显示名（任务包 + UI）。
     pub fn zh(self) -> &'static str {
         match self {
             Platform::Douyin => "抖音",
             Platform::Xhs => "小红书",
             Platform::Kuaishou => "快手",
             Platform::Shipinhao => "视频号",
-            Platform::Bilibili => "B站",
         }
     }
 
@@ -61,15 +57,14 @@ impl Platform {
         Platform::ALL.into_iter().find(|p| p.code() == code)
     }
 
-    /// 由中文名解析（收件箱文件名 / xlsx 回读容错）。
-    /// 容忍常见别名：`b站`/`哔哩哔哩` → Bilibili。
+    /// 由中文名解析（收件箱文件名等人工输入容错）。
+    /// 容忍视频号的常见中文别名。
     pub fn from_zh(name: &str) -> Option<Platform> {
         let n = name.trim();
         if let Some(p) = Platform::ALL.into_iter().find(|p| p.zh() == n) {
             return Some(p);
         }
         match n {
-            "b站" | "B站" | "哔哩哔哩" | "bilibili" => Some(Platform::Bilibili),
             "视频号" | "微信视频号" => Some(Platform::Shipinhao),
             _ => None,
         }
@@ -84,7 +79,7 @@ pub struct PlatformInfo {
     pub zh: String,
 }
 
-/// 全部五平台的 `{code, zh}`（前端单点数据来源）。
+/// 全部四平台的 `{code, zh}`（前端单点数据来源）。
 pub fn platform_infos() -> Vec<PlatformInfo> {
     Platform::ALL
         .into_iter()
@@ -121,7 +116,7 @@ mod tests {
 
     #[test]
     fn from_zh_aliases() {
-        assert_eq!(Platform::from_zh("哔哩哔哩"), Some(Platform::Bilibili));
+        assert_eq!(Platform::from_zh("微信视频号"), Some(Platform::Shipinhao));
         assert_eq!(Platform::from_zh(" 小红书 "), Some(Platform::Xhs));
         assert_eq!(Platform::from_zh("未知平台"), None);
     }
@@ -137,9 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn infos_cover_five() {
+    fn infos_cover_four() {
         let infos = platform_infos();
-        assert_eq!(infos.len(), 5);
+        assert_eq!(infos.len(), 4);
         assert_eq!(infos[0].code, "douyin");
         assert_eq!(infos[0].zh, "抖音");
     }

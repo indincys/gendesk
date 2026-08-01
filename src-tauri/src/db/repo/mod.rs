@@ -1,18 +1,16 @@
 //! 各业务域数据仓（repo）。薄封装 SQL；业务规则在上层命令 / 引擎。
 
-pub mod accounts;
 pub mod api_keys;
-pub mod assets;
+pub mod copy;
+pub mod images;
 pub mod inbox;
 pub mod intake;
-pub mod ledger;
-pub mod planning;
+pub mod products;
 pub mod prompts;
 pub mod refs;
 pub mod settings;
-pub mod skus;
+pub mod sheets;
 pub mod tasks;
-pub mod texts;
 pub mod trash;
 pub mod v2v;
 pub mod works;
@@ -407,6 +405,7 @@ mod tests {
                 batch_id: bid,
                 prompt_code: String::new(),
                 group_name: String::new(),
+                sku_id: None,
             },
         )
         .await

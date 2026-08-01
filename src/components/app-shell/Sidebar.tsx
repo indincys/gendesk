@@ -45,16 +45,16 @@ export function Sidebar() {
   const updateVersion = useEngineStore((s) => s.updateVersion);
 
   const NavItem = ({ r }: { r: RouteDef }) => {
-    const assetsN = pubBadges.unclaimed + pubBadges.warn;
+    const assetsN = pubBadges.unclaimed;
     const planN = pubBadges.pendingSheets + pubBadges.pendingReconcile;
     const badge =
       r.key === "tasks" && badges.running > 0
         ? { cls: "nb-run", n: `${badges.running}`, spin: true }
         : r.key === "review" && badges.review > 0
           ? { cls: "nb-amb", n: `${badges.review}`, spin: false }
-          : r.key === "assets" && assetsN > 0
+          : r.key === "images" && assetsN > 0
             ? { cls: "nb-amb", n: `${assetsN}`, spin: false }
-            : r.key === "plan" && planN > 0
+            : r.key === "sheets" && planN > 0
               ? { cls: "nb-amb", n: `${planN}`, spin: false }
               : r.key === "v2v" && v2vN > 0
                 ? { cls: "nb-amb", n: `${v2vN}`, spin: false }

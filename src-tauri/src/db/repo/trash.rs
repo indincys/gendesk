@@ -18,7 +18,7 @@ pub struct TrashItemRow {
     pub source_label: String,
     pub file_paths_json: String,
     pub deleted_at: i64,
-    /// 还原载荷（0027）：行被真删掉的实体（作品）在此存整行快照。
+    /// 还原载荷：行被真删掉的实体（作品、图片素材）在此存整行快照。
     pub payload_json: Option<String>,
     /// 缩略图像素（0031）。网格按真实比例排版，行高要在渲染前算得出来。
     /// None = 还没测过（旧行）或那张图已经不在盘上。
@@ -37,8 +37,7 @@ pub struct NewTrashItem {
     pub source_label: String,
     /// 待清理时物理删除的文件路径列表
     pub file_paths: Vec<String>,
-    /// 整行快照（0027）。只有「删除即真删行」的实体需要它——task/prompt/ref/clip
-    /// 还原时把状态拨回去就行，行一直都在。
+    /// 整行快照。只有「删除即真删行」的实体需要它；其余类型还原时拨回状态即可。
     pub payload_json: Option<String>,
 }
 

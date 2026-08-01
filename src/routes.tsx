@@ -1,6 +1,8 @@
 import { AssetsPage } from "@/features/assets/AssetsPage";
+import { CopyLibraryPage } from "@/features/copy/CopyLibraryPage";
 import { GeneratePage } from "@/features/generate/GeneratePage";
 import { PlanPage } from "@/features/plan/PlanPage";
+import { ProductsPage } from "@/features/products/ProductsPage";
 import { RefsPage } from "@/features/refs/RefsPage";
 import { ReviewPage } from "@/features/review/ReviewPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -11,7 +13,7 @@ import { V2vPage } from "@/features/v2v/V2vPage";
 import { WorksPage } from "@/features/works/WorksPage";
 import type { ComponentType } from "react";
 
-/** 页面路由键 —— 顺序即快捷键序（⌘1–8 制作/资产，⌘9 资产库，⌘0 发布计划）。 */
+/** 页面路由键。图片素材库使用 ⌘9，图文任务单使用 ⌘0；商品资料无快捷键。 */
 export type RouteKey =
   | "generate"
   | "tasks"
@@ -19,9 +21,11 @@ export type RouteKey =
   | "v2v"
   | "clips"
   | "library"
+  | "copy"
   | "refs"
-  | "assets"
-  | "plan"
+  | "products"
+  | "images"
+  | "sheets"
   | "trash"
   | "settings";
 
@@ -91,21 +95,35 @@ export const ROUTES: readonly RouteDef[] = [
     group: "asset",
     component: WorksPage,
   },
+  {
+    key: "copy",
+    label: "文案库",
+    shortcut: null,
+    group: "asset",
+    component: CopyLibraryPage,
+  },
   // 「提示词库」（原 ⌘5）已整页移除：提示词是消耗品，跑完即随批次一起删掉，
   // 没有可长期浏览的库。导入仍在生成页内完成，或由 skill 投工单送进来。
   // **⌘5 就此空着，不把后面的数字往前挪**：重排会把每个人的肌肉记忆一次性作废
   // （同 v0.15.0 给新页不排数字的理由，代价远大于少一个快捷键）。
   { key: "refs", label: "参考图库", shortcut: 6, group: "asset", component: RefsPage },
   {
-    key: "assets",
-    label: "资产库",
+    key: "products",
+    label: "商品资料",
+    shortcut: null,
+    group: "publish",
+    component: ProductsPage,
+  },
+  {
+    key: "images",
+    label: "图片素材库",
     shortcut: 9,
     group: "asset",
     component: AssetsPage,
   },
   {
-    key: "plan",
-    label: "发布计划",
+    key: "sheets",
+    label: "图文任务单",
     shortcut: 0,
     group: "publish",
     component: PlanPage,

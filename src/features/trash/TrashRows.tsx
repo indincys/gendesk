@@ -194,6 +194,7 @@ export function entityLabel(it: TrashItemView): string {
     {
       task: "验收未通过的结果",
       work: "已删除作品",
+      image_asset: "已删除图片素材",
       prompt: "已删除提示词",
       ref: "已删除参考图",
       clip: "验收未通过的视频",

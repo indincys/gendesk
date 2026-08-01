@@ -7,6 +7,7 @@ use serde::Serialize;
 use specta::Type;
 use tauri::State;
 
+use crate::db::repo::images as image_repo;
 use crate::db::repo::tasks as task_repo;
 use crate::db::repo::trash as repo;
 use crate::db::repo::v2v as v2v_repo;
@@ -76,8 +77,7 @@ pub struct TrashItemView {
     pub prompt_text: Option<String>,
     pub source_label: String,
     pub deleted_at: i64,
-    /// 能不能还原回原位。只有 0027 之前删掉的作品是 false（没留整行快照，还不回去），
-    /// 其余四类的行一直都在，还原就是把状态拨回来。
+    /// 能不能还原回原位。真删行的作品与图片素材依赖 payload 快照，其余类型的行仍在。
     pub restorable: bool,
     /// 缩略图像素（0031）。网格按真实比例排版，行高要在渲染前算得出来 ——
     /// 等图片加载完再量，每张落地都会把下面的行往下顶一次。测不到就留 None，
@@ -115,7 +115,8 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
                         .and_then(|v| v.into_iter().next())
                 })
                 .flatten();
-            let restorable = r.entity_type != "work" || r.payload_json.is_some();
+            let restorable = !matches!(r.entity_type.as_str(), "work" | "image_asset")
+                || r.payload_json.is_some();
             TrashItemView {
                 id: r.id,
                 restorable,
@@ -445,12 +446,11 @@ pub struct RestoreResult {
 
 /// 从废纸篓还原回原位（误删撤回）。
 ///
-/// 五类实体走两条路：
+/// 六类实体走两条路：
 /// - **task / prompt / ref / clip** —— 行一直都在，删除只是把状态拨到了一边，
 ///   还原就是把它拨回来（未通过 → 回待验收；提示词 → 回 active；参考图 → 清删除戳）。
-/// - **work** —— 作品是唯一「删除即真删行」的实体（accepted_works 没有 deleted_at），
-///   靠 0027 的 `payload_json` 整行写回，连 id 一起（v2v_clips.work_id 是不设 FK 的锚点，
-///   换个新 id 等于把那条视频认领给了别人）。
+/// - **work / image_asset** —— 删除即真删行，靠 `payload_json` 整行写回；图片素材
+///   恢复时一律回到 free，文件在废纸篓彻底清理前一直保留。
 ///
 /// 还原**不删** trash 行以外的任何东西，也不动文件：未通过的原图本来就还在盘上
 /// （E02 决定的：reject 只是记账，物理删要等「彻底删除/清空」）。这正是它能还原的前提。
@@ -518,6 +518,13 @@ pub async fn restore_trash_items(
                     continue;
                 }
             },
+            "image_asset" => match r.payload_json.as_deref() {
+                Some(payload) => restore_image_asset_snapshot(&state.db, payload).await,
+                None => {
+                    failures.push(format!("{label}：图片素材快照缺失，无法还原"));
+                    continue;
+                }
+            },
             other => {
                 failures.push(format!("{label}：不认识的类型「{other}」"));
                 continue;
@@ -542,6 +549,33 @@ pub async fn restore_trash_items(
         restored: restored.len() as i64,
         failures,
     })
+}
+
+async fn restore_image_asset_snapshot(
+    pool: &sqlx::SqlitePool,
+    payload: &str,
+) -> Result<bool, sqlx::Error> {
+    let Ok(row) = serde_json::from_str::<image_repo::ImageAssetRow>(payload) else {
+        return Ok(false);
+    };
+    let changed = sqlx::query(
+        "INSERT OR IGNORE INTO image_assets
+         (id,sku_id,path_rel,thumb_rel,source,work_id,state,post_id,created_at,updated_at)
+         SELECT ?1,?2,?3,?4,?5,?6,'free',NULL,?7,?8
+         WHERE EXISTS(SELECT 1 FROM skus WHERE id=?2)",
+    )
+    .bind(row.id)
+    .bind(row.sku_id)
+    .bind(row.path_rel)
+    .bind(row.thumb_rel)
+    .bind(row.source)
+    .bind(row.work_id)
+    .bind(row.created_at)
+    .bind(crate::db::now_unix())
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(changed > 0)
 }
 
 /// 跑一条「按 id 把状态拨回去」的 UPDATE（`?1` = id，`?2` = 当前时刻）；
@@ -744,5 +778,70 @@ mod tests {
 
         let kept = filter_live_clip_files(&pool, vec![row]).await.unwrap();
         assert_eq!(kept.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleted_image_asset_restores_to_free_without_losing_its_file() {
+        let (pool, dir) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO products(id,code,name,created_at,updated_at) VALUES(100,'A','商品 A',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO skus(id,code,style_name,product_name,tier,topics_json,status,is_general,
+             note,created_at,updated_at,folder_alias,product_id,music_keyword)
+             VALUES(100,'A-1','款式','商品 A','hot','[]','active',0,'',0,0,'',100,'')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let root = dir.path().join("publish-root");
+        let rel = crate::publish::paths::RelPath::from_parts([
+            crate::publish::paths::IMAGE_LIBRARY,
+            "A-1",
+            "asset.jpg",
+        ]);
+        let local = rel.to_local(&root);
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"image").unwrap();
+        sqlx::query(
+            "INSERT INTO image_assets
+             (id,sku_id,path_rel,thumb_rel,source,state,created_at,updated_at)
+             VALUES(7,100,?1,?1,'import','free',0,0)",
+        )
+        .bind(rel.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            crate::commands::publish_library::trash_image_asset(&pool, &root, 7)
+                .await
+                .unwrap()
+        );
+        assert!(local.is_file(), "进废纸篓时不能提前物理删除文件");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM image_assets WHERE id=7")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let trash = repo::list(&pool).await.unwrap().remove(0);
+        assert_eq!(trash.entity_type, "image_asset");
+        assert!(
+            restore_image_asset_snapshot(&pool, trash.payload_json.as_deref().unwrap())
+                .await
+                .unwrap()
+        );
+        let restored: (String, Option<i64>) =
+            sqlx::query_as("SELECT state,post_id FROM image_assets WHERE id=7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(restored, ("free".into(), None));
+        assert!(local.is_file());
     }
 }

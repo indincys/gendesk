@@ -1,5 +1,6 @@
 //! review 域命令（执行计划 2.1 / 需求 13 / R7 / R8）。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -9,11 +10,14 @@ use tauri::State;
 
 use crate::db::now_unix;
 use crate::db::repo::{
-    prompts as prompt_repo, tasks as task_repo, trash as trash_repo, works as work_repo,
+    images as image_repo, prompts as prompt_repo, tasks as task_repo, trash as trash_repo,
+    works as work_repo,
 };
 use crate::error::AppResult;
 use crate::files;
 use crate::state::AppState;
+
+type AcceptCopyJob = (i64, String, PathBuf, Option<(PathBuf, String, i64)>);
 
 /// 待验收项视图。
 #[derive(Debug, Clone, Serialize, Type, FromRow)]
@@ -155,6 +159,8 @@ struct AcceptRow {
     group_id: Option<i64>,
     is_temp: i64,
     group_name: String,
+    sku_id: Option<i64>,
+    sku_code: String,
 }
 
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
@@ -162,11 +168,13 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
-        COALESCE(g.is_temp,0) AS is_temp, COALESCE(g.name,'') AS group_name
+        COALESCE(g.is_temp,0) AS is_temp, COALESCE(g.name,'') AS group_name,
+        g.sku_id, COALESCE(s.code,'') AS sku_code
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
+    LEFT JOIN skus s ON s.id = g.sku_id
     WHERE t.status = 'rev' AND t.id IN ";
 
 /// 一次取回本批全部待验收行（一条 IN 查询，不是 N 条 SELECT）。
@@ -217,7 +225,14 @@ pub async fn accept_tasks(
 
     let rows = accept_rows(&state.db, &task_ids).await?;
     // 算出每张的落点（纯字符串活，留在这边），再一次性交给阻塞线程去拷。
-    let mut jobs: Vec<(i64, String, PathBuf)> = Vec::new();
+    let publish_root = if rows.iter().any(|row| row.sku_id.is_some()) {
+        Some(crate::commands::publish_settings::root_local(&state.db).await?)
+    } else {
+        None
+    };
+    let mut jobs: Vec<AcceptCopyJob> = Vec::new();
+    let mut planned_outputs = HashSet::new();
+    let mut planned_assets = HashSet::new();
     for row in &rows {
         let Some(src) = row.result_image_path.clone() else {
             continue; // 无结果图，跳过
@@ -237,9 +252,38 @@ pub async fn accept_tasks(
             .join(&group_folder);
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
-        let filename =
+        let base_filename =
             files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index, &ext);
-        jobs.push((row.id, src, out_dir.join(&filename)));
+        let filename = crate::publish::paths::dedupe_name(&base_filename, &|candidate| {
+            let path = out_dir.join(candidate);
+            path.exists() || planned_outputs.contains(&path)
+        });
+        let out_path = out_dir.join(&filename);
+        planned_outputs.insert(out_path.clone());
+        let asset = match (row.sku_id, publish_root.as_ref()) {
+            (Some(sku_id), Some(root)) => {
+                let asset_filename =
+                    crate::publish::paths::dedupe_name(&base_filename, &|candidate| {
+                        let rel = crate::publish::paths::RelPath::from_parts([
+                            crate::publish::paths::IMAGE_LIBRARY,
+                            row.sku_code.as_str(),
+                            candidate,
+                        ]);
+                        let path = rel.to_local(root);
+                        path.exists() || planned_assets.contains(&path)
+                    });
+                let rel = crate::publish::paths::RelPath::from_parts([
+                    crate::publish::paths::IMAGE_LIBRARY,
+                    row.sku_code.as_str(),
+                    asset_filename.as_str(),
+                ]);
+                let path = rel.to_local(root);
+                planned_assets.insert(path.clone());
+                Some((path, rel.as_str().to_string(), sku_id))
+            }
+            _ => None,
+        };
+        jobs.push((row.id, src, out_path, asset));
     }
     if jobs.is_empty() {
         return Ok(AcceptResult {
@@ -248,25 +292,32 @@ pub async fn accept_tasks(
             queued_v2v: 0,
         });
     }
-    let to_copy: Vec<(i64, String, PathBuf)> = jobs.clone();
-    // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
-    let copied: std::io::Result<Vec<i64>> = tokio::task::spawn_blocking(move || {
-        let mut ok = Vec::with_capacity(to_copy.len());
-        for (id, src, dest) in to_copy {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
+    let to_copy = jobs
+        .iter()
+        .flat_map(|(_, src, dest, asset)| {
+            let mut pairs = vec![(PathBuf::from(src), dest.clone())];
+            if let Some((asset_dest, _, _)) = asset {
+                pairs.push((PathBuf::from(src), asset_dest.clone()));
             }
-            std::fs::copy(&src, &dest)?;
-            ok.push(id);
-        }
-        Ok(ok)
-    })
-    .await
-    .map_err(|e| crate::error::AppError::Io(format!("输出拷贝任务失败：{e}")))?;
+            pairs
+        })
+        .collect::<Vec<_>>();
+    let copied_paths = to_copy
+        .iter()
+        .map(|(_, destination)| destination.clone())
+        .collect::<Vec<_>>();
+    // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
+    let copied =
+        tokio::task::spawn_blocking(move || crate::publish::paths::copy_batch_new(&to_copy))
+            .await
+            .map_err(|e| crate::error::AppError::Io(format!("输出拷贝任务失败：{e}")))?;
     copied?;
+    let mut copied_guard = crate::publish::paths::CreatedFilesGuard::new(copied_paths);
 
     for row in rows {
-        let Some((_, src, out_path)) = jobs.iter().find(|(id, _, _)| *id == row.id).cloned() else {
+        let Some((_, src, out_path, asset)) =
+            jobs.iter().find(|(id, _, _, _)| *id == row.id).cloned()
+        else {
             continue;
         };
         let thumb = row.result_thumb_path.clone().unwrap_or_else(|| src.clone());
@@ -288,10 +339,18 @@ pub async fn accept_tasks(
                 // 现读 JOIN 的话作品会在那一刻丢掉自己的身份。
                 prompt_code: row.prompt_code.clone(),
                 group_name: row.group_name.clone(),
+                sku_id: row.sku_id,
             },
         )
         .await?;
+        if let Some((_, rel, sku_id)) = asset.as_ref() {
+            image_repo::insert(&mut tx, *sku_id, rel, rel, "works", Some(work_id)).await?;
+        }
         tx.commit().await?;
+        copied_guard.preserve(&out_path);
+        if let Some((asset_path, _, _)) = asset.as_ref() {
+            copied_guard.preserve(asset_path);
+        }
 
         // R8：微调过则写回提示词库。
         if row.prompt_text_snapshot != row.prompt_text {

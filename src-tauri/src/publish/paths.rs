@@ -10,9 +10,76 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// 以 create_new 语义拷贝，目标已存在时拒绝覆盖。写入中途失败会清掉半文件。
+pub fn copy_new(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<u64> {
+    let mut input = std::fs::File::open(source)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    match std::io::copy(&mut input, &mut output) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            drop(output);
+            let _ = std::fs::remove_file(destination);
+            Err(error)
+        }
+    }
+}
+
+/// 批量 create_new 拷贝。任一项失败时回滚本批已创建文件，不留下无数据库记录的孤儿。
+pub fn copy_batch_new(jobs: &[(std::path::PathBuf, std::path::PathBuf)]) -> std::io::Result<()> {
+    let mut created = Vec::new();
+    for (source, destination) in jobs {
+        let result = if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).and_then(|()| copy_new(source, destination).map(|_| ()))
+        } else {
+            copy_new(source, destination).map(|_| ())
+        };
+        if let Err(error) = result {
+            for path in created.into_iter().rev() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+        created.push(destination.clone());
+    }
+    Ok(())
+}
+
+/// 文件已复制、数据库尚未提交时的补偿守卫。提交成功后逐个 `preserve`；任何 `?`
+/// 提前返回都会删除仍无主的文件。
+pub struct CreatedFilesGuard {
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl CreatedFilesGuard {
+    pub fn new(paths: impl IntoIterator<Item = std::path::PathBuf>) -> Self {
+        Self {
+            paths: paths.into_iter().collect(),
+        }
+    }
+
+    pub fn preserve(&mut self, path: &std::path::Path) {
+        self.paths.retain(|candidate| candidate != path);
+    }
+
+    pub fn preserve_all(&mut self) {
+        self.paths.clear();
+    }
+}
+
+impl Drop for CreatedFilesGuard {
+    fn drop(&mut self) {
+        for path in self.paths.iter().rev() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 // ── 四分区目录名（根目录下）────────────────────────────────────────────
-/// 资产库分区。
-pub const ASSET_LIB: &str = "资产库";
+/// 图片素材库分区。
+pub const IMAGE_LIBRARY: &str = "图片素材库";
 /// 收件箱分区。
 pub const INBOX: &str = "收件箱";
 /// 任务包分区。
@@ -26,24 +93,20 @@ pub const DISCARDED: &str = "已丢弃";
 pub const INBOX_ARCHIVES: [&str; 2] = [INGESTED, DISCARDED];
 
 /// 四分区顶层目录（`init` 时创建；`INGESTED` 在 `收件箱/` 内按日期建）。
-pub const PARTITIONS: [&str; 3] = [ASSET_LIB, INBOX, TASK_PACKAGES];
+pub const PARTITIONS: [&str; 3] = [IMAGE_LIBRARY, INBOX, TASK_PACKAGES];
 
 // ── 任务包内固定名（需求文档 §4.6）──────────────────────────────────────
-/// 任务单 xlsx 文件名。
-pub const TASK_XLSX: &str = "任务单.xlsx";
+/// 任务单 JSON 文件名。
+pub const TASK_JSON: &str = "任务单.json";
 /// 执行说明 markdown 文件名。
 pub const EXEC_GUIDE: &str = "执行说明.md";
 /// 就绪标志文件名（全部文件落盘后最后写入）。
 pub const READY: &str = "READY.txt";
-/// 回执截图目录名。
-pub const RECEIPTS_DIR: &str = "回执截图";
-/// 素材目录名。
-pub const MATERIALS_DIR: &str = "素材";
-/// 图文正文物化文件名。
-pub const BODY_TXT: &str = "body.txt";
-/// 封面固定文件名。
-pub const COVER: &str = "cover.jpg";
-/// 视频素材固定基名（扩展名跟随源文件）。
+/// 图片目录名。
+pub const IMAGES_DIR: &str = "图片";
+/// RPA 追加写回执。
+pub const RECEIPT_JSONL: &str = "回执.jsonl";
+/// 旧素材命名辅助仍供迁移期单元测试使用，不再进入新任务包。
 pub const VIDEO_STEM: &str = "video";
 
 /// Windows 路径长度上限（超过即告警，防 260 字符截断）。
@@ -156,6 +219,24 @@ pub fn exec_join(exec_root: &str, rel: &RelPath, style: PathStyle) -> String {
     }
 }
 
+/// 执行机根必须是对应平台的绝对路径；管理端与执行端可能不是同一操作系统，
+/// 因而不能用本机 `Path::is_absolute` 判断 Windows 路径。
+pub fn is_exec_root_absolute(root: &str, style: PathStyle) -> bool {
+    let root = root.trim();
+    match style {
+        PathStyle::Unix => root.starts_with('/'),
+        PathStyle::Windows => {
+            let bytes = root.as_bytes();
+            (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'\\' | b'/'))
+                || root.starts_with("\\\\")
+                || root.starts_with("//")
+        }
+    }
+}
+
 /// 路径是否超过 Windows 长度上限（导出时对拼接结果告警）。
 pub fn exceeds_path_limit(path: &str) -> bool {
     path.chars().count() > PATH_LIMIT
@@ -196,7 +277,7 @@ pub fn is_ascii_safe_name(name: &str) -> bool {
         })
 }
 
-/// SKU 编码长度上限（编码进目录名与 xlsx，留足 Windows 路径预算）。
+/// SKU 编码长度上限（编码进目录名与任务包，留足 Windows 路径预算）。
 pub const SKU_CODE_MAX: usize = 64;
 
 /// Windows 保留设备名：这些名字（含带扩展名的形式，如 `con.txt`）在 Windows 上
@@ -209,7 +290,7 @@ const WIN_RESERVED: [&str; 22] = [
 /// 校验 SKU 编码：ASCII 字母/数字/`-_.`，非空、无空格、≤64 字符；
 /// 拒绝纯点段（`.`/`..`，路径穿越入口）与 Windows 保留设备名。
 ///
-/// 注：SKU 编码作为用户可见标识（xlsx 第 7 列 + 目录名），允许大写（如 `SF-YD-201`）；
+/// 注：SKU 编码作为用户可见标识（任务包 + 目录名），允许大写（如 `SF-YD-201`）；
 /// GenDesk 是目录结构唯一写方，但 Windows 文件系统大小写不敏感，故编码的**唯一性**
 /// 按大小写不敏感判定（`skus` 表 `idx_skus_code_nocase` 唯一索引 + repo 层 `COLLATE NOCASE`）。
 pub fn is_valid_sku_code(code: &str) -> bool {
@@ -344,6 +425,46 @@ mod tests {
             exec_join("D:\\x", &RelPath::new(""), PathStyle::Windows),
             "D:\\x"
         );
+    }
+
+    #[test]
+    fn exec_root_absolute_is_checked_for_the_remote_platform() {
+        assert!(is_exec_root_absolute(r"D:\GenDesk", PathStyle::Windows));
+        assert!(is_exec_root_absolute(r"\\server\share", PathStyle::Windows));
+        assert!(!is_exec_root_absolute("GenDesk", PathStyle::Windows));
+        assert!(is_exec_root_absolute("/srv/gendesk", PathStyle::Unix));
+        assert!(!is_exec_root_absolute("srv/gendesk", PathStyle::Unix));
+    }
+
+    #[test]
+    fn batch_copy_rolls_back_files_created_before_a_later_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jpg");
+        std::fs::write(&source, b"image").unwrap();
+        let first = dir.path().join("dest/first.jpg");
+        let second = dir.path().join("dest/second.jpg");
+        let missing = dir.path().join("missing.jpg");
+        let result = copy_batch_new(&[(source, first.clone()), (missing, second.clone())]);
+        assert!(result.is_err());
+        assert!(!first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn batch_copy_rolls_back_when_a_later_parent_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jpg");
+        std::fs::write(&source, b"image").unwrap();
+        let first = dir.path().join("dest/first.jpg");
+        let parent_is_file = dir.path().join("not-a-directory");
+        std::fs::write(&parent_is_file, b"file").unwrap();
+        let second = parent_is_file.join("second.jpg");
+
+        let result = copy_batch_new(&[(source.clone(), first.clone()), (source, second.clone())]);
+
+        assert!(result.is_err());
+        assert!(!first.exists());
+        assert!(!second.exists());
     }
 
     #[test]

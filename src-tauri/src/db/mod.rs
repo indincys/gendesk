@@ -3,11 +3,13 @@
 //! 连接参数：WAL · synchronous=NORMAL · busy_timeout=5s · foreign_keys=ON。
 //! 单写者原则在 M2 调度器落实；本层提供池与各域 repo。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+
+use crate::publish::paths;
 
 pub mod repo;
 
@@ -26,12 +28,127 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
         .connect_with(opts)
         .await?;
 
+    backup_before_destructive_migration(&pool, db_path).await?;
     migrate(&pool).await?;
+    recover_interrupted_exports(&pool).await?;
     Ok(pool)
+}
+
+/// single-instance 保证启动恢复时没有另一份本应用仍在导出。token 会跨越数据库记账
+/// 与 READY 落盘之间的窗口：READY 已出现代表包可继续执行，只需释放 token；READY
+/// 尚未出现且回执为空，代表上次在发布包前崩溃，需要把 used 库存和 sheet 一并回滚。
+pub(crate) async fn recover_interrupted_exports(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let interrupted: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id,status,export_dir,export_token FROM task_sheets
+         WHERE export_token IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (sheet_id, status, export_dir, token) in interrupted {
+        if status != "exported" {
+            sqlx::query("UPDATE task_sheets SET export_token=NULL WHERE id=?1 AND export_token=?2")
+                .bind(sheet_id)
+                .bind(&token)
+                .execute(pool)
+                .await?;
+            continue;
+        }
+
+        let package = export_dir.as_deref().map(Path::new);
+        let ready_exists = package.is_some_and(|path| path.join(paths::READY).is_file());
+        let receipt_started = package.is_some_and(|path| {
+            path.join(paths::RECEIPT_JSONL)
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() > 0)
+        });
+        if ready_exists || receipt_started {
+            sqlx::query("UPDATE task_sheets SET export_token=NULL WHERE id=?1 AND export_token=?2")
+                .bind(sheet_id)
+                .bind(&token)
+                .execute(pool)
+                .await?;
+            continue;
+        }
+
+        let mut tx = pool.begin().await?;
+        let reverted = sqlx::query(
+            "UPDATE task_sheets
+             SET status='confirmed',export_dir=NULL,exported_at=NULL,export_token=NULL,updated_at=?3
+             WHERE id=?1 AND status='exported' AND export_token=?2",
+        )
+        .bind(sheet_id)
+        .bind(&token)
+        .bind(now_unix())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if reverted == 1 {
+            sqlx::query(
+                "UPDATE image_assets SET state='held',updated_at=?2
+                 WHERE state='used' AND post_id IN (SELECT id FROM posts WHERE sheet_id=?1)",
+            )
+            .bind(sheet_id)
+            .bind(now_unix())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE text_items SET state='held'
+                 WHERE state='used' AND post_id IN (SELECT id FROM posts WHERE sheet_id=?1)",
+            )
+            .bind(sheet_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+/// 0038 会删除旧发布模型。只要是从 0038 之前的存量库升级，就在同目录先用
+/// SQLite `VACUUM INTO` 生成一致性快照；备份失败会阻断迁移，绝不带病 DROP。
+async fn backup_before_destructive_migration(
+    pool: &SqlitePool,
+    db_path: &Path,
+) -> Result<Option<PathBuf>, sqlx::Error> {
+    let has_migrations: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_migrations == 0 {
+        return Ok(None);
+    }
+    let version: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1")
+            .fetch_one(pool)
+            .await?;
+    if version == 0 || version >= 38 {
+        return Ok(None);
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let stem = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("gendesk");
+    let backup = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.pre-0038-{stamp}.db"));
+    sqlx::query("VACUUM INTO ?1")
+        .bind(backup.to_string_lossy().to_string())
+        .execute(pool)
+        .await?;
+    tracing::info!(path=%backup.display(), from_version=version, "已在破坏性迁移前生成数据库备份");
+    Ok(Some(backup))
 }
 
 /// 运行内置迁移（forward-only）。
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
+    // Forward-only 文件必须连续保留，真实库会拒绝缺少任一已应用版本的二进制。
     sqlx::migrate!("./migrations").run(pool).await
 }
 
@@ -161,6 +278,128 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied, latest_embedded_migration());
+    }
+
+    #[tokio::test]
+    async fn destructive_migration_is_preceded_by_consistent_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let opts = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE _sqlx_migrations(version INTEGER,success INTEGER);
+             CREATE TABLE legacy_marker(value TEXT NOT NULL);
+             INSERT INTO _sqlx_migrations VALUES(37,1);
+             INSERT INTO legacy_marker VALUES('must survive')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let backup = backup_before_destructive_migration(&pool, &path)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(backup.is_file());
+        let backup_pool = SqlitePool::connect(&format!("sqlite:{}", backup.display()))
+            .await
+            .unwrap();
+        let marker: String = sqlx::query_scalar("SELECT value FROM legacy_marker")
+            .fetch_one(&backup_pool)
+            .await
+            .unwrap();
+        assert_eq!(marker, "must survive");
+    }
+
+    #[tokio::test]
+    async fn migration_0041_repairs_copy_after_sku_was_assigned_late() {
+        let (pool, _dir) = test_support::test_pool().await;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=41")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER sync_free_copy_product_after_sku_reassign")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO products(id,code,name,created_at,updated_at) VALUES(901,'LEG','旧商品',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO skus(id,code,style_name,product_name,tier,topics_json,status,is_general,
+             note,created_at,updated_at,folder_alias,product_id,music_keyword)
+             VALUES(901,'LEG-1','旧款','','hot','[]','active',0,'',0,0,'',901,'')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO text_items(sku_id,product_id,kind,text,source,state,created_at)
+             VALUES(901,NULL,'title','升级前文案','manual','free',0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+        let repaired: i64 =
+            sqlx::query_scalar("SELECT product_id FROM text_items WHERE sku_id=901")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(repaired, 901);
+    }
+
+    /// 运维验收：只对显式提供的数据库副本运行真实迁移，再做 SQLite 完整性检查。
+    ///
+    /// 运行方式：
+    /// `GENDESK_MIGRATION_COPY=/tmp/real-db-copy.db cargo test --lib migrate_real_db_copy -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要显式提供真实数据库副本路径"]
+    async fn migrate_real_db_copy() {
+        let path = std::path::PathBuf::from(
+            std::env::var("GENDESK_MIGRATION_COPY")
+                .expect("请通过 GENDESK_MIGRATION_COPY 提供数据库副本路径"),
+        );
+        assert!(path.is_file(), "数据库副本不存在：{}", path.display());
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("copy")),
+            "为防止误迁移真实库，副本文件名必须包含 copy"
+        );
+
+        let pool = connect(&path).await.unwrap();
+        let applied: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied, latest_embedded_migration());
+
+        let foreign_key_violations: Vec<(String, Option<i64>, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            foreign_key_violations.is_empty(),
+            "foreign_key_check 发现异常：{foreign_key_violations:?}"
+        );
+        let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(integrity, vec!["ok"]);
+        pool.close().await;
     }
 
     /// 与迁移无关的错误原样透出，不被这层翻译吞掉。

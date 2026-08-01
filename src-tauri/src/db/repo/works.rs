@@ -28,6 +28,8 @@ pub struct AcceptedWorkRow {
     pub prompt_code: String,
     #[serde(default)]
     pub group_name: String,
+    #[serde(default)]
+    pub sku_id: Option<i64>,
 }
 
 pub struct NewWork {
@@ -41,13 +43,14 @@ pub struct NewWork {
     pub batch_id: i64,
     pub prompt_code: String,
     pub group_name: String,
+    pub sku_id: Option<i64>,
 }
 
 pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sqlx::Error> {
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text,
-            group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
+            group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name, sku_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id",
     )
     .bind(w.task_id)
     .bind(&w.image_path)
@@ -60,6 +63,7 @@ pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sql
     .bind(now_unix())
     .bind(&w.prompt_code)
     .bind(&w.group_name)
+    .bind(w.sku_id)
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -101,8 +105,8 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     let dropped = row.task_id.is_some() && task_id.is_none();
     sqlx::query(
         "INSERT INTO accepted_works (id, task_id, image_path, thumb_path, prompt_id, prompt_text,
-            group_id, ref_image_id, batch_id, favorite, accepted_at, prompt_code, group_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            group_id, ref_image_id, batch_id, favorite, accepted_at, prompt_code, group_name, sku_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(row.id)
     .bind(task_id)
@@ -117,6 +121,7 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     .bind(row.accepted_at)
     .bind(&row.prompt_code)
     .bind(&row.group_name)
+    .bind(row.sku_id)
     .execute(pool)
     .await?;
     Ok(dropped)
@@ -176,6 +181,7 @@ mod tests {
             accepted_at: 100,
             prompt_code: "GG-0001".into(),
             group_name: "g".into(),
+            sku_id: None,
         }
     }
 

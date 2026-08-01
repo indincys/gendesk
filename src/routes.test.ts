@@ -2,12 +2,13 @@ import { ROUTES, ROUTE_BY_SHORTCUT } from "@/routes";
 import { describe, expect, it } from "vitest";
 
 describe("routes 注册表", () => {
-  it("11 个页面，数字快捷键无重复", () => {
-    // 发布模块 P1 新增两项导航：资产库(⌘9) / 发布计划(⌘0)。
+  it("13 个页面，数字快捷键无重复", () => {
+    // 图文发布重构新增商品资料，并将 ⌘9/⌘0 固定给图片素材库与图文任务单。
     // v0.15.0 新增「视频流水线」、v0.20.0 新增「视频成片」——十个数字已用尽，
     // 两页都没有数字快捷键，只能从侧栏进（v0.24.0 去掉了 ⌘K 命令面板）。
     // v0.21.0 移除「提示词库」：提示词是消耗品，没有可长期浏览的库。
-    expect(ROUTES).toHaveLength(11);
+    // v0.31.0 新增「文案库」（标题/正文/话题标签三池），同样无数字快捷键。
+    expect(ROUTES).toHaveLength(13);
     const digits = ROUTES.map((r) => r.shortcut)
       .filter((s): s is number => s !== null)
       .sort((a, b) => a - b);
@@ -21,8 +22,8 @@ describe("routes 注册表", () => {
     expect(ROUTE_BY_SHORTCUT[4]).toBe("library");
     expect(ROUTE_BY_SHORTCUT[6]).toBe("refs");
     expect(ROUTE_BY_SHORTCUT[8]).toBe("settings");
-    expect(ROUTE_BY_SHORTCUT[9]).toBe("assets");
-    expect(ROUTE_BY_SHORTCUT[0]).toBe("plan");
+    expect(ROUTE_BY_SHORTCUT[9]).toBe("images");
+    expect(ROUTE_BY_SHORTCUT[0]).toBe("sheets");
   });
 
   // 提示词库整页移除后，⌘5 **空着**而不是被后面的页顶上来。
@@ -37,6 +38,10 @@ describe("routes 注册表", () => {
     expect(ROUTES.find((r) => r.key === "v2v")?.shortcut).toBeNull();
     expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("clips");
     expect(ROUTES.find((r) => r.key === "clips")?.shortcut).toBeNull();
+    expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("copy");
+    expect(ROUTES.find((r) => r.key === "copy")?.shortcut).toBeNull();
+    expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("products");
+    expect(ROUTES.find((r) => r.key === "products")?.shortcut).toBeNull();
   });
 
   it("路由键唯一", () => {

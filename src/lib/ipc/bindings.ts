@@ -772,7 +772,7 @@ async scanIntakeNow() : Promise<Result<JobView[], AppError>> {
  * 重试：删掉台账那行，让下一次扫描重新收录它。
  * 
  * **只对失败的工单开放**：成功的工单目录已经移走了，删掉记录不会让它重跑，
- * 只会让台账少一行历史。
+ * 只会让台账少一行历史。重复到达时若另一轮已经完成，则按幂等成功处理。
  */
 async retryIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
     try {

@@ -37,7 +37,11 @@ pub struct WorkView {
 pub struct WorkFilter {
     pub group_id: Option<i64>,
     pub favorite_only: bool,
-    /// 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
+    /// 按**用途**筛选（受控取值，当前只有「图生视频」）。
+    ///
+    /// 读的是作品自己的 `purpose` 列（0045），不再 JOIN `tag_bindings`：
+    /// 那是张无外键的多态表，分组一删、id 一复用，旧绑定就会把用途安到无关的组头上。
+    /// 自由标签（txt 里写的 `标签: 白底,3C`）仍然绑在分组上，但它不是这条筛选的事。
     pub tag: Option<String>,
     /// 全文搜索：编号 / 分组名 / 参考图名 / 提示词正文。
     ///
@@ -60,9 +64,7 @@ const WORK_SELECT: &str = "SELECT w.id, w.prompt_code, w.group_name,
         w.batch_id, w.favorite, w.accepted_at, w.image_path, w.thumb_path, w.prompt_text,
         w.ref_image_id, w.group_id, w.task_id,
         EXISTS (SELECT 1 FROM v2v_clips c WHERE c.work_id = w.id) AS in_pipeline,
-        EXISTS (SELECT 1 FROM tag_bindings tb JOIN tags tg ON tg.id = tb.tag_id
-                WHERE tb.entity_type = 'prompt_group' AND tb.entity_id = w.group_id
-                  AND tg.name = '图生视频') AS is_i2v
+        (w.purpose = '图生视频') AS is_i2v
     FROM accepted_works w
     LEFT JOIN ref_images r ON r.id = w.ref_image_id";
 
@@ -82,12 +84,7 @@ pub async fn list_works(
         conds.push("w.favorite = 1".into());
     }
     if filter.tag.is_some() {
-        conds.push(
-            "EXISTS (SELECT 1 FROM tag_bindings tb JOIN tags tg ON tg.id = tb.tag_id
-                     WHERE tb.entity_type = 'prompt_group' AND tb.entity_id = w.group_id
-                       AND tg.name = ?)"
-                .into(),
-        );
+        conds.push("w.purpose = ?".into());
     }
     if filter.batch_id.is_some() {
         conds.push("w.batch_id = ?".into());
@@ -447,7 +444,7 @@ mod tests {
     async fn view_flags_reflect_pipeline_and_purpose() {
         let (pool, _d) = test_pool().await;
         seed(&pool, 1, "AA", &[(1, "甲"), (2, "乙")]).await;
-        bind_tag(&pool, 1, "图生视频").await;
+        set_purpose(&pool, &[1, 2], "图生视频").await;
         sqlx::query(
             "INSERT INTO v2v_clips (work_id,group_id,group_name,stage,source_prompt,created_at,updated_at)
              VALUES (1,1,'组1','rewrite','甲',0,0)",
@@ -487,36 +484,49 @@ mod tests {
         }
     }
 
-    async fn bind_tag(pool: &SqlitePool, group_id: i64, tag: &str) {
-        sqlx::query("INSERT INTO tags (name) VALUES (?1) ON CONFLICT(name) DO NOTHING")
-            .bind(tag)
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO tag_bindings (tag_id, entity_type, entity_id) SELECT id,'prompt_group',?2 FROM tags WHERE name=?1")
-            .bind(tag).bind(group_id).execute(pool).await.unwrap();
+    async fn set_purpose(pool: &SqlitePool, work_ids: &[i64], purpose: &str) {
+        for id in work_ids {
+            sqlx::query("UPDATE accepted_works SET purpose = ?2 WHERE id = ?1")
+                .bind(id)
+                .bind(purpose)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
     }
 
-    /// 复刻 list_works 的 tag 条件（作品自身无标签，须经其提示词组的绑定过滤）。
-    const TAG_COND: &str = "SELECT w.id FROM accepted_works w WHERE EXISTS (
-        SELECT 1 FROM tag_bindings tb JOIN tags tg ON tg.id = tb.tag_id
-        WHERE tb.entity_type = 'prompt_group' AND tb.entity_id = w.group_id AND tg.name = ?1)
-        ORDER BY w.id";
+    /// 复刻 list_works 的用途条件（0045 起读作品自己的列）。
+    const TAG_COND: &str = "SELECT w.id FROM accepted_works w WHERE w.purpose = ?1 ORDER BY w.id";
 
-    // 用途筛选是整条链路的入口：批次会混组，只有沿「作品 → 组 → 标签」这条边才筛得对。
+    /// 用途筛选读**作品自己的那一列**，不再沿「作品 → 组 → tag_bindings」那条边。
+    ///
+    /// 这条替换了原来的 `tag_filter_selects_only_works_of_tagged_groups`：它的前提
+    /// （用途绑在提示词组上）已被 0045 整体移除，不是为了让 CI 变绿而放宽。
+    /// 新形态**更严**：多加了一条「同组但用途不同的两张图必须分得开」——
+    /// 那正是旧载体表达不了的东西（标签绑在组上，同组必然同用途）。
     #[tokio::test]
-    async fn tag_filter_selects_only_works_of_tagged_groups() {
+    async fn purpose_filter_reads_the_work_s_own_column() {
         let (pool, _d) = test_pool().await;
         seed(&pool, 1, "AA", &[(1, "甲"), (2, "乙")]).await;
         seed(&pool, 2, "BB", &[(3, "丙")]).await;
-        bind_tag(&pool, 1, "图生视频").await;
+        set_purpose(&pool, &[1, 2], "图生视频").await;
 
         let ids: Vec<i64> = sqlx::query_scalar(TAG_COND)
             .bind("图生视频")
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(ids, vec![1, 2], "只应命中已打用途标签的组下的作品");
+        assert_eq!(ids, vec![1, 2], "只应命中用途为图生视频的作品");
+
+        // 同一个组里两张图用途不同 —— 旧载体（标签绑在组上）表达不了这件事。
+        set_purpose(&pool, &[2], "").await;
+        let ids: Vec<i64> = sqlx::query_scalar(TAG_COND)
+            .bind("图生视频")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![1], "同组不同用途必须分得开");
+        set_purpose(&pool, &[2], "图生视频").await;
 
         let none: Vec<i64> = sqlx::query_scalar(TAG_COND)
             .bind("不存在的用途")

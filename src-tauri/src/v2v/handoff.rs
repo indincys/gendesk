@@ -14,9 +14,9 @@
 //! **1. 队列非空即自动物化，不等任何按钮。** 「验收通过后不需要点导出」这句话要成立，
 //! 就必须有人在队列变化时把工单写到磁盘上。那个人是本模块，触发点是验收命令与收录命令。
 //!
-//! **2. 目录名对同一组恒定（`g{group_id}`）。** 若每次物化都生成带时间戳的新目录，
+//! **2. 目录名对同一次投单恒定（`g{group_id}`）。** 若每次物化都生成带时间戳的新目录，
 //! skill 每轮都会看到一个「没见过的」目录，重复改写同一批。恒定目录 + 每次全量重写
-//! = 天然幂等，也让「已经改写完的组从待改写里消失」这件事可以靠删目录表达。
+//! = 天然幂等，也让「已经改写完的那一单从待改写里消失」这件事可以靠删目录表达。
 //!
 //! **3. 交接目录不是状态的持有者。** 它是信箱，不是账本。真相在 `v2v_clips`。
 //! 故这里没有 v0.13.0 那份 `ledger.jsonl`——少一个真相来源是收益，不是损失。
@@ -55,17 +55,33 @@ pub fn default_root() -> PathBuf {
     home.join("GenDesk交接")
 }
 
-/// 组目录名：`g{group_id}` 或 `g{group_id}-{ascii-slug}`。
+/// 交接目录名：`g{group_id}` 或 `g{group_id}-{ascii-slug}`。
 ///
-/// 带上 group_id 是为了**恒定且唯一**——组可以改名（改名不该让 skill 重做一遍），
-/// 也可以有两个组 slug 相同（纯中文名一律退化成 `x`）。slug 只是给人看的尾巴。
+/// 带上 group_id 是为了**恒定且唯一**——名字可以改（改名不该让 skill 重做一遍），
+/// 也可以有两个 slug 相同（纯中文名一律退化成 `x`）。slug 只是给人看的尾巴。
+///
+/// ## 为什么这一格仍然是 group_id，而不是 job_id
+///
+/// 收敛之后**一次工单 = 一个 run = 一个组**（收录侧只调一次 `commit_preview`，
+/// 而 `resolve_prefix` 保证前缀唯一，故每一单都落进一个新组）。也就是说
+/// `group_id` **已经就是**这一单的键，换成 `j{job_id}` 只是换个写法：
+///
+/// - `group_id` 是 `INTEGER PRIMARY KEY AUTOINCREMENT`，SQLite 保证**永不复用**，
+///   所以它天然满足「恒定且唯一」；`job_id` 是工单里的自由文本，要当目录名还得
+///   先过一遍 slug（这一格恰恰是为了避开非 ASCII 才这么设计的）。
+/// - `accepted_works` 根本没存 job_id —— 为了换一个字母去加一列、再回填历史数据，
+///   收益是零。
+/// - 而代价是实打实的：改了名，**每一个已经存在的交接目录都会变成「没见过的」**，
+///   skill 会把已经改写完的那些重做一遍。
+pub const DIR_PREFIX: &str = "g";
+
 pub fn group_dir_name(group_id: Option<i64>, group_name: &str) -> String {
     let id = group_id.unwrap_or(0);
     let slug = ascii_slug(group_name);
     if slug == "x" {
-        format!("g{id}")
+        format!("{DIR_PREFIX}{id}")
     } else {
-        format!("g{id}-{slug}")
+        format!("{DIR_PREFIX}{id}-{slug}")
     }
 }
 
@@ -542,7 +558,11 @@ mod tests {
         p.to_string_lossy().to_string()
     }
 
-    // 组目录名必须对同一组恒定：改名不该让 skill 把整组重做一遍。
+    /// 目录名对同一次投单**恒定**：改名不该让 skill 把整单重做一遍。
+    ///
+    /// 一次工单 = 一个 run = 一个组（收录侧只调一次 `commit_preview`），故这一格里的
+    /// `group_id` 就是这一单的键。两次物化同一单必须落在同一个目录里——否则 skill
+    /// 每轮都看到一个「没见过的」目录，把已经改写完的那批重做一遍。
     #[test]
     fn group_dir_name_is_stable_across_renames() {
         let a = group_dir_name(Some(12), "鹿晗-B-Roll素材分镜图");

@@ -3559,7 +3559,11 @@ modelVersion: string | null; duration: number | null; videoResolution: string | 
 trashId: number | null }
 export type WorkFilter = { groupId: number | null; favoriteOnly: boolean; 
 /**
- * 按分组标签（含受控「用途」）筛选。作品自身不带标签——标签绑在它的提示词组上。
+ * 按**用途**筛选（受控取值，当前只有「图生视频」）。
+ * 
+ * 读的是作品自己的 `purpose` 列（0045），不再 JOIN `tag_bindings`：
+ * 那是张无外键的多态表，分组一删、id 一复用，旧绑定就会把用途安到无关的组头上。
+ * 自由标签（txt 里写的 `标签: 白底,3C`）仍然绑在分组上，但它不是这条筛选的事。
  */
 tag: string | null; 
 /**

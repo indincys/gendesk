@@ -949,6 +949,53 @@ mod tests {
         assert_eq!(jobs[0].params_json.len(), 3, "三套参数都要留痕");
     }
 
+    /// 用途是**整单级**且必须显式写：没写就是没有，GenDesk 不靠组名关键词预猜。
+    ///
+    /// 预猜（`purpose::infer_purposes`）是给**手工导入**的兜底 —— 那条路上人没有地方
+    /// 表态。工单里作者已经表过态了，再去猜组名只会把「这批图会不会自动进视频流水线」
+    /// 变成一件说不清的事。
+    #[tokio::test]
+    async fn purpose_must_be_declared_not_guessed_from_the_name() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 500);
+        // 单名里全是会命中 i2v 预猜的关键词（B-Roll / 分镜 / 首帧），但工单没写 purpose。
+        make_job(home.path(), "260804-B-Roll分镜首帧", "", &simple("W-甲-01"));
+
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
+        let purpose: String = sqlx::query_scalar("SELECT purpose FROM prompts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(purpose, "", "没写就是没有 —— 不得从名字里猜出一个用途");
+    }
+
+    /// 未知用途一律拒单，**不能静默当成「没有用途」**：那会让整批本该进视频流水线的图
+    /// 停在作品库里，而没有任何一处会说为什么。
+    #[tokio::test]
+    async fn an_unknown_purpose_rejects_the_whole_order() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 500);
+        make_job(
+            home.path(),
+            "job-purpose",
+            r#","purpose":"图转视频""#,
+            &simple("W-甲-01"),
+        );
+
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "error");
+        assert!(jobs[0].message.contains("未知用途"), "{}", jobs[0].message);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+        for t in ["batches", "prompts", "ref_images", "tasks"] {
+            assert_eq!(count(&pool, t).await, 0, "{t} 不该有任何记录");
+        }
+    }
+
     // 参数完全一样时，台账里只该留**一套**参数的痕迹，不该逐条重复。
     #[tokio::test]
     async fn identical_params_are_recorded_once() {

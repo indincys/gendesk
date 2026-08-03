@@ -158,7 +158,7 @@ pub async fn scan_intake_now(
 /// 重试：删掉台账那行，让下一次扫描重新收录它。
 ///
 /// **只对失败的工单开放**：成功的工单目录已经移走了，删掉记录不会让它重跑，
-/// 只会让台账少一行历史。
+/// 只会让台账少一行历史。重复到达时若另一轮已经完成，则按幂等成功处理。
 #[tauri::command]
 #[specta::specta]
 pub async fn retry_intake_job(
@@ -166,14 +166,11 @@ pub async fn retry_intake_job(
     app: AppHandle,
     id: i64,
 ) -> AppResult<Vec<JobView>> {
-    let job = repo::get(&state.db, id).await?;
-    if job.status == "done" {
-        return Err(AppError::InvalidInput(
-            "这份工单已经成功建批，无需重试；要再跑一次请重新投单".into(),
-        ));
-    }
-    repo::delete(&state.db, id).await?;
-    scan_intake_now(state, app).await
+    let s = load_settings(&state.db).await?;
+    let ctx = ctx_of(&state, s.task_threshold);
+    let jobs = intake::ingest::retry_job(&ctx, &s.root_path(), id).await?;
+    emit(&app, &jobs);
+    Ok(jobs)
 }
 
 // ───────────────────────── 开跑前的可视化确认 ─────────────────────────

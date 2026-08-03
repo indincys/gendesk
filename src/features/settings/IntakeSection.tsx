@@ -2,7 +2,7 @@ import { type IntakeSettings, type JobView, commands, subscribeIntake, unwrap } 
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 import { AlertTriangle, Check, FolderOpen, PlayCircle, RefreshCw, RotateCcw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
@@ -20,6 +20,9 @@ export function IntakeSection() {
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [dir, setDir] = useState<string>("");
   const [scanning, setScanning] = useState(false);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
+  // state 要等下一次 render 才更新；ref 在同一帧内就能拦住双击产生的第二个 IPC。
+  const retryingRef = useRef(false);
   // 待确认工单的可视化确认卡（看清提示词组 ↔ 参考图的对应关系再放行）。
   // 卡本身由外壳统一挂载 —— 这里只是把「要看哪一份」写进去。收到 hold 事件时
   // 外壳也会写同一个字段，于是无论从哪个入口进来，同一时刻都只有一张卡。
@@ -75,11 +78,18 @@ export function IntakeSection() {
   };
 
   const retry = async (id: number) => {
+    if (retryingRef.current) return;
+    retryingRef.current = true;
+    setRetryingId(id);
     try {
       await unwrap(commands.retryIntakeJob(id));
       await refresh();
     } catch (e) {
       toast.error(String(e));
+      await refresh();
+    } finally {
+      retryingRef.current = false;
+      setRetryingId(null);
     }
   };
 
@@ -137,7 +147,12 @@ export function IntakeSection() {
         >
           打开
         </button>
-        <button type="button" className="btn sm gho" disabled={scanning} onClick={scan}>
+        <button
+          type="button"
+          className="btn sm gho"
+          disabled={scanning || retryingId !== null}
+          onClick={scan}
+        >
           <RefreshCw className="ic12" />
           立即扫描
         </button>
@@ -223,8 +238,13 @@ export function IntakeSection() {
               )}
               {(j.status === "error" || j.status === "running") && (
                 <>
-                  <span className="fs11" style={{ color: "var(--er)" }}>
-                    {j.message || "收录中断（重试可再来一次）"}
+                  <span
+                    className="fs11"
+                    style={{ color: j.status === "running" ? "var(--wr)" : "var(--er)" }}
+                  >
+                    {j.status === "running"
+                      ? "正在收录；若应用曾异常退出，可点“恢复收录”"
+                      : j.message || "收录失败（修正工单后可重试）"}
                   </span>
                   {/* 失败的工单可能已经导入了一半：收录没有一步能整体回滚（参考图要拷
                       文件，建批要发编号，第一个批次建完就已经在花钱跑了）。「重试」
@@ -238,9 +258,20 @@ export function IntakeSection() {
                       ，重试前先处理掉
                     </span>
                   )}
-                  <button type="button" className="btn sm gho" onClick={() => void retry(j.id)}>
+                  <button
+                    type="button"
+                    className="btn sm gho"
+                    disabled={scanning || retryingId !== null}
+                    onClick={() => void retry(j.id)}
+                  >
                     <RotateCcw className="ic12" />
-                    重试
+                    {retryingId === j.id
+                      ? j.status === "running"
+                        ? "恢复中…"
+                        : "重试中…"
+                      : j.status === "running"
+                        ? "恢复收录"
+                        : "重试"}
                   </button>
                 </>
               )}

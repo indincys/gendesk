@@ -168,6 +168,18 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<JobView, sqlx::Error> {
     Ok(to_view(r))
 }
 
+/// 按行 id 查一份台账；重试等允许旧界面重复到达的入口必须用它。
+///
+/// `fetch_one` 的 `RowNotFound` 是数据库实现细节，不该因为另一轮重试已经先删掉旧行
+/// 就直接冒到界面上。
+pub async fn get_optional(pool: &SqlitePool, id: i64) -> Result<Option<JobView>, sqlx::Error> {
+    let r: Option<Row> = sqlx::query_as(&format!("{SELECT} WHERE id = ?1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map(to_view))
+}
+
 /// 最近若干条（设置页列表）。
 pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobView>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(&format!(

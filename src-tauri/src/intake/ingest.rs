@@ -89,6 +89,33 @@ pub type ScanResult = Vec<JobView>;
 /// 所以它不是「以后再说」的问题。
 pub async fn scan(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
     let _guard = ctx.scan_lock.lock().await;
+    scan_locked(ctx, root).await
+}
+
+/// 重试一份失败/中断的工单。
+///
+/// 查台账、删旧行和重新扫描必须与普通扫描共用**同一段临界区**。否则快速点两次时，
+/// 第二次会删掉第一次扫描刚插入的 `running` 行；第一次收录其实已经建批并移档，最后
+/// 回读台账却只得到 `RowNotFound`，界面便显示一条与事实相反的数据库错误。
+///
+/// 旧行不存在或已经变成 `done` 都按“另一轮已经处理”成功返回，使本操作具备幂等性。
+pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<ScanResult> {
+    let _guard = ctx.scan_lock.lock().await;
+    match repo::get_optional(&ctx.pool, row_id).await? {
+        Some(job) if job.status == "done" => return Ok(Vec::new()),
+        Some(_) => {
+            repo::delete(&ctx.pool, row_id).await?;
+        }
+        None => {
+            // 上一次调用可能已删掉台账、却在开始扫描前被中断。继续扫目录既能恢复它，
+            // 若工单已经被处理并移档也只会得到空结果。
+        }
+    }
+    scan_locked(ctx, root).await
+}
+
+/// 已持有 `scan_lock` 的扫描主体。只允许 [`scan`] 与 [`retry_job`] 调用。
+async fn scan_locked(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
     let pending = super::pending_dir(root);
     // 目录不存在就先建出来：用户第一次看设置页时应该能直接「打开目录」把工单丢进去。
     std::fs::create_dir_all(&pending)?;
@@ -718,6 +745,60 @@ mod tests {
         assert_eq!(count(&pool, "batches").await, 1, "只该建出一个批次");
         assert_eq!(count(&pool, "intake_jobs").await, 1);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1, "只该唤醒一次调度器");
+    }
+
+    /// 同一行快速点两次「重试」：第一轮删掉旧行后，第二轮会带着已经失效的 id 到达。
+    /// 它不能抛出 RowNotFound，也不能再触发一份收录；最终的新台账行必须保留下来。
+    #[tokio::test]
+    async fn concurrent_retries_are_idempotent_and_keep_the_new_ledger_row() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 500);
+
+        make_job(
+            home.path(),
+            "job-retry",
+            "分组: 重试组\n参考图: images/a.png\n\n提示词一\n",
+            &["a.png"],
+        );
+        let old_id = repo::insert_running(&pool, "job-retry", "job-retry")
+            .await
+            .unwrap();
+
+        let (c1, c2) = (ctx.clone(), ctx.clone());
+        let (h1, h2) = (home.path().to_path_buf(), home.path().to_path_buf());
+        let (r1, r2) = tokio::join!(
+            tokio::spawn(async move { retry_job(&c1, &h1, old_id).await }),
+            tokio::spawn(async move { retry_job(&c2, &h2, old_id).await }),
+        );
+        let a = r1.unwrap().expect("第一次重试不该报错");
+        let b = r2.unwrap().expect("重复重试应当幂等成功");
+
+        assert_eq!(a.len() + b.len(), 1, "工单只该被重新收录一次");
+        assert_eq!(count(&pool, "batches").await, 1, "只该建出一个批次");
+        assert_eq!(count(&pool, "intake_jobs").await, 1, "新台账行必须保留");
+        let final_job = repo::list_recent(&pool, 1)
+            .await
+            .unwrap()
+            .pop()
+            .expect("新台账行仍应存在");
+        assert_eq!(final_job.status, "done");
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1, "只该唤醒一次调度器");
+    }
+
+    /// 页面可能还显示刷新前的旧 id；这种请求应当安静恢复扫描，而不是把 SQLx 的
+    /// RowNotFound 原文抛给用户。
+    #[tokio::test]
+    async fn retrying_a_missing_ledger_row_is_a_noop() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 500);
+
+        let jobs = retry_job(&ctx, home.path(), 404).await.unwrap();
+        assert!(jobs.is_empty());
+        assert_eq!(count(&pool, "intake_jobs").await, 0);
     }
 
     // 各组比例不同 → 自动拆成多个批次（params_json 是批次级的，塞不进一个批次）。

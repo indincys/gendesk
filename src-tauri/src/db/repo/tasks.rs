@@ -328,7 +328,7 @@ pub async fn mark_fail(
     Ok(())
 }
 
-/// 恢复一个无输出的失败任务（fail → q），清错误，保留自动恢复计数。
+/// 恢复一个无输出的失败任务（fail → q），清错误并重置本轮自动恢复预算。
 ///
 /// `rev/pass/rej` 明确不接受：它们已经有输出或已完成验收，不能借这个命令重新生成。
 pub async fn recover(
@@ -337,7 +337,8 @@ pub async fn recover(
     edited_prompt: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let res = sqlx::query(
-        "UPDATE tasks SET status = 'q', error_type = NULL, error_message = NULL, updated_at = ?2
+        "UPDATE tasks SET status = 'q', error_type = NULL, error_message = NULL, retry_count = 0,
+             updated_at = ?2
              , prompt_text_snapshot = COALESCE(?3, prompt_text_snapshot)
          WHERE id = ?1 AND status = 'fail'",
     )
@@ -443,7 +444,7 @@ pub async fn recover_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<i64>, sq
     let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "UPDATE tasks
-            SET status='q', error_type=NULL, error_message=NULL, updated_at=?
+            SET status='q', error_type=NULL, error_message=NULL, retry_count=0, updated_at=?
           WHERE id IN ({ph}) AND status='fail'
             AND (error_type IS NULL OR error_type <> 'ContentPolicy')
           RETURNING id"
@@ -632,16 +633,31 @@ pub async fn recover_interrupted(pool: &SqlitePool) -> Result<Vec<i64>, sqlx::Er
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM tasks WHERE status IN ('run','retry')")
         .fetch_all(pool)
         .await?;
+    let now = now_unix();
+    let mut tx = pool.begin().await?;
     if !ids.is_empty() {
         sqlx::query(
             "UPDATE tasks SET status = 'fail', error_type = 'Interrupted',
                 error_message = '上次退出时任务被中断，任务现场已保留，可点击恢复继续', updated_at = ?1
              WHERE status IN ('run','retry')",
         )
-        .bind(now_unix())
-        .execute(pool)
+        .bind(now)
+        .execute(&mut *tx)
         .await?;
     }
+    // worker 在 insert_attempt 后、finish_attempt 前退出会留下 outcome='pending'。
+    // 它不参与派发，却会永久污染 Key 成功率，看起来也像一条没有归宿的执行记录。
+    sqlx::query(
+        "UPDATE task_attempts
+            SET finished_at = ?1, outcome = 'error', error_type = 'Interrupted',
+                error_message = COALESCE(error_message, '上次退出时执行记录未完成'),
+                duration_ms = COALESCE(duration_ms, MAX(0, (?1 - started_at) * 1000))
+          WHERE outcome = 'pending'",
+    )
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(ids)
 }
 
@@ -883,6 +899,11 @@ mod tests {
         let (pool, _d) = test_pool().await;
         let (_bid, ids) = seed(&pool, 6).await;
         set_status(&pool, ids[0], "fail").await.unwrap();
+        sqlx::query("UPDATE tasks SET retry_count=3 WHERE id=?1")
+            .bind(ids[0])
+            .execute(&pool)
+            .await
+            .unwrap();
         set_status(&pool, ids[1], "fail").await.unwrap();
         sqlx::query("UPDATE tasks SET error_type='ContentPolicy' WHERE id=?1")
             .bind(ids[1])
@@ -896,6 +917,11 @@ mod tests {
 
         let done = recover_many(&pool, &ids).await.unwrap();
         assert_eq!(done, vec![ids[0]], "只返回真正更新成功的失败任务");
+        assert_eq!(
+            get_task(&pool, ids[0]).await.unwrap().unwrap().retry_count,
+            0,
+            "人工恢复应获得一轮完整的自动恢复预算"
+        );
         for id in &ids[1..] {
             assert_ne!(
                 get_task(&pool, *id).await.unwrap().unwrap().status,

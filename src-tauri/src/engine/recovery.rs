@@ -53,10 +53,31 @@ mod tests {
         task_repo::set_status(&pool, t_retry, "retry")
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO api_keys
+             (id,name,keyring_account,base_url,model,concurrency_limit,enabled,created_at)
+             VALUES (1,'k','acct','http://x/v1','m',1,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let attempt = task_repo::insert_attempt(&pool, t_run, 1, 123)
+            .await
+            .unwrap();
 
         let sink: SharedSink = CollectingSink::shared();
         let ids = recover(&pool, &sink).await.unwrap();
         assert_eq!(ids.len(), 2);
+
+        let (outcome, error_type, finished_at): (String, Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT outcome,error_type,finished_at FROM task_attempts WHERE id=?1")
+                .bind(attempt)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome, "error");
+        assert_eq!(error_type.as_deref(), Some("Interrupted"));
+        assert!(finished_at.is_some(), "悬空 attempt 也应在启动恢复时结案");
 
         assert_eq!(
             task_repo::get_task(&pool, t_run)

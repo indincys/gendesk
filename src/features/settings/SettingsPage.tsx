@@ -168,7 +168,7 @@ export function SettingsPage() {
                 <span>Key</span>
                 <span>Base URL</span>
                 <span>模型</span>
-                <span>并发 1–100</span>
+                <span>并发 1–250</span>
                 <span>成功率</span>
                 <span>状态</span>
                 <span />
@@ -654,10 +654,10 @@ export function SettingsPage() {
   );
 }
 
-/** 单 Key 并发上限的上界。**与 migration 0017 的 CHECK 及后端 MAX_CONCURRENCY 同值**。 */
-const MAX_CONCURRENCY = 100;
+/** 单 Key 并发上限的上界。**与 migration 0043 的 CHECK 及后端 MAX_CONCURRENCY 同值**。 */
+const MAX_CONCURRENCY = 250;
 
-/** 把输入夹到 1–100 的整数；空/非法回退到 fallback。 */
+/** 把输入夹到 1–250 的整数；空/非法回退到 fallback。 */
 function clampConcurrency(raw: string, fallback: number): number {
   const n = Math.round(Number(raw));
   if (!Number.isFinite(n) || n <= 0) return fallback;
@@ -665,7 +665,7 @@ function clampConcurrency(raw: string, fallback: number): number {
 }
 
 /**
- * Key 行内的并发上限输入（1–100）。上限放宽到 100 后步进器要点近百下才到顶，
+ * Key 行内的并发上限输入（1–250）。上限放宽后步进器要点太多次才到顶，
  * 故改直接输入；失焦或回车才提交，避免中间态（"1" → "10"）打一串无用请求。
  */
 function ConcurrencyInput({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
@@ -794,7 +794,7 @@ function AddKeyModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
             <input className="inp mono" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
           <div className="col gap4" style={{ width: 90 }}>
-            <span className="fs11 t3">并发上限 1–100</span>
+            <span className="fs11 t3">并发上限 1–250</span>
             <input
               className="inp mono"
               value={concurrency}
@@ -928,7 +928,7 @@ function EditKeyModal({
             <input className="inp mono" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
           <div className="col gap4" style={{ width: 90 }}>
-            <span className="fs11 t3">并发上限 1–100</span>
+            <span className="fs11 t3">并发上限 1–250</span>
             <input
               className="inp mono"
               value={concurrency}

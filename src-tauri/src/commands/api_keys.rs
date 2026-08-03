@@ -171,23 +171,36 @@ pub async fn update_api_key(
         rpm,
     )
     .await?;
-    let row = repo::get(&state.db, id)
+    let mut row = repo::get(&state.db, id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
     // 密钥轮换：仅当传入非空 Key 时覆写钥匙串（沿用原 keyring 账户名）。
-    if let Some(new_key) = patch
+    let rotated = if let Some(new_key) = patch
         .key
         .as_deref()
         .map(str::trim)
         .filter(|k| !k.is_empty())
     {
         state.secrets.set(&row.keyring_account, new_key)?;
+        true
+    } else {
+        false
+    };
+    // 明确轮换凭据就是对熔断原因的修复，不应再要求用户额外点一次“恢复”。
+    if rotated && row.circuit_broken != 0 {
+        repo::recover_circuit(&state.db, id).await?;
+        row = repo::get(&state.db, id)
+            .await?
+            .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
     }
     let view = to_view(&state, row).await?;
     let _ = state
         .engine
         .reload_keys(&state.db, state.secrets.as_ref())
         .await;
+    if rotated {
+        state.engine.resume_if_auto_paused();
+    }
     Ok(view)
 }
 
@@ -200,6 +213,7 @@ pub async fn recover_api_key(state: State<'_, AppState>, id: i64) -> AppResult<(
         .engine
         .reload_keys(&state.db, state.secrets.as_ref())
         .await;
+    state.engine.resume_if_auto_paused();
     Ok(())
 }
 
@@ -215,6 +229,9 @@ pub async fn set_api_key_enabled(
         .engine
         .reload_keys(&state.db, state.secrets.as_ref())
         .await;
+    if enabled {
+        state.engine.resume_if_auto_paused();
+    }
     Ok(())
 }
 

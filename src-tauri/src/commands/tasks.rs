@@ -37,6 +37,7 @@ const TASK_SELECT: &str = "SELECT t.id, t.batch_id, t.status, t.ref_image_id,
         t.api_key_id, k.name AS key_alias, t.error_type, t.error_message,
         t.retry_count, t.result_thumb_path, t.prompt_text_snapshot
     FROM tasks t
+    JOIN batches b ON b.id = t.batch_id
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
@@ -55,7 +56,16 @@ pub async fn list_tasks(
     status_group: Option<String>,
     page: Option<i64>,
 ) -> AppResult<Vec<TaskView>> {
-    let statuses: &[&str] = match status_group.as_deref() {
+    Ok(query_tasks(&state.db, batch_id, status_group.as_deref(), page).await?)
+}
+
+async fn query_tasks(
+    pool: &sqlx::SqlitePool,
+    batch_id: Option<i64>,
+    status_group: Option<&str>,
+    page: Option<i64>,
+) -> Result<Vec<TaskView>, sqlx::Error> {
+    let statuses: &[&str] = match status_group {
         Some("pending") => &["q"],
         Some("running") => &["run", "retry"],
         Some("failed") => &["fail"],
@@ -64,15 +74,20 @@ pub async fn list_tasks(
         _ => &["q", "run", "retry", "rev", "pass", "rej", "fail"],
     };
     let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let limit = 500i64;
-    let offset = page.unwrap_or(0).max(0) * limit;
+    // 当前任务页传 page=None，语义是“全部在制任务”。旧实现仍硬截 500，520/585 张批次
+    // 会凭空少一截，汇总与进度也一起算错。仅显式传页码的旧调用保留 500/页。
+    let (limit, offset) = match page {
+        Some(page) => (500i64, page.max(0) * 500),
+        None => (-1i64, 0), // SQLite: LIMIT -1 = 不限
+    };
     let batch_cond = if batch_id.is_some() {
         "t.batch_id = ? AND "
     } else {
         ""
     };
     let sql = format!(
-        "{TASK_SELECT} WHERE {batch_cond}t.status IN ({placeholders})
+        "{TASK_SELECT} WHERE (b.status != 'archived' OR t.status = 'fail')
+         AND {batch_cond}t.status IN ({placeholders})
          ORDER BY t.batch_id DESC, t.id ASC LIMIT ? OFFSET ?"
     );
     let mut q = sqlx::query_as::<_, TaskView>(&sql);
@@ -82,7 +97,7 @@ pub async fn list_tasks(
     for s in statuses {
         q = q.bind(*s);
     }
-    let rows = q.bind(limit).bind(offset).fetch_all(&state.db).await?;
+    let rows = q.bind(limit).bind(offset).fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -110,7 +125,7 @@ pub async fn recover_task(
             .bind(id)
             .fetch_optional(&state.db)
             .await?;
-    if let Some((status, Some(error_type), prompt)) = current {
+    if let Some((status, Some(error_type), prompt)) = current.as_ref() {
         let prompt_unchanged = match edited_prompt.as_deref() {
             Some(edited) => edited.trim() == prompt.trim(),
             None => true,
@@ -120,6 +135,12 @@ pub async fn recover_task(
                 "违规任务必须修改提示词后才能恢复".into(),
             ));
         }
+    }
+    if current
+        .as_ref()
+        .is_some_and(|(status, _, _)| status == "fail")
+    {
+        ensure_usable_key(&state)?;
     }
     let affected = i64::from(repo::recover(&state.db, id, edited_prompt.as_deref()).await?);
     if affected > 0 {
@@ -161,6 +182,7 @@ async fn recover_and_revive(state: &State<'_, AppState>, ids: &[i64]) -> AppResu
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_usable_key(state)?;
     let done = repo::recover_many(&state.db, ids).await?;
     if done.is_empty() {
         return Ok(done);
@@ -180,8 +202,21 @@ async fn revive_batches(state: &State<'_, AppState>, done: &[i64]) -> AppResult<
         q = q.bind(id);
     }
     q.execute(&state.db).await?;
-    state.engine.kick();
+    // “恢复”本身就是用户确认上游已经可再试。清掉上一波并发失败留下的 Key 冷却，
+    // 并仅在暂停来自全局自动熔断时自动继续；用户手工暂停仍原样保留。
+    state.engine.prepare_manual_retry();
     Ok(())
+}
+
+fn ensure_usable_key(state: &State<'_, AppState>) -> AppResult<()> {
+    if state.engine.has_usable_key() {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(
+            "当前没有可用的 API Key。请先到设置中补全或恢复 Key，再恢复任务；任务仍保留在失败列表中。"
+                .into(),
+        ))
+    }
 }
 
 /// 批量恢复所选。只有无输出的 fail 参与，其余全部计入 skipped。
@@ -292,4 +327,86 @@ pub async fn count_interrupted(state: State<'_, AppState>) -> AppResult<i64> {
     .fetch_one(&state.db)
     .await?;
     Ok(n)
+}
+
+#[cfg(test)]
+// 测试断言失败即测试失败，允许直接 unwrap/expect 保持夹具清晰。
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::db::test_support::test_pool;
+
+    #[tokio::test]
+    async fn completed_archived_batches_do_not_reappear_as_zombie_queue_rows() {
+        let (pool, _dir) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at)
+             VALUES (1,'g','GG','',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at)
+             VALUES (1,1,'GG-0001','t','active','library',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at)
+             VALUES (1,'r','/r','/t',1,1,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (batch_id, batch_status, task_status) in [
+            (1, "archived", "pass"),
+            (2, "archived", "fail"),
+            (3, "running", "q"),
+        ] {
+            sqlx::query(
+                "INSERT INTO batches (id,created_at,output_dir,params_json,status)
+                 VALUES (?1,0,'/out','{}',?2)",
+            )
+            .bind(batch_id)
+            .bind(batch_status)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO tasks
+                 (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at)
+                 VALUES (?1,?1,1,1,'t',?2,0,0)",
+            )
+            .bind(batch_id)
+            .bind(task_status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // 把运行中批次扩到 501 条，钉住 page=None 不能再被旧的 500 行上限截断。
+        sqlx::query(
+            "WITH RECURSIVE seq(id) AS (
+               SELECT 4 UNION ALL SELECT id + 1 FROM seq WHERE id < 503
+             )
+             INSERT INTO tasks
+               (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at)
+             SELECT id,3,1,1,'t','q',0,0 FROM seq",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = query_tasks(&pool, None, None, None).await.unwrap();
+        let ids: Vec<i64> = rows.into_iter().map(|row| row.id).collect();
+        assert_eq!(ids.len(), 502, "501 条在制 + 1 条真实失败必须全部返回");
+        assert_eq!(ids.first(), Some(&3));
+        assert_eq!(ids.last(), Some(&2));
+
+        let page = query_tasks(&pool, None, None, Some(0)).await.unwrap();
+        assert_eq!(page.len(), 500, "显式分页仍保留 500/页");
+    }
 }

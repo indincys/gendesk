@@ -67,6 +67,24 @@ fn rpm_ok(k: &mut KeyRuntime, now: Instant) -> bool {
     (k.request_times.len() as u32) < limit
 }
 
+/// 本轮最多能从一把 Key 派发几条。
+///
+/// 失败退避结束后先只放一条探针：探针成功会清失败计数并唤醒下一轮，届时恢复全并发；
+/// 探针仍失败则重新进入更长冷却。否则 250 个待重试任务会在冷却结束的一刻再次齐发。
+fn dispatch_slots(k: &mut KeyRuntime, now: Instant) -> usize {
+    if !k.config.enabled || k.cooldown_until > now || !rpm_ok(k, now) {
+        return 0;
+    }
+    let mut slots = k.sem.available_permits();
+    if let Some(limit) = k.config.rpm_limit {
+        slots = slots.min(limit.saturating_sub(k.request_times.len() as u32) as usize);
+    }
+    if k.consecutive_failures >= 2 {
+        slots = slots.min(1);
+    }
+    slots
+}
+
 pub struct Scheduler {
     pool: SqlitePool,
     dirs: Arc<DataDirs>,
@@ -197,8 +215,34 @@ impl Scheduler {
         self.active.load(Ordering::SeqCst)
     }
 
-    fn has_enabled_keys(&self) -> bool {
+    /// 至少有一把已启用且密钥本体加载成功的 Key。
+    /// `self.keys` 本身已经剔除了 secret missing 的数据库空壳。
+    pub fn has_usable_key(&self) -> bool {
         lock(&self.keys).iter().any(|k| k.config.enabled)
+    }
+
+    /// 人工恢复任务前清掉由上一波失败留下的 Key 退避；RPM 窗口不动，不能借重试绕限速。
+    pub fn reset_failure_backoff(&self) {
+        let now = Instant::now();
+        let mut keys = lock(&self.keys);
+        for key in keys.iter_mut().filter(|key| key.config.enabled) {
+            key.cooldown_until = now;
+            key.consecutive_failures = 0;
+            key.auth_failures = 0;
+        }
+    }
+
+    /// 只消费“自动熔断造成的暂停”，不越过用户手工按下的暂停。
+    /// 返回是否确实恢复过自动暂停。
+    pub fn resume_if_auto_paused(&self) -> bool {
+        let was_auto_paused = lock(&self.auto_pause_reason).take().is_some();
+        if !was_auto_paused {
+            return false;
+        }
+        self.global_fail_streak.store(0, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        self.notify();
+        true
     }
 
     /// 拉起后台调度循环。
@@ -223,7 +267,7 @@ impl Scheduler {
             self.dispatch_once().await;
             let idle = self.active.load(Ordering::SeqCst) == 0
                 && lock(&self.ready_retry).is_empty()
-                && (self.queued_count().await == 0 || !self.has_enabled_keys());
+                && (self.queued_count().await == 0 || !self.has_usable_key());
             if idle {
                 break;
             }
@@ -260,16 +304,14 @@ impl Scheduler {
         }
 
         // 1) 就绪 Key 快照（启用、未冷却、未超 RPM），并克隆各自 Semaphore。
+        // slots 是这一轮的派发预算：失败 Key 半开时只有 1，避免冷却结束即重放整批。
         let now = Instant::now();
-        let eligible: Vec<(i64, Arc<Semaphore>)> = {
+        let eligible: Vec<(i64, Arc<Semaphore>, usize)> = {
             let mut keys = lock(&self.keys);
             keys.iter_mut()
                 .filter_map(|k| {
-                    if k.config.enabled && k.cooldown_until <= now && rpm_ok(k, now) {
-                        Some((k.config.id, k.sem.clone()))
-                    } else {
-                        None
-                    }
+                    let slots = dispatch_slots(k, now);
+                    (slots > 0).then(|| (k.config.id, k.sem.clone(), slots))
                 })
                 .collect()
         };
@@ -277,7 +319,7 @@ impl Scheduler {
             return 0;
         }
         let rates = self
-            .rates(&eligible.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+            .rates(&eligible.iter().map(|(id, _, _)| *id).collect::<Vec<_>>())
             .await;
 
         // 2) 就绪任务：先 ready 重试，再 'q'（FIFO）。
@@ -298,7 +340,7 @@ impl Scheduler {
                 }
             }
         }
-        let capacity: usize = eligible.iter().map(|(_, s)| s.available_permits()).sum();
+        let capacity: usize = eligible.iter().map(|(_, _, slots)| *slots).sum();
         if capacity > 0 {
             if let Ok(q) = task_repo::fetch_queued(&self.pool, capacity as i64).await {
                 queue.extend(q);
@@ -307,12 +349,18 @@ impl Scheduler {
 
         // 3) 逐个派发。
         let mut spawned = 0;
+        let mut slots_left: HashMap<i64, usize> = eligible
+            .iter()
+            .map(|(id, _, slots)| (*id, *slots))
+            .collect();
         for task in queue {
             // 当前仍有余量的候选 Key
             let cands: Vec<Candidate> = eligible
                 .iter()
-                .filter(|(_, s)| s.available_permits() > 0)
-                .map(|(id, _)| Candidate {
+                .filter(|(id, s, _)| {
+                    slots_left.get(id).copied().unwrap_or(0) > 0 && s.available_permits() > 0
+                })
+                .map(|(id, _, _)| Candidate {
                     id: *id,
                     success_rate: *rates.get(id).unwrap_or(&0.0),
                 })
@@ -326,7 +374,7 @@ impl Scheduler {
                 pick(strat, &cands, &mut rr)
             };
             let Some(key_id) = key_id else { break };
-            let Some((_, sem)) = eligible.iter().find(|(id, _)| *id == key_id) else {
+            let Some((_, sem, _)) = eligible.iter().find(|(id, _, _)| *id == key_id) else {
                 continue;
             };
             let permit = match sem.clone().try_acquire_owned() {
@@ -347,6 +395,9 @@ impl Scheduler {
                 Ok(true)
             ) {
                 continue;
+            }
+            if let Some(left) = slots_left.get_mut(&key_id) {
+                *left = left.saturating_sub(1);
             }
             // 派发成功后才从就绪重试集移除。
             if from == TaskStatus::Retry {
@@ -500,8 +551,8 @@ impl Scheduler {
         // 缩略图生成顺带返回原图真实像素（0027）：验收页按真实比例排版要用它，
         // 而这里已经把整张图解码过一遍了，再读一次纯属白干。
         //
-        // 走 `files::decode::bounded` 而不是裸 `spawn_blocking`：并发上限最高 100，
-        // 那就是 100 张图同时解码 —— 阻塞线程池默认能开到 512，谁都拦不住。
+        // 走 `files::decode::bounded` 而不是裸 `spawn_blocking`：并发上限最高 250，
+        // 那就是 250 张图可能同时等着解码 —— 阻塞线程池默认能开到 512，谁都拦不住。
         let size = crate::files::decode::bounded(move |permit| {
             crate::files::generate_thumbnail(&full_c, &thumb_c, permit)
         })
@@ -666,13 +717,18 @@ impl Scheduler {
                     k.consecutive_failures = 0;
                     k.auth_failures = 0;
                     k.cooldown_until = now;
-                } else {
+                } else if k.cooldown_until <= now {
+                    // 同一并发波里的几十/几百个失败是一个上游事故，不是几百轮顺序失败。
+                    // 第一、第二个回包会建立本波冷却；冷却期内其余在途回包不再把指数
+                    // 继续抬高。否则 250 并发一次 503 就会把 Key 直接锁满 10 分钟。
                     k.consecutive_failures += 1;
                     let cd = self.key_cooldown(k.consecutive_failures);
                     k.cooldown_until = now + cd;
                     if cd > Duration::ZERO {
                         state = KeyState::Limited;
                     }
+                } else {
+                    state = KeyState::Limited;
                 }
             }
         }
@@ -1261,6 +1317,61 @@ mod tests {
         assert!(!h.sched.is_paused());
     }
 
+    #[tokio::test]
+    async fn auto_resume_does_not_override_a_manual_pause() {
+        let h = setup(
+            1,
+            &[(1, 1)],
+            Duration::from_millis(1),
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            0,
+        )
+        .await;
+
+        h.sched.pause();
+        assert!(!h.sched.resume_if_auto_paused());
+        assert!(h.sched.is_paused(), "手工暂停不能被任务恢复动作越过");
+
+        h.sched.resume();
+        h.sched.trip_global_breaker(3);
+        assert!(h.sched.resume_if_auto_paused());
+        assert!(!h.sched.is_paused());
+        assert!(h.sched.auto_pause_reason().is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_failure_wave_only_advances_backoff_once() {
+        let h = setup(
+            1,
+            &[(1, 1)],
+            Duration::from_millis(1),
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            0,
+        )
+        .await;
+        h.sched.set_cooldown_base_ms(1_000);
+
+        // 前两个回包建立本波冷却；之后即使再同时回来 248 个，也不能继续指数放大。
+        h.sched.on_key_result(1, false);
+        h.sched.on_key_result(1, false);
+        for _ in 0..248 {
+            h.sched.on_key_result(1, false);
+        }
+        let keys = lock(&h.sched.keys);
+        let key = keys.iter().find(|key| key.config.id == 1).unwrap();
+        assert_eq!(
+            key.consecutive_failures, 2,
+            "同一并发失败波不能被算成 250 轮连续失败"
+        );
+        let left = key.cooldown_until.saturating_duration_since(Instant::now());
+        assert!(
+            left <= Duration::from_secs(1),
+            "本波冷却应约为一个基数而非 10 分钟，实际 {left:?}"
+        );
+    }
+
     // E18：RPM 滑动窗口——达到上限即拒派，窗口滑过后恢复。
     #[test]
     fn rpm_ok_enforces_limit_and_slides() {
@@ -1290,6 +1401,38 @@ mod tests {
         let later = now + RPM_WINDOW + Duration::from_secs(1);
         assert!(rpm_ok(&mut k, later), "窗口外旧记录裁掉后应恢复放行");
         assert!(k.request_times.is_empty(), "过期记录应已裁剪");
+    }
+
+    #[test]
+    fn dispatch_budget_half_opens_with_one_probe_and_respects_rpm() {
+        let now = Instant::now();
+        let mut k = KeyRuntime {
+            config: KeyConfig {
+                id: 1,
+                base_url: "http://x/v1".into(),
+                model: "m".into(),
+                api_key: "sk".into(),
+                concurrency_limit: 10,
+                enabled: true,
+                rpm_limit: Some(4),
+            },
+            sem: Arc::new(Semaphore::new(10)),
+            cooldown_until: now,
+            consecutive_failures: 0,
+            auth_failures: 0,
+            request_times: VecDeque::from([now, now]),
+        };
+        assert_eq!(dispatch_slots(&mut k, now), 2, "RPM 只剩两个名额");
+
+        k.consecutive_failures = 2;
+        assert_eq!(
+            dispatch_slots(&mut k, now),
+            1,
+            "失败退避结束后只能先发一个探针"
+        );
+
+        k.cooldown_until = now + Duration::from_secs(1);
+        assert_eq!(dispatch_slots(&mut k, now), 0, "冷却中不得派发探针");
     }
 
     // 1→500 压测（执行计划 2.8）：500 任务 × 6 Key，注入 ~5% 超时/3% 违规/2% Auth。

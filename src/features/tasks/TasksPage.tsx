@@ -58,7 +58,11 @@ export function TasksPage() {
       setInterrupted(await unwrap(commands.countInterrupted()));
       setAvgSec(await unwrap(commands.estimateTaskSeconds()).catch(() => null));
       const keys = await unwrap(commands.listApiKeys()).catch(() => []);
-      setConcurrency(keys.filter((k) => k.enabled).reduce((s, k) => s + k.concurrencyLimit, 0));
+      setConcurrency(
+        keys
+          .filter((k) => k.enabled && !k.circuitBroken && !k.secretMissing)
+          .reduce((s, k) => s + k.concurrencyLimit, 0),
+      );
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
@@ -119,9 +123,13 @@ export function TasksPage() {
   };
 
   const recoverAllFailed = async () => {
-    const res = await unwrap(commands.recoverFailedTasks());
-    toast(`已恢复 ${res.affected} 个任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
-    await refresh();
+    try {
+      const res = await unwrap(commands.recoverFailedTasks());
+      toast(`已恢复 ${res.affected} 个任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
+      await refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const deleteAllFailed = async () => {
@@ -231,16 +239,24 @@ export function TasksPage() {
   };
 
   const recoverInterrupted = async () => {
-    const res = await unwrap(commands.recoverInterruptedTasks());
-    toast(`已恢复 ${res.affected} 个中断任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
-    setInterrupted(0);
-    await refresh();
+    try {
+      const res = await unwrap(commands.recoverInterruptedTasks());
+      toast(`已恢复 ${res.affected} 个中断任务${res.skipped > 0 ? ` · 跳过 ${res.skipped}` : ""}`);
+      setInterrupted(0);
+      await refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const recoverOne = async (t: TaskView) => {
-    const res = await unwrap(commands.recoverTask(t.id, null));
-    if (res.affected === 0) toast("任务状态已变化，未恢复");
-    await refresh();
+    try {
+      const res = await unwrap(commands.recoverTask(t.id, null));
+      if (res.affected === 0) toast("任务状态已变化，未恢复");
+      await refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   };
 
   // E34：改词后恢复——预填快照，确认后按编辑文本恢复失败任务。

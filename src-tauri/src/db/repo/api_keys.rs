@@ -7,11 +7,11 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::db::now_unix;
 
-/// 单 Key 并发上限的上界。**必须与 migration 0017 的 CHECK 一致**，且是
+/// 单 Key 并发上限的上界。**必须与 migration 0043 的 CHECK 一致**，且是
 /// 写入侧（命令层夹取）与执行侧（引擎 Semaphore 容量）的**唯一**来源 ——
 /// 两侧各写一份常量时，落后的那份会静默把设置页的值压回去（表现为
 /// 「设置 50 却只跑 10 个」），而 DB 里存的又确实是 50，从值上查不出来。
-pub const MAX_CONCURRENCY: i64 = 100;
+pub const MAX_CONCURRENCY: i64 = 250;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ApiKeyRow {
@@ -101,11 +101,17 @@ pub async fn update_fields(
 }
 
 pub async fn set_enabled(pool: &SqlitePool, id: i64, enabled: bool) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE api_keys SET enabled = ?2 WHERE id = ?1")
-        .bind(id)
-        .bind(enabled as i64)
-        .execute(pool)
-        .await?;
+    // 人工重新启用就是一次显式恢复动作。若只改 enabled、保留 circuit_broken=1，
+    // 引擎实际已经会使用这把 Key，设置页却仍显示「已熔断」，两份状态互相打架。
+    sqlx::query(
+        "UPDATE api_keys SET enabled = ?2,
+            circuit_broken = CASE WHEN ?2 = 1 THEN 0 ELSE circuit_broken END
+         WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(enabled as i64)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

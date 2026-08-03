@@ -67,17 +67,26 @@ export const useEngineStore = create<EngineState>((set) => ({
     }
     return subscribeEngine({
       onSummary: (p) =>
-        set((s) => ({
-          summaries: {
-            ...s.summaries,
-            [p.batchId]: {
-              ...p.counts,
-              paused: p.paused,
+        set((s) => {
+          // 批次全终态后数据库会归档。未通过图片可能因废纸篓可还原而继续留库，
+          // 但它们不是仍在跑的队列；只留下真正还要人处理的 fail，其他行即时退场。
+          const resolved =
+            p.counts.pending === 0 && p.counts.running === 0 && p.counts.review === 0;
+          return {
+            summaries: {
+              ...s.summaries,
+              [p.batchId]: {
+                ...p.counts,
+                paused: p.paused,
+              },
             },
-          },
-          paused: p.paused,
-          autoPauseReason: p.autoPauseReason,
-        })),
+            tasks: resolved
+              ? s.tasks.filter((task) => task.batchId !== p.batchId || task.status === "fail")
+              : s.tasks,
+            paused: p.paused,
+            autoPauseReason: p.autoPauseReason,
+          };
+        }),
       onProgress: (p) =>
         set((s) => ({ progress: { ...s.progress, [p.taskId]: { pct: p.pct, phase: p.phase } } })),
       // 批次不再是可切换的对象（v0.21.0）：任务页展示全部在制任务，

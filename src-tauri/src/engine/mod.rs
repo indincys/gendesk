@@ -209,6 +209,20 @@ impl Engine {
     pub fn resume(&self) {
         self.scheduler.resume();
     }
+    /// 是否有已启用且凭据完整的 Key 可供任务派发。
+    pub fn has_usable_key(&self) -> bool {
+        self.scheduler.has_usable_key()
+    }
+    /// 人工恢复任务：重置上一波失败退避，并仅在暂停来自自动熔断时继续队列。
+    pub fn prepare_manual_retry(&self) {
+        self.scheduler.reset_failure_backoff();
+        self.scheduler.resume_if_auto_paused();
+        self.scheduler.notify();
+    }
+    /// Key 被人工恢复后，仅消费自动暂停；手工暂停保持不变。
+    pub fn resume_if_auto_paused(&self) -> bool {
+        self.scheduler.resume_if_auto_paused()
+    }
     pub fn is_paused(&self) -> bool {
         self.scheduler.is_paused()
     }

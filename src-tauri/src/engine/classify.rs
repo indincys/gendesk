@@ -113,7 +113,10 @@ pub fn decide(err: ErrorType, retries_used: u32, user_retry_count: u32) -> Retry
         // 其它：按用户设置的重试次数，换 Key
         ErrorType::Other => {
             if retries_used < user_retry_count {
-                RetryDecision::retry(true, Duration::ZERO)
+                // 5xx / 网络断开 / 上游暂无渠道都归在 Other。立即重试会在 250 并发下
+                // 把同一批失败原样再打一遍；留一个短退避，让 Key 级失败波次先收敛。
+                let secs = 5u64.saturating_mul(1u64 << retries_used.min(4));
+                RetryDecision::retry(true, Duration::from_secs(secs))
             } else {
                 RetryDecision::terminal()
             }
@@ -191,8 +194,10 @@ mod tests {
 
     #[test]
     fn other_follows_user_retry_count() {
-        assert!(decide(ErrorType::Other, 0, 2).retry);
-        assert!(decide(ErrorType::Other, 1, 2).retry);
+        let first = decide(ErrorType::Other, 0, 2);
+        let second = decide(ErrorType::Other, 1, 2);
+        assert!(first.retry && first.cooldown == Duration::from_secs(5));
+        assert!(second.retry && second.cooldown == Duration::from_secs(10));
         assert!(!decide(ErrorType::Other, 2, 2).retry);
         // 用户设 0 次 → 不重试
         assert!(!decide(ErrorType::Other, 0, 0).retry);

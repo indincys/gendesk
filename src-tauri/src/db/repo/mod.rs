@@ -60,6 +60,12 @@ mod tests {
         let row = api_keys::get(&pool, id).await.unwrap().unwrap();
         assert_eq!((row.enabled, row.circuit_broken), (1, 0));
 
+        // 熔断后直接打开开关也是一次显式恢复，状态位必须一起清掉。
+        api_keys::trip_circuit(&pool, id).await.unwrap();
+        api_keys::set_enabled(&pool, id, true).await.unwrap();
+        let row = api_keys::get(&pool, id).await.unwrap().unwrap();
+        assert_eq!((row.enabled, row.circuit_broken), (1, 0));
+
         // 无 attempts 时成功率样本为 0
         let (rate, n) = api_keys::success_rate(&pool, id, 50).await.unwrap();
         assert_eq!((rate, n), (0.0, 0));
@@ -69,13 +75,83 @@ mod tests {
         assert!(api_keys::list(&pool).await.unwrap().is_empty());
     }
 
-    // 0017：并发上限放宽到 100。重建 api_keys 时**不得**碰到子表的外键指向 ——
-    // 若在 FK 开启下走「建新表 → DROP api_keys → 改名」，DROP 触发隐式 DELETE，
-    // tasks / task_attempts.api_key_id 会被 ON DELETE SET NULL 整列清空（成功率统计与
-    // 验收页「按 Key」分组一起报废）。此测试守住迁移方式，不只是守住上限数字。
+    // 0043：并发上限放宽到 250。迁移 api_keys 时**不得删除父表** —— DROP 会让
+    // tasks / task_attempts.api_key_id 经 ON DELETE SET NULL 整列清空（成功率统计与
+    // 验收页「按 Key」分组一起报废）。结构与 foreign_key_check 仍然都会显示正常，
+    // 所以测试必须在迁移前造真实关联、迁移后直接核对值，而不只检查 schema。
     #[tokio::test]
-    async fn migration_0017_widens_concurrency_and_keeps_key_fk() {
-        let (pool, _d) = test_pool().await;
+    async fn migration_0043_widens_concurrency_and_keeps_key_fk() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SqliteConnectOptions::new()
+            .filename(dir.path().join("pre-0043.db"))
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE api_keys (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+               keyring_account TEXT NOT NULL UNIQUE, base_url TEXT NOT NULL, model TEXT NOT NULL,
+               concurrency_limit INTEGER NOT NULL DEFAULT 2
+                 CHECK (concurrency_limit BETWEEN 1 AND 100),
+               enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+               rpm_limit INTEGER, circuit_broken INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE tasks (
+               id INTEGER PRIMARY KEY, api_key_id INTEGER REFERENCES api_keys(id) ON DELETE SET NULL
+             );
+             CREATE TABLE task_attempts (
+               id INTEGER PRIMARY KEY, api_key_id INTEGER REFERENCES api_keys(id) ON DELETE SET NULL
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO api_keys
+             (id,name,keyring_account,base_url,model,concurrency_limit,enabled,created_at)
+             VALUES (1,'old','acct-old','http://x/v1','m',100,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO tasks (id,api_key_id) VALUES (1,1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO task_attempts (id,api_key_id) VALUES (1,1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0043_key_concurrency_250.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (current, legacy): (i64, i64) = sqlx::query_as(
+            "SELECT concurrency_limit,concurrency_limit_legacy FROM api_keys WHERE id=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((current, legacy), (250, 100), "旧上限值应明确提到 250");
+        for table in ["tasks", "task_attempts"] {
+            let linked: Option<i64> =
+                sqlx::query_scalar(&format!("SELECT api_key_id FROM {table} WHERE id=1"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(linked, Some(1), "{table}.api_key_id 不得被迁移清空");
+        }
+
         let mk = |conc: i64| api_keys::NewApiKey {
             name: "k".into(),
             keyring_account: format!("acct-{conc}"),
@@ -85,28 +161,13 @@ mod tests {
             rpm_limit: None,
         };
         assert!(
-            api_keys::insert(&pool, &mk(100)).await.is_ok(),
-            "100 应可存"
+            api_keys::insert(&pool, &mk(250)).await.is_ok(),
+            "250 应可存"
         );
         assert!(
-            api_keys::insert(&pool, &mk(101)).await.is_err(),
-            "101 应被 CHECK 拒绝"
+            api_keys::insert(&pool, &mk(251)).await.is_err(),
+            "251 应被 CHECK 拒绝"
         );
-
-        // 子表 FK 仍指向 api_keys（而非迁移中间体 api_keys_old）。
-        for table in ["tasks", "task_attempts"] {
-            let sql: String = sqlx::query_scalar(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?1",
-            )
-            .bind(table)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert!(
-                sql.contains("REFERENCES api_keys "),
-                "{table} 的外键应仍指向 api_keys，实际：{sql}"
-            );
-        }
     }
 
     #[tokio::test]

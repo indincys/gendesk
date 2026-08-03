@@ -75,6 +75,7 @@ pub async fn create_batch(
         .map(|r| RefMapping {
             ref_image_id: r.ref_image_id,
             prompt_group_id: r.prompt_group_id,
+            params_json: None,
         })
         .collect();
 

@@ -3087,7 +3087,15 @@ failures: string[] }
 /**
  * 待验收项视图。
  */
-export type ReviewItemView = { id: number; batchId: number; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
+export type ReviewItemView = { id: number; batchId: number; 
+/**
+ * 这一批的名字。一次工单 = 一个 run（0045），故对收件进来的批它就是**投单名**；
+ * 生成页手动建的批没有名字，前端退回 `#{batchId}`。
+ * 
+ * 批次退到幕后之后，人在验收页看到的分节标题应该是「哪一次投单」而不是一个
+ * 内部自增 id —— 那个数字对人不表达任何东西。
+ */
+batchNote: string | null; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
 /**
  * 参考图缩略图/原图（E08 大图对比）。
  */

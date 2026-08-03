@@ -296,23 +296,23 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     let refs_dir = ctx.dirs.refs();
     let thumbs_dir = ctx.dirs.thumbs();
 
-    // ── 按参数快照分桶。参数是**批次级**的，各组比例不同就必须拆批次。
-    let mut buckets: Vec<Bucket> = Vec::new();
+    // ── 一次工单 = 一个 run（0045）。
+    //
+    // 参数不再决定切分：它跟着**任务**走（`RefMapping.params_json`），所以各条目
+    // 画幅不同也塞得进同一个 run。原来按参数分桶拆出来的那几个批次，对人从来没有
+    // 意义 —— 它只是「params_json 存在 batches 上」的副作用，代价是一次投单在任务页
+    // 上碎成几张认不出彼此关系的卡片。
+    let mut mappings: Vec<RefMapping> = Vec::new();
+    // 台账里仍要列出这一单**实际用到过的几套参数**（去重后）：全自动收录没有经过
+    // 生成页那张确认卡，「我写了 9:16 到底发出去没有」只能靠它回答。
+    let mut seen_params: Vec<(String, String)> = Vec::new();
     let total_refs: i64 = plan.groups.iter().map(|g| g.refs.len() as i64).sum();
 
     for (g, group_id) in plan.groups.iter().zip(result.group_ids.iter().copied()) {
-        let key = g.bucket();
-        let slot = match buckets.iter().position(|b| b.params == key) {
-            Some(i) => i,
-            None => {
-                buckets.push(Bucket {
-                    params: g.params_json.clone(),
-                    wire: g.wire_json.clone(),
-                    mappings: Vec::new(),
-                });
-                buckets.len() - 1
-            }
-        };
+        let key = (g.params_json.clone(), g.wire_json.clone());
+        if !seen_params.contains(&key) {
+            seen_params.push(key);
+        }
         // 分块并行落盘，块内并发、块间串行、**插库严格按原顺序**。
         //
         // 为什么不干脆「全部解完再全部插库」：失败回执是承重的（谎称「没有导入任何
@@ -350,43 +350,36 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
                 .await?;
                 out.ref_count += 1;
                 ctx.progress.refs(&plan.job_id, out.ref_count, total_refs);
-                buckets[slot].mappings.push(RefMapping {
+                mappings.push(RefMapping {
                     ref_image_id: id,
                     prompt_group_id: group_id,
+                    params_json: Some(g.params_json.clone()),
                 });
             }
         }
     }
 
-    // ── 建批（花钱的那一步，放在最后）。一桶一个批次。
+    // ── 建批（花钱的那一步，放在最后）。**恰好一个**。
+    //
+    // 批次级 params_json 留空：这一单的参数在任务行上，批次级那份只是生成页手动建批
+    // 的兜底。写一个「代表性的」进去反而骗人 —— 一单里可能有三种画幅。
     let output_dir = ctx.dirs.outputs().to_string_lossy().to_string();
-    let multi = buckets.len() > 1;
-    for (i, b) in buckets.iter().enumerate() {
-        let (batch_id, task_count) =
-            engine::create_batch(&ctx.pool, &output_dir, &b.params, &b.mappings).await?;
-        // 批次备注：拆批时带上序号，否则任务页会出现几张认不出彼此关系的卡片。
-        if let Some(note) = &plan.note {
-            let note = if multi {
-                format!("{note}（{}/{}）", i + 1, buckets.len())
-            } else {
-                note.clone()
-            };
-            // 备注失败不该让一个已经跑起来的批次算作「工单失败」。
-            let _ = task_repo::rename_batch(&ctx.pool, batch_id, &note).await;
-        }
-        out.batch_ids.push(batch_id);
-        out.params_json.push(b.params.clone());
-        out.wire_json.push(b.wire.clone());
-        out.task_count += task_count;
+    let (batch_id, task_count) =
+        engine::create_batch(&ctx.pool, &output_dir, "{}", &mappings).await?;
+    // 批次名 = 投单名。批次退到幕后之后，验收页的分节标题读的就是它 —— 让人看见
+    // 「哪一次投单」，而不是一个对人不表达任何东西的内部自增 id。
+    // 备注失败不该让一个已经跑起来的批次算作「工单失败」。
+    let note = plan.note.clone().unwrap_or_else(|| plan.job_id.clone());
+    let _ = task_repo::rename_batch(&ctx.pool, batch_id, &note).await;
+    out.batch_ids.push(batch_id);
+    // params_json / wire_json 此后是「这一单用过的几套参数」，**不再与 batch_ids 同序**
+    // （0023 的表注释写于按参数拆批的年代）。batch_ids 现在恒为一个元素。
+    for (params, wire) in seen_params {
+        out.params_json.push(params);
+        out.wire_json.push(wire);
     }
+    out.task_count += task_count;
     Ok(())
-}
-
-/// 一个批次桶：参数相同的组共用它。
-struct Bucket {
-    params: String,
-    wire: String,
-    mappings: Vec<RefMapping>,
 }
 
 /// 成功后移档到 `_已收录/<目录名>-<ts>`。失败只记日志：DB 那行已经挡住重投了。
@@ -622,14 +615,20 @@ mod tests {
         assert_eq!(job.batch_ids.len(), 1);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1, "建批后必须唤醒调度器");
 
-        // 用户的核心关切：组头写的比例真的进了这个批次的参数快照。
-        let params: String = sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
-            .bind(job.batch_ids[0])
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let p = crate::provider::GenParams::from_json(&params);
-        assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
+        // 用户的核心关切：组头写的比例真的进了参数快照。
+        //
+        // 读的是**任务级**那份（0045）：参数下沉到任务之后，批次级那一列对工单收录
+        // 恒为空 —— 一单里可能有三种画幅，写一个「代表性的」进批次反而骗人。
+        let params: Vec<String> =
+            sqlx::query_scalar("SELECT params_json FROM tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(params.len(), 2);
+        for j in &params {
+            let p = crate::provider::GenParams::from_json(j);
+            assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
+        }
 
         // 编号前缀与用途标签都该落到位。
         let codes: Vec<String> = sqlx::query_scalar("SELECT code FROM prompts ORDER BY id")
@@ -796,9 +795,15 @@ mod tests {
         assert_eq!(count(&pool, "intake_jobs").await, 0);
     }
 
-    // 各组比例不同 → 自动拆成多个批次（params_json 是批次级的，塞不进一个批次）。
+    /// 一份工单里各组画幅不同 → **恰好一个批次**（0045）。
+    ///
+    /// 这条替代了原来那条 `different_ratios_split_into_separate_batches`（「两种比例
+    /// 必须是两个批次」）。它的前提是「params_json 存在 batches 上」，而那个前提正是
+    /// 本次改动移除的东西 —— 不是为了让 CI 变绿而放宽断言：这里守住的是同一件事的
+    /// 新形态，**而且更严**：不仅要一个批次，每条任务还必须拿到自己那一份比例，
+    /// 没有互相串味。参数错配是这条链路上唯一会花错钱的失败。
     #[tokio::test]
-    async fn different_ratios_split_into_separate_batches() {
+    async fn one_job_is_one_run_even_with_mixed_params() {
         let (pool, _d) = test_pool().await;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -808,31 +813,44 @@ mod tests {
             home.path(),
             "job-split",
             "分组: 黄\n参考图: images/黄.png\n比例: 3:4\n\n黄1\n\n黄2\n\n\
-             分组: 蓝\n参考图: images/蓝.png\n比例: 9:16\n\n蓝1\n",
-            &["黄.png", "蓝.png"],
+             分组: 蓝\n参考图: images/蓝.png\n比例: 9:16\n\n蓝1\n\n\
+             分组: 绿\n参考图: images/绿.png\n比例: 1:1\n\n绿1\n",
+            &["黄.png", "蓝.png", "绿.png"],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
-        assert_eq!(jobs[0].batch_ids.len(), 2, "两种比例必须是两个批次");
-        assert_eq!(jobs[0].task_count, 3, "黄 2 条 + 蓝 1 条，各 1 图");
+        assert_eq!(jobs[0].batch_ids.len(), 1, "三种画幅仍然只该有一个 run");
+        assert_eq!(jobs[0].task_count, 4, "黄 2 条 + 蓝 1 条 + 绿 1 条");
+        assert_eq!(count(&pool, "batches").await, 1);
 
-        // 每个批次拿到的是自己那一份比例，没有互相串味。
-        let mut ratios = Vec::new();
-        for b in &jobs[0].batch_ids {
-            let p: String = sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
-                .bind(b)
+        // 每条任务拿到的是自己那一份比例。
+        let raw: Vec<String> = sqlx::query_scalar("SELECT params_json FROM tasks")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let mut ratios: Vec<String> = raw
+            .iter()
+            .map(|j| {
+                crate::provider::GenParams::from_json(j)
+                    .aspect_ratio
+                    .unwrap_or_default()
+            })
+            .collect();
+        ratios.sort();
+        assert_eq!(ratios, vec!["1:1", "3:4", "3:4", "9:16"]);
+
+        // 批次级那一列对工单收录恒为空 —— 任务级优先、批次级兜底的读取顺序才成立。
+        let batch_params: String =
+            sqlx::query_scalar("SELECT params_json FROM batches WHERE id = ?1")
+                .bind(jobs[0].batch_ids[0])
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-            ratios.push(
-                crate::provider::GenParams::from_json(&p)
-                    .aspect_ratio
-                    .unwrap_or_default(),
-            );
-        }
-        ratios.sort();
-        assert_eq!(ratios, vec!["3:4", "9:16"]);
+        assert_eq!(batch_params, "{}");
+
+        // 台账仍要答得出「这一单实际发出去过几套参数」。
+        assert_eq!(jobs[0].params_json.len(), 3, "三套参数都要留痕");
     }
 
     // 参数一样的多个组并进同一个批次，不该无谓拆开。

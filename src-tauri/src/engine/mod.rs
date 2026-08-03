@@ -101,10 +101,15 @@ pub fn load_key_configs(rows: &[key_repo::ApiKeyRow], secrets: &dyn SecretStore)
 }
 
 /// 一次挂靠：某参考图挂靠某提示词组。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct RefMapping {
     pub ref_image_id: i64,
     pub prompt_group_id: i64,
+    /// 这次挂靠展开出来的任务各自带的生成参数（0045）。
+    ///
+    /// `None` = 跟批次级那份走（生成页手动建批是「整批一套参数」）。
+    /// 工单收录走这里：一次工单 = 一个 run，各条目的画幅各写各的。
+    pub params_json: Option<String>,
 }
 
 /// 组合展开并创建批次（R1 挂靠模型，一次事务）。返回 (batch_id, 任务数)。
@@ -118,11 +123,12 @@ pub async fn create_batch(
     mappings: &[RefMapping],
 ) -> AppResult<(i64, i64)> {
     // 预取各组 active 提示词（读，不在事务内）。
-    let mut combos: Vec<(i64, i64, String)> = Vec::new(); // (ref, prompt_id, snapshot)
+    #[allow(clippy::type_complexity)]
+    let mut combos: Vec<(i64, i64, String, Option<String>)> = Vec::new();
     for m in mappings {
         let prompts = prompt_repo::list_active_prompts(pool, m.prompt_group_id).await?;
         for (pid, text) in prompts {
-            combos.push((m.ref_image_id, pid, text));
+            combos.push((m.ref_image_id, pid, text, m.params_json.clone()));
         }
     }
     if combos.is_empty() {
@@ -143,8 +149,16 @@ pub async fn create_batch(
             .execute(&mut *tx)
             .await?;
     }
-    for (ref_id, prompt_id, snapshot) in &combos {
-        task_repo::insert_task(&mut tx, batch_id, *ref_id, *prompt_id, snapshot).await?;
+    for (ref_id, prompt_id, snapshot, task_params) in &combos {
+        task_repo::insert_task(
+            &mut tx,
+            batch_id,
+            *ref_id,
+            *prompt_id,
+            snapshot,
+            task_params.as_deref().unwrap_or(""),
+        )
+        .await?;
     }
     // 归档本批用到的参考图与提示词组（0016）：批次已开跑，这批素材的使命就此完成，
     // 从生成页选择器里让位给下一批。同事务提交 —— 批次建成则必已归档，不会出现
@@ -365,6 +379,7 @@ mod tests {
             &[RefMapping {
                 ref_image_id: rid,
                 prompt_group_id: gid,
+                params_json: None,
             }],
         )
         .await
@@ -399,6 +414,7 @@ mod tests {
             &[RefMapping {
                 ref_image_id: rid,
                 prompt_group_id: gid,
+                params_json: None,
             }],
         )
         .await
@@ -469,6 +485,7 @@ mod tests {
             &[RefMapping {
                 ref_image_id: rid,
                 prompt_group_id: gid,
+                params_json: None,
             }],
         )
         .await

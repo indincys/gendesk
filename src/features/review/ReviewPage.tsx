@@ -41,7 +41,7 @@ type ReviewHead =
   | { kind: "day"; label: string; count: number }
   | {
       kind: "cluster";
-      /** 「批次」「参考图」「提示词组」「Key」「任务」—— 这一段是按什么分的。 */
+      /** 「投单」「参考图」「提示词组」「Key」—— 这一段是按什么分的。 */
       tag: string;
       name: string;
       count: number;
@@ -86,7 +86,7 @@ function buildSections(
           ...(i === 0 ? [{ kind: "day" as const, label: day.label, count: day.count }] : []),
           {
             kind: "cluster" as const,
-            tag: "任务",
+            tag: "投单",
             // 一次任务里可能横跨几个提示词组，故报**组成**而不是挑一个组名。
             name: faceOf(c.items, (x) => x.groupName) || "未分组",
             count: c.items.length,
@@ -100,10 +100,12 @@ function buildSections(
     );
   }
 
-  const tag = { batch: "批次", ref: "参考图", group: "提示词组", key: "Key" }[mode];
+  const tag = { batch: "投单", ref: "参考图", group: "提示词组", key: "Key" }[mode];
+  // 「投单」档的段名读批次备注（收件进来的批 = 投单名）；生成页手动建的批没有名字，
+  // 退回 `#{batchId}` —— 内部自增 id 对人不表达任何东西，只在没有别的可说时才露面。
   const keyOf = (i: ReviewItemView) =>
     mode === "batch"
-      ? `#${i.batchId}`
+      ? (i.batchNote?.trim() || `#${i.batchId}`)
       : mode === "ref"
         ? i.refName
         : mode === "group"
@@ -112,7 +114,7 @@ function buildSections(
 
   const arr = [...items];
   if (mode === "batch") {
-    // 批次倒序（新批在上），批次内保持生成序。后端已是此序，这里显式排一遍，
+    // 投单倒序（新的在上），单内保持生成序。后端已是此序，这里显式排一遍，
     // 使「仅看待定」筛掉部分项后顺序依然确定。
     arr.sort((a, b) => b.batchId - a.batchId || a.id - b.id);
   } else if (mode === "ref") {
@@ -309,7 +311,8 @@ export function ReviewPage() {
   const [onlyPending, setOnlyPending] = useState(false);
   // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
   // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
-  // 默认按批次聚类：最近一批在最顶部，往下依次是更早的批次。
+  // 默认按投单聚类：最近一次投单在最顶部，往下依次是更早的。
+  // 一次工单 = 一个 run（0045），故「批次」这个内部单元与「投单」是一一对应的。
   const [sortMode, setSortMode] = useState<"batch" | "time" | "ref" | "group" | "key">("batch");
   // E38：shift 范围多选锚点（全局序号）。
   const lastClicked = useRef<number | null>(null);
@@ -658,9 +661,9 @@ export function ReviewPage() {
           <span
             className={cn("sgi", sortMode === "batch" && "on")}
             onClick={() => setSortMode("batch")}
-            title="最近一批在最顶部，往下依次是更早的批次"
+            title="最近一次投单在最顶部，往下依次是更早的"
           >
-            按批次
+            按投单
           </span>
           <span
             className={cn("sgi", sortMode === "time" && "on")}

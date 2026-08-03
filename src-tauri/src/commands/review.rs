@@ -38,6 +38,12 @@ struct AcceptPlan {
 pub struct ReviewItemView {
     pub id: i64,
     pub batch_id: i64,
+    /// 这一批的名字。一次工单 = 一个 run（0045），故对收件进来的批它就是**投单名**；
+    /// 生成页手动建的批没有名字，前端退回 `#{batchId}`。
+    ///
+    /// 批次退到幕后之后，人在验收页看到的分节标题应该是「哪一次投单」而不是一个
+    /// 内部自增 id —— 那个数字对人不表达任何东西。
+    pub batch_note: Option<String>,
     pub ref_name: String,
     pub prompt_code: String,
     pub group_name: String,
@@ -75,12 +81,14 @@ pub struct AcceptResult {
     pub queued_v2v: i64,
 }
 
-const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, COALESCE(r.name,'') AS ref_name,
+const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, b.note AS batch_note,
+        COALESCE(r.name,'') AS ref_name,
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
         k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
         r.thumb_path AS ref_thumb_path, r.file_path AS ref_image_path,
         t.result_width, t.result_height, t.created_at, p.skill
     FROM tasks t
+    LEFT JOIN batches b ON b.id = t.batch_id
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id

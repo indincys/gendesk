@@ -454,7 +454,7 @@ impl Scheduler {
             (Some(image_path), Some(cfg)) => {
                 let provider = self.factory.build(&cfg);
                 // E16 / D1：取批次生成参数快照，仅透传显式设置项。
-                let params = self.batch_params(task.batch_id).await;
+                let params = self.task_params(task.id, task.batch_id).await;
                 let req = GenRequest {
                     prompt: task.prompt_text_snapshot.clone(),
                     image_path,
@@ -694,15 +694,32 @@ impl Scheduler {
         .map(std::path::PathBuf::from)
     }
 
-    /// 批次生成参数快照（E16 / D1）。查不到或解析失败退化为「全部空」（不传参）。
-    async fn batch_params(&self, batch_id: i64) -> crate::provider::GenParams {
-        let json = sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
-            .bind(batch_id)
+    /// 本任务的生成参数（E16 / D1）。**任务级优先，批次级兜底**。
+    ///
+    /// 参数原来是批次级的，于是「一份工单里各组比例不同」只能靠**拆批次**表达
+    /// （按 (参数, 抽卡) 分桶）。批次退到幕后之后这条就不成立了：一次工单 = 一个 run，
+    /// 而同一个 run 里各条目的画幅本来就可以不同 —— 参数跟着任务走，不再决定切分。
+    ///
+    /// 生成页手动建的批仍然是「整批一套参数」，那条路径写批次级、任务级留空。
+    /// 查不到或解析失败退化为「全部空」（不传参）。
+    async fn task_params(&self, task_id: i64, batch_id: i64) -> crate::provider::GenParams {
+        let own = sqlx::query_scalar::<_, String>("SELECT params_json FROM tasks WHERE id = ?1")
+            .bind(task_id)
             .fetch_optional(&self.pool)
             .await
             .ok()
             .flatten()
-            .unwrap_or_else(|| "{}".into());
+            .filter(|j| !j.trim().is_empty());
+        let json = match own {
+            Some(j) => j,
+            None => sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
+                .bind(batch_id)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "{}".into()),
+        };
         crate::provider::GenParams::from_json(&json)
     }
 
@@ -1029,6 +1046,7 @@ mod tests {
             &[RefMapping {
                 ref_image_id: 1,
                 prompt_group_id: 1,
+                params_json: None,
             }],
         )
         .await

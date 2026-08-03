@@ -72,6 +72,17 @@ pub struct ImportPreviewGroup {
 pub struct ImportPreviewPrompt {
     pub title: Option<String>,
     pub text: String,
+    /// 0044 条目级身份：语义名 / SKU 数字缩写 / 风格。**空串 = 不知道**。
+    ///
+    /// 只有工单 v2 会填它们（`工单.json` 的 `items[]`）；手工导入恒为空串，
+    /// 验收时退回 `参考图名_YYMMDD_编号` 的兜底语义名。
+    ///
+    /// 与 `purposes` 一样刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段
+    /// 导成可选（`itemName?`），于是前端每一处读它都要先判 undefined，而后端其实
+    /// 永远都序列化它。
+    pub item_name: String,
+    pub sku: String,
+    pub style: String,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -304,6 +315,9 @@ pub(crate) async fn build_preview_from_parsed(
                 .map(|p| ImportPreviewPrompt {
                     title: p.title.clone(),
                     text: p.text.clone(),
+                    item_name: p.item_name.clone(),
+                    sku: p.sku.clone(),
+                    style: p.style.clone(),
                 })
                 .collect(),
         });
@@ -316,6 +330,18 @@ pub(crate) async fn build_preview_from_parsed(
         groups,
         warnings,
     })
+}
+
+/// 组级用途 → 落到每条提示词的那一个受控取值（0045）。
+///
+/// 当前受控取值只有「图生视频」一个，故取第一个即可。多值出现的那天，这里会是
+/// **唯一**要改的地方 —— 载体是一列，不是一张多态绑定表。
+fn purpose_of(purposes: &[String]) -> &str {
+    purposes
+        .iter()
+        .find(|p| crate::purpose::is_purpose(p))
+        .map(String::as_str)
+        .unwrap_or("")
 }
 
 /// 编号区间预览字符串（忽略回收池，仅供参考）。空组返回空串。
@@ -549,12 +575,21 @@ pub(crate) async fn commit_preview(
             let code = ids::format_code(&prefix, number);
             repo::insert_prompt(
                 &mut tx,
-                group_id,
-                &code,
-                p.title.as_deref(),
-                &p.text,
-                source,
-                pg.skill.as_deref().filter(|s| !s.trim().is_empty()),
+                &repo::NewPrompt {
+                    group_id,
+                    code: &code,
+                    title: p.title.as_deref(),
+                    text: &p.text,
+                    source,
+                    skill: pg.skill.as_deref().filter(|s| !s.trim().is_empty()),
+                    // 0044 条目级身份。手工导入这三项恒为空 —— 不知道就别写，
+                    // 下游对空串走兜底语义名，而不是从中文文件名反推 SKU（会静默分错）。
+                    item_name: p.item_name.trim(),
+                    sku_code: p.sku.trim(),
+                    style: p.style.trim(),
+                    // 用途在工单里是整单级的，落到每一条词上。
+                    purpose: purpose_of(&pg.purposes),
+                },
             )
             .await?;
             inserted += 1;

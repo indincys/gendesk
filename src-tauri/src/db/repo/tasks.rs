@@ -750,6 +750,58 @@ mod tests {
         (bid, ids)
     }
 
+    /// 批次退休会把提示词整组删掉（提示词是消耗品）。作品的**交付身份**必须挺过这一刀：
+    /// SKU / 风格 / 语义名都是 manifest 要写的东西，而 `自动发布` 靠 SKU 分目录 ——
+    /// 分错了不报错，只是放错地方（静默失败）。
+    ///
+    /// 这与 0027 给 prompt_code / group_name 存快照是同一条理由的第二次兑现。
+    #[tokio::test]
+    async fn a_retired_batch_leaves_the_delivery_identity_readable() {
+        let (pool, _d) = test_pool().await;
+        let (bid, ids) = seed(&pool, 1).await;
+        // 提示词带着工单给的身份；作品验收时把它快照下来。
+        sqlx::query(
+            "UPDATE prompts SET item_name='W-王一博-55-正面', sku_code='55', style='王一博'
+             WHERE id=1",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO accepted_works (id,task_id,image_path,thumb_path,prompt_id,prompt_text,
+                group_id,batch_id,accepted_at,item_name,uid,sku_code,style)
+             VALUES (1,?1,'/o.jpg','/t.jpg',1,'t',1,?2,0,'W-王一博-55-正面','hu72','55','王一博')",
+        )
+        .bind(ids[0])
+        .bind(bid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET status='pass'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = retire_resolved_batches(&pool).await.unwrap();
+        assert_eq!(report.batches, 1);
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prompts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "提示词是消耗品，退休时确实被删了");
+
+        let (name, sku, style): (String, String, String) =
+            sqlx::query_as("SELECT item_name, sku_code, style FROM accepted_works WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (name.as_str(), sku.as_str(), style.as_str()),
+            ("W-王一博-55-正面", "55", "王一博"),
+            "上游被清理之后作品仍要答得出自己是谁"
+        );
+    }
+
     /// 认领任务是有闸门的：只有仍停在调用方刚读到的那个状态时才认领得到。
     ///
     /// 调度器先 `fetch_queued` 读一批，再逐个派发，两步之间隔着若干次 await。用户在

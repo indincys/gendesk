@@ -30,8 +30,25 @@ pub struct AcceptedWorkRow {
     pub group_name: String,
     #[serde(default)]
     pub sku_id: Option<i64>,
+    /// 交付身份的快照（0044）。理由与 prompt_code / group_name 那一对完全相同：
+    /// 提示词是消耗品，批次跑完即删，而人隔几天才回来验收是常态 —— 不冗余的话，
+    /// manifest 到那时就写不出 SKU 了。
+    ///
+    /// `item_name` = 语义名（skill 给的，一个字符都没改）；`uid` = 验收那一刻发的号；
+    /// 交付文件名 = `{item_name}-{uid}.{EXT}`。
+    #[serde(default)]
+    pub item_name: String,
+    #[serde(default)]
+    pub uid: String,
+    #[serde(default)]
+    pub sku_code: String,
+    #[serde(default)]
+    pub style: String,
+    #[serde(default)]
+    pub purpose: String,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct NewWork {
     pub task_id: i64,
     pub image_path: String,
@@ -44,13 +61,20 @@ pub struct NewWork {
     pub prompt_code: String,
     pub group_name: String,
     pub sku_id: Option<i64>,
+    pub item_name: String,
+    pub uid: String,
+    pub sku_code: String,
+    pub style: String,
+    pub purpose: String,
 }
 
 pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sqlx::Error> {
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text,
-            group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name, sku_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) RETURNING id",
+            group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name, sku_id,
+            item_name, uid, sku_code, style, purpose)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+         RETURNING id",
     )
     .bind(w.task_id)
     .bind(&w.image_path)
@@ -64,6 +88,11 @@ pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sql
     .bind(&w.prompt_code)
     .bind(&w.group_name)
     .bind(w.sku_id)
+    .bind(&w.item_name)
+    .bind(&w.uid)
+    .bind(&w.sku_code)
+    .bind(&w.style)
+    .bind(&w.purpose)
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -105,8 +134,9 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     let dropped = row.task_id.is_some() && task_id.is_none();
     sqlx::query(
         "INSERT INTO accepted_works (id, task_id, image_path, thumb_path, prompt_id, prompt_text,
-            group_id, ref_image_id, batch_id, favorite, accepted_at, prompt_code, group_name, sku_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            group_id, ref_image_id, batch_id, favorite, accepted_at, prompt_code, group_name, sku_id,
+            item_name, uid, sku_code, style, purpose)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )
     .bind(row.id)
     .bind(task_id)
@@ -122,6 +152,13 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     .bind(&row.prompt_code)
     .bind(&row.group_name)
     .bind(row.sku_id)
+    // 还原连 uid 一起写回。**不重新发号**：uid 是作品的属性，不是这一次还原动作的
+    // 属性；重发会让已经交付出去的那个文件名从此认不出主人（R2 的同一条道理）。
+    .bind(&row.item_name)
+    .bind(&row.uid)
+    .bind(&row.sku_code)
+    .bind(&row.style)
+    .bind(&row.purpose)
     .execute(pool)
     .await?;
     Ok(dropped)
@@ -182,6 +219,11 @@ mod tests {
             prompt_code: "GG-0001".into(),
             group_name: "g".into(),
             sku_id: None,
+            item_name: "商品图_260101_GG0001".into(),
+            uid: "hu72".into(),
+            sku_code: "55".into(),
+            style: "王一博".into(),
+            purpose: String::new(),
         }
     }
 

@@ -5,6 +5,7 @@ pub mod copy;
 pub mod images;
 pub mod inbox;
 pub mod intake;
+pub mod names;
 pub mod products;
 pub mod prompts;
 pub mod refs;
@@ -180,7 +181,16 @@ mod tests {
         for _ in 0..3 {
             let n = ids::allocate(&mut tx, "DZ").await.unwrap();
             let code = ids::format_code("DZ", n);
-            prompts::insert_prompt(&mut tx, gid, &code, None, "正文", "library", None)
+            prompts::insert_prompt(
+                &mut tx,
+                &prompts::NewPrompt {
+                    group_id: gid,
+                    code: &code,
+                    text: "正文",
+                    source: "library",
+                    ..Default::default()
+                },
+            )
                 .await
                 .unwrap();
         }
@@ -442,7 +452,17 @@ mod tests {
         let n = ids::allocate(&mut tx, "DZ").await.unwrap();
         let code = ids::format_code("DZ", n);
         let pid =
-            prompts::insert_prompt(&mut tx, gid, &code, Some("小标题"), "正文", "library", None)
+            prompts::insert_prompt(
+                &mut tx,
+                &prompts::NewPrompt {
+                    group_id: gid,
+                    code: &code,
+                    title: Some("小标题"),
+                    text: "正文",
+                    source: "library",
+                    ..Default::default()
+                },
+            )
                 .await
                 .unwrap();
         let bid = tasks::create_batch(&mut tx, "/out", "{}").await.unwrap();
@@ -464,9 +484,7 @@ mod tests {
                 group_id: Some(gid),
                 ref_image_id: rid,
                 batch_id: bid,
-                prompt_code: String::new(),
-                group_name: String::new(),
-                sku_id: None,
+                ..Default::default()
             },
         )
         .await

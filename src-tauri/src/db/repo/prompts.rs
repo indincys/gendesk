@@ -34,6 +34,12 @@ pub struct PromptRow {
     pub source: String,
     /// 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
     pub skill: Option<String>,
+    /// 条目级身份（0044）：语义名 / SKU 数字缩写 / 风格 / 受控用途。
+    /// 空串 = 不知道（生成页手动建的批、历史数据）。
+    pub item_name: String,
+    pub sku_code: String,
+    pub style: String,
+    pub purpose: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -107,30 +113,48 @@ pub async fn create_group(
     Ok(id)
 }
 
-/// 在事务中插入一条提示词。
+/// 一条待落库的提示词。
 ///
 /// `skill` = 写出这条词的 skill 名（0032）。手工导入传 None —— 不知道就别写，
 /// 界面对 None 不显示标，而一个猜出来的来源比不说更糟。
+///
+/// 后四项是 0044 的**条目级身份**：工单 v2 里一个 item = 一条提示词 = 一个任务
+/// = 一张图，语义名 / SKU / 风格 / 用途都跟着词走，验收那一刻快照进 `accepted_works`。
+/// 空串 = 不知道（生成页手动建的批、历史数据），下游走兜底语义名而**不猜**。
+#[derive(Debug, Clone, Default)]
+pub struct NewPrompt<'a> {
+    pub group_id: i64,
+    pub code: &'a str,
+    pub title: Option<&'a str>,
+    pub text: &'a str,
+    pub source: &'a str,
+    pub skill: Option<&'a str>,
+    pub item_name: &'a str,
+    pub sku_code: &'a str,
+    pub style: &'a str,
+    pub purpose: &'a str,
+}
+
 pub async fn insert_prompt(
     conn: &mut SqliteConnection,
-    group_id: i64,
-    code: &str,
-    title: Option<&str>,
-    text: &str,
-    source: &str,
-    skill: Option<&str>,
+    p: &NewPrompt<'_>,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO prompts (group_id, code, title, text, source, skill, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) RETURNING id",
+        "INSERT INTO prompts (group_id, code, title, text, source, skill,
+            item_name, sku_code, style, purpose, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11) RETURNING id",
     )
-    .bind(group_id)
-    .bind(code)
-    .bind(title)
-    .bind(text)
-    .bind(source)
-    .bind(skill)
+    .bind(p.group_id)
+    .bind(p.code)
+    .bind(p.title)
+    .bind(p.text)
+    .bind(p.source)
+    .bind(p.skill)
+    .bind(p.item_name)
+    .bind(p.sku_code)
+    .bind(p.style)
+    .bind(p.purpose)
     .bind(now)
     .fetch_one(&mut *conn)
     .await?;
@@ -428,7 +452,16 @@ mod tests {
 
     async fn seed_prompt(pool: &SqlitePool, group_id: i64, code: &str) -> i64 {
         let mut tx = pool.begin().await.unwrap();
-        let id = insert_prompt(&mut tx, group_id, code, None, "text", "library", None)
+        let id = insert_prompt(
+            &mut tx,
+            &NewPrompt {
+                group_id,
+                code,
+                text: "text",
+                source: "library",
+                ..Default::default()
+            },
+        )
             .await
             .unwrap();
         tx.commit().await.unwrap();

@@ -1,6 +1,5 @@
 //! review 域命令（执行计划 2.1 / 需求 13 / R7 / R8）。
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -10,14 +9,28 @@ use tauri::State;
 
 use crate::db::now_unix;
 use crate::db::repo::{
-    images as image_repo, prompts as prompt_repo, tasks as task_repo, trash as trash_repo,
-    works as work_repo,
+    images as image_repo, names as name_repo, prompts as prompt_repo, tasks as task_repo,
+    trash as trash_repo, works as work_repo,
 };
 use crate::error::AppResult;
 use crate::files;
 use crate::state::AppState;
 
-type AcceptCopyJob = (i64, String, PathBuf, Option<(PathBuf, String, i64)>);
+/// 一张图的验收落点：源、去处、以及它这一次拿到的身份。
+///
+/// UID 必须在**拷贝之前**就定下来（文件名里有它），所以发号排在整批拷贝之前、
+/// 作品行落库之后由 `attach_work` 认领。见 `db::repo::names` 的模块注释。
+struct AcceptPlan {
+    task_id: i64,
+    src: String,
+    out_path: PathBuf,
+    /// publish 图片素材库的落点（该子系统已停止投入，保留不再演进）。
+    asset: Option<(PathBuf, String, i64)>,
+    /// 语义名（不含 UID）。
+    item_name: String,
+    /// 本次发放的 UID。
+    uid: String,
+}
 
 /// 待验收项视图。
 #[derive(Debug, Clone, Serialize, Type, FromRow)]
@@ -159,7 +172,13 @@ struct AcceptRow {
     is_temp: i64,
     group_name: String,
     sku_id: Option<i64>,
-    sku_code: String,
+    /// publish 子系统的 SKU 编号（`skus.code`）。与下面的 `item_sku` 不是一回事。
+    sku_id_code: String,
+    /// 0044 的条目级身份，来自提示词。空串 = 不知道（生成页手动建的批 / 历史数据）。
+    item_name: String,
+    item_sku: String,
+    item_style: String,
+    item_purpose: String,
 }
 
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
@@ -168,7 +187,9 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
         COALESCE(g.is_temp,0) AS is_temp, COALESCE(g.name,'') AS group_name,
-        g.sku_id, COALESCE(s.code,'') AS sku_code
+        g.sku_id, COALESCE(s.code,'') AS sku_id_code,
+        COALESCE(p.item_name,'') AS item_name, COALESCE(p.sku_code,'') AS item_sku,
+        COALESCE(p.style,'') AS item_style, COALESCE(p.purpose,'') AS item_purpose
     FROM tasks t
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
@@ -216,9 +237,6 @@ pub async fn accept_tasks(
     let mut promoted: Vec<String> = Vec::new();
     let mut accepted = 0i64;
     let mut batches: Vec<i64> = Vec::new();
-    // 用途 = 图生视频的组，其通过图自动入视频流水线。用途缓存按组算一次：
-    // 一个批次里同组常有十几张，逐张查标签是白跑十几次 SQL。
-    let mut i2v_groups: Vec<(i64, bool)> = Vec::new();
     let mut to_queue: Vec<i64> = Vec::new();
     let date = files::date_yymmdd(now_unix());
 
@@ -229,14 +247,40 @@ pub async fn accept_tasks(
     } else {
         None
     };
-    let mut jobs: Vec<AcceptCopyJob> = Vec::new();
-    let mut planned_outputs = HashSet::new();
-    let mut planned_assets = HashSet::new();
+
+    // ── 1. 发号。**整批一个事务**，排在拷贝之前 —— 文件名里有 UID。
+    //
+    // 台账只增不删（0044），发出去的号不回收：这一步之后若拷贝失败，留下的是几个
+    // 没有主人的号，那比"重复发号"便宜得多（重复的代价是 `自动发布` 那边两张图撞主键）。
+    let mut issued: Vec<(i64, String, String)> = Vec::new(); // (task_id, item_name, uid)
+    {
+        let mut tx = state.db.begin().await?;
+        for row in &rows {
+            if row.result_image_path.is_none() {
+                continue; // 无结果图，不发号
+            }
+            // 语义名优先取工单给的那个（P1：GenDesk 一个字符都不改）；
+            // 生成页手动建的批没有工单，退回 `参考图名_YYMMDD_编号`。
+            let item_name = if row.item_name.trim().is_empty() {
+                files::fallback_item_name(&row.ref_name, &row.prompt_code, &date)
+            } else {
+                row.item_name.trim().to_string()
+            };
+            let (uid, _) = name_repo::issue(&mut tx, &item_name, None).await?;
+            issued.push((row.id, item_name, uid));
+        }
+        tx.commit().await?;
+    }
+
+    let mut jobs: Vec<AcceptPlan> = Vec::new();
     for row in &rows {
         let Some(src) = row.result_image_path.clone() else {
             continue; // 无结果图，跳过
         };
-        // 任务6：输出到 outputs/{批次}/{分组}/参考图名_YYMMDD_编号.EXT。
+        let Some((_, item_name, uid)) = issued.iter().find(|(t, _, _)| *t == row.id).cloned() else {
+            continue;
+        };
+        // 任务6：输出到 outputs/{批次}/{分组}/。
         // 按提示词分组分文件夹存放，多分组批次天然各归各处而非全混一处。
         // 分组名做文件系统安全清洗，空分组归入「未分组」。
         let group_folder = if row.group_name.trim().is_empty() {
@@ -251,40 +295,33 @@ pub async fn accept_tasks(
             .join(&group_folder);
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
-        let base_filename = format!(
-            "{}.{ext}",
-            files::fallback_item_name(&row.ref_name, &row.prompt_code, &date)
-        );
-        let filename = crate::publish::paths::dedupe_name(&base_filename, &|candidate| {
-            let path = out_dir.join(candidate);
-            path.exists() || planned_outputs.contains(&path)
-        });
+        // 文件名 = `{语义名}-{uid}.{EXT}`。
+        //
+        // 这里**不再走 `dedupe_name`**：UID 是全局唯一的（`issued_names.uid` 上有唯一
+        // 索引，撞了就重摇），所以撞名在结构上已经不可能。留着那个 `_2` 后缀反而有害
+        // —— 它会造出一个 manifest 里没有、下游也认不出来的名字。
+        let filename = format!("{}.{ext}", name_repo::compose(&item_name, &uid));
         let out_path = out_dir.join(&filename);
-        planned_outputs.insert(out_path.clone());
         let asset = match (row.sku_id, publish_root.as_ref()) {
             (Some(sku_id), Some(root)) => {
-                let asset_filename =
-                    crate::publish::paths::dedupe_name(&base_filename, &|candidate| {
-                        let rel = crate::publish::paths::RelPath::from_parts([
-                            crate::publish::paths::IMAGE_LIBRARY,
-                            row.sku_code.as_str(),
-                            candidate,
-                        ]);
-                        let path = rel.to_local(root);
-                        path.exists() || planned_assets.contains(&path)
-                    });
                 let rel = crate::publish::paths::RelPath::from_parts([
                     crate::publish::paths::IMAGE_LIBRARY,
-                    row.sku_code.as_str(),
-                    asset_filename.as_str(),
+                    row.sku_id_code.as_str(),
+                    filename.as_str(),
                 ]);
                 let path = rel.to_local(root);
-                planned_assets.insert(path.clone());
                 Some((path, rel.as_str().to_string(), sku_id))
             }
             _ => None,
         };
-        jobs.push((row.id, src, out_path, asset));
+        jobs.push(AcceptPlan {
+            task_id: row.id,
+            src,
+            out_path,
+            asset,
+            item_name,
+            uid,
+        });
     }
     if jobs.is_empty() {
         return Ok(AcceptResult {
@@ -295,10 +332,10 @@ pub async fn accept_tasks(
     }
     let to_copy = jobs
         .iter()
-        .flat_map(|(_, src, dest, asset)| {
-            let mut pairs = vec![(PathBuf::from(src), dest.clone())];
-            if let Some((asset_dest, _, _)) = asset {
-                pairs.push((PathBuf::from(src), asset_dest.clone()));
+        .flat_map(|j| {
+            let mut pairs = vec![(PathBuf::from(&j.src), j.out_path.clone())];
+            if let Some((asset_dest, _, _)) = &j.asset {
+                pairs.push((PathBuf::from(&j.src), asset_dest.clone()));
             }
             pairs
         })
@@ -316,11 +353,10 @@ pub async fn accept_tasks(
     let mut copied_guard = crate::publish::paths::CreatedFilesGuard::new(copied_paths);
 
     for row in rows {
-        let Some((_, src, out_path, asset)) =
-            jobs.iter().find(|(id, _, _, _)| *id == row.id).cloned()
-        else {
+        let Some(plan) = jobs.iter().find(|j| j.task_id == row.id) else {
             continue;
         };
+        let (src, out_path, asset) = (&plan.src, &plan.out_path, &plan.asset);
         let thumb = row.result_thumb_path.clone().unwrap_or_else(|| src.clone());
 
         // 事务：写作品 + 微调写回 + 临时组转正 + 状态迁移。
@@ -341,14 +377,24 @@ pub async fn accept_tasks(
                 prompt_code: row.prompt_code.clone(),
                 group_name: row.group_name.clone(),
                 sku_id: row.sku_id,
+                // 0044：交付身份一并存快照。SKU / 风格来自工单，隔天验收时提示词
+                // 很可能已经随批次退休 —— 到那时现读 JOIN 是读不到的。
+                item_name: plan.item_name.clone(),
+                uid: plan.uid.clone(),
+                sku_code: row.item_sku.clone(),
+                style: row.item_style.clone(),
+                purpose: row.item_purpose.clone(),
             },
         )
         .await?;
+        // 号认领主人。放在同一个事务里：作品行与「这个号归谁」要么一起成立，
+        // 要么一起不成立，中间态会让台账指向一个不存在的作品 id。
+        name_repo::attach_work(&mut tx, &plan.uid, work_id).await?;
         if let Some((_, rel, sku_id)) = asset.as_ref() {
             image_repo::insert(&mut tx, *sku_id, rel, rel, "works", Some(work_id)).await?;
         }
         tx.commit().await?;
-        copied_guard.preserve(&out_path);
+        copied_guard.preserve(out_path);
         if let Some((asset_path, _, _)) = asset.as_ref() {
             copied_guard.preserve(asset_path);
         }
@@ -366,20 +412,12 @@ pub async fn accept_tasks(
             }
         }
         // 用途 = 图生视频 → 这张通过图自动进「待改写」。
-        // 用途标在**提示词组**上：一张图的用途由它的提示词决定，提示词的用途由那份 txt 决定。
-        if let Some(gid) = row.group_id {
-            let is_i2v = match i2v_groups.iter().find(|(g, _)| *g == gid) {
-                Some((_, v)) => *v,
-                None => {
-                    let tags = prompt_repo::group_tags(&state.db, gid).await?;
-                    let v = tags.iter().any(|t| t == crate::purpose::PURPOSE_I2V);
-                    i2v_groups.push((gid, v));
-                    v
-                }
-            };
-            if is_i2v {
-                to_queue.push(work_id);
-            }
+        //
+        // 用途现在读**作品自己的那一列**（0045），不再 JOIN `tag_bindings`：
+        // 一张图的用途在工单里就定下来了，跟着提示词落到这一行；而 tag_bindings 是
+        // 无外键的多态表，分组 id 被复用时旧绑定会把用途安到无关的组头上。
+        if row.item_purpose == crate::purpose::PURPOSE_I2V {
+            to_queue.push(work_id);
         }
 
         task_repo::set_status(&state.db, row.id, "pass").await?;

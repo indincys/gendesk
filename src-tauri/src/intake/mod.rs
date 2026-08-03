@@ -539,6 +539,7 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
                     .map(|s| ParsedPrompt {
                         title: None,
                         text: s.to_string(),
+                        ..Default::default()
                     })
                     .collect();
                 if prompts.is_empty() {

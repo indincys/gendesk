@@ -276,10 +276,24 @@ pub async fn file_exists(path: String) -> AppResult<bool> {
 #[tauri::command]
 #[specta::specta]
 pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    reexport_from_snapshot(&state.db, state.dirs.results(), id).await
+}
+
+/// [`reexport_work`] 的本体。抽出来只为一件事：R2 —— **重新导出必须复用原 uid**
+/// —— 是可测的，而 `State<AppResult>` 在单测里造不出来。
+///
+/// 复用不是「再发一次相同的号」，而是**根本不发号**：文件名早就写在
+/// `accepted_works.image_path` 里了，这里原样拷回去。uid 是作品的属性，
+/// 不是导出这个动作的属性；重发会让已经交付出去的那个文件从此认不出主人。
+pub(crate) async fn reexport_from_snapshot(
+    pool: &sqlx::SqlitePool,
+    results_dir: std::path::PathBuf,
+    id: i64,
+) -> AppResult<()> {
     let row: Option<(Option<i64>, String)> =
         sqlx::query_as("SELECT task_id, image_path FROM accepted_works WHERE id = ?1")
             .bind(id)
-            .fetch_optional(&state.db)
+            .fetch_optional(pool)
             .await?;
     let Some((task_id, image_path)) = row else {
         return Err(AppError::InvalidInput("作品不存在".into()));
@@ -295,7 +309,7 @@ pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()>
         .and_then(|s| s.to_str())
         .unwrap_or("jpg")
         .to_lowercase();
-    let src = state.dirs.results().join(format!("{task_id}.{ext}"));
+    let src = results_dir.join(format!("{task_id}.{ext}"));
     if !src.is_file() {
         return Err(AppError::InvalidInput(
             "资产区源快照已不存在（可能随批次清理删除），无法重新导出".into(),
@@ -312,9 +326,57 @@ pub async fn reexport_work(state: State<'_, AppState>, id: i64) -> AppResult<()>
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
-    use super::{WorkView, WORK_SELECT};
+    use super::{reexport_from_snapshot, WorkView, WORK_SELECT};
     use crate::db::test_support::test_pool;
     use sqlx::SqlitePool;
+
+    /// R2：重新导出**复用原 uid**，绝不重摇。
+    ///
+    /// uid 是作品的属性，不是导出这个动作的属性。重发一个号意味着同一张图在
+    /// `自动发布` 那边有了两个主键，而先送出去的那份从此认不出主人 —— 而这条路径
+    /// 恰恰是「文件被搬走之后救回来」的那条（D3），最不该在这里换名字。
+    #[tokio::test]
+    async fn reexport_reuses_the_original_uid_and_issues_nothing() {
+        let (pool, _d) = test_pool().await;
+        let data = tempfile::tempdir().unwrap();
+        let results = data.path().join("results");
+        std::fs::create_dir_all(&results).unwrap();
+        std::fs::write(results.join("1.jpg"), b"snapshot").unwrap();
+        let out = data.path().join("outputs").join("W-王一博-55-正面-hu72.jpg");
+
+        sqlx::query("INSERT INTO batches (id,created_at,output_dir,params_json,status) VALUES (1,0,'/out','{}','running')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (1,1,'GG-0001','t','active','library',0,0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/a','/t',1,1,1,0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at) VALUES (1,1,1,1,'t','pass',0,0)").execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO accepted_works (id,task_id,image_path,thumb_path,prompt_text,accepted_at,
+                item_name,uid,sku_code,style)
+             VALUES (1,1,?1,'/t','t',0,'W-王一博-55-正面','hu72','55','王一博')",
+        )
+        .bind(out.to_string_lossy().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::db::repo::names::issue_with(&mut tx, "W-王一博-55-正面", Some(1), || "hu72".into())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        reexport_from_snapshot(&pool, results, 1).await.unwrap();
+
+        assert!(out.is_file(), "应当把快照拷回原来那个文件名");
+        let (uid, n): (String, i64) = sqlx::query_as(
+            "SELECT (SELECT uid FROM accepted_works WHERE id=1),
+                    (SELECT COUNT(*) FROM issued_names)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(uid, "hu72", "uid 不得因为重新导出而改变");
+        assert_eq!(n, 1, "重新导出不得新发一个号");
+    }
 
     /// 批次倒序 + 批次内 id 升序：与验收页同一排序，两页读起来对得上。
     /// 这条排序是「按批次分节」这个 UI 决定的地基——换成 accepted_at 排序，

@@ -23,11 +23,18 @@
 //! - 缺分组 → 用文件名兜底（`parse_named`），再兜底「未分组导入」；缺前缀 → 由 commit 阶段自动分配。
 
 /// 单条解析出的提示词（正文 + 可选小标题）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedPrompt {
     /// 来自 `【小标题】` 行；无则 None。
     pub title: Option<String>,
     pub text: String,
+    /// 0044 条目级身份：语义名 / SKU 数字缩写 / 风格。**空串 = 不知道**。
+    ///
+    /// txt 解析器一律留空：那种格式里没有地方表达它们。填它们的是工单 v2
+    /// （`工单.json` 的 `items[]` + `prompts/{name}.txt`）。
+    pub item_name: String,
+    pub sku: String,
+    pub style: String,
 }
 
 /// 分组名的来源，决定 UI 的确信度呈现。
@@ -421,6 +428,7 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
         ensure(&mut cur).prompts.push(ParsedPrompt {
             title: pending_title.take().map(|(t, _)| t),
             text: strip_leading_number(trimmed).to_string(),
+            ..Default::default()
         });
     }
 
@@ -455,6 +463,7 @@ fn salvage_empty_inferred(groups: &mut Vec<ParsedGroup>) {
             orphans.push(ParsedPrompt {
                 title: None,
                 text: g.name,
+                ..Default::default()
             });
             continue;
         }

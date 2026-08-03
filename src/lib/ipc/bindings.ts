@@ -2634,7 +2634,18 @@ prompts: ImportPreviewPrompt[] }
 /**
  * 导入预览中的单条提示词（正文 + 可选小标题）。
  */
-export type ImportPreviewPrompt = { title: string | null; text: string }
+export type ImportPreviewPrompt = { title: string | null; text: string; 
+/**
+ * 0044 条目级身份：语义名 / SKU 数字缩写 / 风格。**空串 = 不知道**。
+ * 
+ * 只有工单 v2 会填它们（`工单.json` 的 `items[]`）；手工导入恒为空串，
+ * 验收时退回 `参考图名_YYMMDD_编号` 的兜底语义名。
+ * 
+ * 与 `purposes` 一样刻意**不加** `#[serde(default)]`：specta 会把带默认值的字段
+ * 导成可选（`itemName?`），于是前端每一处读它都要先判 undefined，而后端其实
+ * 永远都序列化它。
+ */
+itemName: string; sku: string; style: string }
 export type ImportResult = { groupIds: number[]; inserted: number; 
 /**
  * 是否新建了临时分组（ctx=generate）

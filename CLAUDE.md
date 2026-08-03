@@ -217,7 +217,8 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 受 `POSITION_QUERY_BUDGET`（8）限制 —— 成本是 O(min(n,8)) 个网络进程，`list_task` 翻页不走网络
 可忽略；早期注释里那句「O(1)、与在跑条数脱钩」**是错的**。预算之外的条目靠 `SWEEP_CURSOR`
 **轮转起点**才轮得到（固定从 id 最小那条开始的话，前 8 条一直排队就把第 9 条起永久饿死，
-而那些条目已经扣过费）。频率仍是成本旋钮（含 VIP 300s / 全非 VIP 600s，`SWEEP_VIP_SECS`）。
+而那些条目已经扣过费）。有本地候补时走 60s 补位档，并优先查询每条候补通道的前方任务；
+队列条数只决定“有没有候补”，100/200 条不会放大请求。无候补时含 VIP 300s / 全非 VIP 600s。
 `list_task` 缺两样东西各自决定一段代码：无 `videos[].path`（出片仍要单发 `query_result --download_dir`）· 无 `queue_info`（故幽灵判定拆宽判据 `phantom_suspect` / 权威回体
 `is_phantom`，**确认查询失败就这一轮不判**——问不出话 ≠ 判死）。未知 `gen_status` 判 Running
 而非 Failed（判死会把已扣费正在跑的任务标死）。计费证据一律 `COALESCE` 写回，**只增不抹**。

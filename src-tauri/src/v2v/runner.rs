@@ -63,17 +63,25 @@ pub const TICK: Duration = Duration::from_secs(6);
 /// 实测：非 VIP 排在第 4485 位、要等几小时；VIP 直接 `Generating`、1–3 分钟出片。
 /// 拿同一个节拍去问这两种任务，对谁都不合适。故：
 ///
-/// | 在跑集合 | 间隔 | 8 小时过夜的进程数 | 相对 30 秒常数 |
-/// |---|---|---|---|
-/// | 含 VIP | 5 分钟 | 96 | 少 10× |
-/// | 全非 VIP | 600 秒 = 10 分钟 | 48 | 少 20× |
-/// | 空 | 不扫 | 0 | —— |
+/// | 当前工作量 | 间隔 | 目的 |
+/// |---|---|---|
+/// | 有本地候补 | 60 秒 | 尽快发现前方任务结束并补位，保持远端通道不断粮 |
+/// | 无候补、含 VIP | 5 分钟 | 快单及时落盘 |
+/// | 无候补、全非 VIP | 10 分钟 | 长队低成本巡检 |
+/// | 全空 | 不起 CLI | 只保留本地心跳 |
 ///
 /// **代价写在这里，免得下次有人以为是 bug**：VIP 1–3 分钟就出片，而 5 分钟一档意味着
 /// 一条早已出片的 VIP 单最多可以在界面上「已提交」着躺 5 分钟。对策是
 /// [`SWEEP_AFTER_SUBMIT_SECS`] 的补扫，不是把档位调回去。
 pub const SWEEP_VIP_SECS: i64 = 300;
 pub const SWEEP_PLAIN_SECS: i64 = 600;
+
+/// 任一通道存在本地候补时的扫描间隔。
+///
+/// 这不是把 100/200 条本地队列逐条轮询：尚未提交的条目没有远端状态，扫描只问已经在
+/// 即梦手上的前方任务，且仍受 [`POSITION_QUERY_BUDGET`] 限制。因此本地候补从 10 条涨到
+/// 200 条不会放大网络请求；代价只与远端在跑数有关。
+pub const SWEEP_BACKLOG_SECS: i64 = 60;
 
 /// 每批提交后多久补扫一次（秒）。
 ///
@@ -82,12 +90,14 @@ pub const SWEEP_PLAIN_SECS: i64 = 600;
 /// 人刚点完提交，正盯着屏幕。
 pub const SWEEP_AFTER_SUBMIT_SECS: i64 = 60;
 
-/// 在跑集合该用哪个档位。
+/// 当前工作量该用哪个扫描档位。
 ///
-/// 「含 VIP 就走快档」而不是按多数派：慢档会让那几条快单白等，而快档对慢单的额外
-/// 代价只是每 8 小时多 48 个进程。判错方向的代价不对等，就往便宜的那边错。
-pub fn sweep_interval(any_vip: bool) -> i64 {
-    if any_vip {
+/// 本地有人候补时，远端空转的代价高于多问一次，故一分钟优先；没有候补才按在跑集合
+/// 分档。「含 VIP 就走快档」而不是按多数派：慢档会让那几条快单白等。
+pub fn sweep_interval(any_vip: bool, has_queued: bool) -> i64 {
+    if has_queued {
+        SWEEP_BACKLOG_SECS
+    } else if any_vip {
         SWEEP_VIP_SECS
     } else {
         SWEEP_PLAIN_SECS
@@ -253,7 +263,12 @@ impl ConcurrencyPolicy {
 /// 重新打开到 100，首个健康回执即清掉旧观测，首个新拒收再写入新的容量。
 #[derive(Debug, Clone, Copy)]
 struct ObservedCapacity {
-    limit: i64,
+    /// 拒收发生时，本地能证明已经被远端接下的同通道任务数。
+    ///
+    /// 这里必须保留 0，不能落库前就夹成 1：0 代表占位者不在本地账上（例如网页端任务，
+    /// 或远端刚出片但槽位尚未释放）。此时冷却期内应当是 0 个可用槽，而不是每个触发器
+    /// 都误以为还能发 1 条。对外展示的“通道上限”仍至少为 1。
+    accepted: i64,
     reprobe_at: i64,
 }
 
@@ -295,7 +310,7 @@ fn observed() -> std::sync::MutexGuard<'static, std::collections::HashMap<String
 fn effective_in_flight_at(channel: &str, configured: i64, now: i64) -> i64 {
     let cfg = configured.clamp(1, MAX_IN_FLIGHT_CAP);
     match observed().get(channel) {
-        Some(o) if now < o.reprobe_at => cfg.min(o.limit.max(1)),
+        Some(o) if now < o.reprobe_at => cfg.min(o.accepted.max(1)),
         None => cfg,
         Some(_) => cfg,
     }
@@ -315,15 +330,15 @@ pub fn effective_in_flight(channel: &str, configured: i64) -> i64 {
 /// 观测带一分钟冷却而不是永久封顶：容量从 10 变成 50 时无需重启应用；容量从 50
 /// 降到 3 时也会在首个拒收后立即收敛。下限保留 1，避免一次外部故障把通道永久判成 0。
 fn observe_concurrency_reject_at(channel: &str, accepted: i64, now: i64) -> i64 {
-    let v = accepted.max(1);
+    let accepted = accepted.max(0);
     observed().insert(
         channel.to_string(),
         ObservedCapacity {
-            limit: v,
+            accepted,
             reprobe_at: now + CONCURRENCY_REPROBE_SECS,
         },
     );
-    v
+    accepted.max(1)
 }
 
 pub fn observe_concurrency_reject(channel: &str, accepted: i64) -> i64 {
@@ -345,7 +360,28 @@ fn observe_concurrency_accept(channel: &str) {
 /// 某条通道最近一次明确拒收时的容量点（`None` = 这次运行还没撞过墙）。
 /// 冷却到期后发现窗口会重开到 100；此值仍保留到首份健康回执，供界面解释变化。
 pub fn observed_in_flight_limit(channel: &str) -> Option<i64> {
-    observed().get(channel).map(|v| v.limit.max(1))
+    observed().get(channel).map(|v| v.accepted.max(1))
+}
+
+/// 由数据库计数与容量观测计算可用槽。抽成纯边界是为了锁住“远端拒收、本地 accepted=0”
+/// 这个事故分支：它必须在冷却期返回 0，冷却到点才允许再发一条无计费探针。
+fn free_slots_from_counts_at(
+    channel: &str,
+    configured: i64,
+    used: i64,
+    unverified: i64,
+    now: i64,
+) -> i64 {
+    if unverified > 0 {
+        return 0;
+    }
+    let blocked_by_external_occupant = observed()
+        .get(channel)
+        .is_some_and(|o| now < o.reprobe_at && o.accepted == 0);
+    if blocked_by_external_occupant {
+        return 0;
+    }
+    (effective_in_flight_at(channel, configured, now) - used).max(0)
 }
 
 /// 这条通道现在还能往即梦发几条。
@@ -361,10 +397,13 @@ pub async fn free_slots(
     )?;
     // 任务 ID 不是接单证据（1310 拒收也会给 id）。在这条未决单被轮询确认前暂停扩容，
     // 否则 CLI 若临时漏回计费字段，下一轮 drain 又会把剩余整批继续推上去。
-    if unverified > 0 {
-        return Ok(0);
-    }
-    Ok((effective_in_flight(channel, configured) - used).max(0))
+    Ok(free_slots_from_counts_at(
+        channel,
+        configured,
+        used,
+        unverified,
+        now_unix(),
+    ))
 }
 
 /// 一条 clip 实际走哪条通道：它自己写死的型号优先，没写就落到设置里的默认型号。
@@ -1219,7 +1258,9 @@ pub const POSITION_QUERY_BUDGET: i64 = 8;
 /// 预算吃干净，第 9 条起**一次都轮不到** —— 而 `list_task` 给的是过期状态，
 /// 它们于是永远停在「已提交」。那些条目**已经扣过费**，片子却永远取不回来。
 ///
-/// 每轮把起点往后挪一个预算的量，任何一条最多等 ⌈n / 预算⌉ 轮必定轮到。
+/// 每轮按“扣掉通道队首后还剩几格预算”推进；没有候补时就是完整预算 8。不能永远固定
+/// 跳 8：若 7 条候补通道长期占掉 7 格、背景只剩 1 格，而背景数恰好与 8 有公因数，
+/// 固定跳 8 会只访问一个子集，重新制造永久饿死。
 static SWEEP_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// 这一轮从在跑列表的第几条开始问（并据此环绕遍历全表）。
@@ -1231,6 +1272,90 @@ pub fn sweep_start(cursor: i64, len: usize) -> usize {
         return 0;
     }
     cursor.rem_euclid(len as i64) as usize
+}
+
+/// 有候补通道里，哪一条最像“前方任务”：已经出队/尚未拿到位次的优先，其次远端位次
+/// 最小的，再按最早提交与 id 稳定排序。非 VIP 的远端队是 FIFO，最靠前者最可能先腾槽；
+/// 2.0Fast 上限为 1 时，它自然就是唯一那条。
+fn refill_front_key(clip: &repo::ClipRow) -> (u8, i64, i64, i64) {
+    let (queued, position) = clip
+        .queue_idx
+        .filter(|position| *position > 0)
+        .map_or((0, 0), |position| (1, position));
+    (
+        queued,
+        position,
+        clip.submitted_at.unwrap_or(i64::MAX),
+        clip.id,
+    )
+}
+
+/// 找出每条候补通道最该先问的那一个前方任务，按通道名稳定排序。
+fn refill_front_indices(
+    running: &[repo::ClipRow],
+    default_model: &str,
+    queued_channels: &std::collections::HashSet<String>,
+) -> Vec<usize> {
+    let mut fronts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (index, clip) in running.iter().enumerate() {
+        let channel = channel_of(clip.model_version.as_deref(), default_model);
+        if !queued_channels.contains(channel) {
+            continue;
+        }
+        fronts
+            .entry(channel.to_string())
+            .and_modify(|front| {
+                if refill_front_key(clip) < refill_front_key(&running[*front]) {
+                    *front = index;
+                }
+            })
+            .or_insert(index);
+    }
+
+    let mut channel_fronts: Vec<(String, usize)> = fronts.into_iter().collect();
+    channel_fronts.sort_by(|a, b| a.0.cmp(&b.0));
+    channel_fronts.into_iter().map(|(_, index)| index).collect()
+}
+
+/// 一轮逐条权威查询的遍历顺序。
+///
+/// 每条有本地候补的通道先放一个“前方任务”，再把剩余任务按全局游标轮转。当前模型清单
+/// 共 7 条通道，小于 8 条查询预算，因此即使同时给所有通道各放 200 条，本轮也能先覆盖
+/// 每条通道的队首；剩余预算仍轮转全表，避免非候补任务饿死。
+fn sweep_order(
+    running: &[repo::ClipRow],
+    default_model: &str,
+    queued_channels: &std::collections::HashSet<String>,
+    cursor: i64,
+) -> Vec<usize> {
+    if running.is_empty() {
+        return Vec::new();
+    }
+    if queued_channels.is_empty() {
+        let start = sweep_start(cursor, running.len());
+        return (0..running.len())
+            .cycle()
+            .skip(start)
+            .take(running.len())
+            .collect();
+    }
+
+    let mut channel_fronts = refill_front_indices(running, default_model, queued_channels);
+    if !channel_fronts.is_empty() {
+        let start = sweep_start(cursor, channel_fronts.len());
+        channel_fronts.rotate_left(start);
+    }
+    let mut order = channel_fronts;
+    let selected: std::collections::HashSet<usize> = order.iter().copied().collect();
+    let mut rest: Vec<usize> = (0..running.len())
+        .filter(|index| !selected.contains(index))
+        .collect();
+    if !rest.is_empty() {
+        let start = sweep_start(cursor, rest.len());
+        rest.rotate_left(start);
+        order.extend(rest);
+    }
+    order
 }
 
 /// 整表扫描一轮 —— **主路径**。
@@ -1263,6 +1388,17 @@ pub async fn sweep_once(
         return Ok(sum);
     }
     std::fs::create_dir_all(dirs.clips())?;
+
+    // 查询预算优先给“后面确实有人等”的通道。否则 200 条跨通道在跑时，固定的 8 条预算
+    // 可能让 2.0Fast 唯一那条排到二十多轮之后才轮到，远端即使早已空闲，本地候补也
+    // 无从得知。队列成员本身不查询，只拿它们的通道集合决定优先级。
+    let queued_channels: std::collections::HashSet<String> =
+        repo::channel_stats(pool, default_model)
+            .await?
+            .into_iter()
+            .filter(|channel| channel.queued > 0)
+            .map(|channel| channel.model_version)
+            .collect();
 
     // 翻页直到把我们关心的 submit_id 都找齐（或翻不动了）。上限 5 页 = 500 条，
     // 远超任何一次实际在跑的量；翻不完的余数走回落路径，不会被漏掉。
@@ -1305,14 +1441,19 @@ pub async fn sweep_once(
     }
 
     let mut position_budget = POSITION_QUERY_BUDGET;
-    // 环绕遍历，起点每轮往后挪一个预算的量：预算只够问前几条，而固定从 id 最小的那条
-    // 开始会把后面的永久饿死（见 [`SWEEP_CURSOR`]）。
-    let total = running.len();
-    let start = sweep_start(
-        SWEEP_CURSOR.fetch_add(POSITION_QUERY_BUDGET, std::sync::atomic::Ordering::Relaxed),
-        total,
-    );
-    for clip in running.iter().cycle().skip(start).take(total) {
+    // 环绕遍历，起点每轮往后挪一个预算的量：先覆盖有候补通道的前方任务，其余仍按
+    // 游标轮转。固定从 id 最小的那条开始会把后面的永久饿死（见 [`SWEEP_CURSOR`]）。
+    let refill_front_count = refill_front_indices(&running, default_model, &queued_channels)
+        .len()
+        .min(POSITION_QUERY_BUDGET as usize);
+    let background_stride = (POSITION_QUERY_BUDGET - refill_front_count as i64).max(1);
+    let cursor = SWEEP_CURSOR.fetch_add(background_stride, std::sync::atomic::Ordering::Relaxed);
+    let order = sweep_order(&running, default_model, &queued_channels, cursor);
+    // 超过查询预算的第 9 条候补通道也只能轮到下一轮，不能让“回落路径”绕过预算。
+    let refill_fronts: std::collections::HashSet<usize> =
+        order.iter().take(refill_front_count).copied().collect();
+    for index in order {
+        let clip = &running[index];
         let Some(submit_id) = clip.submit_id.clone() else {
             continue;
         };
@@ -1387,11 +1528,22 @@ pub async fn sweep_once(
                 .await?;
             }
             None => {
-                // 回落：这一条扫描里没有。按退避决定要不要现在单查。
-                if !is_due(clip.submitted_at, clip.polled_at, now) {
+                // 回落：这一条扫描里没有。普通任务按退避；有候补通道的“前方任务”每个
+                // 补位档都权威查询一次，否则它恰好没出现在 list_task 时，60 秒档会被旧的
+                // 5/10 分钟逐条退避重新拖慢。
+                let refill_front = refill_fronts.contains(&index);
+                if !refill_front && !is_due(clip.submitted_at, clip.polled_at, now) {
                     sum.still_running += 1;
                     sum.skipped += 1;
                     continue;
+                }
+                if refill_front {
+                    if position_budget <= 0 {
+                        sum.still_running += 1;
+                        sum.skipped += 1;
+                        continue;
+                    }
+                    position_budget -= 1;
                 }
                 query_and_settle(
                     pool,
@@ -1845,6 +1997,10 @@ pub fn spawn(
     use crate::v2v::events::{V2vProgress, V2vTick};
     use tauri_specta::Event;
 
+    // 同步重置后再派生后台任务，避免恢复 SQL 的 await 窗口里若用户先手动刷新，后台随后
+    // 又把那次刷新时刻抹成 0，造成两轮重叠查询。
+    LAST_SWEEP.store(0, std::sync::atomic::Ordering::Relaxed);
+    SWEEP_EVERY.store(SWEEP_PLAIN_SECS, std::sync::atomic::Ordering::Relaxed);
     tauri::async_runtime::spawn(async move {
         // 启动恢复：提交过程中被杀的（run 但无 submit_id）远端结果不明，隔离而不重提。
         // 有 submit_id 的一条都不动——额度可能已扣，重提等于花两份钱买同一条视频。
@@ -1864,13 +2020,18 @@ pub fn spawn(
         if let Err(e) = heal_concurrency_rejects(&pool, &log).await {
             log.error("submit", None, format!("并发拒收存量修复失败：{e}"), None);
         }
+        // `interval` 的第一拍立即到达：重新打开软件时不用先等 6 秒，更不能继承同进程里
+        // 旧循环的扫描时钟。候补与带 submit_id 的远端任务都在数据库里，首拍会先核验
+        // 未决任务，再按真实空位继续补；没有 submit_id 的中断窗口已在上面隔离，绝不重提。
+        let mut ticker = tokio::time::interval(TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // 「上一轮扫描的时刻」用全局 `LAST_SWEEP` 而不是循环局部变量：提交成功后会调
         // `request_sweep_soon` 把它往前挪来请求补扫，局部变量收不到那个请求。
         // 上一次「队列告急」通知的时刻。放在循环局部而不是库里：重启应用后重发一次
         // 是可以接受的（那时人本来就在看界面），而每 30 秒弹一次通知不可接受。
         let mut last_refill = super::autofill::Memo::default();
         loop {
-            tokio::time::sleep(TICK).await;
+            ticker.tick().await;
             // 心跳与日志是两件事：日志只在有事发生时增长，而「轮询器还活着吗」
             // 恰恰要在什么都没发生时也答得出 —— 静默的界面和卡死的轮询器长得一样。
             let mut tick = V2vTick {
@@ -1912,8 +2073,11 @@ pub fn spawn(
             // 档位由**在跑集合里有没有 VIP** 决定，每轮重算：VIP 1–3 分钟出片，
             // 非 VIP 排队几小时，拿同一个节拍问这两种任务对谁都不合适。
             // 每 6 秒一次的 SELECT 是内存级开销，与起一个进程不在一个量级。
-            let any_vip = repo::running_models(&pool)
-                .await
+            let (running_models, queued_count) = tokio::join!(
+                repo::running_models(&pool),
+                repo::count_submit_queued(&pool)
+            );
+            let any_vip = running_models
                 .map(|ms| {
                     ms.iter().any(|m| {
                         dreamina::is_vip(
@@ -1924,10 +2088,15 @@ pub fn spawn(
                     })
                 })
                 .unwrap_or(false);
-            let every = sweep_interval(any_vip);
+            // 有候补时走 60 秒补位档。队列条数只决定“有没有”，100/200 条与 1 条产生
+            // 完全相同的扫描频率；数据库读失败则保守走快档，避免一次瞬时错误把长队静默
+            // 降回 10 分钟。
+            let has_queued = queued_count.map_or(true, |count| count > 0);
+            let every = sweep_interval(any_vip, has_queued);
             SWEEP_EVERY.store(every, std::sync::atomic::Ordering::Relaxed);
 
-            // 心跳每 6 秒发一次（内存读），真正去问即梦是 5/10 分钟一次（一个进程）。
+            // 心跳每 6 秒发一次（内存读）；有候补时一分钟扫一次，否则按 VIP 5 分钟 /
+            // 普通 10 分钟。真正的逐条网络查询仍由预算封顶。
             let last_sweep = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
             if last_sweep == 0 || tick.at - last_sweep >= every {
                 match sweep_once(
@@ -2451,6 +2620,72 @@ fi
         assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 2);
     }
 
+    /// 7×24 队列不能靠进程内存续命：200 条候补与已付费远端单都要在关闭连接、重新打开
+    /// 数据库之后原样恢复。启动保护只隔离“run 但没有 submit_id”的扣费未决窗口；有 id
+    /// 的远端单继续轮询，ready + submit_queued_at 则继续按原 FIFO 候补。
+    #[tokio::test]
+    async fn two_hundred_queued_tasks_and_the_paid_front_survive_restart() {
+        let (pool, dir) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 201).await;
+        let channel = "test-restart-fast-channel";
+        repo::set_params(&pool, &ids, Some(channel), Some(4), Some("720p"), 200)
+            .await
+            .unwrap();
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::healthy("paid-before-restart", 8),
+            300,
+        )
+        .await
+        .unwrap();
+        repo::mark_submit_queued(&pool, &ids[1..], 301)
+            .await
+            .unwrap();
+        assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 200);
+
+        pool.close().await;
+        let reopened = crate::db::connect(&dir.path().join("test.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo::recover_orphan_submits(&reopened, 400).await.unwrap(),
+            0,
+            "有 submit_id 的已付费远端单不得在重启时被隔离或重提"
+        );
+        let front = repo::get(&reopened, ids[0]).await.unwrap().unwrap();
+        assert_eq!(front.stage, "run");
+        assert_eq!(front.submit_id.as_deref(), Some("paid-before-restart"));
+        assert_eq!(repo::count_submit_queued(&reopened).await.unwrap(), 200);
+        assert_eq!(
+            repo::pick_submit_queued_on(&reopened, channel, channel, 5)
+                .await
+                .unwrap(),
+            ids[1..6],
+            "重启不能打乱 200 条本地队列的 FIFO"
+        );
+        assert_eq!(free_slots(&reopened, channel, channel, 1).await.unwrap(), 0);
+
+        // 模拟首单在重启后的权威查询中进入终态：数据库一释放它，原队首立刻成为下一候选。
+        repo::mark_failed(
+            &reopened,
+            ids[0],
+            Some("paid-before-restart"),
+            "provider",
+            "test terminal state",
+            500,
+        )
+        .await
+        .unwrap();
+        assert_eq!(free_slots(&reopened, channel, channel, 1).await.unwrap(), 1);
+        assert_eq!(
+            repo::pick_submit_queued_on(&reopened, channel, channel, 1)
+                .await
+                .unwrap(),
+            vec![ids[1]]
+        );
+    }
+
     #[tokio::test]
     async fn an_unverified_submit_pauses_only_its_channel_until_evidence_arrives() {
         let (pool, _d) = crate::db::test_support::test_pool().await;
@@ -2749,6 +2984,16 @@ fi
         assert_eq!(observe_concurrency_reject_at(a, 3, now + 100), 3);
         assert_eq!(effective_in_flight_at(a, 100, now + 101), 3);
         assert_eq!(observe_concurrency_reject_at(a, 0, now + 200), 1);
+        assert_eq!(
+            free_slots_from_counts_at(a, 100, 0, 0, now + 201),
+            0,
+            "本地一条 accepted 都没有时，拒收冷却必须真的挡住紧随其后的重复探测"
+        );
+        assert_eq!(
+            free_slots_from_counts_at(a, 100, 0, 0, now + 200 + CONCURRENCY_REPROBE_SECS,),
+            100,
+            "冷却到点后重新开放发现窗口，长跑无需人工唤醒"
+        );
     }
 
     #[tokio::test]
@@ -2799,6 +3044,94 @@ fi
         // 游标一直增长也不会跑出界（`rem_euclid` 对负数同样安全，防的是将来溢出回绕）。
         assert!(sweep_start(i64::MAX, 5) < 5);
         assert!(sweep_start(-3, 5) < 5);
+    }
+
+    /// 200 条在跑并不该把“后面有人等”的通道队首淹没在全局游标里。
+    ///
+    /// 当前支持 7 个模型通道，小于单轮 8 条权威查询预算；每条有候补的通道必须先拿到
+    /// 一个探针位。否则 Fast 唯一在跑那条若排在第 200 个，仍要 25 分钟才轮到，60 秒
+    /// 补位档只是纸面数字。
+    #[test]
+    fn backlog_fronts_are_probed_before_a_two_hundred_task_background() {
+        let default_model = "seedance2.0fast";
+        let channels = [
+            "seedance1.0fast",
+            "seedance1.5pro",
+            "seedance2.0",
+            "seedance2.0fast",
+            "seedance2.0_vip",
+            "seedance2.0fast_vip",
+            "seedance2.0mini",
+        ];
+        let mut running = Vec::new();
+        for id in 1..=200 {
+            let mut row = clip(Some("background-channel"), None, None);
+            row.id = id;
+            row.submitted_at = Some(id);
+            row.queue_idx = Some(10_000 + id);
+            running.push(row);
+        }
+
+        let mut expected = std::collections::HashSet::new();
+        for (offset, channel) in channels.iter().enumerate() {
+            let tail_id = 1_000 + offset as i64 * 2;
+            let mut tail = clip(Some(channel), None, None);
+            tail.id = tail_id;
+            tail.submitted_at = Some(100);
+            tail.queue_idx = Some(20);
+            running.push(tail);
+
+            let front_id = tail_id + 1;
+            let mut front = clip(Some(channel), None, None);
+            front.id = front_id;
+            front.submitted_at = Some(101);
+            front.queue_idx = None; // 已出远端队列或尚未拿到位次，最值得先问
+            running.push(front);
+            expected.insert(front_id);
+        }
+        let queued_channels = channels
+            .iter()
+            .map(|channel| channel.to_string())
+            .collect::<std::collections::HashSet<_>>();
+
+        let order = sweep_order(&running, default_model, &queued_channels, 0);
+        let first = order
+            .iter()
+            .take(channels.len())
+            .map(|index| running[*index].id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(first, expected, "每条候补通道的前方任务都必须进入本轮预算");
+        assert_eq!(order.len(), running.len());
+        assert_eq!(
+            order
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            running.len(),
+            "优先排序只能换顺序，不能漏查或重复结算任务"
+        );
+
+        // 7 个通道队首长期占掉 7 格后，背景每轮只剩 1 格。游标必须随这 1 格逐项推进，
+        // 而不是仍跳 8；用 207 个非队首任务特意覆盖与 8 不互质的边界。
+        let background = running.len() - expected.len();
+        let mut seen_background = std::collections::HashSet::new();
+        let mut cursor = 0;
+        for _ in 0..background {
+            let round = sweep_order(&running, default_model, &queued_channels, cursor);
+            for index in round.iter().take(POSITION_QUERY_BUDGET as usize) {
+                let id = running[*index].id;
+                if !expected.contains(&id) {
+                    seen_background.insert(id);
+                }
+            }
+            cursor += (POSITION_QUERY_BUDGET - expected.len() as i64).max(1);
+        }
+        assert_eq!(
+            seen_background.len(),
+            background,
+            "200+ 条背景任务也必须在有限轮次内全部拿到一次权威查询"
+        );
     }
 
     // 通道归属：条目自己写死的型号优先，没写就落到设置里的默认型号。
@@ -3104,7 +3437,7 @@ fi
             }
             n
         };
-        for every in [SWEEP_VIP_SECS, SWEEP_PLAIN_SECS] {
+        for every in [SWEEP_BACKLOG_SECS, SWEEP_VIP_SECS, SWEEP_PLAIN_SECS] {
             let sweeps = hours * 3600 / every;
             assert!(
                 sweeps < per_clip_calls(19),
@@ -3117,22 +3450,29 @@ fi
         }
     }
 
-    /// 分档：有 VIP 走快档，全非 VIP 走慢档。
+    /// 分档：有候补走一分钟补位档；无候补时有 VIP 走快档、全非 VIP 走慢档。
     ///
     /// 依据是实测的两种等待时长：VIP 直接 Generating、1–3 分钟出片；非 VIP 排在
     /// 第 4485 位、要等几小时。「含 VIP 就走快档」而不是按多数派 —— 慢档会让那几条
     /// 快单白等，而快档对慢单的额外代价只是每 8 小时多几十个进程，两边不对等。
     #[test]
     fn sweep_tier_follows_the_channel() {
-        assert_eq!(sweep_interval(true), SWEEP_VIP_SECS);
-        assert_eq!(sweep_interval(false), SWEEP_PLAIN_SECS);
+        assert_eq!(sweep_interval(true, false), SWEEP_VIP_SECS);
+        assert_eq!(sweep_interval(false, false), SWEEP_PLAIN_SECS);
+        assert_eq!(sweep_interval(true, true), SWEEP_BACKLOG_SECS);
+        assert_eq!(sweep_interval(false, true), SWEEP_BACKLOG_SECS);
         assert!(
-            sweep_interval(true) < sweep_interval(false),
+            sweep_interval(true, false) < sweep_interval(false, false),
             "VIP 档必须更密"
+        );
+        assert!(
+            sweep_interval(false, true) < sweep_interval(true, false),
+            "有候补时要比单纯收片更密，才能维持远端槽位利用率"
         );
 
         // 降幅要对得上写在文档里的那张表（8 小时过夜）。
         let per_night = |every: i64| 8 * 3600 / every;
+        assert_eq!(per_night(SWEEP_BACKLOG_SECS), 480);
         assert_eq!(per_night(SWEEP_VIP_SECS), 96);
         assert_eq!(per_night(SWEEP_PLAIN_SECS), 48);
     }
@@ -3145,8 +3485,8 @@ fi
     fn per_clip_fallback_is_never_denser_than_the_sweep() {
         for age in [0, 60, 599, 600, 3600, 6 * 3600, 24 * 3600] {
             assert!(
-                poll_interval_for(age) >= SWEEP_VIP_SECS,
-                "age={age} 的回落间隔比最密的扫描档还密"
+                poll_interval_for(age) >= SWEEP_BACKLOG_SECS,
+                "age={age} 的普通回落间隔比补位扫描档还密"
             );
         }
     }

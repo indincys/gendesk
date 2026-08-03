@@ -71,8 +71,8 @@ export function DeliverySection() {
         <span className="chip">READY.txt</span>。
         <br />
         <b>交付即交出所有权</b>：对方看见 READY 就会把整个目录搬走，此后作品库里那张图会
-        显示「源文件缺失」——那是正常的。需要时可在作品库点「重新导出」，
-        它从资产区快照重出并<b>复用原来的 UID</b>。
+        显示「源文件缺失」——那是正常的。需要时可在作品库点「重新导出」， 它从资产区快照重出并
+        <b>复用原来的 UID</b>。
       </div>
     </section>
   );

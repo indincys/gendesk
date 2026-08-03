@@ -8,10 +8,14 @@ GenDesk：内部图片生产工具。Tauri 2 桌面应用，单实例、纯本�
 前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），二者只经
 tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon。
 
-四条流水线：**生图**（参考图 + 提示词 → 批量生成 → 人工验收 → 输出归档）·
+三条流水线：**生图**（工单 → 批量生成 → 人工验收 → **按确定的名字交付**）·
 **图生视频 v2v**（验收图 → skill 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
-**发布与资产管理**（素材包 → 日内容套装 → 任务单 xlsx → 执行器回执闭环）·
 **工单收件 intake**（外部 skill 投单 → 自动导入 → 建批开跑）。
+
+**生成侧已收敛为纯生成工具**：SKU 归属、素材库、任务单全部移交 `自动发布`
+（`/Users/indincys/Documents/自动发布`）。两者之间的契约是**交付目录 + manifest**，
+不是共享数据库。`publish/` 子系统（素材包/日内容套装/任务单/回执）**代码保留、
+不再使用、不再投入**，表也不删；相关词条留在下方「发布」段仅供读懂存量代码。
 
 ## 常用命令
 
@@ -54,9 +58,10 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 | `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                          |
 | `engine/`    | 任务引擎：`dispatcher`(单循环 + per-Key Semaphore) · `status`(7 态机) · `classify`(错误六类) · `progress`(伪进度) · `recovery` · `events`(EventSink 抽象，故引擎可脱离 Tauri 测试)。 |
 | `provider/`  | 生图 Provider 抽象；唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`(元数据/C2PA 剥离)。                                                                      |
-| `publish/`   | 发布与资产管理（最大子系统）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                            |
+| `publish/`   | 发布与资产管理（**已冻结，不再投入**；`paths` 仍被交付/图库复用）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                            |
 | `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `handoff`(交接目录往返) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。                                  |
-| `intake/`    | 工单收件：`mod`(结构 + 校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`。                                                                                       |
+| `intake/`    | 工单收件 v2：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`。                                                                                       |
+| `delivery.rs`| 交付：批目录命名 · SKU 子目录键 · `manifest.jsonl` · 最后写 READY。与 `自动发布` 的唯一契约。                                                     |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
 | `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                 |
 
@@ -75,12 +80,17 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 ### 一条生图请求的完整链路（改生成相关代码前先读懂这条）
 
 ```
-GeneratePage 选组/挂靠 → commands::batches::create_batch
-  → engine::create_batch（同事务：展开组合 → tasks + batch_refs + 归档本批组与图）
+skill 写工单.json → intake::plan（全量校验）→ ingest::apply
+  → commit_preview（提示词落库，带 item_name/sku/style/purpose）+ 参考图入库
+  → engine::create_batch_from_specs（同事务：已配好对的任务 + batch_refs + 归档）
   → Scheduler 循环取 q 态 → per-Key Semaphore 限并发 → provider.generate(multipart)
-  → 落盘 outputs/ + 缩略图 → 状态迁移 rev（待验收）
+  → 落盘 results/ + 缩略图 → 状态迁移 rev（待验收）
   → EventSink 推 task://status-changed · task://progress · batch://summary（250ms 节流）
   → stores/engine 镜像 → 任务页/导航徽章
+  → accept_tasks：发 UID → 整批拷进交付目录 → 写作品快照 → manifest → 最后 READY
+
+生成页手动建批走 `commands::batches::create_batch` → `engine::create_batch`
+（挂靠模型：参考图 × 挂靠组的全部提示词），与上面那条共用同一段建批尾巴。
 ```
 
 ## 架构铁律（均有机器检查）
@@ -119,15 +129,25 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 
 望文生义会出错的那些。
 
-**生图** — **挂靠**：每张参考图指定一个提示词组，任务数 = Σ(参考图 × 其挂靠组提示词数)，
-非笛卡尔积 · **归档(archived\_at)**：只决定生成页选择器是否默认列出，**与删除无关** ·
+**生图** — **条目(item)**：工单 v2 的交付单位，**一个条目 = 一条提示词 = 一个任务 = 一张图
+= 一个文件名主干**；`items[].name` 即身份 · **挂靠**：生成页那条路径上「每张参考图指定一个
+提示词组」，任务数 = Σ(参考图 × 其挂靠组提示词数)，非笛卡尔积；工单侧则是**条目级**配对
+（`engine::TaskSpec`），一条词配一张图，没有可展开的乘法 · **归档(archived\_at)**：只决定
+生成页选择器是否默认列出，**与删除无关** ·
 **批次退休**：任务全落 pass/rej 且无本批结果滞留废纸篓时物理删批次与本批提示词（提示词是
-消耗品），故下游必须先存快照（`accepted_works.prompt_code`/`group_name`），编号**不回收** ·
+消耗品），故下游必须先存快照（`accepted_works` 的 `prompt_code`/`group_name`/`item_name`/
+`uid`/`sku_code`/`style`/`purpose`），编号**不回收** ·
 **临时分组(is\_temp)**：导入 txt 产生，任一提示词首次验收通过则整组转正式 ·
 **临时上传(ephemeral)**：生成页上传的参考图，仍是 ref\_images 行但图库/选择器/去重基准三处
 都不含它（`list_ref_images(include_ephemeral)` 单点控制）· **图库分组(ref\_groups)**：与提示词
-组无关，历史列 `ref_images.group_id` 已废弃不读不写 · **用途(purpose)**：标在**提示词组**上
-（批次会混组），是筛选默认值**不是门禁** · **号池**：编号递增发放回收优先，与业务写同事务 ·
+组无关，历史列 `ref_images.group_id` 已废弃不读不写 · **用途(purpose)**：工单里**整单级**
+声明，跟着提示词落到 `prompts.purpose` → `accepted_works.purpose`（0045 起不再走
+`tag_bindings`），是筛选默认值**不是门禁**；库内写中文标签、跨程序写短码 `i2v`，互转只在
+`purpose::code_of` 与 `intake::normalize_purpose` 这一对里 · **号池**：编号递增发放回收优先，
+与业务写同事务 · **UID**：验收通过那一刻发的 4 位 `[a-z0-9]`，全局唯一、**不回收**，
+台账 `issued_names` 只增不删且不设外键（作品删了、文件早交付出去了，台账仍要答得出
+「这个号发过」）；交付文件名 = `{语义名}-{uid}.{EXT}`，语义名由 skill 给、GenDesk **一个字符
+都不改** ·
 **废纸篓**：暂存不物理删，**可还原回原位**（作品是唯一「删除即真删行」的实体，故
 `trash_items.payload_json` 存整行快照，还原连 id 一起写回）· **伪进度**：生图 API 无真实进度。
 
@@ -157,12 +177,16 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 **五平台**：`douyin/xhs/kuaishou/shipinhao/bilibili`，映射单点在 `publish/platform.rs` ·
 时刻一律**按本地时区**解析（`and_utc()` 会把北京时间当 UTC）。
 
-**intake** — **工单**：一个目录 = 一次投单，`提示词.txt` + `images/` + **最后写的 READY.txt**
-（没有它一律不碰，skill 可能还在写）· 方向与 v2v **相反**（skill 出工单、GenDesk 收），
-两者共用 `publish::inbox::watcher::coalesce` · **组头键**（`参考图:`/`比例:`/`尺寸:`/`格式:`/
-`抽卡:`/`用途:`）**只在该组第一条正文之前生效**，故挂靠是**位置绑定**，改组名不会让它断掉；
-正文是长叙事，「比例：3:4 的竖构图」不该被当成元信息吃掉 · **挂靠不猜**：多组工单每组必须
-写 `参考图:` · **一份工单 → 多个批次**：`params_json`/`draws` 是批次级的，按 (参数, 抽卡) 分桶 ·
+**intake** — **工单(v2)**：一个目录 = 一次投单，`工单.json` + `prompts/{name}.txt` +
+`refs/` + **最后写的 READY.txt**（没有它一律不碰，skill 可能还在写）· 方向与 v2v **相反**
+（skill 出工单、GenDesk 收），两者共用 `publish::inbox::watcher::coalesce` ·
+**正文里零元信息**：旧格式的组头键只在该组第一条正文之前生效，而正文是长叙事，
+「比例：3:4 的竖构图」这种开头会被当元信息吃掉且不报错——新格式把元信息全放进 JSON，
+这个风险从结构上消失 · **挂靠不猜**：`items[].ref` **每条必填**，且必须真的存在 ·
+**一一对应**：`prompts/` 与 `items` 多一个少一个都拒单（少跑一张图是不报错的失败）·
+**version 必须为 1**：不认识的版本按 1 读会得到「看起来成功了的错误结果」，而这条链路每错
+一次都花钱 · **一份工单 = 一个 run**：参数下沉到 `tasks.params_json`（0045），不再决定切分；
+读取单点 `dispatcher::task_params`，任务级优先、批次级兜底 ·
 **job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账在**动手之前** ·
 **阈值(默认 100 张)**：超了转 `hold` **什么都不导入** + 弹应用内可视化确认卡 ·
 **归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
@@ -170,7 +194,17 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 `commands::prompts::{build_preview_from_parsed, commit_preview}`，参考图走
 `commands::refs::ingest_one`，与手动导入同一套前缀分配/用途判定/缩略图口径 ·
 **失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
-会让人点重试拿到第二份提示词）· skill 装在用户级 `~/.claude/skills/`。
+会让人点重试拿到第二份提示词）· skill 装在用户级 `~/.claude/skills/`（仓库内
+`.claude/skills/gendesk-intake/` 是源，改完要同步过去）。
+
+**交付** — 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.EXT`
++ `manifest.jsonl` + **最后写的 READY.txt**（先写 READY 等于让对方搬走一个没有清单的目录）·
+**下游读 manifest，不解析文件名**：从中文名反推 SKU 是静默失败（分错目录不报错）·
+子目录键来自作品快照列 `style`+`sku_code`，**缺一就整个退回「未分类」** ·
+目录名用**本地时刻**（`files::stamp_yymmdd_hhmm`）· **交付即交出所有权**：对方搬走后
+`image_path` 允许悬空，UI 走 `file_exists` 懒检测，救回路径是 `reexport_work`
+（从 `results/{task_id}` 快照重出，**复用原 uid、不重新发号**）· 收尾失败**不回滚验收** ·
+旧落点 `outputs/{批次}/{分组}/` 已停写，`open_outputs_dir` 只是给存量留的入口。
 
 ## 高代价陷阱（改代码前必读）
 
@@ -242,7 +276,8 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 前 149 条作品记录回滚掉而文件已在 outputs/ 里；现在的顺序（先整批拷完、任一张失败就一行库都
 不写）反而更接近原子。
 
-**迁移** — `src-tauri/migrations/` **forward-only，发布后不可改**（`db/repo/mod.rs` 里「重放
+**迁移** — 本次收敛新增 0044（命名与发号台账）与 0045（参数下沉 + 用途载体）。
+`src-tauri/migrations/` **forward-only，发布后不可改**（`db/repo/mod.rs` 里「重放
 0019 搬运语句」那条测试正建立在这个前提上）。废弃列一律**保留不读不写**。默认留在事务内，
 只有必须 `PRAGMA foreign_keys=OFF` 的表重建才用 `-- no-transaction`。改动建议先在**真实库副本**
 上跑 `foreign_key_check` + `integrity_check`。`tag_bindings` 是无外键的多态表，删分组时必须手动

@@ -5,6 +5,7 @@
 
 mod commands;
 mod db;
+mod delivery;
 mod engine;
 mod error;
 mod files;
@@ -119,6 +120,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::intake::confirm_intake_job,
             commands::intake::open_intake_dir,
             commands::intake::pick_intake_root,
+            commands::delivery::get_delivery_settings,
+            commands::delivery::update_delivery_settings,
+            commands::delivery::pick_delivery_root,
+            commands::delivery::open_delivery_dir,
             // v2v 域（视频生成）
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,

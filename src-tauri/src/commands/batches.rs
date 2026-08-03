@@ -111,9 +111,11 @@ pub async fn estimate_task_seconds(state: State<'_, AppState>) -> AppResult<Opti
     Ok(avg.map(|ms| ms / 1000.0))
 }
 
-/// 在系统文件管理器打开输出根目录 `outputs/`（验收通过的图按 `{批次}/{分组}/` 落在里面）。
+/// 在系统文件管理器打开输出根目录 `outputs/`。
 ///
-/// 取代了原来那个「打开本批输出目录」——批次已经不是可点的对象，而人还是要能拿到文件。
+/// **这里只剩历史文件了**：验收通过的图现在交付到交付根（`commands::delivery`），
+/// `outputs/{批次}/{分组}/` 已停止写入（W6 D4）。留着这个入口是因为存量还在里面，
+/// 而删掉它等于让那些图从界面上消失。
 #[tauri::command]
 #[specta::specta]
 pub async fn open_outputs_dir(state: State<'_, AppState>, app: tauri::AppHandle) -> AppResult<()> {

@@ -230,6 +230,24 @@ pub fn date_yymmdd(unix_secs: i64) -> String {
     format!("{:02}{:02}{:02}", year.rem_euclid(100), m, d)
 }
 
+/// Unix 秒 → `YYMMDD-HHMM`（**本地时区**）。交付批目录名用。
+///
+/// 与 `date_yymmdd` 那个 UTC 近似不同，这里必须是本地时刻：交付目录名是人在
+/// Finder 里对着找的东西，晚上八点交付的一批显示成中午十二点会直接找错
+/// （`and_utc()` 把北京时间当 UTC 这条坑，CLAUDE.md 里已经记过一次）。
+pub fn stamp_yymmdd_hhmm(unix_secs: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(unix_secs, 0) {
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
+            dt.format("%y%m%d-%H%M").to_string()
+        }
+        // 夏令时空洞：退回 UTC，宁可差一格也不要给不出名字。
+        chrono::LocalResult::None => chrono::DateTime::from_timestamp(unix_secs, 0)
+            .map(|d| d.format("%y%m%d-%H%M").to_string())
+            .unwrap_or_else(|| format!("{unix_secs}")),
+    }
+}
+
 /// 清洗文件名：替换非法字符与控制符为下划线；保留中文与常规字符。
 pub fn sanitize_filename(name: &str) -> String {
     let mut out: String = name

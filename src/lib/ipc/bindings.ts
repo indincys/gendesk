@@ -615,9 +615,19 @@ async listPendingReview(batchId: number | null) : Promise<Result<ReviewItemView[
  * 
  * **不把整批塞进一个事务**（这一点与「整批改单事务」的直觉相反，理由是文件）：
  * 拷贝无法回滚。真做成一个事务，第 150 张失败就会把前 149 条作品记录回滚掉，
- * 而它们的输出文件已经躺在 outputs/ 里了 —— 变成一堆没有主人的图。现在的顺序
+ * 而它们的输出文件已经躺在交付目录里了 —— 变成一堆没有主人的图。现在的顺序
  * （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
  * 要么全部拷成功再记账，要么什么账都没记。
+ * 
+ * ## 交付即交出所有权（D3）
+ * 
+ * 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.{EXT}`，
+ * 整批拷完 → 写 `manifest.jsonl` → **最后**写 `READY.txt`。对方（`自动发布`）看见
+ * READY 就会把整个目录搬走，此后 `accepted_works.image_path` 允许悬空 ——
+ * UI 走已有的 `file_exists` 懒检测，救回路径是 `reexport_work`（从 `results/{task_id}`
+ * 快照重出，**复用原 uid**）。
+ * 
+ * 旧落点 `outputs/{批次}/{分组}/` 已停止写入。
  */
 async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
     try {
@@ -842,6 +852,41 @@ async openIntakeDir() : Promise<Result<null, AppError>> {
 async pickIntakeRoot() : Promise<Result<string | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pick_intake_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getDeliverySettings() : Promise<Result<DeliverySettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_delivery_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateDeliverySettings(settings: DeliverySettings) : Promise<Result<DeliverySettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_delivery_settings", { settings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pickDeliveryRoot() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_delivery_root") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在系统文件管理器打开交付根。
+ */
+async openDeliveryDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_delivery_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2026,6 +2071,10 @@ export type AcceptResult = { accepted: number;
  */
 promotedGroups: string[]; 
 /**
+ * 本次交付批目录的绝对路径。空串 = 没有任何图被交付。
+ */
+deliveryDir: string; 
+/**
  * 本次自动进入视频流水线「待改写」的条数（提示词组用途 = 图生视频）。
  * 
  * 交接从「你要记得回作品库找出来再点导出」变成「它自己就在那了」——
@@ -2460,6 +2509,14 @@ export type CreditTrendPoint = { bucket: string; spent: number }
  * 数据目录信息（E19：暴露落盘位置）。
  */
 export type DataDirInfo = { root: string; dbPath: string }
+/**
+ * 交付设置（`settings` 表 key='delivery' 单行 JSON）。
+ */
+export type DeliverySettings = { 
+/**
+ * 交付根目录。`自动发布` 那一侧监听它。
+ */
+root?: string }
 /**
  * 当前**实际生效**的生成参数（参数面板的唯一数据源）。
  * 

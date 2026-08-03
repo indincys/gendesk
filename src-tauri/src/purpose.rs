@@ -34,6 +34,22 @@ pub fn all() -> Vec<PurposeView> {
     }]
 }
 
+/// 受控用途 → **跨程序短码**（`图生视频` → `i2v`）。未知/空一律回空串。
+///
+/// 两套写法是有意的，且**只在这一处互转**：
+/// - 库内与界面用中文标签（人读的是它）；
+/// - 交付 manifest 与工单 JSON 用 ASCII 短码（那是给另一个程序读的键，
+///   中文在跨程序的 JSON / 路径 / 日志里迟早遇到编码问题）。
+///
+/// 反向由 `intake::normalize_purpose` 负责，两者是一对。
+pub fn code_of(tag: &str) -> &'static str {
+    if tag.trim() == PURPOSE_I2V {
+        "i2v"
+    } else {
+        ""
+    }
+}
+
 /// 是否为受控用途标签（区别于导入 txt 里自由写的普通标签）。
 pub fn is_purpose(tag: &str) -> bool {
     all().iter().any(|p| p.tag == tag)

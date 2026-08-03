@@ -26,6 +26,8 @@ struct AcceptPlan {
     out_path: PathBuf,
     /// publish 图片素材库的落点（该子系统已停止投入，保留不再演进）。
     asset: Option<(PathBuf, String, i64)>,
+    /// 交付批内的相对路径（写进 manifest 的那个 `file`）。
+    rel_in_batch: String,
     /// 语义名（不含 UID）。
     item_name: String,
     /// 本次发放的 UID。
@@ -74,6 +76,8 @@ pub struct AcceptResult {
     pub accepted: i64,
     /// 本次因验收通过而转正的临时分组名（前端 toast）
     pub promoted_groups: Vec<String>,
+    /// 本次交付批目录的绝对路径。空串 = 没有任何图被交付。
+    pub delivery_dir: String,
     /// 本次自动进入视频流水线「待改写」的条数（提示词组用途 = 图生视频）。
     ///
     /// 交接从「你要记得回作品库找出来再点导出」变成「它自己就在那了」——
@@ -167,6 +171,8 @@ async fn backfill_sizes(pool: &sqlx::SqlitePool, rows: &mut [ReviewItemView]) {
 struct AcceptRow {
     id: i64,
     batch_id: i64,
+    /// 批次名 = 投单名（一次工单 = 一个 run）。写进 manifest 的 `jobId`。
+    batch_note: Option<String>,
     ref_image_id: i64,
     prompt_id: i64,
     prompt_text_snapshot: String,
@@ -189,7 +195,8 @@ struct AcceptRow {
     item_purpose: String,
 }
 
-const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
+const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, b.note AS batch_note,
+        t.ref_image_id, t.prompt_id,
         t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
         p.title AS prompt_title,
@@ -199,6 +206,7 @@ const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_i
         COALESCE(p.item_name,'') AS item_name, COALESCE(p.sku_code,'') AS item_sku,
         COALESCE(p.style,'') AS item_style, COALESCE(p.purpose,'') AS item_purpose
     FROM tasks t
+    LEFT JOIN batches b ON b.id = t.batch_id
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
@@ -232,9 +240,19 @@ async fn accept_rows(pool: &sqlx::SqlitePool, ids: &[i64]) -> AppResult<Vec<Acce
 ///
 /// **不把整批塞进一个事务**（这一点与「整批改单事务」的直觉相反，理由是文件）：
 /// 拷贝无法回滚。真做成一个事务，第 150 张失败就会把前 149 条作品记录回滚掉，
-/// 而它们的输出文件已经躺在 outputs/ 里了 —— 变成一堆没有主人的图。现在的顺序
+/// 而它们的输出文件已经躺在交付目录里了 —— 变成一堆没有主人的图。现在的顺序
 /// （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
 /// 要么全部拷成功再记账，要么什么账都没记。
+///
+/// ## 交付即交出所有权（D3）
+///
+/// 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.{EXT}`，
+/// 整批拷完 → 写 `manifest.jsonl` → **最后**写 `READY.txt`。对方（`自动发布`）看见
+/// READY 就会把整个目录搬走，此后 `accepted_works.image_path` 允许悬空 ——
+/// UI 走已有的 `file_exists` 懒检测，救回路径是 `reexport_work`（从 `results/{task_id}`
+/// 快照重出，**复用原 uid**）。
+///
+/// 旧落点 `outputs/{批次}/{分组}/` 已停止写入。
 #[tauri::command]
 #[specta::specta]
 pub async fn accept_tasks(
@@ -246,9 +264,16 @@ pub async fn accept_tasks(
     let mut accepted = 0i64;
     let mut batches: Vec<i64> = Vec::new();
     let mut to_queue: Vec<i64> = Vec::new();
-    let date = files::date_yymmdd(now_unix());
+    let mut manifest: Vec<crate::delivery::ManifestRow> = Vec::new();
+    let at = now_unix();
+    let date = files::date_yymmdd(at);
 
     let rows = accept_rows(&state.db, &task_ids).await?;
+    // 本次交付批的目录。一次验收一个，与 intake 工单目录形制对称。
+    let delivery_dir = crate::commands::delivery::load_settings(&state.db)
+        .await?
+        .root_path()
+        .join(crate::delivery::batch_dir_name(at));
     // 算出每张的落点（纯字符串活，留在这边），再一次性交给阻塞线程去拷。
     let publish_root = if rows.iter().any(|row| row.sku_id.is_some()) {
         Some(crate::commands::publish_settings::root_local(&state.db).await?)
@@ -289,19 +314,10 @@ pub async fn accept_tasks(
         else {
             continue;
         };
-        // 任务6：输出到 outputs/{批次}/{分组}/。
-        // 按提示词分组分文件夹存放，多分组批次天然各归各处而非全混一处。
-        // 分组名做文件系统安全清洗，空分组归入「未分组」。
-        let group_folder = if row.group_name.trim().is_empty() {
-            "未分组".to_string()
-        } else {
-            files::sanitize_filename(&row.group_name)
-        };
-        let out_dir = state
-            .dirs
-            .outputs()
-            .join(row.batch_id.to_string())
-            .join(&group_folder);
+        // 交付批内按 SKU 分子目录。键来自作品的快照列（style + sku_code），
+        // **不从文件名解析** —— 从中文文件名反推 SKU 是静默失败（分错目录不报错）。
+        let sku_folder = crate::delivery::sku_dir_name(&row.item_style, &row.item_sku);
+        let out_dir = delivery_dir.join(&sku_folder);
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
         // 文件名 = `{语义名}-{uid}.{EXT}`。
@@ -311,6 +327,7 @@ pub async fn accept_tasks(
         // —— 它会造出一个 manifest 里没有、下游也认不出来的名字。
         let filename = format!("{}.{ext}", name_repo::compose(&item_name, &uid));
         let out_path = out_dir.join(&filename);
+        let rel_in_batch = format!("{sku_folder}/{filename}");
         let asset = match (row.sku_id, publish_root.as_ref()) {
             (Some(sku_id), Some(root)) => {
                 let rel = crate::publish::paths::RelPath::from_parts([
@@ -327,6 +344,7 @@ pub async fn accept_tasks(
             task_id: row.id,
             src,
             out_path,
+            rel_in_batch,
             asset,
             item_name,
             uid,
@@ -336,6 +354,7 @@ pub async fn accept_tasks(
         return Ok(AcceptResult {
             accepted: 0,
             promoted_groups: Vec::new(),
+            delivery_dir: String::new(),
             queued_v2v: 0,
         });
     }
@@ -429,11 +448,38 @@ pub async fn accept_tasks(
             to_queue.push(work_id);
         }
 
+        manifest.push(crate::delivery::ManifestRow {
+            file: plan.rel_in_batch.clone(),
+            name: plan.item_name.clone(),
+            uid: plan.uid.clone(),
+            sku: row.item_sku.clone(),
+            style: row.item_style.clone(),
+            // 短码而不是中文标签：这是跨程序的键，`i2v` 比 `图生视频` 稳得多。
+            purpose: crate::purpose::code_of(&row.item_purpose).to_string(),
+            r#ref: row.ref_name.clone(),
+            prompt: row.prompt_text_snapshot.clone(),
+            job_id: row.batch_note.clone().unwrap_or_default(),
+            work_id,
+            accepted_at: at,
+        });
+
         task_repo::set_status(&state.db, row.id, "pass").await?;
         accepted += 1;
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
+    }
+
+    // ── 交付收尾：写 manifest → **最后**写 READY。
+    //
+    // 放在库都写完之后：READY 一落地，对方就可能把整个目录搬走，而搬走之后
+    // `image_path` 就悬空了 —— 那是**允许**的（D3：交付即交出所有权），但库里那几行
+    // 必须已经存在，否则连「这张图交付过」都答不出来。
+    //
+    // 写失败不回滚验收：文件已经躺在那儿了，而验收是人的判断，不该因为一次写盘失败
+    // 被撤销。留一条 ERROR，人可以手动补一份 READY（同 v2v 交付拷贝失败不回滚验收）。
+    if let Err(e) = crate::delivery::finalize(&delivery_dir, &manifest) {
+        tracing::error!(error = %e, dir = %delivery_dir.display(), "交付批收尾失败（图已拷到位，缺 manifest / READY）");
     }
 
     // 入队 + 物化工单。**放在验收循环之后**：一批验收只重写一次工单，而不是每张一次。
@@ -453,6 +499,7 @@ pub async fn accept_tasks(
     Ok(AcceptResult {
         accepted,
         promoted_groups: promoted,
+        delivery_dir: delivery_dir.to_string_lossy().to_string(),
         queued_v2v,
     })
 }

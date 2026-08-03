@@ -2,6 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { DescriptionHint } from "@/components/ui/Tooltip";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
+import { DeliverySection } from "@/features/settings/DeliverySection";
 import { IntakeSection } from "@/features/settings/IntakeSection";
 import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
 import { V2vSection } from "@/features/settings/V2vSection";
@@ -453,6 +454,9 @@ export function SettingsPage() {
 
         {/* ---------------- 与 Claude Code / Codex 的两条链路 ---------------- */}
         <IntakeSection />
+
+        {/* ---------------- 交付（与 `自动发布` 的唯一契约） ---------------- */}
+        <DeliverySection />
 
         {/* ---------------- 发布与同步（发布模块 P1） ---------------- */}
         <V2vSection />

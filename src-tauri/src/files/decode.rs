@@ -66,7 +66,21 @@ pub async fn acquire() -> DecodePermit {
     }
 }
 
-/// 在解码预算内跑一段阻塞的图像工作。
+/// 在解码预算内跑一段阻塞的图像工作，保留调用方自己的返回类型。
+///
+/// provider 的交付转换返回 `ProviderError`，缩略图返回 `AppError`；两条链路必须共用
+/// 同一份 CPU/位图内存预算，不能各自开一把信号量。这里把 JoinError 留给调用方映射，
+/// 使业务错误无需先抹平成另一种错误再还原。
+pub async fn run_bounded<F, T>(f: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce(&DecodePermit) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = acquire().await;
+    tokio::task::spawn_blocking(move || f(&permit)).await
+}
+
+/// 在解码预算内跑一段返回 [`AppResult`] 的阻塞图像工作。
 ///
 /// **先在异步侧拿许可，再 spawn**：`tokio::sync::Semaphore` 没有阻塞式 acquire，
 /// 在 `spawn_blocking` 内部 `try_acquire` 轮询就成了忙等——那是在用「修 CPU 占用」
@@ -76,8 +90,7 @@ where
     F: FnOnce(&DecodePermit) -> AppResult<T> + Send + 'static,
     T: Send + 'static,
 {
-    let permit = acquire().await;
-    tokio::task::spawn_blocking(move || f(&permit))
+    run_bounded(f)
         .await
         .map_err(|e| AppError::Internal(format!("图像处理任务失败：{e}")))?
 }

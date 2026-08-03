@@ -1,7 +1,7 @@
 //! 调度器（执行计划 2.4/2.5/2.6）。
 //!
-//! 单 dispatcher 循环：从队列取待生成/就绪重试任务 → 按策略选可用 Key → 获取该 Key
-//! 的 Semaphore 许可 → spawn worker。所有状态迁移由 worker 统一落库；task_attempts 全记录。
+//! 单 dispatcher 循环：从队列取待生成/就绪重试任务 → 按策略选可用 Key → 预占该 Key
+//! 的运行槽位 → spawn worker。所有状态迁移由 worker 统一落库；task_attempts 全记录。
 //! 暂停 = 停派发；批次全终态自动归档。
 
 use std::collections::{HashMap, VecDeque};
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::classify::{classify, decide, ErrorType};
@@ -26,13 +26,32 @@ use crate::db::repo::{api_keys as key_repo, tasks as task_repo};
 use crate::files::DataDirs;
 use crate::provider::{DownloadProgress, GenRequest, ProgressFn};
 
-const PROGRESS_THROTTLE: Duration = Duration::from_millis(250);
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_MAX_INTERVAL: Duration = Duration::from_secs(5);
+/// 全引擎伪进度事件预算。并发越高，单任务更新越稀疏，避免 WebView 消息队列失控。
+const PROGRESS_EVENTS_PER_SEC: u64 = 120;
 const RATE_WINDOW: i64 = 50;
+
+fn progress_interval(active: i64) -> Duration {
+    let active = active.max(1) as u64;
+    let ms = active.saturating_mul(1_000) / PROGRESS_EVENTS_PER_SEC;
+    Duration::from_millis(ms).clamp(PROGRESS_MIN_INTERVAL, PROGRESS_MAX_INTERVAL)
+}
 
 /// 单 Key 运行时。
 struct KeyRuntime {
     config: KeyConfig,
-    sem: Arc<Semaphore>,
+    /// 当前仍持有槽位的 worker 数。
+    ///
+    /// 不能只靠一把可替换的 Semaphore：运行中修改任意 Key 会触发全量 reload，旧 worker
+    /// 仍持有旧许可，新 Semaphore 却会再次放满，实跑曾把配置 250 叠成 509。槽位数跟着
+    /// KeyRuntime 热更新保留下来，配置改多少次都只能补到新上限。
+    in_flight: u32,
+    /// 已从最新配置中移除、但仍有旧 worker 在跑的占位运行时。
+    ///
+    /// 密钥暂时读不到或 Key 被删除时不能立刻丢掉 `in_flight`；否则同一 id 恢复后会
+    /// 再放满一整份额度。最后一个旧 worker 退出后即可清掉这条墓碑。
+    retired: bool,
     cooldown_until: Instant,
     consecutive_failures: u32,
     /// 连续 Auth/欠费失败次数（E18 熔断计数，成功即清零）。
@@ -75,7 +94,7 @@ fn dispatch_slots(k: &mut KeyRuntime, now: Instant) -> usize {
     if !k.config.enabled || k.cooldown_until > now || !rpm_ok(k, now) {
         return 0;
     }
-    let mut slots = k.sem.available_permits();
+    let mut slots = k.config.concurrency_limit.saturating_sub(k.in_flight) as usize;
     if let Some(limit) = k.config.rpm_limit {
         slots = slots.min(limit.saturating_sub(k.request_times.len() as u32) as usize);
     }
@@ -106,6 +125,21 @@ pub struct Scheduler {
     /// 自动暂停原因（E05）；None = 非自动暂停。手动继续队列时清空。
     auto_pause_reason: Mutex<Option<String>>,
     notify: Arc<Notify>,
+}
+
+/// worker 生命周期守卫：正常返回或 panic 都归还 Key 槽位与全局活跃计数。
+/// 任务态若因 panic 留在 run，会由既有启动恢复收口；并发槽位不能因此永久泄漏。
+struct WorkerSlotGuard {
+    scheduler: Arc<Scheduler>,
+    key_id: i64,
+}
+
+impl Drop for WorkerSlotGuard {
+    fn drop(&mut self) {
+        self.scheduler.release_key_slot(self.key_id);
+        self.scheduler.active.fetch_sub(1, Ordering::SeqCst);
+        self.scheduler.notify();
+    }
 }
 
 /// 生产默认 Key 冷却基数（对应 strategy::backoff 的 30s 起点）。
@@ -172,21 +206,89 @@ impl Scheduler {
         Duration::from_millis(ms)
     }
 
-    /// 重设 Key 运行时（添加/更新 Key 后调用）。
+    /// 热更新 Key 运行时（添加/更新 Key 后调用）。
+    ///
+    /// 已存在 Key 的 `in_flight` 必须保留：旧 worker 不会因为设置保存而消失。直接整表重建
+    /// 会让旧槽位失联，再按新上限放行一整波，等价于绕过并发上限。
     pub fn set_keys(&self, configs: Vec<KeyConfig>) {
         let now = Instant::now();
         let mut keys = lock(&self.keys);
-        *keys = configs
+        let mut old: HashMap<i64, KeyRuntime> = std::mem::take(&mut *keys)
             .into_iter()
-            .map(|c| KeyRuntime {
-                sem: Arc::new(Semaphore::new(c.concurrency_limit.max(1) as usize)),
-                config: c,
-                cooldown_until: now,
-                consecutive_failures: 0,
-                auth_failures: 0,
-                request_times: VecDeque::new(),
+            .map(|runtime| (runtime.config.id, runtime))
+            .collect();
+        let mut next: Vec<KeyRuntime> = configs
+            .into_iter()
+            .map(|config| {
+                let Some(mut runtime) = old.remove(&config.id) else {
+                    return KeyRuntime {
+                        config,
+                        in_flight: 0,
+                        retired: false,
+                        cooldown_until: now,
+                        consecutive_failures: 0,
+                        auth_failures: 0,
+                        request_times: VecDeque::new(),
+                    };
+                };
+
+                // 换凭据/端点或人工重新启用，代表旧健康状态已经失效；但旧 worker 仍计入
+                // in_flight，直到它们真实退出。只改并发/RPM 时则连退避与滑窗也原样保留。
+                let repaired = (!runtime.config.enabled && config.enabled)
+                    || runtime.config.api_key != config.api_key
+                    || runtime.config.base_url != config.base_url
+                    || runtime.config.model != config.model;
+                runtime.config = config;
+                runtime.retired = false;
+                if repaired {
+                    runtime.cooldown_until = now;
+                    runtime.consecutive_failures = 0;
+                    runtime.auth_failures = 0;
+                    runtime.request_times.clear();
+                }
+                runtime
             })
             .collect();
+
+        // 配置缺席不代表旧 worker 已退出。保留一条不可派发的墓碑，既不保存已经删除的
+        // 明文密钥，也让同一 id 随后恢复时能继承真实 in_flight。
+        next.extend(old.into_values().filter_map(|mut runtime| {
+            if runtime.in_flight == 0 {
+                return None;
+            }
+            runtime.config.enabled = false;
+            runtime.config.api_key.clear();
+            runtime.retired = true;
+            Some(runtime)
+        }));
+        *keys = next;
+    }
+
+    /// 在任何 await 之前预占一格。dispatcher 只有一个，但 Key 热更新命令可并发进入，
+    /// 因此仍须在同一把锁下重新核对 enabled 与最新上限。
+    fn try_reserve_key_slot(&self, key_id: i64) -> bool {
+        let mut keys = lock(&self.keys);
+        let Some(key) = keys.iter_mut().find(|key| key.config.id == key_id) else {
+            return false;
+        };
+        // 快照之后跑过成功率/队列 SQL，期间 Key 可能进入冷却、触发 RPM 或被停用；
+        // 预占点必须按最新状态复核，而不只看早先那份 eligible。
+        if dispatch_slots(key, Instant::now()) == 0 {
+            return false;
+        }
+        key.in_flight += 1;
+        true
+    }
+
+    fn release_key_slot(&self, key_id: i64) {
+        let mut keys = lock(&self.keys);
+        if let Some(index) = keys.iter().position(|key| key.config.id == key_id) {
+            let key = &mut keys[index];
+            key.in_flight = key.in_flight.saturating_sub(1);
+            if key.retired && key.in_flight == 0 {
+                keys.remove(index);
+            }
+        }
     }
 
     pub fn set_strategy(&self, s: Strategy) {
@@ -303,15 +405,15 @@ impl Scheduler {
             return 0;
         }
 
-        // 1) 就绪 Key 快照（启用、未冷却、未超 RPM），并克隆各自 Semaphore。
+        // 1) 就绪 Key 快照（启用、未冷却、未超 RPM）。
         // slots 是这一轮的派发预算：失败 Key 半开时只有 1，避免冷却结束即重放整批。
         let now = Instant::now();
-        let eligible: Vec<(i64, Arc<Semaphore>, usize)> = {
+        let eligible: Vec<(i64, usize)> = {
             let mut keys = lock(&self.keys);
             keys.iter_mut()
                 .filter_map(|k| {
                     let slots = dispatch_slots(k, now);
-                    (slots > 0).then(|| (k.config.id, k.sem.clone(), slots))
+                    (slots > 0).then_some((k.config.id, slots))
                 })
                 .collect()
         };
@@ -319,7 +421,7 @@ impl Scheduler {
             return 0;
         }
         let rates = self
-            .rates(&eligible.iter().map(|(id, _, _)| *id).collect::<Vec<_>>())
+            .rates(&eligible.iter().map(|(id, _)| *id).collect::<Vec<_>>())
             .await;
 
         // 2) 就绪任务：先 ready 重试，再 'q'（FIFO）。
@@ -340,7 +442,7 @@ impl Scheduler {
                 }
             }
         }
-        let capacity: usize = eligible.iter().map(|(_, _, slots)| *slots).sum();
+        let capacity: usize = eligible.iter().map(|(_, slots)| *slots).sum();
         if capacity > 0 {
             if let Ok(q) = task_repo::fetch_queued(&self.pool, capacity as i64).await {
                 queue.extend(q);
@@ -349,18 +451,14 @@ impl Scheduler {
 
         // 3) 逐个派发。
         let mut spawned = 0;
-        let mut slots_left: HashMap<i64, usize> = eligible
-            .iter()
-            .map(|(id, _, slots)| (*id, *slots))
-            .collect();
+        let mut slots_left: HashMap<i64, usize> =
+            eligible.iter().map(|(id, slots)| (*id, *slots)).collect();
         for task in queue {
             // 当前仍有余量的候选 Key
             let cands: Vec<Candidate> = eligible
                 .iter()
-                .filter(|(id, s, _)| {
-                    slots_left.get(id).copied().unwrap_or(0) > 0 && s.available_permits() > 0
-                })
-                .map(|(id, _, _)| Candidate {
+                .filter(|(id, _)| slots_left.get(id).copied().unwrap_or(0) > 0)
+                .map(|(id, _)| Candidate {
                     id: *id,
                     success_rate: *rates.get(id).unwrap_or(&0.0),
                 })
@@ -374,17 +472,14 @@ impl Scheduler {
                 pick(strat, &cands, &mut rr)
             };
             let Some(key_id) = key_id else { break };
-            let Some((_, sem, _)) = eligible.iter().find(|(id, _, _)| *id == key_id) else {
-                continue;
-            };
-            let permit = match sem.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => continue, // 竞争丢失，换下一个任务再试
-            };
 
             let from = task.status.parse::<TaskStatus>().unwrap_or(TaskStatus::Q);
             if !super::status::can_transition(from, TaskStatus::Run) {
                 continue; // 守卫：非法迁移不派发
+            }
+            if !self.try_reserve_key_slot(key_id) {
+                slots_left.insert(key_id, 0);
+                continue; // 设置热更新可能刚刚降低上限/停用 Key
             }
             // 认领：只有把 `from → run` 这一步真正写进去的那个循环才继续往下走。
             // 读队列与派发之间隔着若干次 await，用户在那段窗口里中止/删除任务是常态；
@@ -394,6 +489,7 @@ impl Scheduler {
                 task_repo::mark_running(&self.pool, task.id, key_id, &task.status).await,
                 Ok(true)
             ) {
+                self.release_key_slot(key_id);
                 continue;
             }
             if let Some(left) = slots_left.get_mut(&key_id) {
@@ -406,32 +502,26 @@ impl Scheduler {
             // E18：记录本次派发时刻用于 RPM 滑动窗口。
             self.record_request(key_id, Instant::now());
             self.emit_status(&task, TaskStatus::Run, Some(key_id), None, None);
-            self.spawn_worker(task, key_id, permit);
+            self.spawn_worker(task, key_id);
             spawned += 1;
         }
         spawned
     }
 
-    fn spawn_worker(
-        self: &Arc<Self>,
-        task: task_repo::TaskRow,
-        key_id: i64,
-        permit: OwnedSemaphorePermit,
-    ) {
+    fn spawn_worker(self: &Arc<Self>, task: task_repo::TaskRow, key_id: i64) {
         // active 在 spawn 前自增，确保 drive_to_idle 不会在 worker 真正开始前误判空闲。
         self.active.fetch_add(1, Ordering::SeqCst);
         let me = self.clone();
         tokio::spawn(async move {
-            me.run_worker(task, key_id, permit).await;
+            me.run_worker(task, key_id).await;
         });
     }
 
-    async fn run_worker(
-        self: Arc<Self>,
-        task: task_repo::TaskRow,
-        key_id: i64,
-        permit: OwnedSemaphorePermit,
-    ) {
+    async fn run_worker(self: Arc<Self>, task: task_repo::TaskRow, key_id: i64) {
+        let _slot = WorkerSlotGuard {
+            scheduler: self.clone(),
+            key_id,
+        };
         let key_cfg = self.key_config(key_id);
         let started = Instant::now();
         let started_unix = now_unix();
@@ -439,7 +529,7 @@ impl Scheduler {
             .await
             .ok();
 
-        // 伪进度 ticker（250ms 节流）。
+        // 伪进度 ticker（按全局活跃数自适应节流）。
         let expected = {
             let durs = task_repo::key_success_durations(&self.pool, key_id, 20)
                 .await
@@ -485,7 +575,6 @@ impl Scheduler {
             }
         }
 
-        drop(permit);
         // 先归档 + 汇总，再减 active，避免 drive_to_idle 在归档前误判空闲。
         // E04：仅在批次真正归档（全终态）的那一次发系统通知。
         if task_repo::archive_if_all_terminal(&self.pool, task.batch_id)
@@ -495,8 +584,6 @@ impl Scheduler {
             self.notify_batch_complete(task.batch_id).await;
         }
         self.emit_summary(task.batch_id).await;
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        self.notify();
     }
 
     async fn on_success(
@@ -835,13 +922,14 @@ impl Scheduler {
     }
 
     fn spawn_progress_ticker(
-        &self,
+        self: &Arc<Self>,
         task_id: i64,
         started: Instant,
         expected: Duration,
         done: Arc<AtomicBool>,
     ) {
         let sink = self.sink.clone();
+        let scheduler = Arc::downgrade(self);
         tokio::spawn(async move {
             sink.progress(TaskProgress {
                 task_id,
@@ -849,7 +937,12 @@ impl Scheduler {
                 phase: Phase::RequestStarted,
             });
             loop {
-                tokio::time::sleep(PROGRESS_THROTTLE).await;
+                let Some(scheduler) = scheduler.upgrade() else {
+                    break;
+                };
+                let interval = progress_interval(scheduler.active.load(Ordering::Relaxed));
+                drop(scheduler);
+                tokio::time::sleep(interval).await;
                 if done.load(Ordering::SeqCst) {
                     break;
                 }
@@ -863,9 +956,24 @@ impl Scheduler {
         });
     }
 
-    fn download_progress_cb(&self, task_id: i64) -> ProgressFn {
+    fn download_progress_cb(self: &Arc<Self>, task_id: i64) -> ProgressFn {
         let sink = self.sink.clone();
+        let scheduler = Arc::downgrade(self);
+        let last_emit = Arc::new(Mutex::new(Instant::now() - PROGRESS_MAX_INTERVAL));
         Arc::new(move |p: DownloadProgress| {
+            let now = Instant::now();
+            let active = scheduler
+                .upgrade()
+                .map(|scheduler| scheduler.active.load(Ordering::Relaxed))
+                .unwrap_or(1);
+            let complete = p.total.is_some_and(|total| p.received >= total);
+            {
+                let mut last = lock(&last_emit);
+                if !complete && now.duration_since(*last) < progress_interval(active) {
+                    return;
+                }
+                *last = now;
+            }
             let frac = p
                 .total
                 .map(|t| p.received as f32 / t.max(1) as f32)
@@ -1141,6 +1249,85 @@ mod tests {
         );
     }
 
+    /// 真实事故回归：20 个旧 worker 在跑时连续保存两次 250，旧实现每次都会换一把
+    /// Semaphore，于是 20 + 250 + 剩余任务叠到同一时刻。热更新只能补足差额，不能重发
+    /// 一整份额度。这里用 2 → 3 的小数值锁住同一不变量。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reloading_keys_while_running_does_not_stack_concurrency() {
+        let h = setup(
+            12,
+            &[(1, 2)],
+            Duration::from_millis(120),
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            1,
+        )
+        .await;
+
+        assert_eq!(h.sched.dispatch_once().await, 2, "先占满旧上限");
+        let config = || KeyConfig {
+            id: 1,
+            base_url: "http://x/v1".into(),
+            model: "m".into(),
+            api_key: "sk".into(),
+            concurrency_limit: 3,
+            enabled: true,
+            rpm_limit: None,
+        };
+        h.sched.set_keys(vec![config()]);
+        h.sched.set_keys(vec![config()]);
+        h.sched.drive_to_idle().await;
+
+        assert!(
+            h.peak.load(Ordering::SeqCst) <= 3,
+            "热重载后峰值 {} 超过新上限 3",
+            h.peak.load(Ordering::SeqCst)
+        );
+    }
+
+    /// 密钥暂时读不到会让 reload 的配置列表里缺一项。旧 worker 仍在跑时先移除、再以
+    /// 同一 id 恢复，也只能补到新上限，不能把旧槽位遗忘后重发一整份额度。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restoring_temporarily_missing_key_keeps_running_slots() {
+        let h = setup(
+            12,
+            &[(1, 2)],
+            Duration::from_millis(160),
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            1,
+        )
+        .await;
+
+        assert_eq!(h.sched.dispatch_once().await, 2, "先占满旧上限");
+        h.sched.set_keys(vec![]);
+        h.sched.set_keys(vec![KeyConfig {
+            id: 1,
+            base_url: "http://x/v1".into(),
+            model: "m".into(),
+            api_key: "restored-test-secret".into(),
+            concurrency_limit: 3,
+            enabled: true,
+            rpm_limit: None,
+        }]);
+        h.sched.drive_to_idle().await;
+
+        assert!(
+            h.peak.load(Ordering::SeqCst) <= 3,
+            "Key 恢复后峰值 {} 超过新上限 3",
+            h.peak.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn progress_budget_scales_with_active_workers() {
+        assert_eq!(progress_interval(1), PROGRESS_MIN_INTERVAL);
+        assert_eq!(progress_interval(30), PROGRESS_MIN_INTERVAL);
+        assert_eq!(progress_interval(120), Duration::from_secs(1));
+        assert_eq!(progress_interval(240), Duration::from_secs(2));
+        assert_eq!(progress_interval(10_000), PROGRESS_MAX_INTERVAL);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn round_robin_distributes_across_keys() {
         let h = setup(
@@ -1405,7 +1592,8 @@ mod tests {
                 enabled: true,
                 rpm_limit: Some(2),
             },
-            sem: Arc::new(Semaphore::new(1)),
+            in_flight: 0,
+            retired: false,
             cooldown_until: now,
             consecutive_failures: 0,
             auth_failures: 0,
@@ -1435,7 +1623,8 @@ mod tests {
                 enabled: true,
                 rpm_limit: Some(4),
             },
-            sem: Arc::new(Semaphore::new(10)),
+            in_flight: 0,
+            retired: false,
             cooldown_until: now,
             consecutive_failures: 0,
             auth_failures: 0,
@@ -1503,5 +1692,36 @@ mod tests {
         assert_eq!(rev_no_path, 0);
         // sink 至少收到状态事件
         assert!(!h.sink.statuses.lock().unwrap().is_empty());
+    }
+
+    /// 线上事故形态：单 Key 250 并发、250 个任务同时进入 worker。该用例显式跑完整
+    /// provider → 落盘 → 共享解码预算 → 终态链路，避免只测调度数字却漏掉本机资源洪峰。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "高并发压测：cargo test stress_250_concurrent_tasks -- --ignored"]
+    async fn stress_250_concurrent_tasks_finish_without_oversubscription() {
+        let h = setup(
+            250,
+            &[(1, 250)],
+            Duration::from_millis(700),
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            1,
+        )
+        .await;
+
+        assert_eq!(h.sched.dispatch_once().await, 250, "首轮应准确派发 250 个");
+        h.sched.drive_to_idle().await;
+
+        assert_eq!(
+            h.peak.load(Ordering::SeqCst),
+            250,
+            "必须实际覆盖 250 同时在途"
+        );
+        let stuck: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status IN ('q','run','retry')")
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(stuck, 0, "高并发完成后不得留下僵尸任务");
     }
 }

@@ -162,7 +162,7 @@ export function IntakeSection() {
         <span className="chip">提示词.txt</span> + <span className="chip">images/</span> + 最后写的{" "}
         <span className="chip">READY.txt</span>。挂靠与参数写在提示词文档的组头里（
         <span className="chip">参考图:</span> <span className="chip">比例:</span>{" "}
-        <span className="chip">抽卡:</span> <span className="chip">用途:</span>）。
+        <span className="chip">用途:</span>）。
         <br />
         <b>应用没开也不丢单</b>：下次启动会把攒着的工单一并收进来。成功的目录移到{" "}
         <span className="chip">生图/_已收录/</span>（内含 <span className="chip">结果.txt</span>
@@ -211,7 +211,7 @@ export function IntakeSection() {
               <span className="fs12 fw5">{j.jobId}</span>
               {j.status === "done" && (
                 <>
-                  {/* 一份工单可能建出多个批次：各组比例/抽卡不同就会拆批。 */}
+                  {/* 一份工单可能建出多个批次：各组比例不同就会拆批。 */}
                   {j.batchIds.map((b) => (
                     <span key={b} className="bdg b-green">
                       批次 #{b}

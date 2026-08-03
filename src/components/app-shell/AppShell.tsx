@@ -76,7 +76,7 @@ export function AppShell() {
     void subscribeIntake((e) => {
       for (const j of e.jobs) {
         if (j.status === "done") {
-          // 一份工单可能拆出多个批次（各组比例/抽卡不同时）。
+          // 一份工单可能拆出多个批次（各组比例不同时）。
           const b = j.batchIds.map((x) => `#${x}`).join(" ");
           toast(`收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`);
         } else if (j.status === "hold") {

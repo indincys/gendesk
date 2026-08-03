@@ -21,8 +21,6 @@ pub struct RefMappingInput {
 pub struct CreateBatchInput {
     pub refs: Vec<RefMappingInput>,
     pub params_json: String,
-    /// 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
-    pub draws: i64,
 }
 
 /// 建批回执。**批次不再是一个可管理的对象**（v0.21.0）：它没有列表、没有切换器、
@@ -81,14 +79,8 @@ pub async fn create_batch(
         .collect();
 
     let output_dir = state.dirs.outputs().to_string_lossy().to_string();
-    let (batch_id, count) = engine::create_batch(
-        &state.db,
-        &output_dir,
-        &input.params_json,
-        &mappings,
-        input.draws,
-    )
-    .await?;
+    let (batch_id, count) =
+        engine::create_batch(&state.db, &output_dir, &input.params_json, &mappings).await?;
 
     // 唤醒调度器开跑。
     state.engine.kick();

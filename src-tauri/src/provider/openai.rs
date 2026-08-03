@@ -175,7 +175,7 @@ impl ImageProvider for OpenAiCompatible {
             .part("image", part)
             .text("prompt", req.prompt)
             .text("model", req.model)
-            // n 恒为 1：一个任务 = 一张图（抽卡 k 次在引擎侧展开成 k 个任务）。
+            // n 恒为 1：一个任务 = 一张图。
             .text("n", "1");
         // E16 / D1：仅透传显式设置的参数；未设置不带该字段（跟随提示词/模型默认）。
         // 字段名与端点文档的参数表一一对应；比例首选 aspect_ratio（size 只有部分模型认）。
@@ -466,7 +466,7 @@ mod tests {
                 "未设置时请求体不应带 {f}"
             );
         }
-        // 一个任务恒为一张图（抽卡 k 次 = k 个任务，不是 n=k）。
+        // 一个任务恒为一张图（一条提示词 = 一个任务，不是 n=k）。
         assert!(body.contains("name=\"n\""), "应恒带 n=1");
     }
 

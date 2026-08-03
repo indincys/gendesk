@@ -71,9 +71,6 @@ pub const DUPLICATE_FILE: &str = "重名未收录.txt";
 /// **确认的唯一表达**。设置页那个按钮做的事就是替你写下这个文件。
 pub const CONFIRM_FILE: &str = "确认.txt";
 
-/// 抽卡次数上限（与 `engine::create_batch` 的夹取一致）。
-const MAX_DRAWS: i64 = 5;
-
 /// 默认收件根 = 视频流水线那个交接根。
 ///
 /// **刻意共用一个根**：用户只需要知道一个目录、只需要配一次；两个 agent 侧 skill
@@ -161,8 +158,6 @@ pub struct ParamsSpec {
     pub size: Option<String>,
     #[serde(alias = "output_format", alias = "format")]
     pub output_format: Option<String>,
-    /// 抽卡次数 k：每个组合独立生成 k 次（= k 个任务，不是发 `n=k`）。
-    pub draws: Option<i64>,
     #[serde(alias = "clear_ai_metadata")]
     pub clear_ai_metadata: Option<bool>,
     #[serde(alias = "remove_c2pa")]
@@ -177,7 +172,6 @@ impl ParamsSpec {
             aspect_ratio: pick(&self.aspect_ratio, &base.aspect_ratio),
             size: pick(&self.size, &base.size),
             output_format: pick(&self.output_format, &base.output_format),
-            draws: self.draws.or(base.draws),
             clear_ai_metadata: self.clear_ai_metadata.or(base.clear_ai_metadata),
             remove_c2pa: self.remove_c2pa.or(base.remove_c2pa),
         }
@@ -208,17 +202,16 @@ pub struct PlannedGroup {
     pub params_json: String,
     /// 实际会进 multipart 的字段。
     pub wire_json: String,
-    pub draws: i64,
 }
 
 impl PlannedGroup {
-    /// 本组会产生多少个任务 = 多少张图（`n` 恒为 1）。
+    /// 本组会产生多少个任务 = 多少张图（一条提示词 = 一个任务，`n` 恒为 1）。
     pub fn task_count(&self) -> i64 {
-        self.parsed.prompts.len() as i64 * self.refs.len() as i64 * self.draws
+        self.parsed.prompts.len() as i64 * self.refs.len() as i64
     }
     /// 分桶键：参数相同的组并进同一个批次。
-    pub fn bucket(&self) -> (String, i64) {
-        (self.params_json.clone(), self.draws)
+    pub fn bucket(&self) -> String {
+        self.params_json.clone()
     }
 }
 
@@ -228,7 +221,7 @@ impl Plan {
     }
     /// 会建出几个批次（按参数分桶后的桶数）。
     pub fn batch_count(&self) -> usize {
-        let mut seen: Vec<(String, i64)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for g in &self.groups {
             let b = g.bucket();
             if !seen.contains(&b) {
@@ -241,12 +234,12 @@ impl Plan {
 
 // ───────────────────────────── 参数归一化 ─────────────────────────────
 
-/// 参数快照 + wire 记录 + 抽卡次数。
+/// 参数快照 + wire 记录。
 ///
 /// 这是本模块最要紧的一段：用户点名的关切是「尺寸比例等参数能正确传递到生成端」。
 /// 保证由两件事给出——(1) 产出的快照与生成页 `buildParamsJson` **同形**，走的是
 /// 下游同一条解析；(2) 立刻过 `GenParams::parse_checked`，非法当场拒单。
-pub fn build_params(p: &ParamsSpec) -> Result<(String, String, i64), String> {
+pub fn build_params(p: &ParamsSpec) -> Result<(String, String), String> {
     let norm = |s: &Option<String>| -> Option<String> {
         s.as_deref()
             .map(|v| v.trim().replace('：', ":"))
@@ -267,13 +260,6 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String, i64), String> {
         "jpg" => "jpeg".to_string(),
         other => other.to_string(),
     });
-
-    let draws = p.draws.unwrap_or(1);
-    if !(1..=MAX_DRAWS).contains(&draws) {
-        // **不夹取**：组头写了 9 却悄悄跑 5，任务数对不上而没人知道为什么
-        // （v0.14.0 抽卡不进快照那个坑的同一种形状）。
-        return Err(format!("抽卡次数「{draws}」超出范围，应为 1~{MAX_DRAWS}"));
-    }
 
     let mut snap = serde_json::Map::new();
     let mut wire = serde_json::Map::new();
@@ -296,18 +282,13 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String, i64), String> {
         "removeC2pa".into(),
         serde_json::Value::Bool(p.remove_c2pa.unwrap_or(true)),
     );
-    snap.insert("draws".into(), serde_json::Value::from(draws));
-    // n 恒为 1：抽卡 k 次在引擎侧展开成 k 个任务，不是发 n=k。
+    // n 恒为 1：一条提示词 = 一个任务 = 一张图。
     wire.insert("n".into(), serde_json::Value::from(1));
 
     let params_json = serde_json::Value::Object(snap).to_string();
     // 花钱之前的本地预检，与生成页 `create_batch` 同一个函数。
     GenParams::parse_checked(&params_json)?;
-    Ok((
-        params_json,
-        serde_json::Value::Object(wire).to_string(),
-        draws,
-    ))
+    Ok((params_json, serde_json::Value::Object(wire).to_string()))
 }
 
 // ───────────────────────────── 路径安全 ─────────────────────────────
@@ -389,17 +370,15 @@ fn plan_from_doc(dir: &Path, dir_name: &str) -> Result<Plan, String> {
             aspect_ratio: g.ratio.clone(),
             size: g.size.clone(),
             output_format: g.format.clone(),
-            draws: g.draws,
             ..Default::default()
         };
-        let (params_json, wire_json, draws) =
+        let (params_json, wire_json) =
             build_params(&spec).map_err(|e| format!("分组「{}」的参数有问题：{e}", g.name))?;
         groups.push(PlannedGroup {
             parsed: g,
             refs,
             params_json,
             wire_json,
-            draws,
         });
     }
 
@@ -624,14 +603,13 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
         if refs.is_empty() {
             return Err(format!("分组「{}」没有挂靠任何参考图", pg.name));
         }
-        let (params_json, wire_json, draws) =
+        let (params_json, wire_json) =
             build_params(&params).map_err(|e| format!("分组「{}」的参数有问题：{e}", pg.name))?;
         groups.push(PlannedGroup {
             parsed: pg,
             refs,
             params_json,
             wire_json,
-            draws,
         });
     }
 
@@ -700,11 +678,10 @@ mod tests {
     // 用户的核心关切：组头里写的比例必须原样落进批次快照，且能被下游解析回来。
     #[test]
     fn aspect_ratio_survives_into_snapshot_and_wire() {
-        let (snap, wire, draws) = build_params(&params_from(
+        let (snap, wire) = build_params(&params_from(
             r#"{"aspectRatio":"9:16","outputFormat":"png"}"#,
         ))
         .unwrap();
-        assert_eq!(draws, 1);
         // 下游（调度器）读的就是这个快照 —— 用它自己的解析器验一遍。
         let p = GenParams::from_json(&snap);
         assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
@@ -717,7 +694,7 @@ mod tests {
     // 拼法归一化：jpg → jpeg、全角冒号 → 半角。取值本身不替用户改。
     #[test]
     fn spelling_is_normalized_but_values_are_not() {
-        let (snap, _, _) =
+        let (snap, _) =
             build_params(&params_from(r#"{"ratio":"9：16","format":"jpg"}"#)).unwrap();
         let p = GenParams::from_json(&snap);
         assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
@@ -737,7 +714,7 @@ mod tests {
     // （批次 25）。取样必须用竖比例——若换成 1:1，补与不补的结果长得一样，测不出东西。
     #[test]
     fn lone_ratio_gets_its_companion_size() {
-        let (snap, wire, _) = build_params(&params_from(r#"{"ratio":"9:16"}"#)).unwrap();
+        let (snap, wire) = build_params(&params_from(r#"{"ratio":"9:16"}"#)).unwrap();
         let p = GenParams::from_json(&snap);
         assert_eq!(p.size.as_deref(), Some("1152x2048"));
         let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
@@ -748,7 +725,7 @@ mod tests {
     // 用户自己写的尺寸不被配套值覆盖 —— 归一化只管拼法不管取值。
     #[test]
     fn explicit_size_wins_over_companion() {
-        let (snap, _, _) =
+        let (snap, _) =
             build_params(&params_from(r#"{"ratio":"9:16","size":"1008x1792"}"#)).unwrap();
         assert_eq!(
             GenParams::from_json(&snap).size.as_deref(),
@@ -766,29 +743,33 @@ mod tests {
                 "{ratio} 的配套尺寸没过端点预检：{:?}",
                 built.as_ref().err()
             );
-            if let Ok((snap, _, _)) = built {
+            if let Ok((snap, _)) = built {
                 assert_eq!(GenParams::from_json(&snap).size.as_deref(), Some(*size));
             }
         }
     }
 
+    // 抽卡下线后 `draws` 只是一个**没人认识的键**：它既不该被读进快照，也不该让整份
+    // 工单失败。原来那条 `out_of_range_draws_is_rejected_not_clamped` 守的是「越界不夹取
+    // 而是拒单」，其前提（存在这个参数）已随抽卡整体下线。
     #[test]
-    fn out_of_range_draws_is_rejected_not_clamped() {
-        assert!(build_params(&params_from(r#"{"draws":9}"#))
-            .unwrap_err()
-            .contains("1~5"));
+    fn retired_draws_key_is_ignored_not_stored() {
+        let (snap, wire) = build_params(&params_from(r#"{"draws":9,"ratio":"9:16"}"#)).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&snap).unwrap();
+        assert!(s.get("draws").is_none(), "废弃键不得进快照：{snap}");
+        let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert!(w.get("draws").is_none(), "废弃键更不得发往接口：{wire}");
     }
 
     // 未给的参数不该出现在 wire 里（D1：不设置 = 不透传，交给模型默认）。
     #[test]
     fn absent_params_are_absent_from_wire() {
-        let (snap, wire, _) = build_params(&ParamsSpec::default()).unwrap();
+        let (snap, wire) = build_params(&ParamsSpec::default()).unwrap();
         let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert!(w.get("aspect_ratio").is_none() && w.get("size").is_none());
         let s: serde_json::Value = serde_json::from_str(&snap).unwrap();
         assert!(s.get("aspectRatio").is_none());
         assert_eq!(s["clearAiMetadata"], true);
-        assert_eq!(s["draws"], 1);
     }
 
     #[test]
@@ -807,14 +788,13 @@ mod tests {
     #[test]
     fn doc_headers_drive_mapping_and_params() {
         let d = make_dir(
-            "分组: 黄\n参考图: images/黄.jpg\n比例: 3:4\n抽卡: 2\n\n黄1\n\n黄2\n\n\
+            "分组: 黄\n参考图: images/黄.jpg\n比例: 3:4\n\n黄1\n\n黄2\n\n\
              分组: 蓝\n参考图: images/蓝.jpg\n比例: 9:16\n\n蓝1\n",
             &["黄.jpg", "蓝.jpg"],
         );
         let p = plan(d.path(), "job-1").unwrap();
         assert_eq!(p.groups.len(), 2);
         assert_eq!(p.groups[0].refs.len(), 1);
-        assert_eq!(p.groups[0].draws, 2);
         assert_eq!(
             GenParams::from_json(&p.groups[0].params_json)
                 .aspect_ratio
@@ -827,8 +807,8 @@ mod tests {
                 .as_deref(),
             Some("9:16")
         );
-        // 黄：2 条 × 1 图 × 抽卡 2 = 4；蓝：1 条 × 1 图 × 1 = 1。
-        assert_eq!(p.task_count(), 5);
+        // 黄：2 条 × 1 图 = 2；蓝：1 条 × 1 图 = 1。
+        assert_eq!(p.task_count(), 3);
         // 比例不同 → 必须拆成两个批次（params_json 是批次级的）。
         assert_eq!(p.batch_count(), 2);
     }
@@ -852,7 +832,7 @@ mod tests {
         let d = make_dir("分组: 甲\n\n正文一\n\n正文二\n", &["a.jpg", "b.png"]);
         let p = plan(d.path(), "job-3").unwrap();
         assert_eq!(p.groups[0].refs.len(), 2);
-        assert_eq!(p.task_count(), 4); // 2 条 × 2 图 × 1
+        assert_eq!(p.task_count(), 4); // 2 条 × 2 图
     }
 
     // 多组却没点名挂靠 = 拒单。按顺序猜错要到验收时才看得出来，太晚了。
@@ -913,12 +893,12 @@ mod tests {
         std::fs::write(
             d.path().join(JOB),
             r#"{"note":"N","groups":[{"name":"甲","prompts":["a1","a2"],"purposes":["图生视频"]}],
-                "refs":[{"image":"images/a.jpg"}],"params":{"aspectRatio":"9:16","draws":2}}"#,
+                "refs":[{"image":"images/a.jpg"}],"params":{"aspectRatio":"9:16"}}"#,
         )
         .unwrap();
         let p = plan(d.path(), "job-9").unwrap();
         assert_eq!(p.note.as_deref(), Some("N"));
-        assert_eq!(p.task_count(), 4); // 2 条 × 1 图 × 2
+        assert_eq!(p.task_count(), 2); // 2 条 × 1 图
         assert!(p.groups[0]
             .parsed
             .tags

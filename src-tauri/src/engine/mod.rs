@@ -108,15 +108,15 @@ pub struct RefMapping {
 }
 
 /// 组合展开并创建批次（R1 挂靠模型，一次事务）。返回 (batch_id, 任务数)。
+///
+/// **一个组合 = 一个任务 = 一张图。** 抽卡（同一条提示词跑 k 次）已随生成侧收敛下线：
+/// 一条提示词现在就是一件交付物，重跑是人看过之后的决定，不是建批时先摇 k 份。
 pub async fn create_batch(
     pool: &SqlitePool,
     output_dir: &str,
     params_json: &str,
     mappings: &[RefMapping],
-    draws: i64,
 ) -> AppResult<(i64, i64)> {
-    // 抽卡次数（E17 / D2）：每个组合独立生成 k 次；夹取 1..=5 防脏输入。
-    let draws = draws.clamp(1, 5);
     // 预取各组 active 提示词（读，不在事务内）。
     let mut combos: Vec<(i64, i64, String)> = Vec::new(); // (ref, prompt_id, snapshot)
     for m in mappings {
@@ -130,7 +130,7 @@ pub async fn create_batch(
             "所选组合展开后无任务（提示词组为空？）".into(),
         ));
     }
-    let task_count = combos.len() as i64 * draws;
+    let task_count = combos.len() as i64;
 
     let mut tx = pool.begin().await?;
     let batch_id = task_repo::create_batch(&mut tx, output_dir, params_json).await?;
@@ -143,12 +143,8 @@ pub async fn create_batch(
             .execute(&mut *tx)
             .await?;
     }
-    // 每个组合展开 draws 个任务，draw_index ∈ 1..=draws（供输出命名去重）。
     for (ref_id, prompt_id, snapshot) in &combos {
-        for draw_index in 1..=draws {
-            task_repo::insert_task(&mut tx, batch_id, *ref_id, *prompt_id, snapshot, draw_index)
-                .await?;
-        }
+        task_repo::insert_task(&mut tx, batch_id, *ref_id, *prompt_id, snapshot).await?;
     }
     // 归档本批用到的参考图与提示词组（0016）：批次已开跑，这批素材的使命就此完成，
     // 从生成页选择器里让位给下一批。同事务提交 —— 批次建成则必已归档，不会出现
@@ -369,11 +365,10 @@ mod tests {
                 ref_image_id: rid,
                 prompt_group_id: gid,
             }],
-            1,
         )
         .await
         .unwrap();
-        assert_eq!(count, 3, "1 参考图 × 3 提示词 × 抽 1 = 3 任务");
+        assert_eq!(count, 3, "1 参考图 × 3 提示词 = 3 任务");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1")
             .bind(batch_id)
             .fetch_one(&pool)
@@ -390,7 +385,12 @@ mod tests {
                 .unwrap();
         assert_eq!(last, Some(gid), "参考图应记住本次挂靠组");
 
-        // E17 D2：抽卡次数展开。1 参考图 × 3 提示词 × 抽 2 = 6 任务，draw_index ∈ {1,2}。
+        // 抽卡下线后的新不变量：**同一组合再建一次批，仍然只出一个任务**。
+        //
+        // 这条断言替代了原来那条「抽卡 2 次 → 任务翻倍（count2 == 6）」——它的前提
+        // （create_batch 收一个 draws 入参并按它做乘法）已被本次收敛整体移除，
+        // 不是为了让 CI 变绿而放宽。留住的是它真正守着的东西：展开的乘数只有
+        // 「参考图 × 挂靠组提示词数」这一个，任何一处偷偷再乘一次都会在这里露馅。
         let (batch2, count2) = create_batch(
             &pool,
             "/out",
@@ -399,21 +399,18 @@ mod tests {
                 ref_image_id: rid,
                 prompt_group_id: gid,
             }],
-            2,
         )
         .await
         .unwrap();
-        assert_eq!(count2, 6, "抽卡 2 次 → 任务翻倍");
-        // 每个组合恰好 draw_index 1 与 2 各一。
-        let draws: Vec<i64> = sqlx::query_scalar(
-            "SELECT draw_index FROM tasks WHERE batch_id = ?1 AND prompt_id =
-                (SELECT id FROM prompts WHERE code='GG-0001') ORDER BY draw_index",
+        assert_eq!(count2, 3, "一条提示词恒为一个任务，不再有抽卡乘数");
+        let per_prompt: Vec<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE batch_id = ?1 GROUP BY prompt_id",
         )
         .bind(batch2)
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(draws, vec![1, 2], "同组合两次抽卡序号为 1、2");
+        assert_eq!(per_prompt, vec![1, 1, 1], "每条提示词恰好一个任务");
     }
 
     // 0016：批次一建成，本批用到的参考图与提示词组必须已归档 —— 这是「开始生成后生成页
@@ -463,7 +460,6 @@ mod tests {
                 ref_image_id: rid,
                 prompt_group_id: gid,
             }],
-            1,
         )
         .await
         .unwrap();

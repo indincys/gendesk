@@ -446,7 +446,7 @@ mod tests {
                 .await
                 .unwrap();
         let bid = tasks::create_batch(&mut tx, "/out", "{}").await.unwrap();
-        let tid = tasks::insert_task(&mut tx, bid, rid, pid, "正文", 1)
+        let tid = tasks::insert_task(&mut tx, bid, rid, pid, "正文")
             .await
             .unwrap();
         tx.commit().await.unwrap();

@@ -57,12 +57,10 @@ pub struct ParsedGroup {
     /// **位置绑定，不引用组名**：它属于紧跟其后的那个组。相比「按组名引用」的写法，
     /// 改组名不会让挂靠悄悄断掉——而挂靠断掉的后果（整批图配错提示词）要到验收时才看得出来。
     pub refs: Vec<String>,
-    /// 组头 `比例:` / `尺寸:` / `格式:` / `抽卡:`。批次参数是**批次级**的，故收件侧会把
-    /// 参数相同的组并进同一个批次、不同的拆成多个批次（见 `intake`）。
+    /// 组头 `比例:` / `尺寸:` / `格式:`。
     pub ratio: Option<String>,
     pub size: Option<String>,
     pub format: Option<String>,
-    pub draws: Option<i64>,
     /// 组头 `skill:` —— 写出这一组词的 skill 名（0032）。
     ///
     /// 与其余组头一样是**位置绑定**：它属于紧跟其后的那个组。一份工单通常只有一个
@@ -312,7 +310,7 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
             continue;
         }
 
-        // 投单组头（`参考图:` / `比例:` / `抽卡:` / `用途:` / `尺寸:` / `格式:`）。
+        // 投单组头（`参考图:` / `比例:` / `用途:` / `尺寸:` / `格式:`）。
         //
         // **只在组头区生效**——即该组还没有任何正文时。老键（前缀/场景/标签）为了不改动
         // 既有行为仍是全文任意位置认，但新键不能这样：这些文档的正文是长叙事，
@@ -327,7 +325,6 @@ fn parse_text(text: &str) -> (Vec<ParsedGroup>, Vec<ParseWarning>) {
                     IntakeHeader::Ratio => g.ratio = Some(value.to_string()),
                     IntakeHeader::Size => g.size = Some(value.to_string()),
                     IntakeHeader::Format => g.format = Some(value.to_string()),
-                    IntakeHeader::Draws => g.draws = value.trim().parse::<i64>().ok(),
                     // 只收下，不校验取值：skill 名是自由文本，我们没有一份名单可以对。
                     // 空串当没写 —— `skill:` 后面什么都没有时，写一个空标进库毫无意义。
                     IntakeHeader::Skill => {
@@ -661,7 +658,6 @@ enum IntakeHeader {
     Ratio,
     Size,
     Format,
-    Draws,
     Purpose,
     Skill,
 }
@@ -681,7 +677,6 @@ fn parse_intake_header(line: &str) -> Option<(IntakeHeader, &str)> {
         "比例" | "画幅" | "ratio" | "aspect" => IntakeHeader::Ratio,
         "尺寸" | "size" => IntakeHeader::Size,
         "格式" | "输出格式" | "format" => IntakeHeader::Format,
-        "抽卡" | "抽卡次数" | "draws" => IntakeHeader::Draws,
         "用途" | "purpose" | "purposes" => IntakeHeader::Purpose,
         "skill" | "技能" | "产出skill" => IntakeHeader::Skill,
         _ => return None,
@@ -1248,7 +1243,7 @@ mod tests {
         }
     }
 
-    // ───────── 投单组头（参考图 / 比例 / 抽卡 / 用途 / 尺寸 / 格式） ─────────
+    // ───────── 投单组头（参考图 / 比例 / 用途 / 尺寸 / 格式） ─────────
 
     // 标准产出格式：组头带挂靠与参数，正文照旧一段一条。
     #[test]
@@ -1258,7 +1253,6 @@ mod tests {
 前缀: KT
 参考图: images/黄A.jpg, images/黄B.jpg
 比例: 3:4
-抽卡: 2
 用途: 图生视频
 
 第一条完整提示词正文
@@ -1272,7 +1266,6 @@ mod tests {
         assert_eq!(g.prefix.as_deref(), Some("KT"));
         assert_eq!(g.refs, vec!["images/黄A.jpg", "images/黄B.jpg"]);
         assert_eq!(g.ratio.as_deref(), Some("3:4"));
-        assert_eq!(g.draws, Some(2));
         // 用途并进 tags → 下游按「显式用途」处理，不必再猜。
         assert!(g.tags.contains(&"图生视频".to_string()));
         // 组头一行都不该被当成提示词。
@@ -1376,11 +1369,14 @@ skill: prompts-ugc-real
         );
     }
 
-    // 抽卡写了非数字不该让整份文档失败：当作没写（后续按默认 1 走）。
+    // `抽卡:` 这个键已经不存在了：它必须退化成**普通正文**，而不是被静默吞掉。
+    // 原来那条 `bad_draws_value_degrades_to_none` 守的是「取值解析不了就当没写」，
+    // 其前提（存在这个键）已随抽卡整体下线；这里守住下线后真正要紧的那件事 ——
+    // 停用一个组头键不能让写过它的老文档丢内容。
     #[test]
-    fn bad_draws_value_degrades_to_none() {
-        let doc = "分组: A\n抽卡: 两次\n\n正文";
-        assert_eq!(parse(doc.as_bytes()).groups[0].draws, None);
+    fn retired_draws_header_is_plain_text_now() {
+        let g = &parse("分组: A\n抽卡: 2\n\n正文".as_bytes()).groups[0];
+        assert_eq!(texts(g), vec!["抽卡: 2", "正文"], "停用的键应落回正文");
     }
 
     // 没有任何投单组头的老文档：新字段全空，行为与从前一致。
@@ -1388,7 +1384,7 @@ skill: prompts-ugc-real
     fn legacy_docs_get_empty_intake_fields() {
         let doc = "分组: A\n前缀: AA\n\n正文一\n\n正文二";
         let g = &parse(doc.as_bytes()).groups[0];
-        assert!(g.refs.is_empty() && g.ratio.is_none() && g.draws.is_none());
+        assert!(g.refs.is_empty() && g.ratio.is_none() && g.size.is_none());
         assert_eq!(texts(g), vec!["正文一", "正文二"]);
     }
 }

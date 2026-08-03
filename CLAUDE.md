@@ -76,7 +76,7 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 
 ```
 GeneratePage 选组/挂靠 → commands::batches::create_batch
-  → engine::create_batch（同事务：展开组合 × 抽卡 → tasks + batch_refs + 归档本批组与图）
+  → engine::create_batch（同事务：展开组合 → tasks + batch_refs + 归档本批组与图）
   → Scheduler 循环取 q 态 → per-Key Semaphore 限并发 → provider.generate(multipart)
   → 落盘 outputs/ + 缩略图 → 状态迁移 rev（待验收）
   → EventSink 推 task://status-changed · task://progress · batch://summary（250ms 节流）
@@ -181,7 +181,8 @@ GeneratePage 选组/挂靠 → commands::batches::create_batch
 整批是 1024×1024 正方形，单发 `size: "1080x1920"` 则整批 400（边长非 16 倍数）；配套值单点
 `provider::RATIO_SIZES`（同时满足「正好是该比例」与「两边都是 16 的倍数」）。**回来的像素不由
 我们定**（发 `1088*1920` 上游给 941×1672），这些值是**比例的载体**不是交付分辨率。
-**抽卡 k 次 = k 个任务**，不是发 `n=k`（一次响应里 k 张只有一张能落进当前任务，其余照样计费）。
+**一条提示词 = 一个任务 = 一张图**，不是发 `n=k`（一次响应里 k 张只有一张能落进当前任务，
+其余照样计费）。抽卡（同一条词跑 k 次）已下线，`tasks.draw_index` / `batches.draws` 是不读不写的废弃列。
 
 **并发认领** — 三处窗口，代价都是钱。`claim_ready`（ready → run + 检查 `rows_affected`）
 必须在提交**之前**，`UNIQUE(work_id)` 拦不住双提交（自始至终只有一行，第二次只是覆盖

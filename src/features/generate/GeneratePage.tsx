@@ -1,5 +1,5 @@
 import { Modal } from "@/components/ui/Modal";
-import { Stepper } from "@/components/ui/Stepper";
+
 import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
 import { RefImportOverlay, useRefImport } from "@/features/_shared/RefImport";
 import { assetSrc } from "@/lib/img";
@@ -53,9 +53,6 @@ export function GeneratePage() {
   const setSize = useGenerateStore((s) => s.setSize);
   const outputFormat = useGenerateStore((s) => s.outputFormat);
   const setOutputFormat = useGenerateStore((s) => s.setOutputFormat);
-  // E17 / D2：抽卡次数 k（每组合独立生成 k 次），默认 1，上限 5。
-  const draws = useGenerateStore((s) => s.draws);
-  const setDraws = useGenerateStore((s) => s.setDraws);
   // 任务1 输出处理：去水印档位 + 清除 AI 元数据 + 去除 C2PA。
   const watermark = useGenerateStore((s) => s.watermark);
   const setWatermark = useGenerateStore((s) => s.setWatermark);
@@ -137,12 +134,12 @@ export function GeneratePage() {
   const selGroups = groups.filter((g) => selGroupIds.includes(g.id));
   const selRefs = refs.filter((r) => selRefIds.includes(r.id));
   const allMapped = selRefs.length > 0 && selRefs.every((r) => mapping[r.id] != null);
-  // 组合数 = Σ(参考图 × 挂靠组提示词数)；任务总数 = 组合数 × 抽卡次数（D2）。
+  // 组合数 = Σ(参考图 × 挂靠组提示词数)；一个组合 = 一个任务 = 一张图。
   const combos = selRefs.reduce((sum, r) => {
     const g = groups.find((x) => x.id === mapping[r.id]);
     return sum + (g?.count ?? 0);
   }, 0);
-  const taskTotal = combos * draws;
+  const taskTotal = combos;
   const enabledKeys = keys.filter((k) => k.enabled);
   // E12：有可用 Key = 至少一个启用且并发合计 > 0。
   const hasUsableKey = enabledKeys.reduce((s, k) => s + k.concurrencyLimit, 0) > 0;
@@ -249,9 +246,6 @@ export function GeneratePage() {
     p.watermark = watermark;
     p.clearAiMetadata = clearAiMetadata;
     p.removeC2pa = removeC2pa;
-    // 抽卡次数是 createBatch 的独立入参、不进 GenParams；但不写进快照，
-    // 「再来一批」就会把 ×3 悄悄还原成 ×1，任务数对不上而没人知道为什么。
-    p.draws = draws;
     return JSON.stringify(p);
   };
 
@@ -268,7 +262,6 @@ export function GeneratePage() {
         commands.createBatch({
           refs: selRefs.map((r) => ({ refImageId: r.id, promptGroupId: mapping[r.id] as number })),
           paramsJson: buildParamsJson(),
-          draws,
         }),
       );
       setConfirm(null);
@@ -325,8 +318,8 @@ export function GeneratePage() {
     if (wasAuto) setSize(v === null ? null : (RATIO_SIZE[v] ?? null));
   };
 
-  const paramShort = `${aspectRatio ?? size ?? "跟随"} · ${fmtLabel} · ×${draws}`;
-  const paramSum = `比例 ${aspectRatio ?? "跟随提示词"}${size ? ` · 尺寸 ${size}` : ""} · 输出 ${fmtLabel} · 抽卡 ×${draws}`;
+  const paramShort = `${aspectRatio ?? size ?? "跟随"} · ${fmtLabel}`;
+  const paramSum = `比例 ${aspectRatio ?? "跟随提示词"}${size ? ` · 尺寸 ${size}` : ""} · 输出 ${fmtLabel}`;
 
   return (
     <div className="col f1 ohide">
@@ -632,9 +625,7 @@ export function GeneratePage() {
             <>
               <span className="t3 fs12">=</span>
               <span className="fw6 fs13 nowrap" style={{ color: "var(--acc2)" }}>
-                {draws > 1
-                  ? `${combos} 组合 × ${draws} 抽卡 = ${taskTotal} 个任务`
-                  : `${combos} 组合 = ${taskTotal} 个任务`}
+                {`${combos} 组合 = ${taskTotal} 个任务`}
               </span>
             </>
           )}
@@ -723,11 +714,6 @@ export function GeneratePage() {
               <Seg value={outputFormat} options={OUT_FMT_OPTS} onChange={setOutputFormat} />
               <span className="fs11 t3">也决定本地存盘的格式</span>
             </div>
-            <div className="prow2 mt8">
-              <span className="plabel">抽卡次数</span>
-              <Stepper value={draws} min={1} max={5} onChange={setDraws} />
-              <span className="fs11 t3">每个组合独立请求 k 次，各占一个任务</span>
-            </div>
             <div className="psep" />
             <div className="prow2">
               <span className="plabel">去水印</span>
@@ -782,7 +768,7 @@ export function GeneratePage() {
               <span className="fw6">实际发往接口的字段：</span>
               <span className="mono"> {wireParamsLabel(wire)}</span>
               <br />
-              抽卡 ×{draws} = 每个组合请求 {draws} 次（每次 <span className="mono">n=1</span>
+              一个组合 = 一个任务 = 一张图（恒 <span className="mono">n=1</span>
               ，各自独立自动恢复与验收）；去水印/元数据处理在本机执行，不进请求。
             </div>
           </div>
@@ -815,11 +801,7 @@ export function GeneratePage() {
           <div className="col gap10">
             <SummaryLine
               label="任务总数"
-              value={
-                draws > 1
-                  ? `${combos} 组合 × ${draws} 抽卡 = ${taskTotal}`
-                  : `${combos} 组合 = ${taskTotal}`
-              }
+              value={`${combos} 组合 = ${taskTotal}`}
             />
             <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含自动恢复）`} />
             <SummaryLine
@@ -976,7 +958,7 @@ function sizeIssue(size: string | null): string | null {
  *
  * 入参就是构建请求用的那份 wire 记录（键名 = multipart 字段名），故这条文案与
  * `provider/openai.rs` 真正发出去的表单是同一来源——它写什么，远端收什么。
- * 抽卡次数与输出处理全在本机执行，不进请求。
+ * 输出处理全在本机执行，不进请求。
  */
 function wireParamsLabel(wire: Record<string, unknown>): string {
   const parts = Object.entries(wire).map(

@@ -8,7 +8,7 @@ function apply<T>(u: Updater<T>, prev: T): T {
 }
 
 /**
- * 生成页配置（E07）：选择的分组/参考图/挂靠 + 生成参数 + 抽卡次数。
+ * 生成页配置（E07）：选择的分组/参考图/挂靠 + 生成参数。
  *
  * 铁律 1 说明：业务真相在 Rust；此处仅为「本次要生成什么」的 UI 选择态（尚未落库为批次），
  * 属允许前端持久化的 UI 态。持久化到 localStorage，切页/重启沿用；点「开始生成」后由
@@ -26,7 +26,6 @@ interface GenerateState {
   size: string | null;
   /** 输出格式 "png" / "jpeg"；它同时决定本地交付的文件格式。 */
   outputFormat: string | null;
-  draws: number;
   // 任务1 输出处理：去水印档位（V1 仅 "none"）+ 清除 AI 元数据 + 去除 C2PA。
   watermark: string;
   clearAiMetadata: boolean;
@@ -38,7 +37,6 @@ interface GenerateState {
   setAspectRatio: (v: string | null) => void;
   setSize: (v: string | null) => void;
   setOutputFormat: (v: string | null) => void;
-  setDraws: (v: number) => void;
   setWatermark: (v: string) => void;
   setClearAiMetadata: (v: boolean) => void;
   setRemoveC2pa: (v: boolean) => void;
@@ -52,7 +50,6 @@ interface GenerateState {
       watermark?: string | null;
       clearAiMetadata?: boolean | null;
       removeC2pa?: boolean | null;
-      draws?: number | null;
     },
   ) => void;
 }
@@ -66,7 +63,6 @@ export const useGenerateStore = create<GenerateState>()(
       aspectRatio: null,
       size: null,
       outputFormat: null,
-      draws: 1,
       watermark: "none",
       clearAiMetadata: true,
       removeC2pa: true,
@@ -77,7 +73,6 @@ export const useGenerateStore = create<GenerateState>()(
       setAspectRatio: (v) => set({ aspectRatio: v }),
       setSize: (v) => set({ size: v }),
       setOutputFormat: (v) => set({ outputFormat: v }),
-      setDraws: (v) => set({ draws: v }),
       setWatermark: (v) => set({ watermark: v }),
       setClearAiMetadata: (v) => set({ clearAiMetadata: v }),
       setRemoveC2pa: (v) => set({ removeC2pa: v }),
@@ -93,9 +88,6 @@ export const useGenerateStore = create<GenerateState>()(
           // 缺省（旧批次快照无此字段）视为开启，与生成页默认一致。
           clearAiMetadata: params.clearAiMetadata ?? true,
           removeC2pa: params.removeC2pa ?? true,
-          // 抽卡次数进了批次快照（否则「再来一批」会把 ×3 悄悄变回 ×1，任务数对不上）。
-          // 旧批次快照没有这个键，退回 1；夹取到 1..=5，与生成页步进器一致。
-          draws: Math.min(5, Math.max(1, Math.round(params.draws ?? 1))),
         }),
     }),
     { name: "gendesk-generate" },

@@ -2443,11 +2443,7 @@ awaitingDownload: boolean; acceptedAt: number; updatedAt: number }
 export type CloseResult = { deletedFiles: number; deleteFailures: string[]; reportJson: string }
 export type CopyFilePreview = { productCode: string | null; kind: string; titles: number; bodies: number; topics: string[] }
 export type CopyItemView = { id: number; productId: number; productCode: string; productName: string; kind: string; text: string; source: string; enabled: boolean; state: string; postId: number | null; createdAt: number }
-export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string; 
-/**
- * 抽卡次数 k（E17 / D2）：每个组合独立生成 k 次。默认 1，后端夹取 1..=5。
- */
-draws: number }
+export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
 /**
  * 账号与余额（`user_credit` 的完整回体）。
  * 
@@ -2731,7 +2727,7 @@ refs: JobPreviewRef[];
 /**
  * 本组生效的参数快照与实际进 multipart 的字段。
  */
-paramsJson: string; wireJson: string; draws: number; taskCount: number }
+paramsJson: string; wireJson: string; taskCount: number }
 export type JobPreviewRef = { fileName: string; 
 /**
  * 工单目录内的参考图绝对路径。

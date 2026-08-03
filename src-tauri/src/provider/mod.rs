@@ -62,14 +62,14 @@ pub const OUTPUT_FORMATS: &[&str] = &["png", "jpeg"];
 /// **只保留真的会用到的三项**（比例/尺寸/输出格式）。端点文档里还有
 /// quality / response_format / background / output_compression / extra_fields 等，
 /// 一律不做——参数摆在界面上却没人用，只会让「到底哪个在起作用」更难回答。
-/// `n` 恒为 1 由请求本身给定：抽卡 k 次在引擎侧展开成 k 个任务（各自独立重试与验收），
-/// 而不是发 `n=k`——那样一次响应里 k 张图只有一张能落进当前任务。
+/// `n` 恒为 1 由请求本身给定：一条提示词 = 一个任务 = 一张图。发 `n=k` 是错的——
+/// 一次响应里 k 张图只有一张能落进当前任务，其余照样计费。
 ///
 /// **比例走 `aspect_ratio` 而不是 `size`**：gpt-image-2 系列就是这么控制画幅的，
 /// 而提示词里写「9:16」对模型不构成约束——不显式给参数，多数情况回来的是 1:1。
 ///
-/// 批次的 `params_json` 是「本批配置快照」，比本结构宽：还带 `draws`、`watermark`
-/// （本地去水印档位）等纯 UI 键供「按此配置再来一批」还原。此处 **不** 加
+/// 批次的 `params_json` 是「本批配置快照」，比本结构宽：还带 `watermark`
+/// （本地去水印档位）等纯 UI 键，以及历史快照里遗留的废弃键（如 `draws`）。此处 **不** 加
 /// `deny_unknown_fields`，那些键在这里被静默忽略——它们本就不该出现在发给远端的请求里。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -255,9 +255,10 @@ pub trait ImageProvider: Send + Sync {
 mod tests {
     use super::GenParams;
 
-    // 批次快照里混着纯 UI 键（抽卡次数、去水印档位、输出处理开关）。它们**不得**
-    // 影响发往远端的字段，也不得让整份快照解析失败退化成「全部空」——那会让用户
-    // 明明选了 9:16，请求里却一个字段都没有。
+    // 批次快照里混着纯 UI 键（去水印档位、输出处理开关）与**历史遗留的废弃键**
+    // （`draws` 是抽卡下线前写进去的，存量批次的快照里还有）。它们**不得**影响发往
+    // 远端的字段，也不得让整份快照解析失败退化成「全部空」——那会让用户明明选了
+    // 9:16，请求里却一个字段都没有。
     #[test]
     fn ui_only_keys_are_ignored_without_dropping_wire_params() {
         let p = GenParams::from_json(

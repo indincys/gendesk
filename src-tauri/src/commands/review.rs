@@ -149,7 +149,6 @@ struct AcceptRow {
     ref_image_id: i64,
     prompt_id: i64,
     prompt_text_snapshot: String,
-    draw_index: i64,
     result_image_path: Option<String>,
     result_thumb_path: Option<String>,
     ref_name: String,
@@ -164,7 +163,7 @@ struct AcceptRow {
 }
 
 const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, t.ref_image_id, t.prompt_id,
-        t.prompt_text_snapshot, t.draw_index, t.result_image_path, t.result_thumb_path,
+        t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
@@ -252,8 +251,10 @@ pub async fn accept_tasks(
             .join(&group_folder);
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
-        let base_filename =
-            files::output_filename(&row.ref_name, &row.prompt_code, &date, row.draw_index, &ext);
+        let base_filename = format!(
+            "{}.{ext}",
+            files::fallback_item_name(&row.ref_name, &row.prompt_code, &date)
+        );
         let filename = crate::publish::paths::dedupe_name(&base_filename, &|candidate| {
             let path = out_dir.join(candidate);
             path.exists() || planned_outputs.contains(&path)

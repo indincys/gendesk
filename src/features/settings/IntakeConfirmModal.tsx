@@ -153,7 +153,7 @@ export function IntakeConfirmModal({
                 ))}
                 <div className="f1" />
                 <span className="fs11 t3 nowrap">
-                  {g.prompts.length} 条 × {g.refs.length} 图{g.draws > 1 && ` × 抽卡 ${g.draws}`} ={" "}
+                  {g.prompts.length} 条 × {g.refs.length} 图 ={" "}
                   <b style={{ color: "var(--acc2)" }}>{g.taskCount} 张</b>
                 </span>
               </div>

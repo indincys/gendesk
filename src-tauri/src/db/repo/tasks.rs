@@ -170,24 +170,26 @@ pub async fn archive_if_all_terminal(
 
 // ---------------- 任务 ----------------
 
+/// 插入一个任务。
+///
+/// `tasks.draw_index` 是**废弃列**（0003）：抽卡下线后不再读写，靠 0003 那句
+/// `NOT NULL DEFAULT 1` 自己填上。迁移 forward-only，不写 `DROP COLUMN`。
 pub async fn insert_task(
     conn: &mut SqliteConnection,
     batch_id: i64,
     ref_image_id: i64,
     prompt_id: i64,
     snapshot: &str,
-    draw_index: i64,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, draw_index, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'q', ?6, ?6) RETURNING id",
+        "INSERT INTO tasks (batch_id, ref_image_id, prompt_id, prompt_text_snapshot, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'q', ?5, ?5) RETURNING id",
     )
     .bind(batch_id)
     .bind(ref_image_id)
     .bind(prompt_id)
     .bind(snapshot)
-    .bind(draw_index)
     .bind(now)
     .fetch_one(&mut *conn)
     .await?;
@@ -742,7 +744,7 @@ mod tests {
         sqlx::query("INSERT INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/a','/t',1,1,1,0)").execute(&mut *tx).await.unwrap();
         let mut ids = Vec::new();
         for _ in 0..n {
-            ids.push(insert_task(&mut tx, bid, 1, 1, "t", 1).await.unwrap());
+            ids.push(insert_task(&mut tx, bid, 1, 1, "t").await.unwrap());
         }
         tx.commit().await.unwrap();
         (bid, ids)
@@ -1113,7 +1115,7 @@ mod tests {
         let (_b1, ids) = seed(&pool, 1).await;
         let mut tx = pool.begin().await.unwrap();
         let b2 = create_batch(&mut tx, "/out", "{}").await.unwrap();
-        let live = insert_task(&mut tx, b2, 1, 1, "t", 1).await.unwrap();
+        let live = insert_task(&mut tx, b2, 1, 1, "t").await.unwrap();
         tx.commit().await.unwrap();
         set_status(&pool, ids[0], "pass").await.unwrap();
 

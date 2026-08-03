@@ -209,7 +209,6 @@ pub struct JobPreviewGroup {
     /// 本组生效的参数快照与实际进 multipart 的字段。
     pub params_json: String,
     pub wire_json: String,
-    pub draws: i64,
     pub task_count: i64,
 }
 
@@ -326,7 +325,6 @@ fn build_preview(
                 .collect(),
             params_json: g.params_json.clone(),
             wire_json: g.wire_json.clone(),
-            draws: g.draws,
             task_count: g.task_count(),
         })
         .collect();

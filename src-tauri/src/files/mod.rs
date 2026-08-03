@@ -178,21 +178,20 @@ pub fn content_hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}-{:016x}", bytes.len(), h.finish())
 }
 
-/// 输出文件名：`参考图名_YYMMDD_编号无连字符_抽卡序号.EXT`（需求 14.3 / E17 D2）。
-/// 例：`productA_260708_DZ0001_2.JPG`。抽卡序号避免同组合多张通过时文件名冲突。
-/// 参考图名做文件系统安全清洗（保留中文）。扩展名（大写）跟随源结果格式
-/// （任务1：用户保留原格式时可能为 PNG）。
-pub fn output_filename(
-    ref_name: &str,
-    code: &str,
-    date_yymmdd: &str,
-    draw_index: i64,
-    ext: &str,
-) -> String {
+/// 兜底语义名：`参考图名_YYMMDD_编号无连字符`（需求 14.3）。
+/// 例：`productA_260708_DZ0001`。参考图名做文件系统安全清洗（保留中文）。
+///
+/// 只用于**没有语义名的图**：生成页手动建的批、以及新格式之前的历史数据。
+/// 走工单进来的图，语义名是 skill 在 `工单.json` 里给定的 `items[].name`，
+/// GenDesk 一个字符都不改（P1）。
+///
+/// 这里**不带扩展名、也不带 UID**：交付文件名 = `{语义名}-{uid}.{EXT}`，
+/// 在验收发号那一刻才拼得出来。抽卡序号段随抽卡一并下线 —— 一条提示词现在
+/// 就是一个任务，同一组合不会再有第二张要靠序号去重。
+pub fn fallback_item_name(ref_name: &str, code: &str, date_yymmdd: &str) -> String {
     let safe = sanitize_filename(ref_name);
     let code_nohyphen = code.replace('-', "");
-    let ext = normalize_ext(ext);
-    format!("{safe}_{date_yymmdd}_{code_nohyphen}_{draw_index}.{ext}")
+    format!("{safe}_{date_yymmdd}_{code_nohyphen}")
 }
 
 /// 从结果文件路径取输出用扩展名（大写）；无扩展名退化为 `JPG`。
@@ -287,35 +286,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_filename_strips_hyphen_and_keeps_chinese() {
+    fn fallback_item_name_strips_hyphen_and_keeps_chinese() {
         assert_eq!(
-            output_filename("productA", "DZ-0001", "260708", 1, "jpg"),
-            "productA_260708_DZ0001_1.JPG"
+            fallback_item_name("productA", "DZ-0001", "260708"),
+            "productA_260708_DZ0001"
         );
         assert_eq!(
-            output_filename("商品主图", "DZ-0128", "260101", 2, "jpg"),
-            "商品主图_260101_DZ0128_2.JPG"
+            fallback_item_name("商品主图", "DZ-0128", "260101"),
+            "商品主图_260101_DZ0128"
         );
+    }
+
+    // 兜底名里**不许**再出现抽卡序号那一段。原来那条
+    // `output_filename_draw_index_avoids_collision` 守的是「同组合两次抽卡文件名不同」，
+    // 其前提（一个组合可以出 k 张）已随抽卡整体下线；去重现在由验收发放的 UID 承担。
+    #[test]
+    fn fallback_item_name_has_no_draw_segment() {
+        let n = fallback_item_name("productA", "DZ-0001", "260708");
+        assert_eq!(n.matches('_').count(), 2, "只该有两段分隔：{n}");
+        assert!(!n.ends_with("_1"), "抽卡序号段必须消失：{n}");
     }
 
     // 任务1：保留原格式时扩展名跟随源结果（大写）。
     #[test]
-    fn output_filename_follows_source_ext() {
-        assert_eq!(
-            output_filename("p", "DZ-0001", "260708", 1, "png"),
-            "p_260708_DZ0001_1.PNG"
-        );
+    fn output_ext_follows_source() {
         assert_eq!(output_ext_from_path("/data/results/12.png"), "PNG");
         assert_eq!(output_ext_from_path("/data/results/12.jpg"), "JPG");
         assert_eq!(output_ext_from_path("/data/results/noext"), "JPG");
-    }
-
-    // E17 D2：同一组合不同抽卡序号的文件名不冲突。
-    #[test]
-    fn output_filename_draw_index_avoids_collision() {
-        let a = output_filename("productA", "DZ-0001", "260708", 1, "jpg");
-        let b = output_filename("productA", "DZ-0001", "260708", 2, "jpg");
-        assert_ne!(a, b, "同组合两次抽卡的输出文件名必须不同");
     }
 
     #[test]

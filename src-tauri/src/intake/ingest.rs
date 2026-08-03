@@ -296,22 +296,18 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     let refs_dir = ctx.dirs.refs();
     let thumbs_dir = ctx.dirs.thumbs();
 
-    // ── 按 (参数快照, 抽卡) 分桶。参数是**批次级**的，各组比例不同就必须拆批次。
+    // ── 按参数快照分桶。参数是**批次级**的，各组比例不同就必须拆批次。
     let mut buckets: Vec<Bucket> = Vec::new();
     let total_refs: i64 = plan.groups.iter().map(|g| g.refs.len() as i64).sum();
 
     for (g, group_id) in plan.groups.iter().zip(result.group_ids.iter().copied()) {
         let key = g.bucket();
-        let slot = match buckets
-            .iter()
-            .position(|b| (b.params.clone(), b.draws) == key)
-        {
+        let slot = match buckets.iter().position(|b| b.params == key) {
             Some(i) => i,
             None => {
                 buckets.push(Bucket {
                     params: g.params_json.clone(),
                     wire: g.wire_json.clone(),
-                    draws: g.draws,
                     mappings: Vec::new(),
                 });
                 buckets.len() - 1
@@ -367,7 +363,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     let multi = buckets.len() > 1;
     for (i, b) in buckets.iter().enumerate() {
         let (batch_id, task_count) =
-            engine::create_batch(&ctx.pool, &output_dir, &b.params, &b.mappings, b.draws).await?;
+            engine::create_batch(&ctx.pool, &output_dir, &b.params, &b.mappings).await?;
         // 批次备注：拆批时带上序号，否则任务页会出现几张认不出彼此关系的卡片。
         if let Some(note) = &plan.note {
             let note = if multi {
@@ -390,7 +386,6 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
 struct Bucket {
     params: String,
     wire: String,
-    draws: i64,
     mappings: Vec<RefMapping>,
 }
 
@@ -469,8 +464,8 @@ fn result_text(plan: &Plan, done: &Applied) -> String {
 fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
     format!(
         "这份工单超过了自动开跑阈值，**还没有导入任何东西**（提示词、参考图一条都没进库）。\n\n\
-         共 {total} 张图 = {} 组 × 各自的条数 × 挂靠图数 × 抽卡\n\
-         将建 {} 个批次（各组比例/抽卡不同就会拆批）\n\
+         共 {total} 张图 = {} 组 × 各自的条数 × 挂靠图数\n\
+         将建 {} 个批次（各组比例不同就会拆批）\n\
          当前阈值：{threshold}\n\n\
          确认开跑，二选一：\n\
          1. 在这个目录里建一个空文件 `{}`\n\
@@ -612,7 +607,7 @@ mod tests {
         make_job(
             home.path(),
             "20260727-卡套-买家秀",
-            "分组: 黄色系卡套\n前缀: KT\n参考图: images/黄.png\n比例: 9:16\n抽卡: 2\n用途: 图生视频\n\n\
+            "分组: 黄色系卡套\n前缀: KT\n参考图: images/黄.png\n比例: 9:16\n用途: 图生视频\n\n\
              把卡套放进照片里，自然光\n\n侧逆光，浅景深\n",
             &["黄.png"],
         );
@@ -623,7 +618,7 @@ mod tests {
         assert_eq!(job.status, "done", "收录应成功：{}", job.message);
         assert_eq!(job.group_count, 1);
         assert_eq!(job.ref_count, 1);
-        assert_eq!(job.task_count, 4, "2 条 × 1 图 × 抽卡 2");
+        assert_eq!(job.task_count, 2, "2 条 × 1 图 —— 一条提示词恒为一个任务");
         assert_eq!(job.batch_ids.len(), 1);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1, "建批后必须唤醒调度器");
 
@@ -820,7 +815,7 @@ mod tests {
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].batch_ids.len(), 2, "两种比例必须是两个批次");
-        assert_eq!(jobs[0].task_count, 3, "黄 2 条 + 蓝 1 条，各 1 图 1 抽卡");
+        assert_eq!(jobs[0].task_count, 3, "黄 2 条 + 蓝 1 条，各 1 图");
 
         // 每个批次拿到的是自己那一份比例，没有互相串味。
         let mut ratios = Vec::new();
@@ -979,13 +974,13 @@ mod tests {
         let dir = make_job(
             home.path(),
             "job-big",
-            "分组: 甲\n参考图: images/a.png\n抽卡: 2\n\n甲1\n\n甲2\n\n甲3\n",
+            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n\n甲3\n\n甲4\n",
             &["a.png"],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "hold");
-        assert_eq!(jobs[0].task_count, 6, "3 条 × 1 图 × 抽卡 2");
+        assert_eq!(jobs[0].task_count, 4, "4 条 × 1 图");
         assert!(jobs[0].message.contains("超过阈值"), "{}", jobs[0].message);
         assert_eq!(kick.0.load(Ordering::SeqCst), 0);
         for t in ["batches", "prompts", "ref_images", "tasks"] {
@@ -1005,7 +1000,7 @@ mod tests {
         let dir = make_job(
             home.path(),
             "job-big",
-            "分组: 甲\n参考图: images/a.png\n抽卡: 2\n\n甲1\n\n甲2\n\n甲3\n",
+            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n\n甲3\n\n甲4\n",
             &["a.png"],
         );
         let held = scan(&ctx, home.path()).await.unwrap();
@@ -1017,7 +1012,7 @@ mod tests {
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
-        assert_eq!(jobs[0].task_count, 6);
+        assert_eq!(jobs[0].task_count, 4);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1);
     }
 
@@ -1031,12 +1026,12 @@ mod tests {
         make_job(
             home.path(),
             "job-unl",
-            "分组: 甲\n参考图: images/a.png\n抽卡: 5\n\n甲1\n\n甲2\n",
+            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n",
             &["a.png"],
         );
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
-        assert_eq!(jobs[0].task_count, 10);
+        assert_eq!(jobs[0].task_count, 2);
     }
 
     // 多组没点名挂靠 → 拒单，不猜。

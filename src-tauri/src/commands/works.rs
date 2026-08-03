@@ -342,7 +342,10 @@ mod tests {
         let results = data.path().join("results");
         std::fs::create_dir_all(&results).unwrap();
         std::fs::write(results.join("1.jpg"), b"snapshot").unwrap();
-        let out = data.path().join("outputs").join("W-王一博-55-正面-hu72.jpg");
+        let out = data
+            .path()
+            .join("outputs")
+            .join("W-王一博-55-正面-hu72.jpg");
 
         sqlx::query("INSERT INTO batches (id,created_at,output_dir,params_json,status) VALUES (1,0,'/out','{}','running')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(&pool).await.unwrap();
@@ -359,9 +362,11 @@ mod tests {
         .await
         .unwrap();
         let mut tx = pool.begin().await.unwrap();
-        crate::db::repo::names::issue_with(&mut tx, "W-王一博-55-正面", Some(1), || "hu72".into())
-            .await
-            .unwrap();
+        crate::db::repo::names::issue_with(&mut tx, "W-王一博-55-正面", Some(1), || {
+            "hu72".into()
+        })
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         reexport_from_snapshot(&pool, results, 1).await.unwrap();

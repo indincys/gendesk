@@ -5277,7 +5277,7 @@ a:hover {
   line-height: 1.65;
   color: var(--t2);
 }
-/* 「展开全部 N 条」：默认只铺前三条，要核的是挂靠关系而不是通读几千字。 */
+/* 「展开全文」：长正文先截断，要核的是挂靠关系而不是通读几千字。 */
 .ikmore {
   align-self: flex-start;
   padding: 2px 0;

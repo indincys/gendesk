@@ -92,6 +92,12 @@ pub struct ImportResult {
     pub inserted: i64,
     /// 是否新建了临时分组（ctx=generate）
     pub temp: bool,
+    /// 刚落库的提示词 id，**按落库顺序**（组间按组序、组内按条序）。
+    ///
+    /// 工单收录要靠它把条目与提示词配对：`items[i]` 的参考图挂 `prompt_ids[i]`。
+    /// 回读一次 `WHERE group_id = ?` 是不行的 —— 同前缀二次导入会追加进已有组，
+    /// 那样读回来的会混进上一份工单的词。
+    pub prompt_ids: Vec<i64>,
 }
 
 /// 从 name 生成候选前缀：取 ASCII 字母/数字前 2 位大写，缺省 "IM"。
@@ -545,6 +551,7 @@ pub(crate) async fn commit_preview(
 
     let mut tx = pool.begin().await?;
     let mut group_ids = Vec::new();
+    let mut prompt_ids = Vec::new();
     let mut inserted = 0i64;
 
     for pg in &preview.groups {
@@ -573,7 +580,7 @@ pub(crate) async fn commit_preview(
         for p in prompts {
             let number = ids::allocate(&mut tx, &prefix).await?;
             let code = ids::format_code(&prefix, number);
-            repo::insert_prompt(
+            let pid = repo::insert_prompt(
                 &mut tx,
                 &repo::NewPrompt {
                     group_id,
@@ -592,18 +599,24 @@ pub(crate) async fn commit_preview(
                 },
             )
             .await?;
+            prompt_ids.push(pid);
             inserted += 1;
         }
 
-        // 分组级标签绑定（V1：entity_type='prompt_group'）。用途与 txt 里自由写的
-        // `标签: 白底,3C` 恰好共用一张 tags 表，故这里是合并而不是覆盖。
+        // 分组级标签绑定（V1：entity_type='prompt_group'）。**这里只有自由标签**
+        // （txt 里写的 `标签: 白底,3C`）—— 用途已经不在这张表里了（0045）：它跟着
+        // 提示词落到 `prompts.purpose`，随作品一起长期存在。
         //
-        // **导入只增不减**：追加进已有组（同前缀二次导入）时，绝不因为这份新 txt 的组名
-        // 不带关键词就把上次标好的用途抹掉。要改用途就在导入预览那一刻改——提示词是
-        // 消耗品，一份 txt 从进库到跑完就那么一次，没有「回头再管理它」这个阶段。
-        let purposes = validate_purposes(&pg.purposes)?;
+        // 为什么搬走：tag_bindings 是**无外键的多态表**，分组删掉时漏清一次绑定，
+        // 分组 id 被后来的分组复用，旧绑定就会把用途安到一个无关的组头上 ——
+        // 而「这批图会不会自动进视频流水线」因此变成一件说不清的事。
+        //
+        // 校验仍在（受控取值不能手打），只是校验完之后写的是那一列。
+        validate_purposes(&pg.purposes)?;
+        // **导入只增不减**：追加进已有组（同前缀二次导入）时，绝不因为这份新 txt
+        // 不带那个标签就把上次标好的抹掉。
         let mut merged = repo::group_tags(pool, group_id).await?;
-        for t in pg.tags.iter().chain(purposes.iter()) {
+        for t in &pg.tags {
             if !merged.contains(t) {
                 merged.push(t.clone());
             }
@@ -616,6 +629,7 @@ pub(crate) async fn commit_preview(
         group_ids,
         inserted,
         temp: is_temp,
+        prompt_ids,
     })
 }
 

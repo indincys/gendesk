@@ -712,13 +712,15 @@ impl Scheduler {
             .filter(|j| !j.trim().is_empty());
         let json = match own {
             Some(j) => j,
-            None => sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
-                .bind(batch_id)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "{}".into()),
+            None => {
+                sqlx::query_scalar::<_, String>("SELECT params_json FROM batches WHERE id = ?1")
+                    .bind(batch_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "{}".into())
+            }
         };
         crate::provider::GenParams::from_json(&json)
     }

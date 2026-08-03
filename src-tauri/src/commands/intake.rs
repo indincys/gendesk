@@ -179,8 +179,8 @@ pub async fn retry_intake_job(
 ///
 /// **存在的理由**：超阈值的工单是自动收录链路上唯一一处「停下来等人点头」的地方，
 /// 而在此之前那句「XX 张，去设置页确认」并不足以让人做出判断 —— 真正要看的是
-/// **哪个组配了哪几张图**。配错的代价是整批图跑出来全是错的，且要到验收时才发现，
-/// 那时钱已经花完了。所以这里给的是生成页那张「已经挂好靠」的图，而不是一个数字。
+/// **哪条词配了哪张图、会叫什么名字**。配错的代价是整批图跑出来全是错的，且要到
+/// 验收时才发现，那时钱已经花完了。所以这里给的是逐条的对应关系，而不是一个数字。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobPreview {
@@ -189,42 +189,38 @@ pub struct JobPreview {
     pub dir_name: String,
     /// 工单目录绝对路径（「在访达里打开」用）。
     pub dir: String,
-    pub groups: Vec<JobPreviewGroup>,
+    /// 整单级受控用途（归一化后）；空串 = 没有用途。
+    pub purpose: String,
+    pub items: Vec<JobPreviewItem>,
     pub task_count: i64,
-    pub batch_count: i64,
+    /// 去重后的参考图张数（多个条目常共用一张原图）。
+    pub ref_count: i64,
     /// 当前阈值（前端说明「超过它才要确认」）。
     pub threshold: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct JobPreviewGroup {
+pub struct JobPreviewItem {
+    /// 语义名 = 未来的图片名主干（还差一个验收时才发放的 UID）。
     pub name: String,
-    pub prefix: Option<String>,
-    pub purposes: Vec<String>,
-    /// 本组全部提示词正文（人要能逐条读，不只是数一个条数）。
-    pub prompts: Vec<String>,
-    /// 挂靠到本组的参考图。
-    pub refs: Vec<JobPreviewRef>,
-    /// 本组生效的参数快照与实际进 multipart 的字段。
-    pub params_json: String,
-    pub wire_json: String,
-    pub task_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct JobPreviewRef {
-    pub file_name: String,
+    pub sku: String,
+    pub style: String,
+    /// 提示词正文全文（人要能逐条读，不只是数一个条数）。
+    pub prompt: String,
+    pub ref_file_name: String,
     /// 工单目录内的参考图绝对路径。
     ///
     /// **这里不带缩略图。** 缩略图由 [`intake_ref_thumb`] 按需单张生成——原来是在
     /// 组装预览时把每张参考图都全分辨率解码一遍再塞成 base64，一份 120 张 26 MP
-    /// 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两组。
+    /// 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两条。
     ///
     /// 顺带解决了 asset 协议的 scope 问题：工单目录在交接根下（默认 `~/GenDesk交接/`），
     /// 够不着 `$APPDATA/**`；而按需生成的缩略图**缓存在 app data 里**，正好够得着。
-    pub path: String,
+    pub ref_path: String,
+    /// 本条生效的参数快照与实际进 multipart 的字段。
+    pub params_json: String,
+    pub wire_json: String,
 }
 
 /// 预览一份待确认工单。**只读**：与真正收录走的是同一个 `intake::plan`，
@@ -298,34 +294,22 @@ fn build_preview(
     threshold: i64,
 ) -> AppResult<JobPreview> {
     let plan = intake::plan(dir, dir_name).map_err(AppError::InvalidInput)?;
-    let groups = plan
-        .groups
+    let items = plan
+        .items
         .iter()
-        .map(|g| JobPreviewGroup {
-            name: g.parsed.name.clone(),
-            prefix: g.parsed.prefix.clone(),
-            purposes: g
-                .parsed
-                .tags
-                .iter()
-                .filter(|t| crate::purpose::is_purpose(t))
-                .cloned()
-                .collect(),
-            prompts: g.parsed.prompts.iter().map(|p| p.text.clone()).collect(),
-            refs: g
-                .refs
-                .iter()
-                .map(|p| JobPreviewRef {
-                    file_name: p
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    path: p.to_string_lossy().to_string(),
-                })
-                .collect(),
-            params_json: g.params_json.clone(),
-            wire_json: g.wire_json.clone(),
-            task_count: g.task_count(),
+        .map(|it| JobPreviewItem {
+            name: it.name.clone(),
+            sku: it.sku.clone(),
+            style: it.style.clone(),
+            prompt: it.prompt_text.clone(),
+            ref_file_name: it
+                .ref_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            ref_path: it.ref_path.to_string_lossy().to_string(),
+            params_json: it.params_json.clone(),
+            wire_json: it.wire_json.clone(),
         })
         .collect();
     Ok(JobPreview {
@@ -333,9 +317,10 @@ fn build_preview(
         job_id: job_id.to_string(),
         dir_name: dir_name.to_string(),
         dir: dir.to_string_lossy().to_string(),
-        groups,
+        purpose: plan.purpose.clone(),
+        items,
         task_count: plan.task_count(),
-        batch_count: plan.batch_count() as i64,
+        ref_count: plan.distinct_refs().len() as i64,
         threshold,
     })
 }

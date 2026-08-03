@@ -112,6 +112,24 @@ pub struct RefMapping {
     pub params_json: Option<String>,
 }
 
+/// 一个待建的任务：**参考图与提示词已经配好对**。
+///
+/// 与 [`RefMapping`] 的区别就是这一点。挂靠模型（一张参考图 × 一个提示词组里的全部
+/// 提示词）是生成页那条路径的形状；工单 v2 里 `items[].ref` 是**条目级**的，
+/// 一条词配一张图，没有可展开的乘法。硬要塞进挂靠模型，就得给每个条目建一个只有
+/// 一条词的分组——而 `prompt_groups.prefix` 是 UNIQUE 的，那意味着一单十条词就要
+/// 占掉十个前缀和十个号池。
+#[derive(Debug, Clone, Default)]
+pub struct TaskSpec {
+    pub ref_image_id: i64,
+    pub prompt_id: i64,
+    /// 提示词所属分组（batch_refs 与归档要用；工单 v2 里一单一组）。
+    pub prompt_group_id: i64,
+    pub prompt_text: String,
+    /// 任务级生成参数（0045）；空串 = 跟批次级那份走。
+    pub params_json: String,
+}
+
 /// 组合展开并创建批次（R1 挂靠模型，一次事务）。返回 (batch_id, 任务数)。
 ///
 /// **一个组合 = 一个任务 = 一张图。** 抽卡（同一条提示词跑 k 次）已随生成侧收敛下线：
@@ -123,40 +141,72 @@ pub async fn create_batch(
     mappings: &[RefMapping],
 ) -> AppResult<(i64, i64)> {
     // 预取各组 active 提示词（读，不在事务内）。
-    #[allow(clippy::type_complexity)]
-    let mut combos: Vec<(i64, i64, String, Option<String>)> = Vec::new();
+    let mut specs: Vec<TaskSpec> = Vec::new();
     for m in mappings {
         let prompts = prompt_repo::list_active_prompts(pool, m.prompt_group_id).await?;
         for (pid, text) in prompts {
-            combos.push((m.ref_image_id, pid, text, m.params_json.clone()));
+            specs.push(TaskSpec {
+                ref_image_id: m.ref_image_id,
+                prompt_id: pid,
+                prompt_group_id: m.prompt_group_id,
+                prompt_text: text,
+                params_json: m.params_json.clone().unwrap_or_default(),
+            });
         }
     }
-    if combos.is_empty() {
+    if specs.is_empty() {
         return Err(crate::error::AppError::InvalidInput(
             "所选组合展开后无任务（提示词组为空？）".into(),
         ));
     }
-    let task_count = combos.len() as i64;
+    create_batch_from_specs(pool, output_dir, params_json, &specs).await
+}
+
+/// 按**已配好对**的任务清单创建批次（工单 v2 的入口）。返回 (batch_id, 任务数)。
+///
+/// 与 [`create_batch`] 共用同一段尾巴（batch_refs + 挂靠记忆 + 归档 + 落任务），
+/// 差别只在「任务清单是展开出来的还是直接给的」。分叉过一次的东西就会一直分叉下去
+/// （`channel_of` / `CHANNEL_OF` 那次的教训），所以这里只有一份实现。
+pub async fn create_batch_from_specs(
+    pool: &SqlitePool,
+    output_dir: &str,
+    params_json: &str,
+    specs: &[TaskSpec],
+) -> AppResult<(i64, i64)> {
+    if specs.is_empty() {
+        return Err(crate::error::AppError::InvalidInput(
+            "这一单展开后没有任何任务".into(),
+        ));
+    }
+    let task_count = specs.len() as i64;
 
     let mut tx = pool.begin().await?;
     let batch_id = task_repo::create_batch(&mut tx, output_dir, params_json).await?;
-    for m in mappings {
-        task_repo::add_batch_ref(&mut tx, batch_id, m.ref_image_id, m.prompt_group_id).await?;
+
+    // batch_refs 的主键是 (batch_id, ref_image_id)，故每张参考图只记一行 ——
+    // 多个条目共用一张图时，记的是它第一次出现时挂的那个组。
+    let mut seen_refs: Vec<i64> = Vec::new();
+    for s in specs {
+        if seen_refs.contains(&s.ref_image_id) {
+            continue;
+        }
+        seen_refs.push(s.ref_image_id);
+        task_repo::add_batch_ref(&mut tx, batch_id, s.ref_image_id, s.prompt_group_id).await?;
         // E32 挂靠记忆：记录该参考图本次挂靠的组，下批预填。
         sqlx::query("UPDATE ref_images SET last_group_id = ?2 WHERE id = ?1")
-            .bind(m.ref_image_id)
-            .bind(m.prompt_group_id)
+            .bind(s.ref_image_id)
+            .bind(s.prompt_group_id)
             .execute(&mut *tx)
             .await?;
     }
-    for (ref_id, prompt_id, snapshot, task_params) in &combos {
+    for s in specs {
         task_repo::insert_task(
             &mut tx,
             batch_id,
-            *ref_id,
-            *prompt_id,
-            snapshot,
-            task_params.as_deref().unwrap_or(""),
+            s.ref_image_id,
+            s.prompt_id,
+            &s.prompt_text,
+            &s.params_json,
         )
         .await?;
     }
@@ -164,10 +214,9 @@ pub async fn create_batch(
     // 从生成页选择器里让位给下一批。同事务提交 —— 批次建成则必已归档，不会出现
     // 「任务跑起来了但素材还留在选择器里」的中间态。库里仍在，可一键取消归档。
     let at = crate::db::now_unix();
-    let mut ref_ids: Vec<i64> = mappings.iter().map(|m| m.ref_image_id).collect();
+    let mut ref_ids = seen_refs;
     ref_ids.sort_unstable();
-    ref_ids.dedup();
-    let mut group_ids: Vec<i64> = mappings.iter().map(|m| m.prompt_group_id).collect();
+    let mut group_ids: Vec<i64> = specs.iter().map(|s| s.prompt_group_id).collect();
     group_ids.sort_unstable();
     group_ids.dedup();
     ref_repo::archive_many(&mut tx, &ref_ids, at).await?;
@@ -420,13 +469,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count2, 3, "一条提示词恒为一个任务，不再有抽卡乘数");
-        let per_prompt: Vec<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tasks WHERE batch_id = ?1 GROUP BY prompt_id",
-        )
-        .bind(batch2)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let per_prompt: Vec<i64> =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE batch_id = ?1 GROUP BY prompt_id")
+                .bind(batch2)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(per_prompt, vec![1, 1, 1], "每条提示词恰好一个任务");
     }
 

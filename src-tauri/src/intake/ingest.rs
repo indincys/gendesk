@@ -24,7 +24,7 @@ use crate::db::now_unix;
 use crate::db::repo::intake as repo;
 use crate::db::repo::refs as refs_repo;
 use crate::db::repo::tasks as task_repo;
-use crate::engine::{self, Engine, RefMapping};
+use crate::engine::{self, Engine};
 use crate::error::{AppError, AppResult};
 use crate::files::DataDirs;
 use crate::importer::ParsedGroup;
@@ -237,13 +237,9 @@ async fn record_hold(
     total: i64,
     threshold: i64,
 ) -> AppResult<Option<JobView>> {
-    let msg = format!(
-        "共 {total} 张图（{} 组 · {} 批次），超过阈值 {threshold}，等待确认",
-        plan.groups.len(),
-        plan.batch_count()
-    );
+    let msg = format!("共 {total} 张图（{total} 个条目），超过阈值 {threshold}，等待确认");
     let row_id = repo::insert_running(&ctx.pool, &plan.job_id, &plan.dir_name).await?;
-    repo::mark_hold(&ctx.pool, row_id, &msg, total, plan.groups.len() as i64).await?;
+    repo::mark_hold(&ctx.pool, row_id, &msg, total, total).await?;
     write_receipt(
         &plan.dir,
         super::HOLD_FILE,
@@ -270,17 +266,55 @@ pub struct Applied {
 /// 「已经导入了多少」必须留下痕迹，否则台账那行只剩一句错误原文，而回执还在说
 /// 「没有导入任何东西」—— 人照着那句话重投，就会得到第二份提示词和第二个批次。
 async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
-    // ── 提示词：全部组合成一份预览，一个事务落库（同手动导入的写路径）。
-    let parsed: Vec<ParsedGroup> = plan.groups.iter().map(|g| g.parsed.clone()).collect();
-    let preview = build_preview_from_parsed(&ctx.pool, &parsed, "UTF-8".into(), Vec::new()).await?;
+    // ── 提示词：一单一组，一条条目 = 一条提示词。走的是手动导入那条落库路径
+    //    （`build_preview_from_parsed` → `commit_preview`），故前缀分配、号池、
+    //    用途校验三处口径与手工导入完全一致 —— 铁律「写路径只有一条」。
+    //
+    //    「组」在工单 v2 里已经不是一个概念（`items[].name` 即身份），但 prompts
+    //    的外键要求它有个落脚点，而编号是**按前缀**发的。故这里造一个以投单为名的组：
+    //    它是容器，不是身份。
+    let parsed = ParsedGroup {
+        name: plan.note.clone(),
+        prefix: None,
+        scene: String::new(),
+        tags: Vec::new(),
+        origin: crate::importer::GroupOrigin::Explicit,
+        skill: plan.skill.clone(),
+        prompts: plan
+            .items
+            .iter()
+            .map(|it| crate::importer::ParsedPrompt {
+                title: None,
+                text: it.prompt_text.clone(),
+                item_name: it.name.clone(),
+                sku: it.sku.clone(),
+                style: it.style.clone(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut preview =
+        build_preview_from_parsed(&ctx.pool, &[parsed], "UTF-8".into(), Vec::new()).await?;
+    // 用途是**整单级**的（0045）：工单里写了就是它，不走关键词预猜 —— 预猜是给
+    // 手工导入的兜底，而工单里作者已经明确表过态。
+    for g in &mut preview.groups {
+        g.purposes = if plan.purpose.is_empty() {
+            Vec::new()
+        } else {
+            vec![plan.purpose.clone()]
+        };
+        g.purpose_inferred = false;
+    }
     let result = commit_preview(&ctx.pool, &preview, "library").await?;
-    out.group_count = result.group_ids.len() as i64;
-    if result.group_ids.len() != plan.groups.len() {
-        // 理论上不会发生（空组已在校验里排除）；真发生了宁可整单失败也不要错配挂靠。
+    out.group_count = result.prompt_ids.len() as i64;
+    if result.prompt_ids.len() != plan.items.len() || result.group_ids.len() != 1 {
+        // 理论上不会发生（空正文已在校验里排除）；真发生了宁可整单失败也不要错配挂靠——
+        // 配错的后果是整批图配错提示词，而那要到验收时才看得出来。
         return Err(AppError::Internal(
-            "分组落库数与工单不一致，已中止（未建批次）".into(),
+            "提示词落库数与工单条目数不一致，已中止（未建批次）".into(),
         ));
     }
+    let group_id = result.group_ids[0];
 
     // ── 参考图：可选的图库分组（重名复用，不报错）。
     let ref_group_id = match &plan.ref_group {
@@ -296,85 +330,85 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     let refs_dir = ctx.dirs.refs();
     let thumbs_dir = ctx.dirs.thumbs();
 
-    // ── 一次工单 = 一个 run（0045）。
+    // ── 参考图落盘。**按去重后的清单**：多个条目共用一张原图是常态（正面/侧面
+    //    各写一条词却挂同一张），逐条入库会得到几份内容相同的行，而落盘与缩略图
+    //    还各花一遍 CPU。
     //
-    // 参数不再决定切分：它跟着**任务**走（`RefMapping.params_json`），所以各条目
-    // 画幅不同也塞得进同一个 run。原来按参数分桶拆出来的那几个批次，对人从来没有
-    // 意义 —— 它只是「params_json 存在 batches 上」的副作用，代价是一次投单在任务页
-    // 上碎成几张认不出彼此关系的卡片。
-    let mut mappings: Vec<RefMapping> = Vec::new();
-    // 台账里仍要列出这一单**实际用到过的几套参数**（去重后）：全自动收录没有经过
-    // 生成页那张确认卡，「我写了 9:16 到底发出去没有」只能靠它回答。
-    let mut seen_params: Vec<(String, String)> = Vec::new();
-    let total_refs: i64 = plan.groups.iter().map(|g| g.refs.len() as i64).sum();
-
-    for (g, group_id) in plan.groups.iter().zip(result.group_ids.iter().copied()) {
-        let key = (g.params_json.clone(), g.wire_json.clone());
-        if !seen_params.contains(&key) {
-            seen_params.push(key);
-        }
-        // 分块并行落盘，块内并发、块间串行、**插库严格按原顺序**。
-        //
-        // 为什么不干脆「全部解完再全部插库」：失败回执是承重的（谎称「没有导入任何
-        // 东西」会让人点重试拿到第二份提示词），两段式会在解码阶段失败时留下一整批
-        // 谁也不知道存在的孤儿文件，而台账上 ref_count 还是 0。分块把孤儿窗口压到
-        // 一个块以内，且 ref_count 是可见地往前走的。
-        //
-        // 顺序必须保持：mappings 的顺序会喂给 create_batch 决定任务创建顺序。
+    //    分块并行落盘，块内并发、块间串行、**插库严格按原顺序**。
+    //
+    //    为什么不干脆「全部解完再全部插库」：失败回执是承重的（谎称「没有导入任何
+    //    东西」会让人点重试拿到第二份提示词），两段式会在解码阶段失败时留下一整批
+    //    谁也不知道存在的孤儿文件，而台账上 ref_count 还是 0。分块把孤儿窗口压到
+    //    一个块以内，且 ref_count 是可见地往前走的。
+    let wanted = plan.distinct_refs();
+    let total_refs = wanted.len() as i64;
+    let mut ref_ids: Vec<(PathBuf, i64)> = Vec::with_capacity(wanted.len());
+    for chunk in wanted.chunks(crate::files::decode::max_concurrent()) {
+        let jobs = chunk.iter().map(|path| {
+            let p = path.to_string_lossy().to_string();
+            let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
+            // 解码 + 缩放 + 重编码是纯 CPU，留在异步执行器上会把整个 IPC 卡住
+            // （v0.14.0）；`bounded` 同时把它纳入进程级解码预算。
+            crate::files::decode::bounded(move |permit| ingest_one(&p, &rd, &td, permit))
+        });
         // `join_all` 按输入顺序返回，故这里天然保序。
-        for chunk in g.refs.chunks(crate::files::decode::max_concurrent()) {
-            let jobs = chunk.iter().map(|path| {
-                let p = path.to_string_lossy().to_string();
-                let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
-                // 解码 + 缩放 + 重编码是纯 CPU，留在异步执行器上会把整个 IPC 卡住
-                // （v0.14.0）；`bounded` 同时把它纳入进程级解码预算。
-                crate::files::decode::bounded(move |permit| ingest_one(&p, &rd, &td, permit))
-            });
-            for ing in futures_util::future::join_all(jobs).await {
-                let ing = ing?;
-                let id = refs_repo::insert(
-                    &ctx.pool,
-                    &refs_repo::NewRefImage {
-                        name: ing.name,
-                        ref_group_id,
-                        file_path: ing.file_path,
-                        thumb_path: ing.thumb_path,
-                        width: ing.width,
-                        height: ing.height,
-                        file_size: ing.file_size,
-                        content_hash: ing.content_hash,
-                        upload_path: ing.upload_path,
-                        ephemeral: plan.ephemeral,
-                    },
-                )
-                .await?;
-                out.ref_count += 1;
-                ctx.progress.refs(&plan.job_id, out.ref_count, total_refs);
-                mappings.push(RefMapping {
-                    ref_image_id: id,
-                    prompt_group_id: group_id,
-                    params_json: Some(g.params_json.clone()),
-                });
-            }
+        for (path, ing) in chunk.iter().zip(futures_util::future::join_all(jobs).await) {
+            let ing = ing?;
+            let id = refs_repo::insert(
+                &ctx.pool,
+                &refs_repo::NewRefImage {
+                    name: ing.name,
+                    ref_group_id,
+                    file_path: ing.file_path,
+                    thumb_path: ing.thumb_path,
+                    width: ing.width,
+                    height: ing.height,
+                    file_size: ing.file_size,
+                    content_hash: ing.content_hash,
+                    upload_path: ing.upload_path,
+                    ephemeral: plan.ephemeral,
+                },
+            )
+            .await?;
+            out.ref_count += 1;
+            ctx.progress.refs(&plan.job_id, out.ref_count, total_refs);
+            ref_ids.push((path.clone(), id));
         }
     }
 
-    // ── 建批（花钱的那一步，放在最后）。**恰好一个**。
+    // ── 配对：items[i] 的参考图 ↔ prompt_ids[i]。两个清单同序是上面那句
+    //    「落库数不一致就整单失败」在守着的东西。
+    let mut specs = Vec::with_capacity(plan.items.len());
+    for (it, prompt_id) in plan.items.iter().zip(result.prompt_ids.iter().copied()) {
+        let ref_image_id = ref_ids
+            .iter()
+            .find(|(p, _)| p == &it.ref_path)
+            .map(|(_, id)| *id)
+            .ok_or_else(|| AppError::Internal(format!("条目「{}」的参考图没能入库", it.name)))?;
+        specs.push(engine::TaskSpec {
+            ref_image_id,
+            prompt_id,
+            prompt_group_id: group_id,
+            prompt_text: it.prompt_text.clone(),
+            params_json: it.params_json.clone(),
+        });
+    }
+
+    // ── 建批（花钱的那一步，放在最后）。**恰好一个**：一次工单 = 一个 run（0045）。
     //
     // 批次级 params_json 留空：这一单的参数在任务行上，批次级那份只是生成页手动建批
     // 的兜底。写一个「代表性的」进去反而骗人 —— 一单里可能有三种画幅。
     let output_dir = ctx.dirs.outputs().to_string_lossy().to_string();
     let (batch_id, task_count) =
-        engine::create_batch(&ctx.pool, &output_dir, "{}", &mappings).await?;
+        engine::create_batch_from_specs(&ctx.pool, &output_dir, "{}", &specs).await?;
     // 批次名 = 投单名。批次退到幕后之后，验收页的分节标题读的就是它 —— 让人看见
     // 「哪一次投单」，而不是一个对人不表达任何东西的内部自增 id。
     // 备注失败不该让一个已经跑起来的批次算作「工单失败」。
-    let note = plan.note.clone().unwrap_or_else(|| plan.job_id.clone());
-    let _ = task_repo::rename_batch(&ctx.pool, batch_id, &note).await;
+    let _ = task_repo::rename_batch(&ctx.pool, batch_id, &plan.note).await;
     out.batch_ids.push(batch_id);
     // params_json / wire_json 此后是「这一单用过的几套参数」，**不再与 batch_ids 同序**
     // （0023 的表注释写于按参数拆批的年代）。batch_ids 现在恒为一个元素。
-    for (params, wire) in seen_params {
+    for (params, wire) in plan.param_sets() {
         out.params_json.push(params);
         out.wire_json.push(wire);
     }
@@ -433,7 +467,7 @@ fn duplicate_text(job_id: &str) -> String {
 fn result_text(plan: &Plan, done: &Applied) -> String {
     let mut s = format!(
         "GenDesk 已收录并开跑。\n\n\
-         工单：{}\n组数：{}\n参考图：{}\n任务（= 出图张数）：{}\n批次：{}\n\n",
+         工单：{}\n条目：{}\n参考图：{}\n任务（= 出图张数）：{}\n批次：{}\n\n",
         plan.job_id,
         done.group_count,
         done.ref_count,
@@ -444,11 +478,8 @@ fn result_text(plan: &Plan, done: &Applied) -> String {
             .collect::<Vec<_>>()
             .join(" "),
     );
-    for (i, b) in done.batch_ids.iter().enumerate() {
-        s.push_str(&format!(
-            "批次 #{b} 实际发往接口的字段：{}\n",
-            done.wire_json.get(i).map(String::as_str).unwrap_or("{}")
-        ));
+    for w in &done.wire_json {
+        s.push_str(&format!("实际发往接口的字段：{w}\n"));
     }
     s.push_str("\n验收请在 GenDesk 的验收页完成。\n");
     s
@@ -457,15 +488,14 @@ fn result_text(plan: &Plan, done: &Applied) -> String {
 fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
     format!(
         "这份工单超过了自动开跑阈值，**还没有导入任何东西**（提示词、参考图一条都没进库）。\n\n\
-         共 {total} 张图 = {} 组 × 各自的条数 × 挂靠图数\n\
-         将建 {} 个批次（各组比例不同就会拆批）\n\
+         共 {total} 张图 = {total} 个条目（一条 = 一个任务 = 一张图）\n\
+         参考图 {} 张 · 将建 1 个批次（一次工单 = 一个 run）\n\
          当前阈值：{threshold}\n\n\
          确认开跑，二选一：\n\
          1. 在这个目录里建一个空文件 `{}`\n\
          2. 或在 GenDesk 设置页「Claude Code 收件」点「确认开跑」（它做的就是第 1 件事）\n\n\
          不想跑就直接删掉整个工单目录。\n",
-        plan.groups.len(),
-        plan.batch_count(),
+        plan.distinct_refs().len(),
         super::CONFIRM_FILE,
     )
 }
@@ -482,7 +512,7 @@ fn error_text(msg: &str, done: &Applied) -> String {
     } else {
         s.push_str(&format!(
             "但**已经导入了一部分**，重投前必须先处理它们，否则会得到第二份：\n\
-             · 提示词组：{} 组\n· 参考图：{} 张\n",
+             · 提示词：{} 条\n· 参考图：{} 张\n",
             done.group_count, done.ref_count
         ));
         if done.batch_ids.is_empty() {
@@ -530,16 +560,43 @@ mod tests {
         buf.into_inner()
     }
 
-    /// 造一份工单目录（标准形态：提示词.txt + images/ + READY.txt）。
-    fn make_job(root: &Path, dir_name: &str, doc: &str, images: &[&str]) -> PathBuf {
+    /// 造一份 v2 工单目录（工单.json + prompts/ + refs/ + 最后写的 READY.txt）。
+    ///
+    /// `items` = (条目名, 正文, 参考图文件名, 条目级参数 JSON 片段)。
+    fn make_job(
+        root: &Path,
+        dir_name: &str,
+        head: &str,
+        items: &[(&str, &str, &str, &str)],
+    ) -> PathBuf {
         let dir = super::super::pending_dir(root).join(dir_name);
-        std::fs::create_dir_all(dir.join(super::super::IMAGES)).unwrap();
-        std::fs::write(dir.join(super::super::DOC), doc).unwrap();
-        for n in images {
-            std::fs::write(dir.join(super::super::IMAGES).join(n), png()).unwrap();
+        std::fs::create_dir_all(dir.join(super::super::PROMPTS)).unwrap();
+        std::fs::create_dir_all(dir.join(super::super::REFS)).unwrap();
+        let mut refs_written: Vec<String> = Vec::new();
+        let mut specs = Vec::new();
+        for (name, text, img, extra) in items {
+            std::fs::write(
+                dir.join(super::super::PROMPTS).join(format!("{name}.txt")),
+                text,
+            )
+            .unwrap();
+            if !refs_written.contains(&img.to_string()) {
+                std::fs::write(dir.join(super::super::REFS).join(img), png()).unwrap();
+                refs_written.push(img.to_string());
+            }
+            specs.push(format!(
+                r#"{{"name":"{name}","sku":"55","style":"王一博","ref":"refs/{img}"{extra}}}"#
+            ));
         }
+        let order = format!(r#"{{"version":1{head},"items":[{}]}}"#, specs.join(","));
+        std::fs::write(dir.join(super::super::ORDER), order).unwrap();
         std::fs::write(dir.join(super::super::READY), "ok").unwrap();
         dir
+    }
+
+    /// 最常见的一份：一个条目、一张图、无额外参数。
+    fn simple(name: &str) -> Vec<(&str, &str, &str, &str)> {
+        vec![(name, "正文一", "a.png", "")]
     }
 
     /// 记录进度回报，供「进度必须单调且到达 total」那条测试用。
@@ -600,42 +657,68 @@ mod tests {
         make_job(
             home.path(),
             "20260727-卡套-买家秀",
-            "分组: 黄色系卡套\n前缀: KT\n参考图: images/黄.png\n比例: 9:16\n用途: 图生视频\n\n\
-             把卡套放进照片里，自然光\n\n侧逆光，浅景深\n",
-            &["黄.png"],
+            r#","purpose":"i2v","defaults":{"ratio":"9:16"}"#,
+            &[
+                ("W-王一博-55-正面", "把卡套放进照片里，自然光", "黄.png", ""),
+                ("W-王一博-55-侧面", "侧逆光，浅景深", "黄.png", ""),
+            ],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs.len(), 1);
         let job = &jobs[0];
         assert_eq!(job.status, "done", "收录应成功：{}", job.message);
-        assert_eq!(job.group_count, 1);
-        assert_eq!(job.ref_count, 1);
-        assert_eq!(job.task_count, 2, "2 条 × 1 图 —— 一条提示词恒为一个任务");
+        assert_eq!(job.group_count, 2, "两个条目");
+        assert_eq!(job.ref_count, 1, "两条共用一张原图，只该入库一次");
+        assert_eq!(job.task_count, 2, "一条 = 一个任务 = 一张图");
         assert_eq!(job.batch_ids.len(), 1);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1, "建批后必须唤醒调度器");
 
-        // 用户的核心关切：组头写的比例真的进了参数快照。
+        // 用户的核心关切：工单里写的比例真的进了参数快照。
         //
         // 读的是**任务级**那份（0045）：参数下沉到任务之后，批次级那一列对工单收录
         // 恒为空 —— 一单里可能有三种画幅，写一个「代表性的」进批次反而骗人。
-        let params: Vec<String> =
-            sqlx::query_scalar("SELECT params_json FROM tasks ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let params: Vec<String> = sqlx::query_scalar("SELECT params_json FROM tasks ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         assert_eq!(params.len(), 2);
         for j in &params {
             let p = crate::provider::GenParams::from_json(j);
             assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
         }
 
-        // 编号前缀与用途标签都该落到位。
-        let codes: Vec<String> = sqlx::query_scalar("SELECT code FROM prompts ORDER BY id")
+        // 条目级身份（0044）跟着提示词落库：语义名 / SKU / 风格 / 用途。
+        let ids: Vec<(String, String, String, String)> =
+            sqlx::query_as("SELECT item_name, sku_code, style, purpose FROM prompts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                (
+                    "W-王一博-55-正面".into(),
+                    "55".into(),
+                    "王一博".into(),
+                    "图生视频".into()
+                ),
+                (
+                    "W-王一博-55-侧面".into(),
+                    "55".into(),
+                    "王一博".into(),
+                    "图生视频".into()
+                ),
+            ]
+        );
+        // 正文进库必须**逐字符**等于 txt —— 新格式的全部意义就是正文里零元信息。
+        let texts: Vec<String> = sqlx::query_scalar("SELECT text FROM prompts ORDER BY id")
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(codes, vec!["KT-0001", "KT-0002"]);
+        assert_eq!(texts, vec!["把卡套放进照片里，自然光", "侧逆光，浅景深"]);
+        // 用途**不再**走 tag_bindings（0045）：它是无外键的多态表，分组 id 被复用时
+        // 旧绑定会把用途安到无关的组头上。载体是上面那一列。
         let tags: Vec<String> = sqlx::query_scalar(
             "SELECT t.name FROM tags t JOIN tag_bindings b ON b.tag_id = t.id
               WHERE b.entity_type = 'prompt_group'",
@@ -643,7 +726,10 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert!(tags.contains(&crate::purpose::PURPOSE_I2V.to_string()));
+        assert!(
+            !tags.contains(&crate::purpose::PURPOSE_I2V.to_string()),
+            "用途不该再被绑成分组标签：{tags:?}"
+        );
 
         // 成功后移档 + 回执随目录一起走。
         assert!(!super::super::pending_dir(home.path())
@@ -659,11 +745,11 @@ mod tests {
         assert!(receipt.contains("aspect_ratio"), "回执要写清实际发出去什么");
     }
 
-    /// 分块并行落盘之后，**参考图的入库顺序必须仍然是工单里写的顺序**。
+    /// 分块并行落盘之后，**参考图的入库顺序必须仍然是工单里写的顺序**，
+    /// 而且每个条目必须配到自己那一张。
     ///
-    /// mappings 的顺序会喂给 `create_batch` 决定任务创建顺序；并行化最容易在这里
-    /// 静默出错——图都进去了、数量也对，只是配对错位，而那要到验收时才看得出来。
-    /// 同时钉住进度回报：单调、且最终等于总数。
+    /// 并行化最容易在这里静默出错——图都进去了、数量也对，只是配对错位，
+    /// 而那要到验收时才看得出来。同时钉住进度回报：单调、且最终等于总数。
     #[tokio::test]
     async fn parallel_ref_ingest_preserves_order_and_reports_progress() {
         let (pool, _d) = test_pool().await;
@@ -672,19 +758,21 @@ mod tests {
         let (ctx, _kick, progress) = ctx_for_full(&pool, data.path(), 500);
 
         // 七张（> 并发块大小，保证真的跨了多个块），名字本身带顺序。
-        let names: Vec<String> = (1..=7).map(|i| format!("r{i}.png")).collect();
-        let refs_line = names
+        let items: Vec<(String, String, String, String)> = (1..=7)
+            .map(|i| {
+                (
+                    format!("W-顺序-{i:02}"),
+                    format!("正文{i}"),
+                    format!("r{i}.png"),
+                    String::new(),
+                )
+            })
+            .collect();
+        let item_refs: Vec<(&str, &str, &str, &str)> = items
             .iter()
-            .map(|n| format!("images/{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        make_job(
-            home.path(),
-            "20260727-顺序",
-            &format!("分组: 顺序组\n参考图: {refs_line}\n\n提示词一\n"),
-            &name_refs,
-        );
+            .map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str()))
+            .collect();
+        make_job(home.path(), "20260727-顺序", "", &item_refs);
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "收录应成功：{}", jobs[0].message);
@@ -697,6 +785,21 @@ mod tests {
             .unwrap();
         let want: Vec<String> = (1..=7).map(|i| format!("r{i}")).collect();
         assert_eq!(got, want, "并行落盘不得打乱参考图顺序");
+
+        // 配对正确性：第 i 条词挂的必须是第 i 张图。数量对而配对错是这条链路上
+        // 最贵的静默失败 —— 整批图配错提示词，要到验收时才看得出来。
+        let pairs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT p.item_name, r.name FROM tasks t
+             JOIN prompts p ON p.id = t.prompt_id
+             JOIN ref_images r ON r.id = t.ref_image_id ORDER BY t.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let want_pairs: Vec<(String, String)> = (1..=7)
+            .map(|i| (format!("W-顺序-{i:02}"), format!("r{i}")))
+            .collect();
+        assert_eq!(pairs, want_pairs, "条目与参考图必须一一对上");
 
         let seen = progress.0.lock().unwrap().clone();
         assert!(!seen.is_empty(), "必须有进度回报");
@@ -718,12 +821,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let (ctx, kick) = ctx_for(&pool, data.path(), 500);
 
-        make_job(
-            home.path(),
-            "20260727-并发",
-            "分组: 并发组\n参考图: images/a.png\n\n提示词一\n",
-            &["a.png"],
-        );
+        make_job(home.path(), "20260727-并发", "", &simple("W-并发-01"));
 
         let (c1, c2) = (ctx.clone(), ctx.clone());
         let (h1, h2) = (home.path().to_path_buf(), home.path().to_path_buf());
@@ -750,12 +848,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let (ctx, kick) = ctx_for(&pool, data.path(), 500);
 
-        make_job(
-            home.path(),
-            "job-retry",
-            "分组: 重试组\n参考图: images/a.png\n\n提示词一\n",
-            &["a.png"],
-        );
+        make_job(home.path(), "job-retry", "", &simple("W-重试-01"));
         let old_id = repo::insert_running(&pool, "job-retry", "job-retry")
             .await
             .unwrap();
@@ -812,16 +905,19 @@ mod tests {
         make_job(
             home.path(),
             "job-split",
-            "分组: 黄\n参考图: images/黄.png\n比例: 3:4\n\n黄1\n\n黄2\n\n\
-             分组: 蓝\n参考图: images/蓝.png\n比例: 9:16\n\n蓝1\n\n\
-             分组: 绿\n参考图: images/绿.png\n比例: 1:1\n\n绿1\n",
-            &["黄.png", "蓝.png", "绿.png"],
+            "",
+            &[
+                ("W-黄-01", "黄1", "黄.png", r#","ratio":"3:4""#),
+                ("W-黄-02", "黄2", "黄.png", r#","ratio":"3:4""#),
+                ("W-蓝-01", "蓝1", "蓝.png", r#","ratio":"9:16""#),
+                ("W-绿-01", "绿1", "绿.png", r#","ratio":"1:1""#),
+            ],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].batch_ids.len(), 1, "三种画幅仍然只该有一个 run");
-        assert_eq!(jobs[0].task_count, 4, "黄 2 条 + 蓝 1 条 + 绿 1 条");
+        assert_eq!(jobs[0].task_count, 4, "四个条目 = 四个任务");
         assert_eq!(count(&pool, "batches").await, 1);
 
         // 每条任务拿到的是自己那一份比例。
@@ -853,9 +949,9 @@ mod tests {
         assert_eq!(jobs[0].params_json.len(), 3, "三套参数都要留痕");
     }
 
-    // 参数一样的多个组并进同一个批次，不该无谓拆开。
+    // 参数完全一样时，台账里只该留**一套**参数的痕迹，不该逐条重复。
     #[tokio::test]
-    async fn same_params_share_one_batch() {
+    async fn identical_params_are_recorded_once() {
         let (pool, _d) = test_pool().await;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -863,13 +959,17 @@ mod tests {
         make_job(
             home.path(),
             "job-merge",
-            "分组: 甲\n参考图: images/a.png\n比例: 3:4\n\n甲1\n\n\
-             分组: 乙\n参考图: images/b.png\n比例: 3:4\n\n乙1\n",
-            &["a.png", "b.png"],
+            r#","defaults":{"ratio":"3:4"}"#,
+            &[
+                ("W-甲-01", "甲1", "a.png", ""),
+                ("W-乙-01", "乙1", "b.png", ""),
+            ],
         );
         let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].batch_ids.len(), 1);
-        assert_eq!(jobs[0].group_count, 2);
+        assert_eq!(jobs[0].group_count, 2, "两个条目");
+        assert_eq!(jobs[0].params_json.len(), 1, "同一套参数只留一份痕迹");
     }
 
     // 重复扫描不得重复建批 —— 这是整个模块最贵的一条错误（重复花钱）。
@@ -879,12 +979,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx_for(&pool, data.path(), 500);
-        let doc = "分组: 甲\n参考图: images/a.png\n\n甲1\n";
-        make_job(home.path(), "job-1", doc, &["a.png"]);
+        make_job(home.path(), "job-1", "", &simple("W-甲-01"));
 
         assert_eq!(scan(&ctx, home.path()).await.unwrap().len(), 1);
         // 同一份工单原样再投一次（同目录名 = 同 jobId）：目录在，但台账已记，必须跳过。
-        make_job(home.path(), "job-1", doc, &["a.png"]);
+        make_job(home.path(), "job-1", "", &simple("W-甲-01"));
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
         assert_eq!(count(&pool, "batches").await, 1, "同一工单只能建一个批次");
     }
@@ -897,17 +996,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx_for(&pool, data.path(), 500);
-        let doc = "分组: 甲\n参考图: images/a.png\n\n甲1\n";
-        make_job(home.path(), "job-dup", doc, &["a.png"]);
+        make_job(home.path(), "job-dup", "", &simple("W-甲-01"));
         assert_eq!(scan(&ctx, home.path()).await.unwrap().len(), 1);
 
         // 新内容套了个用过的名字。
-        let dir = make_job(
-            home.path(),
-            "job-dup",
-            "分组: 乙\n参考图: images/a.png\n\n乙1\n",
-            &["a.png"],
-        );
+        let dir = make_job(home.path(), "job-dup", "", &simple("W-乙-01"));
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
         let note = dir.join(super::super::DUPLICATE_FILE);
         assert!(note.is_file(), "撞名必须留下回执");
@@ -923,11 +1016,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx_for(&pool, data.path(), 500);
-        let doc = "分组: 甲\n参考图: images/a.png\n\n甲1\n";
-        make_job(home.path(), "job-kept", doc, &["a.png"]);
+        make_job(home.path(), "job-kept", "", &simple("W-甲-01"));
         assert_eq!(scan(&ctx, home.path()).await.unwrap().len(), 1);
 
-        let dir = make_job(home.path(), "job-kept", doc, &["a.png"]);
+        let dir = make_job(home.path(), "job-kept", "", &simple("W-甲-01"));
         std::fs::write(dir.join(super::super::RESULT_FILE), "已收录并开跑").unwrap();
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
         assert!(
@@ -943,12 +1035,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx_for(&pool, data.path(), 500);
-        let dir = make_job(
-            home.path(),
-            "job-2",
-            "分组: 甲\n参考图: images/a.png\n\n甲1\n",
-            &["a.png"],
-        );
+        let dir = make_job(home.path(), "job-2", "", &simple("W-甲-01"));
         std::fs::remove_file(dir.join(super::super::READY)).unwrap();
 
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
@@ -965,8 +1052,8 @@ mod tests {
         let dir = make_job(
             home.path(),
             "job-3",
-            "分组: 甲\n参考图: images/a.png\n尺寸: 1080x1920\n\n甲1\n",
-            &["a.png"],
+            "",
+            &[("W-甲-01", "甲1", "a.png", r#","size":"1080x1920""#)],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
@@ -992,13 +1079,18 @@ mod tests {
         let dir = make_job(
             home.path(),
             "job-big",
-            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n\n甲3\n\n甲4\n",
-            &["a.png"],
+            "",
+            &[
+                ("W-甲-01", "甲1", "a.png", ""),
+                ("W-甲-02", "甲2", "a.png", ""),
+                ("W-甲-03", "甲3", "a.png", ""),
+                ("W-甲-04", "甲4", "a.png", ""),
+            ],
         );
 
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "hold");
-        assert_eq!(jobs[0].task_count, 4, "4 条 × 1 图");
+        assert_eq!(jobs[0].task_count, 4, "4 个条目 = 4 张图");
         assert!(jobs[0].message.contains("超过阈值"), "{}", jobs[0].message);
         assert_eq!(kick.0.load(Ordering::SeqCst), 0);
         for t in ["batches", "prompts", "ref_images", "tasks"] {
@@ -1018,8 +1110,13 @@ mod tests {
         let dir = make_job(
             home.path(),
             "job-big",
-            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n\n甲3\n\n甲4\n",
-            &["a.png"],
+            "",
+            &[
+                ("W-甲-01", "甲1", "a.png", ""),
+                ("W-甲-02", "甲2", "a.png", ""),
+                ("W-甲-03", "甲3", "a.png", ""),
+                ("W-甲-04", "甲4", "a.png", ""),
+            ],
         );
         let held = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(held[0].status, "hold");
@@ -1044,29 +1141,71 @@ mod tests {
         make_job(
             home.path(),
             "job-unl",
-            "分组: 甲\n参考图: images/a.png\n\n甲1\n\n甲2\n",
-            &["a.png"],
+            "",
+            &[
+                ("W-甲-01", "甲1", "a.png", ""),
+                ("W-甲-02", "甲2", "a.png", ""),
+            ],
         );
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].task_count, 2);
     }
 
-    // 多组没点名挂靠 → 拒单，不猜。
+    // 条目没点名挂靠 → 拒单，不猜。挂靠现在是**条目级、每条必填**：
+    // 按顺序猜错的代价是整批图配错提示词，而那要到验收时才看得出来。
     #[tokio::test]
-    async fn multi_group_without_mapping_fails() {
+    async fn an_item_without_a_ref_is_rejected_end_to_end() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 500);
+        let dir = super::super::pending_dir(home.path()).join("job-4");
+        std::fs::create_dir_all(dir.join(super::super::PROMPTS)).unwrap();
+        std::fs::create_dir_all(dir.join(super::super::REFS)).unwrap();
+        std::fs::write(dir.join(super::super::PROMPTS).join("A.txt"), "甲1").unwrap();
+        std::fs::write(dir.join(super::super::REFS).join("a.png"), png()).unwrap();
+        std::fs::write(
+            dir.join(super::super::ORDER),
+            r#"{"version":1,"items":[{"name":"A","sku":"55","style":"王一博"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(super::super::READY), "ok").unwrap();
+
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "error");
+        assert!(
+            jobs[0].message.contains("必须点名参考图"),
+            "{}",
+            jobs[0].message
+        );
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+        for t in ["batches", "prompts", "ref_images", "tasks"] {
+            assert_eq!(count(&pool, t).await, 0, "{t} 不该有任何记录");
+        }
+    }
+
+    // 旧格式（提示词.txt + 组头键）已下线：必须**明确点名**，而不是笼统地报
+    // 「找不到工单」—— 存量目录会撞上这条，而人的第一反应是「我明明放了提示词文档」。
+    #[tokio::test]
+    async fn a_legacy_job_fails_with_a_pointed_message() {
         let (pool, _d) = test_pool().await;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx_for(&pool, data.path(), 500);
-        make_job(
-            home.path(),
-            "job-4",
-            "分组: 甲\n\n甲1\n\n分组: 乙\n参考图: images/b.png\n\n乙1\n",
-            &["a.png", "b.png"],
-        );
+        let dir = super::super::pending_dir(home.path()).join("job-legacy");
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(
+            dir.join("提示词.txt"),
+            "分组: 甲\n参考图: images/a.png\n\n甲1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("images").join("a.png"), png()).unwrap();
+        std::fs::write(dir.join(super::super::READY), "ok").unwrap();
+
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "error");
-        assert!(jobs[0].message.contains("必须点名"), "{}", jobs[0].message);
+        assert!(jobs[0].message.contains("旧格式"), "{}", jobs[0].message);
+        assert!(dir.join(super::super::ERROR_FILE).is_file(), "要留下回执");
     }
 }

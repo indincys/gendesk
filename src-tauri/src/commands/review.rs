@@ -285,7 +285,8 @@ pub async fn accept_tasks(
         let Some(src) = row.result_image_path.clone() else {
             continue; // 无结果图，跳过
         };
-        let Some((_, item_name, uid)) = issued.iter().find(|(t, _, _)| *t == row.id).cloned() else {
+        let Some((_, item_name, uid)) = issued.iter().find(|(t, _, _)| *t == row.id).cloned()
+        else {
             continue;
         };
         // 任务6：输出到 outputs/{批次}/{分组}/。

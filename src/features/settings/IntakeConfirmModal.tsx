@@ -2,7 +2,7 @@ import { Modal } from "@/components/ui/Modal";
 import { assetSrc } from "@/lib/img";
 import {
   type JobPreview,
-  type JobPreviewRef,
+  type JobPreviewItem,
   commands,
   subscribeIntakeProgress,
   unwrap,
@@ -16,11 +16,11 @@ import { toast } from "sonner";
  *
  * 阈值是自动收录链路上唯一一处「停下来等人点头」的地方。原来那句
  * 「600 张，去设置页确认开跑」并不足以让人做判断：真正要核的是
- * **哪个提示词组配了哪几张参考图**——配错的代价是整批图跑出来全是错的，
+ * **哪条词配了哪张图、会叫什么名字**——配错的代价是整批图跑出来全是错的，
  * 而那要到验收时才看得出来，那时钱已经花完了。
  *
- * 所以这里长得像生成页那张「已经挂好靠」的图：一组一块，组头是参数，
- * 下面左边是参考图缩略图、右边是这组的提示词。
+ * 工单 v2 里一个条目 = 一条词 = 一个任务 = 一张图，故这里一条一块：
+ * 左边是它挂的那张参考图，右边是语义名 / SKU / 参数 / 正文。
  *
  * 预览与真正收录走的是**同一个 `intake::plan`**，故这里看见的就是确认之后
  * 会发生的那一份，不存在两套解析各说各话。
@@ -134,40 +134,31 @@ export function IntakeConfirmModal({
       ) : (
         <>
           <div className="fs11 t3" style={{ lineHeight: 1.8, marginBottom: 12 }}>
-            <span className="mono">{preview.jobId}</span> · {preview.groups.length} 个提示词组 ·
-            会建 {preview.batchCount} 个批次
-            {preview.batchCount > 1 && "（各组参数不同，塞不进同一批）"}
+            <span className="mono">{preview.jobId}</span> · {preview.items.length} 个条目 ·{" "}
+            {preview.refCount} 张参考图 · 会建 1 个批次（一次工单 = 一个 run）
+            {preview.purpose && <span className="bdg b-amber">{preview.purpose}</span>}
             <br />
-            下面是这份工单里**提示词组与参考图的对应关系**，与开跑后实际生成的一致。
+            下面是**每条词配了哪张图、会叫什么名字**，与开跑后实际生成的一致。
           </div>
 
-          {preview.groups.map((g) => (
-            <div key={g.name} className="ikgroup">
+          {preview.items.map((it) => (
+            <div key={it.name} className="ikgroup">
               <div className="fx ac gap8 wrap">
-                <span className="fw6 fs13">{g.name}</span>
-                {g.prefix && <span className="chip">{g.prefix}</span>}
-                {g.purposes.map((p) => (
-                  <span key={p} className="bdg b-amber">
-                    {p}
-                  </span>
-                ))}
+                <span className="fw6 fs13">{it.name}</span>
+                <span className="chip">{it.style}</span>
+                <span className="chip">{it.sku}</span>
                 <div className="f1" />
-                <span className="fs11 t3 nowrap">
-                  {g.prompts.length} 条 × {g.refs.length} 图 ={" "}
-                  <b style={{ color: "var(--acc2)" }}>{g.taskCount} 张</b>
-                </span>
+                <span className="fs11 t3 nowrap mono">{it.refFileName}</span>
               </div>
               {/* 实际发往接口的字段 —— 全自动收录没经过生成页那张确认卡，
                   「到底发出去没有」在别处无处可查。 */}
-              <div className="fs11 t3 mono mt4">{wireLabel(g.wireJson)}</div>
+              <div className="fs11 t3 mono mt4">{wireLabel(it.wireJson)}</div>
 
               <div className="ikbody mt8">
                 <div className="ikrefs">
-                  {g.refs.map((r) => (
-                    <LazyRef key={r.path} jobId={jobId} refItem={r} />
-                  ))}
+                  <LazyRef jobId={jobId} item={it} />
                 </div>
-                <PromptList groupName={g.name} prompts={g.prompts} />
+                <PromptBody text={it.prompt} />
               </div>
             </div>
           ))}
@@ -178,7 +169,7 @@ export function IntakeConfirmModal({
 }
 
 /** 一张参考图：进了视口才去要缩略图。 */
-function LazyRef({ jobId, refItem }: { jobId: number; refItem: JobPreviewRef }) {
+function LazyRef({ jobId, item }: { jobId: number; item: JobPreviewItem }) {
   const [src, setSrc] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -191,7 +182,7 @@ function LazyRef({ jobId, refItem }: { jobId: number; refItem: JobPreviewRef }) 
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         io.disconnect();
-        void unwrap(commands.intakeRefThumb(jobId, refItem.path))
+        void unwrap(commands.intakeRefThumb(jobId, item.refPath))
           .then((p) => {
             if (alive) setSrc(assetSrc(p) ?? null);
           })
@@ -205,43 +196,39 @@ function LazyRef({ jobId, refItem }: { jobId: number; refItem: JobPreviewRef }) 
       alive = false;
       io.disconnect();
     };
-  }, [jobId, refItem.path]);
+  }, [jobId, item.refPath]);
 
   return (
-    <div ref={boxRef} className="ikref" title={refItem.fileName}>
+    <div ref={boxRef} className="ikref" title={item.refFileName}>
       {src ? (
-        <img src={src} alt={refItem.fileName} loading="lazy" decoding="async" />
+        <img src={src} alt={item.refFileName} loading="lazy" decoding="async" />
       ) : (
         <div className="ph" style={{ aspectRatio: 1, borderRadius: 8 }} />
       )}
-      <div className="fs10 t3 nowrap ohide mono">{refItem.fileName}</div>
+      <div className="fs10 t3 nowrap ohide mono">{item.refFileName}</div>
     </div>
   );
 }
 
 /**
- * 一组的提示词。默认只铺前三条。
+ * 一条提示词正文。长的先截断。
  *
- * 要核的是「这组配了哪几张图」，不是把 120 组 × 每组几千字全部读一遍；
- * 一次性铺开 600 段长叙事只会把要核的东西埋掉。
+ * 要核的是「这条词配了哪张图、会叫什么名字」，不是把 120 条几千字的长叙事
+ * 全部读一遍；一次性铺开只会把要核的东西埋掉。
  */
-const PROMPT_PREVIEW = 3;
+const PROMPT_CLAMP = 160;
 
-function PromptList({ groupName, prompts }: { groupName: string; prompts: string[] }) {
+function PromptBody({ text }: { text: string }) {
   const [all, setAll] = useState(false);
-  const shown = all ? prompts : prompts.slice(0, PROMPT_PREVIEW);
+  const long = text.length > PROMPT_CLAMP;
   return (
     <div className="ikprompts">
-      {shown.map((t, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 组内提示词允许重复，文本不能当键；这份列表只从尾部增减、永不重排，位置就是身份。
-        <div key={`${groupName}-${i}`} className="ikprompt">
-          <span className="fs10 t3 mono noshrink">{i + 1}</span>
-          <span className="fs11">{t}</span>
-        </div>
-      ))}
-      {prompts.length > PROMPT_PREVIEW && (
+      <div className="ikprompt">
+        <span className="fs11">{all || !long ? text : `${text.slice(0, PROMPT_CLAMP)}…`}</span>
+      </div>
+      {long && (
         <button type="button" className="ikmore" onClick={() => setAll((v) => !v)}>
-          {all ? "收起" : `展开全部 ${prompts.length} 条`}
+          {all ? "收起" : `展开全文（${text.length} 字）`}
         </button>
       )}
     </div>

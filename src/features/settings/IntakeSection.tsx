@@ -159,10 +159,10 @@ export function IntakeSection() {
       </div>
       <div className="fs11 t3 mt6" style={{ lineHeight: 1.8 }}>
         与图生视频共用同一个交接根（一个目录、配一次）。一份工单 = 一个目录：
-        <span className="chip">提示词.txt</span> + <span className="chip">images/</span> + 最后写的{" "}
-        <span className="chip">READY.txt</span>。挂靠与参数写在提示词文档的组头里（
-        <span className="chip">参考图:</span> <span className="chip">比例:</span>{" "}
-        <span className="chip">用途:</span>）。
+        <span className="chip">工单.json</span> + <span className="chip">prompts/</span> +{" "}
+        <span className="chip">refs/</span> + 最后写的 <span className="chip">READY.txt</span>。
+        元信息全在 <span className="chip">工单.json</span>，正文文件里<b>零元信息</b>；一个条目 ={" "}
+        一条词 = 一个任务 = 一张图，文件名主干由它的 <span className="chip">name</span> 决定。
         <br />
         <b>应用没开也不丢单</b>：下次启动会把攒着的工单一并收进来。成功的目录移到{" "}
         <span className="chip">生图/_已收录/</span>（内含 <span className="chip">结果.txt</span>
@@ -211,14 +211,14 @@ export function IntakeSection() {
               <span className="fs12 fw5">{j.jobId}</span>
               {j.status === "done" && (
                 <>
-                  {/* 一份工单可能建出多个批次：各组比例不同就会拆批。 */}
+                  {/* 一次工单 = 一个 run（0045），故这里恒为一个。 */}
                   {j.batchIds.map((b) => (
                     <span key={b} className="bdg b-green">
                       批次 #{b}
                     </span>
                   ))}
                   <span className="fs11 t3">
-                    {j.groupCount} 组 · {j.refCount} 图 · {j.taskCount} 张
+                    {j.groupCount} 条 · {j.refCount} 图 · {j.taskCount} 张
                   </span>
                   {/* 展示与执行同一来源：这串就是构建 multipart 用的那份 wire 记录。
                       全自动收录没经过生成页那张确认卡，这里是唯一能回查的地方。 */}

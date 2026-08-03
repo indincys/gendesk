@@ -2650,7 +2650,15 @@ export type ImportResult = { groupIds: number[]; inserted: number;
 /**
  * 是否新建了临时分组（ctx=generate）
  */
-temp: boolean }
+temp: boolean; 
+/**
+ * 刚落库的提示词 id，**按落库顺序**（组间按组序、组内按条序）。
+ * 
+ * 工单收录要靠它把条目与提示词配对：`items[i]` 的参考图挂 `prompt_ids[i]`。
+ * 回读一次 `WHERE group_id = ?` 是不行的 —— 同前缀二次导入会追加进已有组，
+ * 那样读回来的会混进上一份工单的词。
+ */
+promptIds: number[] }
 /**
  * 导入诊断（E37：缺分组标记 / 悬空小标题等，含行号）。
  */
@@ -2714,43 +2722,50 @@ taskThreshold?: number }
  * 
  * **存在的理由**：超阈值的工单是自动收录链路上唯一一处「停下来等人点头」的地方，
  * 而在此之前那句「XX 张，去设置页确认」并不足以让人做出判断 —— 真正要看的是
- * **哪个组配了哪几张图**。配错的代价是整批图跑出来全是错的，且要到验收时才发现，
- * 那时钱已经花完了。所以这里给的是生成页那张「已经挂好靠」的图，而不是一个数字。
+ * **哪条词配了哪张图、会叫什么名字**。配错的代价是整批图跑出来全是错的，且要到
+ * 验收时才发现，那时钱已经花完了。所以这里给的是逐条的对应关系，而不是一个数字。
  */
 export type JobPreview = { id: number; jobId: string; dirName: string; 
 /**
  * 工单目录绝对路径（「在访达里打开」用）。
  */
-dir: string; groups: JobPreviewGroup[]; taskCount: number; batchCount: number; 
+dir: string; 
+/**
+ * 整单级受控用途（归一化后）；空串 = 没有用途。
+ */
+purpose: string; items: JobPreviewItem[]; taskCount: number; 
+/**
+ * 去重后的参考图张数（多个条目常共用一张原图）。
+ */
+refCount: number; 
 /**
  * 当前阈值（前端说明「超过它才要确认」）。
  */
 threshold: number }
-export type JobPreviewGroup = { name: string; prefix: string | null; purposes: string[]; 
+export type JobPreviewItem = { 
 /**
- * 本组全部提示词正文（人要能逐条读，不只是数一个条数）。
+ * 语义名 = 未来的图片名主干（还差一个验收时才发放的 UID）。
  */
-prompts: string[]; 
+name: string; sku: string; style: string; 
 /**
- * 挂靠到本组的参考图。
+ * 提示词正文全文（人要能逐条读，不只是数一个条数）。
  */
-refs: JobPreviewRef[]; 
-/**
- * 本组生效的参数快照与实际进 multipart 的字段。
- */
-paramsJson: string; wireJson: string; taskCount: number }
-export type JobPreviewRef = { fileName: string; 
+prompt: string; refFileName: string; 
 /**
  * 工单目录内的参考图绝对路径。
  * 
  * **这里不带缩略图。** 缩略图由 [`intake_ref_thumb`] 按需单张生成——原来是在
  * 组装预览时把每张参考图都全分辨率解码一遍再塞成 base64，一份 120 张 26 MP
- * 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两组。
+ * 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两条。
  * 
  * 顺带解决了 asset 协议的 scope 问题：工单目录在交接根下（默认 `~/GenDesk交接/`），
  * 够不着 `$APPDATA/**`；而按需生成的缩略图**缓存在 app data 里**，正好够得着。
  */
-path: string }
+refPath: string; 
+/**
+ * 本条生效的参数快照与实际进 multipart 的字段。
+ */
+paramsJson: string; wireJson: string }
 /**
  * 工单收录结果（事件与设置页列表共用）。
  */
@@ -2758,13 +2773,24 @@ export type JobView = { id: number; jobId: string; dirName: string;
 /**
  * running / done / error / hold
  */
-status: string; batchIds: number[]; taskCount: number; groupCount: number; refCount: number; 
+status: string; 
 /**
- * 各批次的参数快照（与 `batch_ids` 同序）。
+ * 一次工单 = 一个 run（0045），故成功时恒为一个元素。
+ */
+batchIds: number[]; taskCount: number; 
+/**
+ * 条目数。一条 = 一个任务 = 一张图，故成功时它等于 `task_count`；
+ * 保留成两列是因为台账列（0023 的 `group_count`）是既有的，
+ * 且中途失败时「导入了几条」与「建了几个任务」确实可以不等。
+ */
+groupCount: number; refCount: number; 
+/**
+ * 这一单用过的几套参数快照（去重）。**不再与 `batch_ids` 同序**
+ * （0023 的表注释写于按参数拆批的年代）。
  */
 paramsJson: string[]; 
 /**
- * 各批次实际发往接口的字段（与 `batch_ids` 同序）。
+ * 对应的「实际发往接口的字段」，与 `params_json` 同序。
  */
 wireJson: string[]; message: string; createdAt: number }
 /**

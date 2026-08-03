@@ -799,10 +799,7 @@ export function GeneratePage() {
           }
         >
           <div className="col gap10">
-            <SummaryLine
-              label="任务总数"
-              value={`${combos} 组合 = ${taskTotal}`}
-            />
+            <SummaryLine label="任务总数" value={`${combos} 组合 = ${taskTotal}`} />
             <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含自动恢复）`} />
             <SummaryLine
               label="预计耗时"

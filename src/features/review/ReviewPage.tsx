@@ -105,7 +105,7 @@ function buildSections(
   // 退回 `#{batchId}` —— 内部自增 id 对人不表达任何东西，只在没有别的可说时才露面。
   const keyOf = (i: ReviewItemView) =>
     mode === "batch"
-      ? (i.batchNote?.trim() || `#${i.batchId}`)
+      ? i.batchNote?.trim() || `#${i.batchId}`
       : mode === "ref"
         ? i.refName
         : mode === "group"

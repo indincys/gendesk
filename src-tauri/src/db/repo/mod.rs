@@ -191,8 +191,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
         }
         tx.commit().await.unwrap();
 
@@ -451,20 +451,19 @@ mod tests {
             .unwrap();
         let n = ids::allocate(&mut tx, "DZ").await.unwrap();
         let code = ids::format_code("DZ", n);
-        let pid =
-            prompts::insert_prompt(
-                &mut tx,
-                &prompts::NewPrompt {
-                    group_id: gid,
-                    code: &code,
-                    title: Some("小标题"),
-                    text: "正文",
-                    source: "library",
-                    ..Default::default()
-                },
-            )
-                .await
-                .unwrap();
+        let pid = prompts::insert_prompt(
+            &mut tx,
+            &prompts::NewPrompt {
+                group_id: gid,
+                code: &code,
+                title: Some("小标题"),
+                text: "正文",
+                source: "library",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let bid = tasks::create_batch(&mut tx, "/out", "{}").await.unwrap();
         let tid = tasks::insert_task(&mut tx, bid, rid, pid, "正文", "")
             .await

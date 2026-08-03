@@ -2,11 +2,11 @@
 //!
 //! ```text
 //! <交接根>/生图/收件/<工单目录>/
-//!     提示词.txt        ← 标准入口：组头带挂靠与参数，正文一段一条
-//!     images/*.jpg
-//!     说明.md           ← 可选，给人看的方向地图 / 可替换变量表
-//!     READY.txt         ← 最后写；没有它的目录一律跳过（skill 可能还在写）
-//!     job.json          ← 可选逃生舱，见下
+//!     工单.json                     ← 全部元信息（唯一入口）
+//!     refs/王一博-正面.jpg
+//!     prompts/W-王一博-55-正面.txt   ← 文件名 = 未来的图片名主干；内容 = 纯正文
+//!     说明.md                       ← 可选，给人看的方向地图
+//!     READY.txt                     ← 最后写；没有它的目录一律跳过（skill 可能还在写）
 //! <交接根>/生图/_已收录/<工单目录>-<ts>/   ← 成功后移档，内含 结果.txt
 //! ```
 //!
@@ -16,18 +16,24 @@
 //! 端口还有一个更实际的问题：**GenDesk 没开的时候投单会直接失败**。文件不会——
 //! 启动时补跑一次扫描，昨晚投的单今天照样进得来。
 //!
-//! ## 为什么参数写在 txt 的组头里，而不是一份 job.json
+//! ## 为什么从「提示词.txt + 组头键」换成「工单.json + 一条一文件」
 //!
-//! 因为 `参考图:` 写在组头里是**位置绑定**——它属于紧跟其后的那个组，不引用组名。
-//! job.json 那种 `{"image":"a.jpg","group":"楼道骑行"}` 是**按名引用**：组名一改，
-//! 挂靠当场断掉，而且断得很安静（整批图配错提示词，要到验收时才看得出来）。
+//! 旧格式把元信息（`参考图:` / `比例:` / `用途:`）写在提示词文档的组头里，靠**位置
+//! 绑定**——它属于紧跟其后的那个组。这解决了「按组名引用会因改名而静默断掉」，
+//! 但代价是两条：
 //!
-//! 单一产物还消灭了「txt 与 json 各存一半真相、改一处漏一处」这个老问题
-//! （v0.13.0 的包内 ledger、v0.15.0 的两处真相，都是这个形状）。
+//! **① 正文里不能出现像键的行。** 组头只在该组第一条正文之前生效，可这些文档的正文
+//! 是长叙事，「比例：3:4 的竖构图」这种开头随时可能出现，一旦出现那条提示词当场
+//! 少一句还不报错。现在正文文件里**零元信息**，这个风险从结构上消失了。
 //!
-//! `job.json` 保留为逃生舱：结构化程度更高的调用方（或需要内联提示词的场景）仍可用它。
+//! **② 「组」这个中间层没有对应的现实。** 生成侧收敛之后，交付的单位是**一张图**：
+//! 它有自己的语义名、自己的 SKU、自己的参考图。`items[].name` 即身份，一条 =
+//! 一个任务 = 一张图 = 一个文件名主干。
 //!
-//! ## 三条设计决定
+//! 挂靠因此从「组级、位置绑定」变成**条目级、每条必填**——它引用的是包内的一个
+//! 文件路径，而不是一个可以被改掉的名字，所以旧格式那个「改名即断」的问题不会回来。
+//!
+//! ## 三条设计决定（沿用）
 //!
 //! **1. 收录恰好一次，靠库不靠目录。** 见 0023 的表注释：工单目录会被移动、重建、
 //! 手动整理，磁盘上的标记不可靠，而重复收录 = 重复建批 = 重复花钱。
@@ -35,29 +41,32 @@
 //! **2. 校验与阈值都发生在写任何东西之前。** 参数非法、图片缺失、超阈值——这些
 //! 在「一张图都还没进库」的时候就拦下，工单要么整份生效要么整份没发生。
 //!
-//! **3. 参数只归一化拼法，不归一化取值。** `jpg → jpeg`、全角冒号 → 半角是拼法；
-//! 而「1080x1920 边长不是 16 的倍数」是取值问题，**拒单而不是替用户改成 1088**。
-//! 静默改值正是「我明明写了 9:16，出来的却不是」这类问题的成因（v0.15.2）。
+//! **3. 参数只归一化拼法，不归一化取值。** `jpg → jpeg`、`i2v → 图生视频`、
+//! 全角冒号 → 半角是拼法；而「1080x1920 边长不是 16 的倍数」是取值问题，
+//! **拒单而不是替用户改成 1088**。静默改值正是「我明明写了 9:16，出来的却不是」
+//! 这类问题的成因（v0.15.2）。
 
 pub mod ingest;
 pub mod watcher;
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::importer::{self, GroupOrigin, ParsedGroup, ParsedPrompt};
 use crate::provider::GenParams;
 
 /// 交接根下的固定子目录名。skill 侧写死这几个名字，故它们是契约，不可改。
 pub const INTAKE: &str = "生图";
 pub const PENDING: &str = "收件";
 pub const CONSUMED: &str = "_已收录";
-pub const JOB: &str = "job.json";
 pub const READY: &str = "READY.txt";
-/// 标准提示词文档名。找不到它时退而在目录里找唯一的 `.txt`/`.md`。
-pub const DOC: &str = "提示词.txt";
-pub const IMAGES: &str = "images";
+/// 工单描述文件。**唯一入口**：找不到它就是拒单，不再去目录里猜哪个是提示词文档。
+pub const ORDER: &str = "工单.json";
+/// 提示词正文目录：一条一文件，文件名 = 未来的图片名主干。
+pub const PROMPTS: &str = "prompts";
+/// 参考图目录。`items[].ref` 是工单目录内的相对路径，习惯上落在这里。
+pub const REFS: &str = "refs";
 
 /// 回执文件：让 Claude Code / Codex 侧能回读结果，而不必猜后面发生了什么。
 pub const ERROR_FILE: &str = "错误.txt";
@@ -70,6 +79,13 @@ pub const RESULT_FILE: &str = "结果.txt";
 pub const DUPLICATE_FILE: &str = "重名未收录.txt";
 /// **确认的唯一表达**。设置页那个按钮做的事就是替你写下这个文件。
 pub const CONFIRM_FILE: &str = "确认.txt";
+
+/// 本版认得的工单格式版本。
+///
+/// 显式拒绝不认识的版本，而不是「尽力解析」：一份 version=2 的工单里，我们读不懂的
+/// 那部分很可能正是它与 version=1 的差别所在，按 1 去读会得到一份**看起来成功了的
+/// 错误结果**——而这条链路的每一次错误都直接花钱。
+pub const ORDER_VERSION: i64 = 1;
 
 /// 默认收件根 = 视频流水线那个交接根。
 ///
@@ -89,64 +105,56 @@ pub fn consumed_dir(root: &Path) -> PathBuf {
     root.join(INTAKE).join(CONSUMED)
 }
 
-// ───────────────────────────── job.json（逃生舱） ─────────────────────────────
+// ───────────────────────────── 工单.json ─────────────────────────────
 
-/// 一份工单的结构化描述。标准路径不需要它——`提示词.txt` 的组头已经表达了全部信息。
+/// 一份工单的全部元信息。
 ///
 /// **入参一律宽容**：camelCase 与 snake_case 都收，缺省项都有合理默认。
+/// 宽容只针对**拼法**；取值不合法一律拒单。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct JobSpec {
+pub struct OrderSpec {
+    /// 格式版本。必须是 [`ORDER_VERSION`]。
+    pub version: Option<i64>,
     /// 工单标识（去重键）。缺省取工单目录名。
     #[serde(alias = "job_id", alias = "id")]
     pub job_id: Option<String>,
-    /// 批次备注名，落到 `batches.note`，任务页可见。
+    /// 这一单的名字，落到批次名，验收页按它分节。缺省用 `job_id`。
     pub note: Option<String>,
-    /// 提示词分组。每项要么给 `file`（txt），要么给 `prompts`（内联）。
-    pub groups: Vec<GroupSpec>,
-    /// 参考图挂靠（按组名引用）。**仅 job.json 路径有**；txt 路径走组头的位置绑定。
-    pub refs: Vec<RefSpec>,
-    /// 工单级默认参数，组头没写时用它。
-    pub params: ParamsSpec,
+    /// **整单级**受控用途（当前只有图生视频）。取值见 [`normalize_purpose`]。
+    ///
+    /// 为什么是整单级而不是条目级：一份工单是为一件事写的。真要混，那本来就该是
+    /// 两份工单——而两份工单在交付侧也是两个交付批，读起来对得上。
+    pub purpose: Option<String>,
+    /// 写出这批词的 skill 名（0032）。不声明就没有——下游不猜。
+    pub skill: Option<String>,
+    /// 工单级默认参数；条目没写时用它。
+    pub defaults: ParamsSpec,
+    pub items: Vec<ItemSpec>,
     /// 参考图入库分组名（图库目录，`ref_groups`）。缺省不分组。
     #[serde(alias = "ref_group")]
     pub ref_group: Option<String>,
     /// 参考图是否只作本批附件（不进长期图库）。缺省 false。
     pub ephemeral: Option<bool>,
-    /// 写出这批词的 skill 名（0032）。工单级默认，组可各自覆盖。
-    ///
-    /// 标准 txt 路径写组头 `skill:`；这里是 job.json 逃生舱的等价物。
-    /// 不声明就没有 —— 下游不猜。
-    pub skill: Option<String>,
 }
 
+/// 一个条目 = 一条提示词 = 一个任务 = 一张图 = 一个文件名主干。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct GroupSpec {
-    pub name: Option<String>,
-    /// 编号前缀（如 `BR`）。缺省由组名生成；与库内已有同前缀分组会自动**追加**。
-    pub prefix: Option<String>,
-    pub scene: Option<String>,
-    pub tags: Vec<String>,
-    /// 受控用途（当前只有「图生视频」）。取值非法直接拒单，同命令边界的口径。
-    pub purposes: Vec<String>,
-    /// 工单目录内相对路径的 txt。
-    pub file: Option<String>,
-    /// 内联提示词正文。
-    pub prompts: Vec<String>,
-    /// 组级参数（覆盖工单级）。
+pub struct ItemSpec {
+    /// 语义名，如 `W-王一博-55-正面`。**GenDesk 一个字符都不改**（P1）。
+    /// 它同时是 `prompts/{name}.txt` 的文件名。
+    pub name: String,
+    /// SKU 数字缩写，如 `55`。由 skill 给定，不是批次号也不是序号。
+    pub sku: String,
+    /// 风格 / 人物，如 `王一博`。交付时按它 + sku 分子目录。
+    pub style: String,
+    /// 参考图：工单目录内的相对路径，如 `refs/王一博-正面.jpg`。**每条必填**。
+    #[serde(rename = "ref", alias = "image", alias = "refImage")]
+    pub ref_path: String,
+    /// 条目级参数（覆盖 `defaults`）。
+    #[serde(flatten)]
     pub params: ParamsSpec,
-    /// 组级 skill（覆盖工单级）。
-    pub skill: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RefSpec {
-    #[serde(alias = "path", alias = "file")]
-    pub image: String,
-    /// 挂靠到哪个组（组名）。只有一个组时可省。
-    pub group: Option<String>,
 }
 
 /// 生成参数。**只有这三项会发到远端**（v0.15.2），加上恒定的 `n=1`。
@@ -165,7 +173,7 @@ pub struct ParamsSpec {
 }
 
 impl ParamsSpec {
-    /// 组级覆盖工单级：组头写了就用组头的，没写就继承工单默认。
+    /// 条目级覆盖工单级：条目写了就用条目的，没写就继承 `defaults`。
     fn overlay(&self, base: &ParamsSpec) -> ParamsSpec {
         let pick = |a: &Option<String>, b: &Option<String>| a.clone().or_else(|| b.clone());
         ParamsSpec {
@@ -186,53 +194,94 @@ pub struct Plan {
     pub job_id: String,
     pub dir_name: String,
     pub dir: PathBuf,
-    pub note: Option<String>,
-    pub groups: Vec<PlannedGroup>,
+    /// 批次名 / 验收页分节标题。
+    pub note: String,
+    /// 归一化后的受控用途；空串 = 没有用途。
+    pub purpose: String,
+    pub skill: Option<String>,
+    pub items: Vec<PlannedItem>,
     pub ref_group: Option<String>,
     pub ephemeral: bool,
 }
 
-/// 一个已解析、已配好图、已定好参数的组。
+/// 一个已校验、已配好图、已定好参数的条目。
 #[derive(Debug, Clone)]
-pub struct PlannedGroup {
-    pub parsed: ParsedGroup,
-    /// 挂靠到本组的参考图（绝对路径，已确认存在）。**位置绑定，不按组名引用。**
-    pub refs: Vec<PathBuf>,
-    /// 本组生效的批次参数快照（与生成页 `buildParamsJson` 同形）。
+pub struct PlannedItem {
+    pub name: String,
+    pub sku: String,
+    pub style: String,
+    /// `prompts/{name}.txt` 的内容，**逐字符原样**（只裁掉首尾空白）。
+    pub prompt_text: String,
+    /// 参考图绝对路径（已确认存在）。
+    pub ref_path: PathBuf,
+    /// 本条生效的参数快照（与生成页 `buildParamsJson` 同形）。
     pub params_json: String,
     /// 实际会进 multipart 的字段。
     pub wire_json: String,
 }
 
-impl PlannedGroup {
-    /// 本组会产生多少个任务 = 多少张图（一条提示词 = 一个任务，`n` 恒为 1）。
-    pub fn task_count(&self) -> i64 {
-        self.parsed.prompts.len() as i64 * self.refs.len() as i64
-    }
-    /// 分桶键：参数相同的组并进同一个批次。
-    pub fn bucket(&self) -> String {
-        self.params_json.clone()
-    }
-}
-
 impl Plan {
+    /// 任务数 = 出图张数 = 条目数。一条提示词 = 一个任务 = 一张图。
     pub fn task_count(&self) -> i64 {
-        self.groups.iter().map(PlannedGroup::task_count).sum()
+        self.items.len() as i64
     }
-    /// 会建出几个批次（按参数分桶后的桶数）。
-    pub fn batch_count(&self) -> usize {
-        let mut seen: Vec<String> = Vec::new();
-        for g in &self.groups {
-            let b = g.bucket();
-            if !seen.contains(&b) {
-                seen.push(b);
+    /// 本单用到的**去重后**参考图（保持出现顺序）。
+    ///
+    /// 多个条目常常挂同一张图（正面 / 侧面各写一条提示词，却共用一张原图）。
+    /// 按条目逐张入库会得到几份内容相同的 `ref_images` 行，图库里就是几张一模一样
+    /// 的图 —— 而落盘与缩略图还各花一遍 CPU。
+    pub fn distinct_refs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for it in &self.items {
+            if !out.contains(&it.ref_path) {
+                out.push(it.ref_path.clone());
             }
         }
-        seen.len()
+        out
+    }
+    /// 这一单实际用到的几套参数（去重，保持出现顺序）。
+    ///
+    /// 它**不再决定切分**（一次工单 = 一个 run），只回答「我写了 9:16 到底发出去
+    /// 没有」——全自动收录没有经过生成页那张确认卡，别处无处可查。
+    pub fn param_sets(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for it in &self.items {
+            let k = (it.params_json.clone(), it.wire_json.clone());
+            if !seen.contains(&k) {
+                seen.push(k);
+            }
+        }
+        seen
     }
 }
 
-// ───────────────────────────── 参数归一化 ─────────────────────────────
+// ───────────────────────────── 归一化 ─────────────────────────────
+
+/// 用途归一化：受控取值的**拼法**别名 → 落库用的那个标签。
+///
+/// `i2v` 与 `图生视频` 是同一个取值的两种写法（前者对写 JSON 的模型友好，后者是
+/// 库里的规范形），互转属于归一化拼法。认不出来的一律**拒单**：静默当成「没有用途」
+/// 会让整批本该进视频流水线的图停在作品库里，而没有任何一处会说为什么。
+pub fn normalize_purpose(raw: &str) -> Result<String, String> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Ok(String::new());
+    }
+    if crate::purpose::is_purpose(v) {
+        return Ok(v.to_string());
+    }
+    if v.eq_ignore_ascii_case("i2v") || v.eq_ignore_ascii_case("v2v") {
+        return Ok(crate::purpose::PURPOSE_I2V.to_string());
+    }
+    Err(format!(
+        "未知用途「{v}」，可用：{}（或简写 i2v）",
+        crate::purpose::all()
+            .into_iter()
+            .map(|x| x.tag)
+            .collect::<Vec<_>>()
+            .join(" / ")
+    ))
+}
 
 /// 参数快照 + wire 记录。
 ///
@@ -246,7 +295,7 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String), String> {
             .filter(|v| !v.is_empty())
     };
     let aspect_ratio = norm(&p.aspect_ratio);
-    // 只写了「比例:」没写「尺寸:」时补上配套尺寸：实测单发 aspect_ratio 会回整批正方形
+    // 只写了比例没写尺寸时补上配套尺寸：实测单发 aspect_ratio 会回整批正方形
     // （见 `provider::RATIO_SIZES`）。这是**补一个缺失字段**，不是改用户写下的取值——
     // 他若自己写了尺寸，哪怕与比例不符也照发，归一化只管拼法不管取值。
     let size = norm(&p.size).map(|s| s.to_lowercase()).or_else(|| {
@@ -312,151 +361,58 @@ pub fn safe_join(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(dir.join(p))
 }
 
+/// 语义名是否可以直接当文件名用。
+///
+/// 它会成为 `prompts/{name}.txt`、成为交付文件名的主干、成为 manifest 里的主键。
+/// 只要 `sanitize_filename` 动过它一个字符，这三处就会各自看到不同的名字 ——
+/// 所以判据是**原样等于清洗后的样子**，而不是「清洗一下就好了」（P1：不改一个字符）。
+fn name_is_safe(name: &str) -> bool {
+    !name.is_empty() && crate::files::sanitize_filename(name) == name
+}
+
 // ───────────────────────────── 校验 ─────────────────────────────
 
 /// 工单目录 → `Plan`。任何一处不对都返回**人能照着改**的错误信息。
 ///
 /// 只读文件、不写任何东西：整份校验通过之前，库里一个字节都不会变。
 pub fn plan(dir: &Path, dir_name: &str) -> Result<Plan, String> {
-    let job_path = dir.join(JOB);
-    if job_path.is_file() {
-        let raw =
-            std::fs::read_to_string(&job_path).map_err(|e| format!("读不到 job.json：{e}"))?;
-        let spec: JobSpec =
-            serde_json::from_str(&raw).map_err(|e| format!("job.json 不是合法 JSON：{e}"))?;
-        return plan_from_spec(dir, dir_name, &spec);
-    }
-    plan_from_doc(dir, dir_name)
-}
-
-/// 标准路径：从 `提示词.txt` 的组头读挂靠与参数。
-fn plan_from_doc(dir: &Path, dir_name: &str) -> Result<Plan, String> {
-    let doc = find_doc(dir)?;
-    let bytes = std::fs::read(&doc).map_err(|e| format!("读不到提示词文档：{e}"))?;
-    let stem = doc.file_stem().map(|s| s.to_string_lossy().to_string());
-    let parsed = importer::parse_named(&bytes, stem.as_deref());
-    if parsed.groups.is_empty() {
-        return Err("提示词文档里没解析出任何提示词".into());
-    }
-
-    let single = parsed.groups.len() == 1;
-    let mut groups = Vec::with_capacity(parsed.groups.len());
-    for g in parsed.groups {
-        // 组头没写 `参考图:` 时：单组工单可以吃 images/ 下全部图；多组必须点名。
-        // **绝不按顺序猜**——猜错的代价是整批图配错提示词，而那要到验收时才看得出来。
-        let refs = if g.refs.is_empty() {
-            if !single {
-                return Err(format!(
-                    "分组「{}」没写 `参考图:`；工单里有多个分组时每组都必须点名挂靠",
-                    g.name
-                ));
-            }
-            list_images(dir)?
+    let order_path = dir.join(ORDER);
+    if !order_path.is_file() {
+        // 旧格式（提示词.txt + 组头键）已下线。明说它，而不是笼统地「找不到工单」——
+        // 存量目录会撞上这条，而人的第一反应是「我明明放了提示词文档」。
+        let legacy = dir.join("提示词.txt").is_file() || dir.join("job.json").is_file();
+        return Err(if legacy {
+            format!(
+                "这是**旧格式**工单（提示词.txt / job.json + 组头键），本版只认 `{ORDER}`。\n\
+                 新形状：{ORDER} + {PROMPTS}/{{条目名}}.txt + {REFS}/ + 最后写的 {READY}。\n\
+                 让写这份工单的 skill 更新到新规范后重投。"
+            )
         } else {
-            let mut out = Vec::with_capacity(g.refs.len());
-            for r in &g.refs {
-                let p = safe_join(dir, r)?;
-                if !p.is_file() {
-                    return Err(format!("分组「{}」的参考图不存在：{r}", g.name));
-                }
-                out.push(p);
-            }
-            out
-        };
-        if refs.is_empty() {
-            return Err(format!("分组「{}」没有可用的参考图", g.name));
-        }
-        let spec = ParamsSpec {
-            aspect_ratio: g.ratio.clone(),
-            size: g.size.clone(),
-            output_format: g.format.clone(),
-            ..Default::default()
-        };
-        let (params_json, wire_json) =
-            build_params(&spec).map_err(|e| format!("分组「{}」的参数有问题：{e}", g.name))?;
-        groups.push(PlannedGroup {
-            parsed: g,
-            refs,
-            params_json,
-            wire_json,
+            format!("工单目录里没有 `{ORDER}`")
         });
     }
-
-    Ok(Plan {
-        job_id: dir_name.to_string(),
-        dir_name: dir_name.to_string(),
-        dir: dir.to_path_buf(),
-        note: None,
-        groups,
-        ref_group: None,
-        ephemeral: false,
-    })
+    let raw = std::fs::read_to_string(&order_path).map_err(|e| format!("读不到 {ORDER}：{e}"))?;
+    let spec: OrderSpec =
+        serde_json::from_str(&raw).map_err(|e| format!("{ORDER} 不是合法 JSON：{e}"))?;
+    plan_from_spec(dir, dir_name, &spec)
 }
 
-/// 找提示词文档：`提示词.txt` 优先；否则目录下唯一的 `.txt`/`.md`（`说明.md` 除外）。
-fn find_doc(dir: &Path) -> Result<PathBuf, String> {
-    let std_doc = dir.join(DOC);
-    if std_doc.is_file() {
-        return Ok(std_doc);
+fn plan_from_spec(dir: &Path, dir_name: &str, spec: &OrderSpec) -> Result<Plan, String> {
+    match spec.version {
+        Some(v) if v == ORDER_VERSION => {}
+        Some(v) => {
+            return Err(format!(
+                "这份工单声明 version={v}，本版 GenDesk 只认 {ORDER_VERSION}。\
+                 按旧版本尽力解析出来的会是一份「看起来成功了的错误结果」，\
+                 而这条链路每错一次都直接花钱，故拒单。"
+            ))
+        }
+        None => return Err(format!("{ORDER} 缺 version，应为 {ORDER_VERSION}")),
     }
-    let mut cands: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| format!("读不到工单目录：{e}"))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().map(|s| s.to_string_lossy().to_string());
-            // READY / 回执文件不是提示词文档。
-            let excluded = matches!(
-                name.as_deref(),
-                Some(READY)
-                    | Some(ERROR_FILE)
-                    | Some(HOLD_FILE)
-                    | Some(RESULT_FILE)
-                    | Some(CONFIRM_FILE)
-                    | Some("说明.md")
-            );
-            p.is_file()
-                && !excluded
-                && p.extension()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("md"))
-        })
-        .collect();
-    cands.sort();
-    match cands.len() {
-        0 => Err(format!(
-            "工单目录里没有提示词文档（找 `{DOC}`，或目录下唯一的 .txt/.md）"
-        )),
-        1 => Ok(cands.remove(0)),
-        _ => Err(format!(
-            "工单目录里有多个 .txt/.md，认不出哪个是提示词文档；把它命名为 `{DOC}`"
-        )),
+    if spec.items.is_empty() {
+        return Err(format!("{ORDER} 的 items 是空的：至少要有一个条目"));
     }
-}
-
-/// `images/` 下的全部图片（排序保证稳定）。
-fn list_images(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let img_dir = dir.join(IMAGES);
-    let mut out: Vec<PathBuf> = std::fs::read_dir(&img_dir)
-        .map_err(|_| format!("工单目录里没有 `{IMAGES}/`，也没在组头写 `参考图:`"))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension().and_then(|s| s.to_str()).is_some_and(|e| {
-                    matches!(
-                        e.to_lowercase().as_str(),
-                        "jpg" | "jpeg" | "png" | "webp" | "bmp"
-                    )
-                })
-        })
-        .collect();
-    out.sort();
-    Ok(out)
-}
-
-/// 逃生舱路径：从 job.json 构造。
-fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, String> {
+    let purpose = normalize_purpose(spec.purpose.as_deref().unwrap_or(""))?;
     let job_id = spec
         .job_id
         .as_deref()
@@ -464,158 +420,82 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
         .filter(|s| !s.is_empty())
         .unwrap_or(dir_name)
         .to_string();
-    if spec.groups.is_empty() {
-        return Err("job.json 里没有 groups：至少要有一个提示词分组".into());
-    }
 
-    // 先把每个 GroupSpec 展开成解析器口径的分组（txt 可能拆出多个）。
-    let mut flat: Vec<(ParsedGroup, ParamsSpec)> = Vec::new();
-    for (i, g) in spec.groups.iter().enumerate() {
-        let params = g.params.overlay(&spec.params);
-        let mut extra_tags = g.tags.clone();
-        for p in &g.purposes {
-            if !crate::purpose::is_purpose(p) {
-                return Err(format!(
-                    "未知用途「{p}」，可用：{}",
-                    crate::purpose::all()
-                        .into_iter()
-                        .map(|x| x.tag)
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                ));
-            }
-            if !extra_tags.contains(p) {
-                extra_tags.push(p.clone());
-            }
+    let mut items = Vec::with_capacity(spec.items.len());
+    let mut names: HashSet<String> = HashSet::new();
+    for (i, it) in spec.items.iter().enumerate() {
+        let name = it.name.trim();
+        if !name_is_safe(name) {
+            return Err(format!(
+                "items[{i}] 的 name「{name}」不能直接当文件名用（不得为空，也不得含\
+                 路径分隔符或文件系统保留字符）。这个名字会原样成为交付文件名的主干，\
+                 GenDesk 一个字符都不会改。"
+            ));
         }
-        // 组级优先、工单级兜底。空串当没写。
-        let skill = g
-            .skill
-            .clone()
-            .or_else(|| spec.skill.clone())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        match (&g.file, g.prompts.is_empty()) {
-            (Some(f), _) => {
-                let path = safe_join(dir, f)?;
-                let bytes =
-                    std::fs::read(&path).map_err(|e| format!("读不到提示词文件「{f}」：{e}"))?;
-                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string());
-                for mut pg in importer::parse_named(&bytes, stem.as_deref()).groups {
-                    if let Some(n) = g.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        // 只有解析出单个组时才让 job.json 的组名覆盖它。
-                        if spec.groups.len() == 1 {
-                            pg.name = n.to_string();
-                        }
-                    }
-                    for t in &extra_tags {
-                        if !pg.tags.contains(t) {
-                            pg.tags.push(t.clone());
-                        }
-                    }
-                    if pg.prefix.is_none() {
-                        pg.prefix = g.prefix.clone();
-                    }
-                    // txt 组头里写了 `skill:` 就以它为准（离词最近的那处声明），
-                    // 否则依次落回组级、工单级。
-                    if pg.skill.is_none() {
-                        pg.skill = skill.clone();
-                    }
-                    flat.push((pg, params.clone()));
-                }
-            }
-            (None, false) => {
-                let name = g
-                    .name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| format!("groups[{i}] 用了内联 prompts，必须同时给 name"))?;
-                let prompts: Vec<ParsedPrompt> = g
-                    .prompts
-                    .iter()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| ParsedPrompt {
-                        title: None,
-                        text: s.to_string(),
-                        ..Default::default()
-                    })
-                    .collect();
-                if prompts.is_empty() {
-                    return Err(format!("groups[{i}]「{name}」的 prompts 全是空串"));
-                }
-                flat.push((
-                    ParsedGroup {
-                        name: name.to_string(),
-                        prefix: g.prefix.clone(),
-                        scene: g.scene.clone().unwrap_or_default(),
-                        tags: extra_tags,
-                        prompts,
-                        origin: GroupOrigin::Explicit,
-                        skill: skill.clone(),
-                        ..Default::default()
-                    },
-                    params,
-                ));
-            }
-            (None, true) => return Err(format!("groups[{i}] 既没有 file 也没有 prompts")),
+        if !names.insert(name.to_string()) {
+            return Err(format!(
+                "items 里有两个条目都叫「{name}」。名字即身份：重名意味着两张不同的图\
+                 共用一个 {PROMPTS}/{name}.txt，挂靠必然错一个。"
+            ));
         }
-    }
-
-    // 挂靠：job.json 用组名引用（逃生舱的代价），单组时可省。
-    if spec.refs.is_empty() {
-        return Err("job.json 里没有 refs：至少要有一张参考图及其挂靠".into());
-    }
-    let mut by_group: Vec<Vec<PathBuf>> = vec![Vec::new(); flat.len()];
-    for (i, r) in spec.refs.iter().enumerate() {
-        let path = safe_join(dir, &r.image)?;
-        if !path.is_file() {
-            return Err(format!("refs[{i}] 的图片不存在：{}", r.image));
+        let sku = it.sku.trim();
+        let style = it.style.trim();
+        if sku.is_empty() || style.is_empty() {
+            return Err(format!(
+                "items[{i}]「{name}」缺 sku 或 style。交付时按 style + sku 分子目录，\
+                 缺了就只能靠猜——而从中文名反推 SKU 是静默失败（分错目录不报错）。"
+            ));
         }
-        let idx = match r.group.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(want) => flat
-                .iter()
-                .position(|(g, _)| g.name.trim().eq_ignore_ascii_case(want))
-                .ok_or_else(|| {
-                    format!(
-                        "挂靠的组名「{want}」对不上本工单的分组（{}）",
-                        flat.iter()
-                            .map(|(g, _)| g.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" / ")
-                    )
-                })?,
-            None if flat.len() == 1 => 0,
-            None => {
-                return Err(format!(
-                    "refs[{i}]「{}」没写挂靠到哪个组；有 {} 个组时每张图都必须点名",
-                    r.image,
-                    flat.len()
-                ))
-            }
-        };
-        by_group[idx].push(path);
-    }
-
-    let mut groups = Vec::with_capacity(flat.len());
-    for (i, (pg, params)) in flat.into_iter().enumerate() {
-        let refs = std::mem::take(&mut by_group[i]);
-        if refs.is_empty() {
-            return Err(format!("分组「{}」没有挂靠任何参考图", pg.name));
+        // 挂靠不猜：每条必填、且必须真的存在。
+        if it.ref_path.trim().is_empty() {
+            return Err(format!(
+                "items[{i}]「{name}」没写 ref：每个条目都必须点名参考图"
+            ));
         }
-        let (params_json, wire_json) =
-            build_params(&params).map_err(|e| format!("分组「{}」的参数有问题：{e}", pg.name))?;
-        groups.push(PlannedGroup {
-            parsed: pg,
-            refs,
+        let ref_path = safe_join(dir, &it.ref_path)?;
+        if !ref_path.is_file() {
+            return Err(format!(
+                "items[{i}]「{name}」的参考图不存在：{}",
+                it.ref_path.trim()
+            ));
+        }
+        // 正文：一条一文件，文件名 = 条目名。
+        let txt = dir.join(PROMPTS).join(format!("{name}.txt"));
+        let prompt_text = std::fs::read_to_string(&txt)
+            .map_err(|e| format!("读不到 {PROMPTS}/{name}.txt：{e}"))?
+            .trim()
+            .to_string();
+        if prompt_text.is_empty() {
+            return Err(format!("{PROMPTS}/{name}.txt 是空的"));
+        }
+        let (params_json, wire_json) = build_params(&it.params.overlay(&spec.defaults))
+            .map_err(|e| format!("items[{i}]「{name}」的参数有问题：{e}"))?;
+        items.push(PlannedItem {
+            name: name.to_string(),
+            sku: sku.to_string(),
+            style: style.to_string(),
+            prompt_text,
+            ref_path,
             params_json,
             wire_json,
         });
     }
 
+    // 反向核对：`prompts/` 里不许有 items 之外的 txt。
+    //
+    // 多出来的那一份要么是 skill 漏写了 items 条目，要么是上一版工单的残留 —— 两种
+    // 都意味着这份工单与写它的人以为的不一样，而少跑一张图是**不报错**的失败。
+    let extras = stray_prompt_files(dir, &names);
+    if !extras.is_empty() {
+        return Err(format!(
+            "{PROMPTS}/ 里有 items 之外的正文：{}。要么给它们补上 items 条目，\
+             要么删掉——多一个少一个都说明这份工单与你以为的不一样。",
+            extras.join(" / ")
+        ));
+    }
+
     Ok(Plan {
-        job_id,
+        job_id: job_id.clone(),
         dir_name: dir_name.to_string(),
         dir: dir.to_path_buf(),
         note: spec
@@ -623,8 +503,16 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .unwrap_or(&job_id)
+            .to_string(),
+        purpose,
+        skill: spec
+            .skill
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string),
-        groups,
+        items,
         ref_group: spec
             .ref_group
             .as_deref()
@@ -633,6 +521,28 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &JobSpec) -> Result<Plan, St
             .map(str::to_string),
         ephemeral: spec.ephemeral.unwrap_or(false),
     })
+}
+
+/// `prompts/` 下不在 `names` 里的 `.txt`（排序保证报错信息稳定）。
+fn stray_prompt_files(dir: &Path, names: &HashSet<String>) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.join(PROMPTS)) else {
+        // 目录读不动时，上面读正文那一步已经先报过错了。
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+        })
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .filter(|stem| !names.contains(stem))
+        .collect();
+    out.sort();
+    out
 }
 
 /// 工单收录结果（事件与设置页列表共用）。
@@ -644,13 +554,18 @@ pub struct JobView {
     pub dir_name: String,
     /// running / done / error / hold
     pub status: String,
+    /// 一次工单 = 一个 run（0045），故成功时恒为一个元素。
     pub batch_ids: Vec<i64>,
     pub task_count: i64,
+    /// 条目数。一条 = 一个任务 = 一张图，故成功时它等于 `task_count`；
+    /// 保留成两列是因为台账列（0023 的 `group_count`）是既有的，
+    /// 且中途失败时「导入了几条」与「建了几个任务」确实可以不等。
     pub group_count: i64,
     pub ref_count: i64,
-    /// 各批次的参数快照（与 `batch_ids` 同序）。
+    /// 这一单用过的几套参数快照（去重）。**不再与 `batch_ids` 同序**
+    /// （0023 的表注释写于按参数拆批的年代）。
     pub params_json: Vec<String>,
-    /// 各批次实际发往接口的字段（与 `batch_ids` 同序）。
+    /// 对应的「实际发往接口的字段」，与 `params_json` 同序。
     pub wire_json: Vec<String>,
     pub message: String,
     pub created_at: i64,
@@ -665,18 +580,217 @@ mod tests {
         serde_json::from_str(json).expect("参数 JSON 应能解析")
     }
 
-    /// 造一个工单目录：`提示词.txt` + images/。
-    fn make_dir(doc: &str, images: &[&str]) -> tempfile::TempDir {
+    /// 造一个 v2 工单目录。
+    fn make_dir(order: &str, prompts: &[(&str, &str)], refs: &[&str]) -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join(DOC), doc).unwrap();
-        std::fs::create_dir_all(d.path().join(IMAGES)).unwrap();
-        for n in images {
-            std::fs::write(d.path().join(IMAGES).join(n), b"x").unwrap();
+        std::fs::write(d.path().join(ORDER), order).unwrap();
+        std::fs::create_dir_all(d.path().join(PROMPTS)).unwrap();
+        std::fs::create_dir_all(d.path().join(REFS)).unwrap();
+        for (name, text) in prompts {
+            std::fs::write(d.path().join(PROMPTS).join(format!("{name}.txt")), text).unwrap();
+        }
+        for n in refs {
+            std::fs::write(d.path().join(REFS).join(n), b"x").unwrap();
         }
         d
     }
 
-    // 用户的核心关切：组头里写的比例必须原样落进批次快照，且能被下游解析回来。
+    const ORDER_OK: &str = r#"{
+      "version": 1, "purpose": "i2v",
+      "defaults": {"ratio": "9:16", "format": "jpeg"},
+      "items": [
+        {"name":"W-王一博-55-正面","sku":"55","style":"王一博","ref":"refs/正面.jpg"},
+        {"name":"W-王一博-55-侧面","sku":"55","style":"王一博","ref":"refs/侧面.jpg",
+         "ratio":"3:4","size":"1088x1440"}
+      ]}"#;
+
+    // 主路径：两条目、各自的图与参数、整单级用途。
+    #[test]
+    fn a_well_formed_order_plans_one_task_per_item() {
+        let d = make_dir(
+            ORDER_OK,
+            &[
+                ("W-王一博-55-正面", "正面正文"),
+                ("W-王一博-55-侧面", "侧面正文"),
+            ],
+            &["正面.jpg", "侧面.jpg"],
+        );
+        let p = plan(d.path(), "投单-260804-1530").unwrap();
+        assert_eq!(p.task_count(), 2, "一条 = 一个任务 = 一张图");
+        assert_eq!(
+            p.purpose,
+            crate::purpose::PURPOSE_I2V,
+            "i2v 归一化成受控取值"
+        );
+        assert_eq!(p.items[0].sku, "55");
+        assert_eq!(p.items[0].style, "王一博");
+        assert!(p.items[0].ref_path.ends_with("正面.jpg"));
+        assert_eq!(p.items[1].prompt_text, "侧面正文");
+        // 条目级参数覆盖 defaults，且两个字段都要在。
+        let a = GenParams::from_json(&p.items[0].params_json);
+        assert_eq!(a.aspect_ratio.as_deref(), Some("9:16"));
+        assert_eq!(a.size.as_deref(), Some("1152x2048"), "只写比例要补配套尺寸");
+        let b = GenParams::from_json(&p.items[1].params_json);
+        assert_eq!(b.aspect_ratio.as_deref(), Some("3:4"));
+        assert_eq!(b.size.as_deref(), Some("1088x1440"));
+        // 两套参数都要留痕，但参数不再决定切分。
+        assert_eq!(p.param_sets().len(), 2);
+        assert_eq!(p.distinct_refs().len(), 2);
+    }
+
+    // 多条目共用同一张原图时只入库一次：否则图库里躺着几张一模一样的图，
+    // 而落盘与缩略图还各花一遍 CPU。
+    #[test]
+    fn items_sharing_one_ref_ingest_it_once() {
+        let d = make_dir(
+            r#"{"version":1,"items":[
+                {"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"},
+                {"name":"B","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "甲"), ("B", "乙")],
+            &["a.jpg"],
+        );
+        let p = plan(d.path(), "j").unwrap();
+        assert_eq!(p.task_count(), 2);
+        assert_eq!(p.distinct_refs().len(), 1, "同一张图只该入库一次");
+    }
+
+    // 正文进库必须**逐字符**等于 txt 内容：新格式的全部意义就是正文里零元信息。
+    #[test]
+    fn prompt_text_is_the_file_verbatim() {
+        let body = "比例：3:4 的竖构图，人物居中\n第二行：尺寸: 不该被吃掉";
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"55","style":"王一博","ref":"refs/a.jpg"}]}"#,
+            &[("A", body)],
+            &["a.jpg"],
+        );
+        let p = plan(d.path(), "j").unwrap();
+        assert_eq!(
+            p.items[0].prompt_text, body,
+            "正文里像组头键的行必须原样保留 —— 那正是旧格式会静默吃掉的东西"
+        );
+    }
+
+    #[test]
+    fn a_missing_ref_is_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"55","style":"S","ref":"refs/没有.jpg"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("参考图不存在"));
+    }
+
+    #[test]
+    fn an_item_without_ref_is_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"55","style":"S"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("必须点名参考图"));
+    }
+
+    // prompts/ 与 items 必须一一对应：多一个少一个都拒。
+    #[test]
+    fn a_missing_prompt_file_is_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("A.txt"));
+    }
+
+    #[test]
+    fn a_stray_prompt_file_is_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "正文"), ("B", "多出来的")],
+            &["a.jpg"],
+        );
+        let err = plan(d.path(), "j").unwrap_err();
+        assert!(err.contains('B'), "{err}");
+    }
+
+    #[test]
+    fn duplicate_item_names_are_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[
+                {"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"},
+                {"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("都叫"));
+    }
+
+    // 名字会原样成为文件名，故动过一个字符就不算安全 —— 清洗一下放行是不行的。
+    #[test]
+    fn an_unsafe_item_name_is_rejected_not_sanitized() {
+        for bad in ["a/b", "", "   ", "a:b"] {
+            let d = make_dir(
+                &format!(
+                    r#"{{"version":1,"items":[{{"name":"{bad}","sku":"5","style":"S","ref":"refs/a.jpg"}}]}}"#
+                ),
+                &[],
+                &["a.jpg"],
+            );
+            assert!(plan(d.path(), "j").is_err(), "「{bad}」不该被放行");
+        }
+    }
+
+    #[test]
+    fn missing_sku_or_style_is_rejected() {
+        let d = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("sku"));
+    }
+
+    // 未知 version 一律拒：按 1 去读会得到一份「看起来成功了的错误结果」。
+    #[test]
+    fn an_unknown_or_missing_version_is_rejected() {
+        let d = make_dir(
+            r#"{"version":2,"items":[{"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d.path(), "j").unwrap_err().contains("version=2"));
+        let d2 = make_dir(
+            r#"{"items":[{"name":"A","sku":"5","style":"S","ref":"refs/a.jpg"}]}"#,
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        assert!(plan(d2.path(), "j").unwrap_err().contains("version"));
+    }
+
+    // 旧格式目录要被明确点名，而不是笼统地「找不到工单」。
+    #[test]
+    fn a_legacy_order_says_so_plainly() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("提示词.txt"), "分组: 甲\n\n甲1").unwrap();
+        let err = plan(d.path(), "j").unwrap_err();
+        assert!(err.contains("旧格式"), "{err}");
+        assert!(err.contains(ORDER), "要说清新形状：{err}");
+    }
+
+    #[test]
+    fn an_unknown_purpose_is_rejected() {
+        assert!(normalize_purpose("图转视频").is_err());
+        assert_eq!(normalize_purpose("").unwrap(), "");
+        assert_eq!(
+            normalize_purpose("I2V").unwrap(),
+            crate::purpose::PURPOSE_I2V
+        );
+        assert_eq!(
+            normalize_purpose(crate::purpose::PURPOSE_I2V).unwrap(),
+            crate::purpose::PURPOSE_I2V
+        );
+    }
+
+    // 用户的核心关切：写下的比例必须原样落进快照，且能被下游解析回来。
     #[test]
     fn aspect_ratio_survives_into_snapshot_and_wire() {
         let (snap, wire) = build_params(&params_from(
@@ -695,8 +809,7 @@ mod tests {
     // 拼法归一化：jpg → jpeg、全角冒号 → 半角。取值本身不替用户改。
     #[test]
     fn spelling_is_normalized_but_values_are_not() {
-        let (snap, _) =
-            build_params(&params_from(r#"{"ratio":"9：16","format":"jpg"}"#)).unwrap();
+        let (snap, _) = build_params(&params_from(r#"{"ratio":"9：16","format":"jpg"}"#)).unwrap();
         let p = GenParams::from_json(&snap);
         assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
         assert_eq!(p.output_format.as_deref(), Some("jpeg"));
@@ -711,8 +824,8 @@ mod tests {
         assert!(err.contains("1088"), "还要给出可用值：{err}");
     }
 
-    // 只写「比例:」时补上配套尺寸：单发 aspect_ratio 实测回整批 1024×1024 正方形
-    // （批次 25）。取样必须用竖比例——若换成 1:1，补与不补的结果长得一样，测不出东西。
+    // 只写「比例」时补上配套尺寸：单发 aspect_ratio 实测回整批 1024×1024 正方形。
+    // 取样必须用竖比例——若换成 1:1，补与不补的结果长得一样，测不出东西。
     #[test]
     fn lone_ratio_gets_its_companion_size() {
         let (snap, wire) = build_params(&params_from(r#"{"ratio":"9:16"}"#)).unwrap();
@@ -750,18 +863,6 @@ mod tests {
         }
     }
 
-    // 抽卡下线后 `draws` 只是一个**没人认识的键**：它既不该被读进快照，也不该让整份
-    // 工单失败。原来那条 `out_of_range_draws_is_rejected_not_clamped` 守的是「越界不夹取
-    // 而是拒单」，其前提（存在这个参数）已随抽卡整体下线。
-    #[test]
-    fn retired_draws_key_is_ignored_not_stored() {
-        let (snap, wire) = build_params(&params_from(r#"{"draws":9,"ratio":"9:16"}"#)).unwrap();
-        let s: serde_json::Value = serde_json::from_str(&snap).unwrap();
-        assert!(s.get("draws").is_none(), "废弃键不得进快照：{snap}");
-        let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
-        assert!(w.get("draws").is_none(), "废弃键更不得发往接口：{wire}");
-    }
-
     // 未给的参数不该出现在 wire 里（D1：不设置 = 不透传，交给模型默认）。
     #[test]
     fn absent_params_are_absent_from_wire() {
@@ -780,140 +881,8 @@ mod tests {
         assert!(safe_join(dir, "/etc/passwd").is_err());
         assert!(safe_join(dir, "").is_err());
         assert_eq!(
-            safe_join(dir, "images/a.jpg").unwrap(),
-            Path::new("/tmp/job/images/a.jpg")
+            safe_join(dir, "refs/a.jpg").unwrap(),
+            Path::new("/tmp/job/refs/a.jpg")
         );
-    }
-
-    // 标准路径：组头带挂靠与参数，一份文档解析出两个组、各自的图与比例。
-    #[test]
-    fn doc_headers_drive_mapping_and_params() {
-        let d = make_dir(
-            "分组: 黄\n参考图: images/黄.jpg\n比例: 3:4\n\n黄1\n\n黄2\n\n\
-             分组: 蓝\n参考图: images/蓝.jpg\n比例: 9:16\n\n蓝1\n",
-            &["黄.jpg", "蓝.jpg"],
-        );
-        let p = plan(d.path(), "job-1").unwrap();
-        assert_eq!(p.groups.len(), 2);
-        assert_eq!(p.groups[0].refs.len(), 1);
-        assert_eq!(
-            GenParams::from_json(&p.groups[0].params_json)
-                .aspect_ratio
-                .as_deref(),
-            Some("3:4")
-        );
-        assert_eq!(
-            GenParams::from_json(&p.groups[1].params_json)
-                .aspect_ratio
-                .as_deref(),
-            Some("9:16")
-        );
-        // 黄：2 条 × 1 图 = 2；蓝：1 条 × 1 图 = 1。
-        assert_eq!(p.task_count(), 3);
-        // 比例不同 → 必须拆成两个批次（params_json 是批次级的）。
-        assert_eq!(p.batch_count(), 2);
-    }
-
-    // 参数完全相同的多个组 → 并进同一个批次，不该拆。
-    #[test]
-    fn same_params_share_one_batch() {
-        let d = make_dir(
-            "分组: 甲\n参考图: images/a.jpg\n比例: 3:4\n\n甲1\n\n\
-             分组: 乙\n参考图: images/b.jpg\n比例: 3:4\n\n乙1\n",
-            &["a.jpg", "b.jpg"],
-        );
-        let p = plan(d.path(), "job-2").unwrap();
-        assert_eq!(p.groups.len(), 2);
-        assert_eq!(p.batch_count(), 1);
-    }
-
-    // 单组工单可以不写 `参考图:` —— images/ 下全部图都挂给它。
-    #[test]
-    fn single_group_takes_all_images() {
-        let d = make_dir("分组: 甲\n\n正文一\n\n正文二\n", &["a.jpg", "b.png"]);
-        let p = plan(d.path(), "job-3").unwrap();
-        assert_eq!(p.groups[0].refs.len(), 2);
-        assert_eq!(p.task_count(), 4); // 2 条 × 2 图
-    }
-
-    // 多组却没点名挂靠 = 拒单。按顺序猜错要到验收时才看得出来，太晚了。
-    #[test]
-    fn multi_group_requires_explicit_mapping() {
-        let d = make_dir(
-            "分组: 甲\n\n甲1\n\n分组: 乙\n参考图: images/b.jpg\n\n乙1\n",
-            &["a.jpg", "b.jpg"],
-        );
-        let err = plan(d.path(), "job-4").unwrap_err();
-        assert!(err.contains("必须点名"), "{err}");
-    }
-
-    #[test]
-    fn missing_ref_image_is_rejected() {
-        let d = make_dir("分组: 甲\n参考图: images/没有.jpg\n\n甲1\n", &["a.jpg"]);
-        assert!(plan(d.path(), "job-5")
-            .unwrap_err()
-            .contains("参考图不存在"));
-    }
-
-    // 组级参数非法要指名道姓说是哪个组 —— 一份文档十个组，不说清楚等于没说。
-    #[test]
-    fn bad_group_params_name_the_group() {
-        let d = make_dir(
-            "分组: 甲\n参考图: images/a.jpg\n比例: 9:15\n\n甲1\n",
-            &["a.jpg"],
-        );
-        let err = plan(d.path(), "job-6").unwrap_err();
-        assert!(err.contains("甲") && err.contains("9:15"), "{err}");
-    }
-
-    // 目录里有多个 txt/md 且没有标准名 → 明说认不出，不猜。
-    #[test]
-    fn ambiguous_doc_is_rejected() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("a.txt"), "分组: 甲\n\n甲1").unwrap();
-        std::fs::write(d.path().join("b.txt"), "分组: 乙\n\n乙1").unwrap();
-        assert!(plan(d.path(), "job-7").unwrap_err().contains("多个"));
-    }
-
-    // 说明.md 是给人看的，不该被当成提示词文档。
-    #[test]
-    fn readme_is_not_mistaken_for_the_doc() {
-        let d = make_dir("分组: 甲\n\n甲1\n", &["a.jpg"]);
-        std::fs::rename(d.path().join(DOC), d.path().join("提示词库.txt")).unwrap();
-        std::fs::write(d.path().join("说明.md"), "# 方向地图").unwrap();
-        let p = plan(d.path(), "job-8").unwrap();
-        assert_eq!(p.groups.len(), 1);
-    }
-
-    // job.json 逃生舱仍然可用（内联提示词 + 按组名挂靠）。
-    #[test]
-    fn job_json_escape_hatch_still_works() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join(IMAGES)).unwrap();
-        std::fs::write(d.path().join(IMAGES).join("a.jpg"), b"x").unwrap();
-        std::fs::write(
-            d.path().join(JOB),
-            r#"{"note":"N","groups":[{"name":"甲","prompts":["a1","a2"],"purposes":["图生视频"]}],
-                "refs":[{"image":"images/a.jpg"}],"params":{"aspectRatio":"9:16"}}"#,
-        )
-        .unwrap();
-        let p = plan(d.path(), "job-9").unwrap();
-        assert_eq!(p.note.as_deref(), Some("N"));
-        assert_eq!(p.task_count(), 2); // 2 条 × 1 图
-        assert!(p.groups[0]
-            .parsed
-            .tags
-            .contains(&crate::purpose::PURPOSE_I2V.to_string()));
-    }
-
-    #[test]
-    fn unknown_purpose_is_rejected() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join(JOB),
-            r#"{"groups":[{"name":"甲","prompts":["a"],"purposes":["图转视频"]}],"refs":[]}"#,
-        )
-        .unwrap();
-        assert!(plan(d.path(), "job-10").unwrap_err().contains("未知用途"));
     }
 }

@@ -462,8 +462,8 @@ mod tests {
                 ..Default::default()
             },
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         id
     }

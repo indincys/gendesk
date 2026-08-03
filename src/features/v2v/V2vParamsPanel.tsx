@@ -38,7 +38,7 @@ export function V2vParamsPanel({
   onClose,
 }: {
   models: ModelInfo[];
-  /** 在跑上限那一段要说的是**现在**的样子（实测上限、本地排队几条），故取实时快照。 */
+  /** 并发段要说的是**现在**的样子（发现窗口、最近拒收点、本地排队），故取实时快照。 */
   queue?: QueueStats | null;
   onClose: () => void;
 }) {
@@ -206,28 +206,17 @@ export function V2vParamsPanel({
         >
           通道并发
           <DescriptionHint label="通道并发说明">
-            每条通道分别限制并发；超过上限的任务留在本地等待
+            所有模型通道默认独立自适应；远端容量变化时会自动降级并重新向上探测
           </DescriptionHint>
         </div>
         <div className="fx ac gap8 wrap">
-          <span className="fs11 t3">每通道最多</span>
-          <input
-            className="inp sm"
-            style={{ width: 64 }}
-            type="number"
-            min={1}
-            max={20}
-            value={s.maxInFlight ?? 1}
-            onChange={(e) => setS({ ...s, maxInFlight: Number(e.target.value) })}
-            onBlur={() => void save({ maxInFlight: s.maxInFlight ?? 1 })}
-            disabled={busy}
-          />
-          <span className="fs11 t3">条</span>
+          <span className="bdg b-green">全部通道 · 自动</span>
+          <span className="fs11 t3">单轮安全探测上限 100 条</span>
           {queue?.observedLimit != null && (
             <span className="bdg b-amber">
-              实测上限 {queue.observedLimit}
-              <DescriptionHint label="实测上限说明">
-                默认通道同时最多运行 {queue.observedLimit} 条，设置更高也会按该上限执行
+              最近拒收点 {queue.observedLimit}
+              <DescriptionHint label="最近拒收点说明">
+                默认通道最近在 {queue.observedLimit} 条附近拒收；冷却后会自动重新向上探测
               </DescriptionHint>
             </span>
           )}
@@ -235,12 +224,18 @@ export function V2vParamsPanel({
             <span className="fs11 t3">当前本地排队共 {queue?.queued} 条</span>
           )}
         </div>
+        <div className="fs11 t3 mt6" style={{ lineHeight: 1.7 }}>
+          不再保存人工并发数。每条模型通道从健康扣费回执继续向上发现；一旦远端返回
+          <span className="chip">ret=1310</span> 且没有扣费记录，只暂停并降低该通道， 被拒任务回到
+          FIFO 候补。冷却后自动重开探测窗口，容量恢复时会自己升回去。
+        </div>
         {/* 逐通道现状：这个上限是按通道算的，那就必须能当场看到每条通道各占了多少。 */}
         {(queue?.channels?.length ?? 0) > 0 && (
           <div className="fx ac gap8 wrap" style={{ marginTop: 8 }}>
             {queue?.channels.map((c) => (
               <span key={c.modelVersion || "(default)"} className="fs11 t3">
                 <b className="t1">{c.label}</b> {c.running}/{c.limit} 在跑
+                {c.observedLimit != null && ` · 最近拒收点 ${c.observedLimit}`}
                 {c.queued > 0 && ` · 本地 ${c.queued}`}
               </span>
             ))}

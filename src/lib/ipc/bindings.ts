@@ -1214,10 +1214,9 @@ async previewV2vCommands(ids: number[]) : Promise<Result<SubmitPreview, AppError
 /**
  * 放行一批到即梦。
  * 
- * **不再是「N 条一起砸过去」**：即梦对每条模型通道各有一个并发上限（实测 2.0fast
- * 只跑得下 1 条），超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里
- * 只发得下的那几条，其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序
- * 自动补上 —— **逐通道各补各的**（0031）。
+ * **不再是「N 条一起砸过去」**：同一模型通道逐条读取接单/计费回执，第一份明确未计费
+ * 的 `ExceedConcurrencyLimit` 会让该通道立即停发并收敛发现窗口。被拒的一条与尚未发送
+ * 的尾部都留在本地 FIFO，由轮询循环自动补上；其它模型通道并行推进、互不连坐。
  */
 async submitV2vClips(ids: number[]) : Promise<Result<SubmitSummary, AppError>> {
     try {
@@ -2277,7 +2276,7 @@ running: number;
  */
 limit: number; 
 /**
- * 这条通道实测到的上限（撞过墙才有值）。
+ * 这条通道最近一次明确拒收时的在跑数（撞过墙才有值）。
  */
 observedLimit: number | null; 
 /**
@@ -2820,9 +2819,21 @@ export type PreviewLane = { label: string;
  */
 total: number; 
 /**
- * 其中现在就会真的发出去的条数（其余留在本地队列，出一条补一条）。
+ * 本轮最多尝试发出的条数；远端提前拒收/回执不明会立即刹车，实际可能更少。
  */
-goesNow: number; limit: number }
+goesNow: number; 
+/**
+ * 当前发现窗口：拒收冷却期使用最近拒收点，到期后重新打开到探测护栏。
+ */
+limit: number; 
+/**
+ * 自动发现的单轮安全护栏（所有通道默认 100），不代表远端一定接得住。
+ */
+probeCeiling: number; 
+/**
+ * 本次进程里最近一次明确拒收时的在跑数；冷却后会重新探测，没撞过墙则为空。
+ */
+observedLimit: number | null }
 export type ProductInput = { code: string; name: string; platforms: string[]; cartEnabled: boolean; douyinProductUrl: string; douyinShortTitle: string; note: string }
 export type ProductPatch = { name: string; platforms: string[]; cartEnabled: boolean; douyinProductUrl: string; douyinShortTitle: string; status: string; note: string }
 export type ProductSkuInput = { productId: number; code: string; name: string; tier: string; folderAlias: string; musicKeyword: string; note: string }
@@ -2941,15 +2952,14 @@ nextPollIn: number | null;
  */
 timeoutHours: number | null; 
 /**
- * **默认通道**生效的在跑上限（配置值与实测值取小）。
+ * **默认通道**此刻的发现窗口：拒收冷却期用最近拒收点，到期后重开到 100。
  * 
  * 逐条的上限请读 [`ChannelStat::limit`] —— 上限是按通道算的（0031），
- * 这一项只是没有通道上下文时的兜底（设置页那句「同时在跑上限」）。
+ * 这一项只是没有通道上下文时的兜底；逐通道状态互不共享。
  */
 inFlightLimit: number; 
 /**
- * 默认通道本次运行实测到的上限；有值即「我们在这条通道上撞过
- * `ExceedConcurrencyLimit`，所以就算你设得更大也只能跑这么多」。
+ * 默认通道最近一次明确拒收时的在跑数；冷却后会自动重新向上探测。
  */
 observedLimit: number | null; 
 /**
@@ -3204,7 +3214,7 @@ estimatedCredits: number;
  */
 unpriced: string[]; 
 /**
- * 这一批按通道拆开的「现在就发得出去几条」（0031）。
+ * 这一批按通道拆开的「本轮最多会试发几条」（0031）。远端提前拒收时会更少。
  * 
  * **由 Rust 算**：空位是逐通道的，前端拿一个全局上限减一个全局在跑数，
  * 会在一批横跨两条通道时给出一个谁也不对的数 —— 而那个数就印在「确认提交」旁边。
@@ -3213,7 +3223,11 @@ lanes: PreviewLane[] }
 /**
  * 提交摘要。
  */
-export type SubmitSummary = { submitted: number; failed: number; 
+export type SubmitSummary = { 
+/**
+ * 远端明确以并发上限拒收、且确认没有扣费后，退回本地候补的条数。
+ */
+requeued: number; submitted: number; failed: number; 
 /**
  * 这一批里被在跑上限挡在本地、排队等空位的条数（0028）。**不是失败**。
  */
@@ -3447,14 +3461,6 @@ timeoutHours?: number | null;
  * 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
  */
 autofill?: AutofillCfg; 
-/**
- * 同时最多有几条在即梦手上（0028）。**所有**提交路径共用它 —— 人点确认提交、
- * 常驻队列补单、失败重跑，抢的都是即梦那一份账户级并发配额。
- * 
- * 默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队，其余 8 条回来
- * `ExceedConcurrencyLimit`。超出的条目不再往外发，而是留在本地队列排队等空位。
- */
-maxInFlight?: number; 
 /**
  * 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
  * 

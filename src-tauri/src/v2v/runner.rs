@@ -8,8 +8,8 @@
 //! ## 额度是一次性的，所以状态迁移的顺序不能反
 //!
 //! 提交成功 → 立刻写 submit_id 并置 run。反过来（先置 run 再写 id）会留下
-//! 「跑着但认不出是哪条」的孤儿，而 `recover_orphan_submits` 只能把它退回 ready
-//! 让人重提——那就是花两份钱买同一条视频。
+//! 「跑着但认不出是哪条」的孤儿。启动恢复会把这种结果不明的条目隔离起来，绝不
+//! 自动重提——否则就可能花两份钱买同一条视频。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -176,6 +176,8 @@ pub const DEFAULT_TIMEOUT_HOURS: Option<i64> = None;
 #[derive(Debug, Clone, Default, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSummary {
+    /// 远端明确以并发上限拒收、且确认没有扣费后，退回本地候补的条数。
+    pub requeued: i64,
     pub submitted: i64,
     pub failed: i64,
     /// 这一批里被在跑上限挡在本地、排队等空位的条数（0028）。**不是失败**。
@@ -184,24 +186,49 @@ pub struct SubmitSummary {
     pub first_error: Option<String>,
 }
 
-// ─────────────────────── 在跑上限（即梦的账户级并发闸门）───────────────────────
+// ───────────────────────── 在跑上限（即梦逐模型通道的并发闸门）─────────────────
 
-/// 每条通道默认同时在跑几条。
+/// 所有模型通道默认使用自动容量探测；100 是单轮安全护栏，不是即梦容量真值。
 ///
-/// **1，因为那是实测到的真值**：2026-07-28 一批 9 条同时提交（全部走 `seedance2.0fast`），
-/// 即梦逐条给了 submit_id，随后 8 条回来 `ret=1310 ExceedConcurrencyLimit`，
-/// 只有 1 条真的进了队列。
-///
-/// 猜大猜小的代价不对等：猜小只是让后面那些多等一会儿（而「等」在非 VIP 通道上本来
-/// 就是免费的，那正是常驻队列成立的前提）；猜大则是一批片子集体躺进「处理异常」，
-/// 还得人一条条辨认哪些是真失败。所以默认往小了猜，由 [`observe_concurrency_reject`]
-/// 在撞墙时自己收敛。
-pub const DEFAULT_MAX_IN_FLIGHT: i64 = 1;
+/// 提交仍逐条读取回执，首个明确未计费拒收就停止当前通道，因此把护栏设为 100 不会
+/// 变成「同时打 100 个 CLI、然后一起报错」。人确认过多少条、远端实际收下多少条，
+/// 才是这一轮真正会发生的数量。
+pub const DEFAULT_MAX_IN_FLIGHT: i64 = 100;
 
-/// 配置值的取值范围。上限 20 不是技术限制，是「一次性把余额烧光」的护栏。
-pub const MAX_IN_FLIGHT_CAP: i64 = 20;
+/// 单通道一次自动发现最多试到 100 条。用户确认卡仍会先展示整批总成本。
+pub const MAX_IN_FLIGHT_CAP: i64 = 100;
 
-/// 这一次运行里**逐通道实测**到的并发上限（缺席 = 这条通道还没撞过墙）。
+/// 明确撞墙后多久重新打开发现窗口。拒收且无计费不会花额度；一分钟后只在下一次正常
+/// 补位机会重新探测，不另起高频定时器，因此非 VIP 长队也不会制造请求风暴。
+pub const CONCURRENCY_REPROBE_SECS: i64 = 60;
+
+/// 逐通道的自动容量策略。生产环境统一为 100；测试可用较小护栏验证 FIFO 与隔离行为。
+#[derive(Debug, Clone)]
+pub struct ConcurrencyPolicy {
+    ceiling: i64,
+}
+
+impl ConcurrencyPolicy {
+    pub fn automatic() -> Self {
+        Self {
+            ceiling: DEFAULT_MAX_IN_FLIGHT,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fixed(limit: i64) -> Self {
+        Self {
+            ceiling: limit.clamp(1, MAX_IN_FLIGHT_CAP),
+        }
+    }
+
+    /// 护栏相同，容量状态仍按 `channel` 各自学习；参数保留以防调用者误以为是账户级配额。
+    pub fn ceiling(&self, _channel: &str) -> i64 {
+        self.ceiling
+    }
+}
+
+/// 这一次运行里逐通道最近一次明确拒收的容量点（缺席 = 这条通道还没撞过墙）。
 ///
 /// ## 为什么是「逐通道」而不是一个账户级的数（0031）
 ///
@@ -222,13 +249,40 @@ pub const MAX_IN_FLIGHT_CAP: i64 = 20;
 /// 按账户级口径记的代价是实打实的：2.0fast 那条长队一占上，2.0mini 上的 6 条
 /// **一条都发不出去**，而它们本可以并行跑完。
 ///
-/// 进程内、不落库：即梦随时可以按账户等级调整这些数，而一个被写进库的旧观测会在上限
-/// 放宽之后永远把队列压在低位，且没人知道为什么。重启即重新试探，代价只是再撞一次墙
-/// —— 而撞墙不花钱也不丢条目。
-static OBSERVED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
-    std::sync::OnceLock::new();
+/// 进程内、不落库：容量会动态变化。明确拒收只是一份带有效期的瞬时观测；冷却后自动
+/// 重新打开到 100，首个健康回执即清掉旧观测，首个新拒收再写入新的容量。
+#[derive(Debug, Clone, Copy)]
+struct ObservedCapacity {
+    limit: i64,
+    reprobe_at: i64,
+}
 
-fn observed() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, i64>> {
+static OBSERVED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, ObservedCapacity>>,
+> = std::sync::OnceLock::new();
+
+/// 同一通道的提交调度锁。
+///
+/// 手动确认、定时补位、手动刷新、常驻队列都可能在同一秒触发。只靠 `claim_ready` 虽能
+/// 防止**同一条**重复扣费，却挡不住两个调度器各按「还有 100 个空位」认领两批不同任务。
+/// 锁按通道拆分：同通道串行重算空位，不同通道仍可同时向各自远端队列提交。
+static SUBMIT_GATES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn submit_gate(channel: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut gates = SUBMIT_GATES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    gates
+        .entry(channel.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn observed() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, ObservedCapacity>>
+{
     // 中毒的锁照用：里面只有一张「这条通道最多几条」的观测表，一个写者 panic
     // 不会让这些数字失去意义，而为它把整条提交链路停掉才是真的损失。
     OBSERVED
@@ -237,36 +291,61 @@ fn observed() -> std::sync::MutexGuard<'static, std::collections::HashMap<String
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// 某条通道生效的在跑上限 = 配置值与该通道实测值取小。
-pub fn effective_in_flight(channel: &str, configured: i64) -> i64 {
+/// 某条通道此刻生效的发现窗口。冷却期读最近一次拒收值；到点后自动重开到护栏。
+fn effective_in_flight_at(channel: &str, configured: i64, now: i64) -> i64 {
     let cfg = configured.clamp(1, MAX_IN_FLIGHT_CAP);
     match observed().get(channel) {
-        Some(o) => cfg.min((*o).max(1)),
+        Some(o) if now < o.reprobe_at => cfg.min(o.limit.max(1)),
         None => cfg,
+        Some(_) => cfg,
     }
 }
 
-/// 某条通道撞上 `ExceedConcurrencyLimit` 了 —— 把该通道的实测上限收敛到
+pub fn effective_in_flight(channel: &str, configured: i64) -> i64 {
+    effective_in_flight_at(channel, configured, now_unix())
+}
+
+/// 某条通道撞上 `ExceedConcurrencyLimit` 了 —— 把该通道的临时发现窗口收敛到
 /// 「即梦当时在这条通道上确实收下的条数」。
 ///
 /// `accepted` 取此刻**同通道**在跑、且有计费回执或队列位次的条数
 /// （`repo::count_running_accepted_on`）：被拒的那些两样都没有，所以剩下的正是
 /// 即梦愿意在这条通道上同时跑的量。
 ///
-/// 只降不升，且下限为 1；升回去交给下次重启。这条路径要防的是「设了 5、真值是 1」时
-/// 每轮提交 4 条、每轮被弹回 4 条的空转，一轮之内就该收敛。
-pub fn observe_concurrency_reject(channel: &str, accepted: i64) -> i64 {
+/// 观测带一分钟冷却而不是永久封顶：容量从 10 变成 50 时无需重启应用；容量从 50
+/// 降到 3 时也会在首个拒收后立即收敛。下限保留 1，避免一次外部故障把通道永久判成 0。
+fn observe_concurrency_reject_at(channel: &str, accepted: i64, now: i64) -> i64 {
     let v = accepted.max(1);
-    let mut map = observed();
-    let slot = map.entry(channel.to_string()).or_insert(v);
-    *slot = (*slot).min(v).max(1);
-    *slot
+    observed().insert(
+        channel.to_string(),
+        ObservedCapacity {
+            limit: v,
+            reprobe_at: now + CONCURRENCY_REPROBE_SECS,
+        },
+    );
+    v
 }
 
-/// 某条通道实测到的上限（`None` = 这次运行还没在这条通道上撞过墙）。
-/// 界面据此说明「为什么这条通道只跑了 1 条」。
+pub fn observe_concurrency_reject(channel: &str, accepted: i64) -> i64 {
+    observe_concurrency_reject_at(channel, accepted, now_unix())
+}
+
+/// 冷却后的第一份健康回执证明容量已经恢复，旧的拒收观测立即失效；当前批可继续发现。
+fn observe_concurrency_accept_at(channel: &str, now: i64) {
+    let mut map = observed();
+    if map.get(channel).is_some_and(|o| now >= o.reprobe_at) {
+        map.remove(channel);
+    }
+}
+
+fn observe_concurrency_accept(channel: &str) {
+    observe_concurrency_accept_at(channel, now_unix());
+}
+
+/// 某条通道最近一次明确拒收时的容量点（`None` = 这次运行还没撞过墙）。
+/// 冷却到期后发现窗口会重开到 100；此值仍保留到首份健康回执，供界面解释变化。
 pub fn observed_in_flight_limit(channel: &str) -> Option<i64> {
-    observed().get(channel).map(|v| (*v).max(1))
+    observed().get(channel).map(|v| v.limit.max(1))
 }
 
 /// 这条通道现在还能往即梦发几条。
@@ -276,7 +355,15 @@ pub async fn free_slots(
     channel: &str,
     configured: i64,
 ) -> AppResult<i64> {
-    let used = repo::count_in_flight_on(pool, default_model, channel).await?;
+    let (used, unverified) = tokio::try_join!(
+        repo::count_in_flight_on(pool, default_model, channel),
+        repo::count_running_unverified_on(pool, default_model, channel),
+    )?;
+    // 任务 ID 不是接单证据（1310 拒收也会给 id）。在这条未决单被轮询确认前暂停扩容，
+    // 否则 CLI 若临时漏回计费字段，下一轮 drain 又会把剩余整批继续推上去。
+    if unverified > 0 {
+        return Ok(0);
+    }
     Ok((effective_in_flight(channel, configured) - used).max(0))
 }
 
@@ -303,12 +390,12 @@ pub async fn release_and_submit(
     bin: &str,
     ids: &[i64],
     defaults: &GenOpts,
-    configured: i64,
+    policy: &ConcurrencyPolicy,
     log: &Activity,
 ) -> AppResult<SubmitSummary> {
     let now = now_unix();
     repo::mark_submit_queued(pool, ids, now).await?;
-    let mut sum = drain_queue(pool, bin, defaults, configured, log).await?;
+    let mut sum = drain_queue(pool, bin, defaults, policy, log).await?;
     sum.queued = repo::count_submit_queued(pool).await?;
     Ok(sum)
 }
@@ -322,48 +409,64 @@ pub async fn drain_queue(
     pool: &SqlitePool,
     bin: &str,
     defaults: &GenOpts,
-    configured: i64,
+    policy: &ConcurrencyPolicy,
     log: &Activity,
 ) -> AppResult<SubmitSummary> {
     let default_model = defaults.model_version.as_deref().unwrap_or("");
     let mut out = SubmitSummary::default();
-    for ch in repo::channel_stats(pool, default_model).await? {
-        if ch.queued <= 0 {
-            continue;
-        }
-        let slots = free_slots(pool, default_model, &ch.model_version, configured).await?;
-        if slots <= 0 {
-            continue;
-        }
-        let ids =
-            repo::pick_submit_queued_on(pool, default_model, &ch.model_version, slots).await?;
-        if ids.is_empty() {
-            continue;
-        }
-        // 一条通道提交失败不该连坐其余通道：它们各排各的队，凭什么一起停。
-        match submit_batch(pool, bin, &ids, defaults, log).await {
-            Ok(s) => {
-                out.submitted += s.submitted;
-                out.failed += s.failed;
-                if out.first_error.is_none() {
-                    out.first_error = s.first_error;
+    let channels = repo::channel_stats(pool, default_model).await?;
+    let jobs = channels.into_iter().filter(|ch| ch.queued > 0).map(|ch| {
+        let channel = ch.model_version;
+        async move {
+            let label = dreamina::short_label(&channel);
+            let gate = submit_gate(&channel);
+            // 等锁之后再数空位：前一个调度器可能刚刚接单，锁外算的数字已经过期。
+            let _guard = gate.lock().await;
+            let result: AppResult<SubmitSummary> = async {
+                let slots =
+                    free_slots(pool, default_model, &channel, policy.ceiling(&channel)).await?;
+                if slots <= 0 {
+                    return Ok(SubmitSummary::default());
+                }
+                let ids = repo::pick_submit_queued_on(pool, default_model, &channel, slots).await?;
+                if ids.is_empty() {
+                    return Ok(SubmitSummary::default());
+                }
+                // 当前通道失败只结束它自己的批；其它通道由 join_all 独立推进。
+                match submit_batch(pool, bin, &ids, defaults, log).await {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        log.error("submit", None, format!("通道 {label} 补位失败：{e}"), None);
+                        Ok(SubmitSummary {
+                            failed: ids.len() as i64,
+                            first_error: Some(e.to_string()),
+                            ..Default::default()
+                        })
+                    }
                 }
             }
+            .await;
+            (label, result)
+        }
+    });
+
+    // 每条远端模型队列互相独立；本机也并行推进，某通道试 100 条不会让其它通道等完它。
+    for (label, result) in futures_util::future::join_all(jobs).await {
+        let s = match result {
+            Ok(s) => s,
             Err(e) => {
-                log.error(
-                    "submit",
-                    None,
-                    format!(
-                        "通道 {} 补位失败：{e}",
-                        dreamina::short_label(&ch.model_version)
-                    ),
-                    None,
-                );
-                out.failed += ids.len() as i64;
+                log.error("submit", None, format!("通道 {label} 补位失败：{e}"), None);
                 if out.first_error.is_none() {
-                    out.first_error = Some(format!("{e}"));
+                    out.first_error = Some(e.to_string());
                 }
+                continue;
             }
+        };
+        out.requeued += s.requeued;
+        out.submitted += s.submitted;
+        out.failed += s.failed;
+        if out.first_error.is_none() {
+            out.first_error = s.first_error;
         }
     }
     Ok(out)
@@ -387,6 +490,32 @@ pub fn opts_for(clip: &repo::ClipRow, defaults: &GenOpts) -> GenOpts {
     }
 }
 
+/// 放回已经认领、但远端明确没有接单扣费的条目。
+///
+/// 只供「明确并发拒收 + 无计费证据」路径；普通的无回执/超时绝不调用。SQLite 短暂
+/// 锁库时退避重试，三次仍失败就向上报错并停止本通道，绝不因为放回失败而继续提交。
+async fn release_unsubmitted_claims(pool: &SqlitePool, ids: &[i64]) -> AppResult<i64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut last = String::new();
+    for attempt in 1..=3u64 {
+        match repo::release_claims(pool, ids, now_unix()).await {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                last = e.to_string();
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
+                }
+            }
+        }
+    }
+    Err(AppError::Database(format!(
+        "停止提交后无法把 {} 条明确未接单任务放回候补队列：{last}",
+        ids.len()
+    )))
+}
+
 /// 成片与封面的落盘路径。
 ///
 /// 封面**独立成文件**（clip 自己的 jpg），绝不复用 `accepted_works.thumb_path`：
@@ -402,23 +531,27 @@ pub fn clip_paths(dirs: &DataDirs, clip_id: i64) -> (PathBuf, PathBuf) {
 
 /// 批量提交待提交条目。顺序执行：CLI 每次要走网络，并发打过去容易撞限流，
 /// 而这一步本来就是人点了「提交」之后的后台活，快几秒没有价值。
-pub async fn submit_batch(
+async fn submit_batch(
     pool: &SqlitePool,
     bin: &str,
     ids: &[i64],
     defaults: &GenOpts,
     log: &Activity,
 ) -> AppResult<SubmitSummary> {
-    // **先认领再提交**。人点「确认提交」与常驻队列补单器跑在不同任务里，中间隔着整个
-    // CLI 网络往返；两边都读到同一条 `ready`，就会为同一张图下两次单、扣两份钱，
-    // 而 `UNIQUE(work_id)` 拦不住（第二次只是覆盖 submit_id，第一张片子当场变成孤儿）。
-    let rows = repo::claim_ready(pool, ids, now_unix()).await?;
-    let total = rows.len();
+    // **每条在调用 CLI 前才认领**。`drain_queue` 的逐通道锁挡住同通道双调度，单条
+    // `claim_ready` 的 CAS 再挡住同一任务重复提交。绝不能一开始就把整批全改成 run：
+    // 进程若在第 1 条回执落库前崩溃，其余条目明明从未出本机，却也会被启动保护当作
+    // 「扣费未知」隔离。逐条认领把不确定窗口严格压到当前这一条，其余始终留在 FIFO。
+    let total = ids.len();
     let mut sum = SubmitSummary::default();
     if total > 0 {
         log.info("submit", None, format!("开始提交 {total} 条到即梦"), None);
     }
-    for (i, clip) in rows.into_iter().enumerate() {
+    for (i, id) in ids.iter().enumerate() {
+        let mut claimed = repo::claim_ready(pool, &[*id], now_unix()).await?;
+        let Some(clip) = claimed.pop() else {
+            continue;
+        };
         let who = Some((clip.id, clip.prompt_code.as_str()));
         let Some(prompt) = clip
             .video_prompt
@@ -453,6 +586,50 @@ pub async fn submit_batch(
         );
         match dreamina::submit(bin, Path::new(&clip.image_path), prompt, &opts, log, who).await {
             Ok(receipt) => {
+                // 即梦会给 1310 拒收请求也分配 submit_id，所以「有任务 ID」不能当作
+                // 已接单。只有这一种**明确并发拒绝 + 无计费字段**的组合才允许回队。
+                // 先于 persist：这单没有花钱，没必要把一个已死远端 id 写进库再清掉。
+                if receipt.unbilled_concurrency_reject() {
+                    let channel = opts.model_version.as_deref().unwrap_or("");
+                    let default_model = defaults.model_version.as_deref().unwrap_or("");
+                    let accepted =
+                        repo::count_running_accepted_on(pool, default_model, channel).await?;
+                    let limit = observe_concurrency_reject(channel, accepted);
+
+                    // 只有当前这一条被认领：明确未扣费后放回；后续条目从未离开
+                    // ready/FIFO。本批在这里立刻刹车，不会让剩余几十条一起报错，也不会
+                    // 把它们扩大进崩溃时的「扣费未知」窗口。
+                    let released = release_unsubmitted_claims(pool, &[clip.id]).await?;
+                    sum.requeued += 1;
+                    log.warn(
+                        "submit",
+                        who,
+                        format!(
+                            "{} 通道远端容量实测为 {limit}：任务 {} 被明确拒收且未扣费，\
+                             已退回本地候补；本通道其后 {} 条未再发送。其它通道继续补位。",
+                            dreamina::short_label(channel),
+                            receipt.submit_id,
+                            total.saturating_sub(i + 1),
+                        ),
+                        None,
+                    );
+                    if released != 1 {
+                        log.error(
+                            "submit",
+                            None,
+                            format!(
+                                "并发拒收后应放回 {} 条认领，实际放回 {released} 条；\
+                                 未放回的条目不会自动重提，请检查执行日志",
+                                1
+                            ),
+                            None,
+                        );
+                    }
+                    if let Some(app) = log.app() {
+                        crate::commands::v2v::emit_changed(pool, app, Some(clip.id)).await;
+                    }
+                    break;
+                }
                 if let Err(e) = persist_submit(
                     pool,
                     clip.id,
@@ -482,9 +659,23 @@ pub async fn submit_batch(
                         sum.first_error =
                             Some(format!("{} 提交回执落库失败：{e}", clip.prompt_code));
                     }
-                    continue;
+                    let waiting = total.saturating_sub(i + 1);
+                    if waiting > 0 {
+                        log.warn(
+                            "submit",
+                            None,
+                            format!(
+                                "回执落库异常，本通道立即停发；其后 {waiting} 条从未离开本地候补"
+                            ),
+                            None,
+                        );
+                    }
+                    break;
                 }
                 if receipt.looks_healthy() {
+                    // 若这是拒收冷却后的重新探测，第一份健康回执已经证明旧上限过期；
+                    // 清掉的只是当前通道观测，别的模型通道仍保留各自结论。
+                    observe_concurrency_accept(opts.model_version.as_deref().unwrap_or(""));
                     let billed = receipt.credit_count.unwrap_or(0);
                     log.info(
                         "submit",
@@ -515,20 +706,25 @@ pub async fn submit_batch(
                         }
                     }
                 } else {
-                    // 提交这一刻还不能判它死（见 `dreamina::submit` 的说明），但必须出声：
-                    // 事故那次 18 条全程一句异常都没有，人只能看着卡片停在「已提交」。
+                    // 这单可能已经接单，所以 submit_id 留在 run 里继续轮询；但没有健康
+                    // 计费回执就没有资格拿后续几十条继续试。尾部全部留在本地，等这单的
+                    // 归属被轮询确认后再补，既不重复扣当前单，也不会整批一起报错。
                     log.warn(
                         "submit",
                         who,
                         format!(
-                            "已提交但回执异常 · {} · 状态 {} · 无计费回执，\
-                             若 15 分钟内仍拿不到队列位次将判为幽灵单",
+                            "提交回执待确认 · {} · 状态 {} · {}。本通道已暂停继续试发，\
+                             后续任务留在本地候补",
                             receipt.submit_id,
                             if receipt.gen_status.is_empty() {
                                 "—"
                             } else {
                                 &receipt.gen_status
-                            }
+                            },
+                            receipt.credit_count.map_or_else(
+                                || "没有计费记录".to_string(),
+                                |n| format!("已有 {n} 额度计费记录"),
+                            ),
                         ),
                         None,
                     );
@@ -538,6 +734,18 @@ pub async fn submit_batch(
                 // 无法判断是「在提交」还是「卡住了」。
                 if let Some(app) = log.app() {
                     crate::commands::v2v::emit_changed(pool, app, Some(clip.id)).await;
+                }
+                if !receipt.looks_healthy() {
+                    let waiting = total.saturating_sub(i + 1);
+                    if waiting > 0 {
+                        log.info(
+                            "submit",
+                            None,
+                            format!("本通道其后 {waiting} 条保持本地候补，等待回执确认"),
+                            None,
+                        );
+                    }
+                    break;
                 }
             }
             Err(e) => {
@@ -559,11 +767,25 @@ pub async fn submit_batch(
                     },
                     None,
                 );
+                // 只把真正调用过 CLI 的当前条目标成失败/结果不明；后续条目从未被认领，
+                // 原样留在候补并停止本通道，避免一个系统性错误把整批都判死。
+                let waiting = total.saturating_sub(i + 1);
+                if waiting > 0 {
+                    log.warn(
+                        "submit",
+                        None,
+                        format!(
+                            "本通道在首个提交错误后停发，其后 {waiting} 条未调用远端，仍在本地候补"
+                        ),
+                        None,
+                    );
+                }
                 repo::mark_failed(pool, clip.id, None, kind, &msg, now_unix()).await?;
                 sum.failed += 1;
                 if sum.first_error.is_none() {
                     sum.first_error = Some(msg);
                 }
+                break;
             }
         }
     }
@@ -571,7 +793,10 @@ pub async fn submit_batch(
         log.info(
             "submit",
             None,
-            format!("提交结束：成功 {} · 失败 {}", sum.submitted, sum.failed),
+            format!(
+                "提交结束：接单 {} · 未扣费退回 {} · 失败 {}",
+                sum.submitted, sum.requeued, sum.failed
+            ),
             None,
         );
     }
@@ -969,7 +1194,7 @@ pub async fn heal_concurrency_rejects(pool: &SqlitePool, log: &Activity) -> AppR
             "submit",
             None,
             format!(
-                "{healed} 条曾被即梦以「同时在跑的太多了」拒收、并被误记成失败的条目已救回本地队列                 （它们从未扣费）。有空位会自动逐条发出去，不想跑就在表格里选中它们「撤回放行」。"
+                "{healed} 条曾被即梦以「同时在跑的太多了」拒收、并被误记成失败的条目已救回本地队列（它们从未扣费）。有空位会自动逐条发出去，不想跑就在表格里选中它们「撤回放行」。"
             ),
             None,
         );
@@ -980,9 +1205,9 @@ pub async fn heal_concurrency_rejects(pool: &SqlitePool, log: &Activity) -> AppR
 /// 一轮扫描里最多为几条单独跑一次 `query_result`。
 ///
 /// `list_task` 不带 `queue_info`，且它的 `gen_status` 是本机缓存（见 [`SWEEP_VIP_SECS`]
-/// 的实证），所以**位次与状态都只能逐条问**（O(n) 个进程）。并发闸门把在跑条数压到
-/// 个位数之后这笔开销可以忽略，但历史库里可能攒着一堆 `run` 条目 —— 这个预算就是那种
-/// 情况下的止损线，剩下的下一轮再问。
+/// 的实证），所以**位次与状态都只能逐条问**（O(n) 个进程）。自动发现可能让在跑量升到
+/// 100，这个预算把后台单条查询固定在 8 个进程；其余条目靠整表状态扫描，并在后续轮次
+/// 轮转取得位次，既不饿死也不让一次扫描制造进程风暴。
 pub const POSITION_QUERY_BUDGET: i64 = 8;
 
 /// 扫描起点的轮转游标（进程内）。
@@ -1117,8 +1342,8 @@ pub async fn sweep_once(
                 // 有意义的进度：「第 4485 位」与「第 12 位」是两件完全不同的事，
                 // 而在此之前界面上两者都只说得出一句「即梦在跑」。
                 //
-                // 之所以现在负担得起：在跑条数已被并发闸门压到个位数。仍留预算上限 ——
-                // 历史上攒下的一堆在跑条目不该把一轮扫描重新变成 O(n) 个进程。
+                // 自动发现最多可到 100，故单条位次查询必须保留预算上限；整表状态仍会
+                // 每轮覆盖全部任务，位次则按轮转游标在后续轮次补齐，不会饿死尾部。
                 let mut q = q.clone();
                 let mut authoritative = false;
                 if position_budget > 0
@@ -1199,8 +1424,8 @@ pub async fn sweep_once(
 ///
 /// 三者都只有逐条 `query_result` 才有。所以这里是 O(n) 个进程，**没有退避、没有
 /// [`POSITION_QUERY_BUDGET`]**：预算是给后台循环省钱的，人按下按钮就是要现在全问一遍。
-/// n 是**在跑条数**（受逐通道并发上限压着，稳态是个位数），不是本地队列长度 ——
-/// 本地队列里那些即梦压根不知道，没什么可问的。
+/// n 是**在跑条数**（所有通道合计可能超过单通道的 100 护栏），不是本地队列长度。
+/// 因此界面必须展示逐条进度；本地候补尚未发到即梦，没有可查询的远端状态。
 ///
 /// ## 进度用回调而不是 `AppHandle`
 ///
@@ -1498,8 +1723,8 @@ async fn settle(
                     "submit",
                     who,
                     format!(
-                        "{} 通道同时只跑得下 {limit} 条，这一单没排上（未扣费）→ 已放回本地队列，\
-                         有空位就自动补上。其它通道不受影响。",
+                        "{} 通道本轮在 {limit} 条附近明确拒收了这一单（未扣费）→ 已放回本地队列，\
+                         有空位就自动补上；冷却后会重新向上探测。其它通道不受影响。",
                         dreamina::short_label(channel)
                     ),
                     None,
@@ -1621,13 +1846,15 @@ pub fn spawn(
     use tauri_specta::Event;
 
     tauri::async_runtime::spawn(async move {
-        // 启动恢复：提交过程中被杀的（run 但无 submit_id）退回 ready 让人重提。
-        // 有 submit_id 的一条都不动——额度已扣，重提等于花两份钱买同一条视频。
+        // 启动恢复：提交过程中被杀的（run 但无 submit_id）远端结果不明，隔离而不重提。
+        // 有 submit_id 的一条都不动——额度可能已扣，重提等于花两份钱买同一条视频。
         match repo::recover_orphan_submits(&pool, now_unix()).await {
             Ok(n) if n > 0 => log.warn(
                 "poll",
                 None,
-                format!("中断恢复：{n} 条提交到一半的条目退回待提交（未产生额度消耗）"),
+                format!(
+                    "中断保护：{n} 条提交结果不明的条目已隔离到处理异常，未自动重提；请先去即梦核对"
+                ),
                 None,
             ),
             Err(e) => log.error("poll", None, format!("中断恢复失败：{e}"), None),
@@ -1753,15 +1980,8 @@ pub fn spawn(
                 //
                 // 放在扫描之后：扫描刚刚才把出片/判死/被弹回的条目挪出 `run`，
                 // 此刻数出来的空位才是准的。
-                match drain_queue(
-                    &pool,
-                    &settings.bin,
-                    &settings.defaults(),
-                    settings.max_in_flight,
-                    &log,
-                )
-                .await
-                {
+                let policy = settings.concurrency_policy();
+                match drain_queue(&pool, &settings.bin, &settings.defaults(), &policy, &log).await {
                     Ok(s) if s.submitted > 0 => {
                         request_sweep_soon(now_unix());
                         crate::commands::v2v::emit_changed(&pool, &app, None).await;
@@ -1888,9 +2108,16 @@ mod tests {
         let ids = seed_ready(&pool, 9).await;
         let log = Activity::silent();
 
-        let sum = release_and_submit(&pool, NO_SUCH_BIN, &ids, &opts(), 1, &log)
-            .await
-            .unwrap();
+        let sum = release_and_submit(
+            &pool,
+            NO_SUCH_BIN,
+            &ids,
+            &opts(),
+            &ConcurrencyPolicy::fixed(1),
+            &log,
+        )
+        .await
+        .unwrap();
 
         // 只动了 1 条（CLI 不存在 → 它提交失败），其余 8 条一条都没被碰过。
         assert_eq!(sum.submitted, 0, "假 CLI 发不出去");
@@ -1907,6 +2134,140 @@ mod tests {
         assert_eq!(
             repo::list_by_stages(&pool, &["fail"]).await.unwrap().len(),
             1
+        );
+    }
+
+    /// 远端容量不需要人猜：把探测天花板放高，逐条提交到第一份明确的未计费 1310 为止。
+    ///
+    /// 这个测试用一个可执行的假 CLI 复刻真实回体：Fast VIP 第一条扣费接单、第二条分配
+    /// 任务 ID 后以 1310 拒收；同批的 Mini 正常接单。它同时守住四个花钱相关的不变量：
+    ///
+    /// 1. 拒收单不因「有任务 ID」被误算成接单；
+    /// 2. 同通道剩余条目不再继续撞墙；
+    /// 3. 拒收与未发送条目按原序回到本地候补；
+    /// 4. Fast VIP 撞墙不阻塞 Mini，观测上限也不串台。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_reject_downgrades_only_that_channel_and_requeues_without_resubmitting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (pool, d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 4).await;
+        let log = Activity::silent();
+        let image = d.path().join("first-frame.jpg");
+        std::fs::write(&image, b"not decoded by the fake CLI").unwrap();
+        sqlx::query("UPDATE accepted_works SET image_path=?1")
+            .bind(image.to_string_lossy().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        repo::set_params(
+            &pool,
+            &ids[..3],
+            Some("seedance2.0fast_vip"),
+            Some(4),
+            Some("720p"),
+            200,
+        )
+        .await
+        .unwrap();
+        repo::set_params(
+            &pool,
+            &ids[3..],
+            Some("seedance2.0mini"),
+            Some(4),
+            Some("720p"),
+            200,
+        )
+        .await
+        .unwrap();
+
+        let bin = d.path().join("fake-dreamina");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+channel=""
+for arg in "$@"; do
+  case "$arg" in
+    --model_version=*) channel=${arg#--model_version=} ;;
+  esac
+done
+if [ "$channel" = "seedance2.0mini" ]; then
+  printf '%s\n' '{"submit_id":"mini-ok","gen_status":"querying","credit_count":36}'
+  exit 0
+fi
+counter="$0.fast_count"
+n=0
+if [ -f "$counter" ]; then
+  read n < "$counter" || n=0
+fi
+n=$((n + 1))
+printf '%s\n' "$n" > "$counter"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n' '{"submit_id":"vip-ok","gen_status":"querying","credit_count":44}'
+else
+  printf '%s\n' '{"submit_id":"vip-rejected","gen_status":"fail","fail_reason":"api error: ret=1310, message=ExceedConcurrencyLimit"}'
+fi
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+
+        let policy = ConcurrencyPolicy::fixed(3);
+        let defaults = GenOpts {
+            model_version: Some("seedance2.0fast_vip".into()),
+            duration: Some(4),
+            video_resolution: Some("720p".into()),
+            session: None,
+        };
+
+        let sum = release_and_submit(
+            &pool,
+            &bin.to_string_lossy(),
+            &ids,
+            &defaults,
+            &policy,
+            &log,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sum.submitted, 2, "VIP 第一条与 Mini 都应正常接单");
+        assert_eq!(sum.failed, 0, "未计费的并发拒收不是任务失败");
+        assert_eq!(sum.requeued, 1, "只有真正调用过远端的拒收单计为退回");
+        assert_eq!(sum.queued, 2, "拒收单与同通道尚未发送的一条都在本地候补");
+        assert_eq!(
+            std::fs::read_to_string(bin.with_extension("fast_count")).unwrap(),
+            "2\n",
+            "Fast VIP 第三条绝不能再调用 CLI"
+        );
+
+        let first = repo::get(&pool, ids[0]).await.unwrap().unwrap();
+        let rejected = repo::get(&pool, ids[1]).await.unwrap().unwrap();
+        let untouched = repo::get(&pool, ids[2]).await.unwrap().unwrap();
+        let mini = repo::get(&pool, ids[3]).await.unwrap().unwrap();
+        assert_eq!(first.submit_id.as_deref(), Some("vip-ok"));
+        assert_eq!(mini.submit_id.as_deref(), Some("mini-ok"));
+        for row in [&rejected, &untouched] {
+            assert_eq!(row.stage, "ready");
+            assert!(row.submit_id.is_none());
+            assert_eq!(row.attempt, 0, "未扣费/未提交不应增加付费尝试次数");
+        }
+        assert_eq!(
+            repo::pick_submit_queued_on(&pool, "seedance2.0fast_vip", "seedance2.0fast_vip", 9,)
+                .await
+                .unwrap(),
+            vec![ids[1], ids[2]],
+            "候补必须保持 FIFO"
+        );
+        assert_eq!(observed_in_flight_limit("seedance2.0fast_vip"), Some(1));
+        assert_eq!(
+            observed_in_flight_limit("seedance2.0mini"),
+            None,
+            "其它通道的观测绝不能被连坐"
         );
     }
 
@@ -2059,9 +2420,16 @@ mod tests {
 
         let ch = opts().model_version.unwrap_or_default();
         assert_eq!(free_slots(&pool, &ch, &ch, 1).await.unwrap(), 0);
-        let sum = release_and_submit(&pool, NO_SUCH_BIN, &ids[1..], &opts(), 1, &log)
-            .await
-            .unwrap();
+        let sum = release_and_submit(
+            &pool,
+            NO_SUCH_BIN,
+            &ids[1..],
+            &opts(),
+            &ConcurrencyPolicy::fixed(1),
+            &log,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (sum.submitted, sum.failed),
             (0, 0),
@@ -2070,11 +2438,56 @@ mod tests {
         assert_eq!(sum.queued, 2, "两条原样排着，等那一条出片");
 
         // 空位为 0 时 drain 直接返回，不去动库里任何一行。
-        let again = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
-            .await
-            .unwrap();
+        let again = drain_queue(
+            &pool,
+            NO_SUCH_BIN,
+            &opts(),
+            &ConcurrencyPolicy::fixed(1),
+            &log,
+        )
+        .await
+        .unwrap();
         assert_eq!(again.submitted + again.failed, 0);
         assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unverified_submit_pauses_only_its_channel_until_evidence_arrives() {
+        let (pool, _d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        let channel = "seedance2.0fast";
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::bare("ambiguous-id"),
+            400,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            free_slots(&pool, channel, channel, 50).await.unwrap(),
+            0,
+            "只有任务 ID、没有计费或位次时，不得继续拿其余 49 条冒险"
+        );
+        assert_eq!(
+            free_slots(&pool, channel, "seedance2.0mini", 50)
+                .await
+                .unwrap(),
+            50,
+            "未决闸门只属于当前通道"
+        );
+
+        sqlx::query("UPDATE v2v_clips SET queue_idx=42 WHERE id=?1")
+            .bind(ids[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            free_slots(&pool, channel, channel, 50).await.unwrap(),
+            49,
+            "轮询拿到入队证据后应自动解除暂停并继续探测"
+        );
     }
 
     /// 换通道之后，**新通道那条队必须当场往前推一格**（0032）。
@@ -2106,14 +2519,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
+            drain_queue(
+                &pool,
+                NO_SUCH_BIN,
+                &opts(),
+                &ConcurrencyPolicy::fixed(1),
+                &log,
+            )
+            .await
+            .unwrap()
+            .submitted
+                + drain_queue(
+                    &pool,
+                    NO_SUCH_BIN,
+                    &opts(),
+                    &ConcurrencyPolicy::fixed(1),
+                    &log,
+                )
                 .await
                 .unwrap()
-                .submitted
-                + drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
-                    .await
-                    .unwrap()
-                    .failed,
+                .failed,
             0,
             "换通道之前：默认通道没空位，这一条推不动"
         );
@@ -2138,9 +2563,15 @@ mod tests {
 
         // 现在 drain 必须动它 —— bin 不存在，故这一下记成 failed 而不是静静跳过，
         // 断言的是「它确实被取出来发了」。
-        let sum = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
-            .await
-            .unwrap();
+        let sum = drain_queue(
+            &pool,
+            NO_SUCH_BIN,
+            &opts(),
+            &ConcurrencyPolicy::fixed(1),
+            &log,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             sum.failed, 1,
             "改投到空闲通道后必须当场发出去，而不是等下一轮扫描"
@@ -2194,9 +2625,15 @@ mod tests {
 
         // drain 会为 mini 那条真的去调 CLI（这里的 bin 不存在，故记一次失败而不是
         // 静静跳过）—— 断言的是「它确实动了 mini 那条」，而不是别的通道。
-        let sum = drain_queue(&pool, NO_SUCH_BIN, &opts(), 1, &log)
-            .await
-            .unwrap();
+        let sum = drain_queue(
+            &pool,
+            NO_SUCH_BIN,
+            &opts(),
+            &ConcurrencyPolicy::fixed(1),
+            &log,
+        )
+        .await
+        .unwrap();
         assert_eq!(sum.failed, 1, "只该动 mini 那一条：默认通道没空位，mini 有");
         assert_eq!(
             repo::pick_submit_queued_on(&pool, &default_model, &default_model, 9)
@@ -2271,38 +2708,70 @@ mod tests {
         assert_eq!(heal_concurrency_rejects(&pool, &log).await.unwrap(), 0);
     }
 
-    // 在跑上限：配置值与实测值取小，实测值只降不升，且**逐通道各记各的**。
+    // 在跑上限：所有通道默认自动探到 100；拒收后暂降，冷却后重开，且逐通道各记各的。
     //
     // **整条链路写在一个测试里**是有意的：`OBSERVED` 是进程级静态量，拆成几个并行跑的
     // 测试会互相污染 —— 一个把它压到 1，另一个正好在断言 5。通道名也为此取得独一无二，
     // 免得与别处的测试用例撞车。
     #[test]
-    fn in_flight_limit_clamps_to_both_the_setting_and_what_dreamina_actually_allows() {
+    fn in_flight_limit_reprobes_upward_without_crossing_channels() {
         let a = "test-channel-a";
         let b = "test-channel-b";
-        // 还没撞过墙 → 完全听配置的，但受硬护栏夹取。
-        assert_eq!(effective_in_flight(a, 5), 5);
-        assert_eq!(effective_in_flight(a, 0), 1, "0 条在跑等于这条链路停摆");
-        assert_eq!(effective_in_flight(a, 9999), MAX_IN_FLIGHT_CAP);
+        let now = 2_000_000_000;
+        let policy = ConcurrencyPolicy::automatic();
+        assert_eq!(policy.ceiling(a), 100);
+        assert_eq!(policy.ceiling(b), 100);
+        assert_eq!(policy.ceiling("unconfigured-channel"), 100);
+        // 还没撞过墙 → 所有通道都打开到统一安全护栏。
+        assert_eq!(effective_in_flight_at(a, 100, now), 100);
+        assert_eq!(effective_in_flight_at(a, 0, now), 1);
+        assert_eq!(effective_in_flight_at(a, 9999, now), MAX_IN_FLIGHT_CAP);
         assert_eq!(observed_in_flight_limit(a), None);
 
-        // 撞墙：即梦当时在 a 上只收下了 1 条 → 从此 a 的上限就是 1，配置再大也没用。
-        assert_eq!(observe_concurrency_reject(a, 1), 1);
+        // 撞墙：a 当时只收下 1 条 → 冷却期内只维持 1 条。
+        assert_eq!(observe_concurrency_reject_at(a, 1, now), 1);
         assert_eq!(observed_in_flight_limit(a), Some(1));
-        assert_eq!(effective_in_flight(a, 5), 1);
+        assert_eq!(effective_in_flight_at(a, 100, now + 59), 1);
 
         // **通道之间互不相干**（0031 的核心）：a 撞了墙，b 该照跑不误。
-        // 反过来（一处观测压住全部通道）正是 2.0fast 那条长队把 2.0mini 锁死的成因。
         assert_eq!(observed_in_flight_limit(b), None);
-        assert_eq!(effective_in_flight(b, 5), 5);
+        assert_eq!(effective_in_flight_at(b, 100, now + 59), 100);
 
-        // 只降不升：又一次观测到 3 不该把上限放宽回去（那会让空转重新开始）。
-        observe_concurrency_reject(a, 3);
-        assert_eq!(effective_in_flight(a, 5), 1);
+        // 冷却到点后自动重开到 100；首条健康回执清掉旧观测。
+        assert_eq!(
+            effective_in_flight_at(a, 100, now + CONCURRENCY_REPROBE_SECS),
+            100
+        );
+        observe_concurrency_accept_at(a, now + CONCURRENCY_REPROBE_SECS);
+        assert_eq!(observed_in_flight_limit(a), None);
 
-        // 0 条被收下时兜底为 1：判成 0 会让这条通道永久停摆，
-        // 而「一条都跑不了」几乎一定是别的故障，不该由这里下结论。
-        assert_eq!(observe_concurrency_reject(a, 0), 1);
+        // 新一轮若在 3 条处撞墙就直接写 3，容量既可以下降也可以上升；0 仍兜底为 1。
+        assert_eq!(observe_concurrency_reject_at(a, 3, now + 100), 3);
+        assert_eq!(effective_in_flight_at(a, 100, now + 101), 3);
+        assert_eq!(observe_concurrency_reject_at(a, 0, now + 200), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_scheduler_lock_is_shared_within_a_channel_but_not_across_channels() {
+        let a1 = submit_gate("test-gate-fast-vip");
+        let a2 = submit_gate("test-gate-fast-vip");
+        let b = submit_gate("test-gate-mini");
+        assert!(std::sync::Arc::ptr_eq(&a1, &a2));
+        assert!(!std::sync::Arc::ptr_eq(&a1, &b));
+
+        let _held = a1.lock().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), b.lock())
+                .await
+                .is_ok(),
+            "Fast VIP 提交中不能阻塞 Mini 的调度锁"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), a2.lock())
+                .await
+                .is_err(),
+            "同通道第二个调度器必须等待，避免按过期空位数再发一批"
+        );
     }
 
     /// 扫描起点的轮转必须**覆盖全表**，否则预算之外的条目永远问不到。
@@ -2344,11 +2813,11 @@ mod tests {
         assert_eq!(channel_of(Some("  "), "seedance2.0fast"), "seedance2.0fast");
     }
 
-    // 默认往小了猜：猜小只是让后面那些多等一会儿（非 VIP 通道上「等」本来就免费），
-    // 猜大是一批片子集体躺进「处理异常」。
+    // 所有通道默认进入自动发现；100 只是逐条回执保护下的单轮安全护栏。
     #[test]
-    fn default_in_flight_is_the_measured_truth() {
-        assert_eq!(DEFAULT_MAX_IN_FLIGHT, 1);
+    fn every_channel_defaults_to_the_automatic_hundred_task_ceiling() {
+        assert_eq!(DEFAULT_MAX_IN_FLIGHT, 100);
+        assert_eq!(MAX_IN_FLIGHT_CAP, 100);
     }
 
     // skill 对某一条给的建议优先于全局默认：它是看过图之后的判断

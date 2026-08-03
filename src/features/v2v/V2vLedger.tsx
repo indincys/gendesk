@@ -520,6 +520,12 @@ export function hintFor(row: Row): { text: string; tone: "wr" | "er" } | null {
       text: "提交时 CLI 超时且没有 submit_id，但任务可能已经提交并计费。恢复前请先在即梦核对；再次提交可能重复计费。",
     };
   }
+  if (row.clip.errorType === "submit_interrupted") {
+    return {
+      tone: "er",
+      text: "应用在提交回执落库前中断，远端是否接单和扣费无法确认，因此没有自动重提。请先在即梦任务记录中核对。",
+    };
+  }
   if (row.slow) {
     return {
       tone: "wr",

@@ -281,7 +281,8 @@ pub async fn tick(
     // 这条队列只跑它自己那条通道，闸门也只该按那条通道算（0031）。
     // `validate()` 已经保证模型非空，故这里的 channel 一定是个真型号。
     let channel = opts.model_version.clone().unwrap_or_default();
-    let hard_limit = crate::v2v::runner::effective_in_flight(&channel, settings.max_in_flight);
+    let hard_limit =
+        crate::v2v::runner::effective_in_flight(&channel, settings.concurrency_ceiling(&channel));
     let (in_flight, stock, spent_today) = match tokio::try_join!(
         repo::count_in_flight_on(pool, &settings.model_version, &channel),
         repo::count_autofill_pool(pool),
@@ -396,12 +397,17 @@ pub async fn tick(
         ),
         None,
     );
-    match crate::v2v::runner::submit_batch(pool, &settings.bin, &ids, &opts, log).await {
-        Ok(sum) => {
-            if sum.submitted > 0 {
-                crate::commands::v2v::emit_changed(pool, app, None).await;
-            }
-        }
+    // 也进入统一的逐通道 FIFO：这样手动提交、定时补位和常驻补单共享同一把通道锁，
+    // 不会在同一秒各自按旧空位数再发一批。人工早已放行的条目按时间排在它前面。
+    if let Err(e) = repo::mark_submit_queued(pool, &ids, now).await {
+        log.error("submit", None, format!("常驻队列进入候补失败：{e}"), None);
+        return;
+    }
+    let policy = settings.concurrency_policy();
+    match crate::v2v::runner::drain_queue(pool, &settings.bin, &settings.defaults(), &policy, log)
+        .await
+    {
+        Ok(_) => crate::commands::v2v::emit_changed(pool, app, None).await,
         Err(e) => log.error("submit", None, format!("常驻队列提交失败：{e}"), None),
     }
 }

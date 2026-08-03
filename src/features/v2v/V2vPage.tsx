@@ -397,7 +397,12 @@ export function V2vPage() {
   const recover = useCallback(
     (ids: number[], advanceFrom?: number) => {
       const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => r != null);
-      const risky = rows.filter((r) => r.clip.billed || r.clip.errorType === "submit_timeout");
+      const risky = rows.filter(
+        (r) =>
+          r.clip.billed ||
+          r.clip.errorType === "submit_timeout" ||
+          r.clip.errorType === "submit_interrupted",
+      );
       if (risky.length === 0) {
         void doRecover(ids, advanceFrom);
         return;
@@ -420,7 +425,8 @@ export function V2vPage() {
           r.stage === "fail" &&
           ((r.clip.submitId ?? "").trim() !== "" ||
             r.clip.billed ||
-            r.clip.errorType === "submit_timeout"),
+            r.clip.errorType === "submit_timeout" ||
+            r.clip.errorType === "submit_interrupted"),
       );
       if (risky.length === 0) {
         void queueAction(ids, "rewrite", advanceFrom);
@@ -491,13 +497,16 @@ export function V2vPage() {
       if (sum.submitted > 0) {
         toast.success(
           sum.queued > 0
-            ? `已提交 ${sum.submitted} 条到即梦 · 另 ${sum.queued} 条在本地排队，出一条自动补一条`
+            ? `已提交 ${sum.submitted} 条到即梦 · 另 ${sum.queued} 条在本地候补，出一条自动补一条`
             : `已提交 ${sum.submitted} 条到即梦`,
         );
       } else if (sum.queued > 0) {
         // 即梦已经跑满时一条都发不出去 —— 这不是失败，但必须说清楚，
         // 否则点了确认什么都没发生。
         toast(`即梦已跑满，${sum.queued} 条已排进本地队列，有空位就自动发`);
+      }
+      if (sum.requeued > 0) {
+        toast(`远端容量探测已降级：${sum.requeued} 条明确未扣费的拒收任务已自动回到候补队列`);
       }
       if (sum.failed > 0) toast.error(`${sum.failed} 条提交失败：${sum.firstError ?? ""}`);
       setCmdPreview(null);
@@ -1232,9 +1241,9 @@ function SubmitConfirm({
     const t = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [busy]);
-  // 即梦同时只跑得下这么多条，其余留在本地排队自动接上。**这个数必须出现在按下确认
-  // 之前**：这一版之前，选 9 条点确认得到的是「已提交 9 条」，而实际只有 1 条入队、
-  // 8 条被即梦以 ExceedConcurrencyLimit 弹回来判死 —— 界面从头到尾没提过有这个上限。
+  // 后端按每条通道当前发现窗口算出本轮最多会试发多少条；远端若更早拒收会立即刹车，
+  // 尾部留在本地自动接上。**这个数必须出现在按下确认之前**，让人知道 100 是探测护栏
+  // 而不是远端容量承诺。
   //
   // 由 Rust 逐通道算好（`SubmitPreview.lanes`）：空位是按通道的，前端拿一个全局上限减
   // 一个全局在跑数，会在一批横跨两条通道时给出一个谁也不对的数（0031）。
@@ -1255,7 +1264,7 @@ function SubmitConfirm({
             {short} 额度
           </span>
           <span className="fs11 t3">
-            {waits > 0 ? `先发 ${goesNow} 条 · 其余排队时才扣费` : "提交即扣费，无法撤回"}
+            {waits > 0 ? `最多试发 ${goesNow} 条 · 远端接单时才扣费` : "远端接单即扣费，无法撤回"}
           </span>
           <div className="f1" />
           {/* 提交进行中：这一行是「它还在动吗」的全部答案。取消按钮此刻让位给它 ——
@@ -1340,7 +1349,7 @@ function SubmitConfirm({
         <div className="costbar mb8">
           <div className="fs12">
             即梦<b>按模型通道各排各的队</b>，每条通道各有一个在跑上限，所以现在{" "}
-            <b>先发 {goesNow} 条</b>
+            <b>本轮最多试发 {goesNow} 条</b>
             {waits > 0 && (
               <>
                 ，其余 <b>{waits} 条排在本地</b>，出一条自动补一条 —— 不必再来点一次
@@ -1353,14 +1362,21 @@ function SubmitConfirm({
           <div className="fs11 t3" style={{ lineHeight: 1.8 }}>
             {preview.lanes.map((l) => (
               <span key={l.label} style={{ marginRight: 12 }}>
-                <b className="t1">{l.label}</b> 共 {l.total} 条 · 先发 {l.goesNow} 条（该通道上限{" "}
-                {l.limit}）
+                <b className="t1">{l.label}</b> 共 {l.total} 条 · 最多试发 {l.goesNow} 条（
+                {l.observedLimit != null
+                  ? `当前自适应窗口 ${l.limit} · 最近拒收点 ${l.observedLimit}`
+                  : `自动探测上限 ${l.probeCeiling}`}
+                ）
               </span>
             ))}
           </div>
           <div className="fs11 t3">
             排队的那些<b>还没扣费</b>：额度是在真正发出去的那一刻扣的，所以下面那个预估是
             这些条目全部跑完的总数，不是现在就要花掉的。
+          </div>
+          <div className="fs11 t3">
+            所有模型通道各自自适应。明确返回并发已满且无扣费记录时，只停止并降低该通道并回到 FIFO
+            候补；冷却后自动重新向上探测，其它通道照常提交。
           </div>
         </div>
         <div className="fs12 t2 mb8">提交命令</div>

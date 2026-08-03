@@ -148,9 +148,9 @@ export function nextAction(stage: Stage, phantom: boolean, queued = false): Next
 /**
  * 这一条是不是「人已放行、正在本地排队等即梦的空位」（0028）。
  *
- * 即梦对**每条模型通道**各有一个并发上限（实测 2.0fast 只跑得下 1 条），超出的部分
- * 会被它逐条以 `ExceedConcurrencyLimit` 弹回来。所以 GenDesk 逐通道只发得下的那几条，
- * 其余留在本地 —— 而**别的通道不受影响**（0031）。
+ * 即梦对**每条模型通道**各自动态限容。GenDesk 逐条读接单回执，首个明确未计费的
+ * `ExceedConcurrencyLimit` 会停止当前通道并把条目放回 FIFO；其余尾部从未离开本地，
+ * 而**别的通道不受影响**（0031）。
  * 这一格与「等你点确认提交」必须分开显示 —— 在此之前两者长得一模一样，
  * 于是一批放行完的片子看起来像是没人管。
  */
@@ -566,6 +566,9 @@ export function deriveRows(
       // 直接重跑是这一格里最贵的一个误操作，所以这句话必须说「先核对」。
       situation = "提交超时 · 可能已扣费，核对后再恢复";
       situationTone = "er";
+    } else if (stage === "fail" && c.errorType === "submit_interrupted") {
+      situation = "提交中断 · 扣费未知，已禁止自动重提";
+      situationTone = "er";
     } else if (stage === "fail") {
       situation = `失败 · ${c.errorType ?? "原因见执行日志"}`;
       situationTone = "er";
@@ -658,9 +661,9 @@ export function matchFilter(r: Row, f: Filter): boolean {
  *    这也正是它能免费重跑的原因，两处判据必须同源。
  * 3. 其余情况看有没有 submit_id：有回执就是收下了。
  *
- * `submit_timeout` 单列（`removalRisk` 里的 `"unknown"`）：CLI 在超时被杀之前可能已经
- * 下过单，而 submit_id 随进程一起没了 —— 这一类我们**不知道**，不能当成「没收下过」
- * 顺手删掉。
+ * `submit_timeout` / `submit_interrupted` 单列（`removalRisk` 里的 `"unknown"`）：CLI
+ * 在回执落库前可能已经下过单，而 submit_id 没拿到或随进程一起没了 —— 这一类我们
+ * **不知道**，不能当成「没收下过」顺手删掉。
  */
 export function remoteAccepted(r: Row): boolean {
   if (r.clip.billed) return true;
@@ -673,7 +676,11 @@ export type RemovalRisk = "free" | "held" | "unknown";
 
 export function removalRisk(r: Row): RemovalRisk {
   if (remoteAccepted(r)) return "held";
-  if (r.stage === "fail" && r.clip.errorType === "submit_timeout") return "unknown";
+  if (
+    r.stage === "fail" &&
+    (r.clip.errorType === "submit_timeout" || r.clip.errorType === "submit_interrupted")
+  )
+    return "unknown";
   return "free";
 }
 

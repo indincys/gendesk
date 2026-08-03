@@ -365,6 +365,15 @@ describe("超时与幽灵的处置必须相反", () => {
     // 幽灵单那条信号不能沾上：它的含义是「确认没花钱」，而这里恰恰不确认。
     expect(r?.signals.has("phantom")).toBe(false);
   });
+
+  it("提交进程中断且无回执时明确禁止自动重提", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "submit_interrupted", videoPath: null, submitId: null }),
+    ]);
+    expect(r?.situation).toContain("禁止自动重提");
+    expect(r?.situation).toContain("扣费未知");
+    expect(r?.signals.has("phantom")).toBe(false);
+  });
 });
 
 describe("等待异常", () => {
@@ -1083,6 +1092,14 @@ describe("删除的代价（removalRisk）", () => {
   it("提交超时是「不知道」，不并进「免费」", () => {
     const [r] = derive([
       clip({ stage: "fail", errorType: "submit_timeout", submitId: null, videoPath: null }),
+    ]);
+    if (!r) throw new Error("fixture");
+    expect(removalRisk(r)).toBe("unknown");
+  });
+
+  it("提交中断也是「不知道」，不并进「免费」", () => {
+    const [r] = derive([
+      clip({ stage: "fail", errorType: "submit_interrupted", submitId: null, videoPath: null }),
     ]);
     if (!r) throw new Error("fixture");
     expect(removalRisk(r)).toBe("unknown");

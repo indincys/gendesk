@@ -276,8 +276,8 @@ pub async fn list_ready(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, 
 /// 第一张片子当场变成认不出主人的孤儿）。
 ///
 /// 认领必须发生在**提交之前**。这与「额度不可撤回」不冲突：这一步还没花钱，
-/// 而进程若恰好被杀在认领与写 submit_id 之间，`recover_orphan_submits` 会把
-/// 「run 但没有 submit_id」的条目退回 ready —— 那条恢复路径本来就是为这个窗口写的。
+/// 而进程若恰好被杀在远端接单与写 submit_id 之间，我们无法知道有没有扣费。
+/// `recover_orphan_submits` 会把「run 但没有 submit_id」隔离到失败态，绝不自动重提。
 ///
 /// 认领不成功的条目静静跳过：它要么被别人抢走了，要么已经不是 ready（被退回改写/
 /// 被删）。返回的行是**认领到的那些**，调用方对它们负责到底。
@@ -306,12 +306,20 @@ pub async fn claim_ready(
         return Ok(Vec::new());
     }
     let holes = vec!["?"; claimed.len()].join(",");
-    let sql = format!("{SELECT} WHERE c.id IN ({holes}) ORDER BY c.id");
+    let sql = format!("{SELECT} WHERE c.id IN ({holes})");
     let mut q = sqlx::query_as::<_, ClipRow>(&sql);
     for i in &claimed {
         q = q.bind(*i);
     }
-    q.fetch_all(pool).await
+    let rows = q.fetch_all(pool).await?;
+    let mut by_id: std::collections::HashMap<i64, ClipRow> =
+        rows.into_iter().map(|row| (row.id, row)).collect();
+    // SQL 的 IN 查询没有顺序保证；必须恢复调用方挑出的 FIFO 顺序。否则撞墙后停批时，
+    // 哪条先试、哪几条退回会偷偷变成主键顺序，候补队列就不再是 FIFO。
+    Ok(claimed
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id))
+        .collect())
 }
 
 /// 放回认领：`run`（无 submit_id）→ `ready`。
@@ -329,6 +337,28 @@ pub async fn release_claim(pool: &SqlitePool, id: i64, now: i64) -> Result<(), s
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// 批量放回一批**还没调用过远端**的认领。
+///
+/// 并发探测遇到明确未计费拒收时，把相应 `run` 认领一次 UPDATE 退回。人工放行的保留
+/// 原 `submit_queued_at`；常驻补单原本没有排队时刻，就以本次拒收时刻入队。两种来源
+/// 此后都由同一个 FIFO 队列在有空位时自动候补，不会变成无人再碰的 ready 条目。
+pub async fn release_claims(pool: &SqlitePool, ids: &[i64], now: i64) -> Result<i64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let holes = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "UPDATE v2v_clips
+            SET stage='ready', submit_queued_at=COALESCE(submit_queued_at, ?), updated_at=?
+          WHERE stage='run' AND submit_id IS NULL AND id IN ({holes})"
+    );
+    let mut q = sqlx::query(&sql).bind(now).bind(now);
+    for id in ids {
+        q = q.bind(*id);
+    }
+    Ok(q.execute(pool).await?.rows_affected() as i64)
 }
 
 /// 只改生成参数（批量覆盖用），不动提示词也不动阶段。
@@ -1229,6 +1259,27 @@ pub async fn count_running_accepted_on(
     Ok(n)
 }
 
+/// 某通道还存在多少条「已调用提交，但远端到底收没收尚无证据」的任务。
+///
+/// 只要有一条这样的单，容量探测就必须暂停：继续提交不能增加任何关于并发容量的信息，
+/// 却可能在 CLI 少回一个计费字段时把整批推成结果不明。`submit_id` 也不是证据——即梦会
+/// 给 1310 拒收请求分配 id。待轮询拿到计费/位次，或明确判失败后，这道临时闸自动解除。
+pub async fn count_running_unverified_on(
+    pool: &SqlitePool,
+    default_model: &str,
+    channel: &str,
+) -> Result<i64, sqlx::Error> {
+    let (n,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM v2v_clips WHERE stage='run' AND {CHANNEL_OF} = ?2
+           AND credit_count IS NULL AND submit_credit IS NULL AND queue_idx IS NULL"
+    ))
+    .bind(default_model)
+    .bind(channel)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// 本地待发队列的成员判据（0028）：人已放行、有提示词、还没轮到它。
 const QUEUED_POOL: &str = "stage='ready' AND submit_queued_at IS NOT NULL
       AND video_prompt IS NOT NULL AND TRIM(video_prompt) <> ''";
@@ -1674,13 +1725,17 @@ pub async fn remove(pool: &SqlitePool, ids: &[i64]) -> Result<i64, sqlx::Error> 
     Ok(q.execute(pool).await?.rows_affected() as i64)
 }
 
-/// 启动恢复：run 态但没有 submit_id 的条目 = 提交过程中被杀进程，退回 ready 让人重提。
+/// 启动恢复：run 态但没有 submit_id = 进程可能死在「远端已接单」与「本地回执落库」之间。
 ///
-/// 反过来（有 submit_id 的）**不能**退回：任务已经在即梦那边跑了，额度已扣，
-/// 退回重提等于花两份钱买同一条视频。它们由轮询器继续认领。
+/// 这个窗口无法证明远端没扣费，所以绝不能自动退回 ready。隔离到 `fail` 让人先去即梦
+/// 核对；这是宁可暂时卡住一条，也不拿用户余额赌一次自动重提。
+/// 有 submit_id 的条目保持 run，由轮询器继续认领。
 pub async fn recover_orphan_submits(pool: &SqlitePool, now: i64) -> Result<i64, sqlx::Error> {
     let res = sqlx::query(
-        "UPDATE v2v_clips SET stage='ready', updated_at=?1
+        "UPDATE v2v_clips
+            SET stage='fail', error_type='submit_interrupted',
+                error_message='提交进程中断且没有拿到任务 ID；远端是否扣费无法确认。为防重复扣费，未自动重提，请先在即梦核对。',
+                finished_at=?1, updated_at=?1
           WHERE stage='run' AND (submit_id IS NULL OR submit_id='')",
     )
     .bind(now)
@@ -2021,6 +2076,20 @@ mod tests {
                 .unwrap(),
             1,
             "只有拿到计费回执的那条算即梦真收下了 —— 它就是这条通道上限本身"
+        );
+        assert_eq!(
+            count_running_unverified_on(&pool, "seedance2.0fast", "seedance2.0fast")
+                .await
+                .unwrap(),
+            1,
+            "没有计费/位次证据的任务必须暂时挡住本通道继续扩容"
+        );
+        assert_eq!(
+            count_running_unverified_on(&pool, "seedance2.0fast", "seedance2.0mini")
+                .await
+                .unwrap(),
+            0,
+            "未决任务不能串台挡住其它通道"
         );
     }
 
@@ -2525,8 +2594,8 @@ mod tests {
         );
     }
 
-    // 中断恢复：**只**把「提交过程中被杀」的（无 submit_id）退回 ready。
-    // 有 submit_id 的额度已扣，退回重提等于花两份钱买同一条视频。
+    // 中断保护：无 submit_id 不等于没扣费——进程可能死在远端接单与本地落库之间。
+    // 结果不明的条目必须隔离；有 submit_id 的条目继续由轮询器认领。
     #[tokio::test]
     async fn recovery_never_resubmits_paid_tasks() {
         let (pool, _d) = test_pool().await;
@@ -2554,7 +2623,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(recover_orphan_submits(&pool, 400).await.unwrap(), 1);
-        assert_eq!(get(&pool, orphan).await.unwrap().unwrap().stage, "ready");
+        let orphan_row = get(&pool, orphan).await.unwrap().unwrap();
+        assert_eq!(orphan_row.stage, "fail");
+        assert_eq!(orphan_row.error_type.as_deref(), Some("submit_interrupted"));
         let paid_row = get(&pool, paid).await.unwrap().unwrap();
         assert_eq!(paid_row.stage, "run", "已付费提交的任务必须留给轮询器认领");
         assert_eq!(paid_row.submit_id.as_deref(), Some("sub-paid"));
@@ -2588,10 +2659,42 @@ mod tests {
         assert!(list_ready(&pool, &[id]).await.unwrap().is_empty());
     }
 
-    /// 认领到一半被杀 → 启动恢复认得出来（run 且无 submit_id）。
-    /// 这正是「认领可以放在提交之前」的全部依据。
     #[tokio::test]
-    async fn a_claim_without_a_submit_id_is_recovered_on_startup() {
+    async fn claimed_rows_preserve_the_requested_fifo_order() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 3).await;
+        let requested = [ids[2], ids[0], ids[1]];
+        let claimed = claim_ready(&pool, &requested, 300).await.unwrap();
+        assert_eq!(
+            claimed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            requested,
+            "IN 查询的数据库行序不能覆盖队列挑选器给出的 FIFO 顺序"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_an_unsubmitted_tail_keeps_manual_fifo_and_queues_autofill_rows() {
+        let (pool, _d) = test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        mark_submit_queued(&pool, &[ids[0]], 111).await.unwrap();
+        claim_ready(&pool, &ids, 300).await.unwrap();
+
+        assert_eq!(release_claims(&pool, &ids, 500).await.unwrap(), 2);
+        let manual = get(&pool, ids[0]).await.unwrap().unwrap();
+        let autofill = get(&pool, ids[1]).await.unwrap().unwrap();
+        assert_eq!(manual.stage, "ready");
+        assert_eq!(autofill.stage, "ready");
+        assert_eq!(manual.submit_queued_at, Some(111), "人工队列顺序必须保留");
+        assert_eq!(
+            autofill.submit_queued_at,
+            Some(500),
+            "常驻补单被拒后也必须进入自动候补，不能搁浅"
+        );
+    }
+
+    /// 认领到一半被杀 → 启动恢复认得出来（run 且无 submit_id），但绝不自动重提。
+    #[tokio::test]
+    async fn a_claim_without_a_submit_id_is_quarantined_on_startup() {
         let (pool, _d) = test_pool().await;
         seed_work(&pool, 1).await;
         enqueue_one(&pool, 1).await;
@@ -2604,7 +2707,9 @@ mod tests {
         claim_ready(&pool, &[id], 300).await.unwrap();
 
         assert_eq!(recover_orphan_submits(&pool, 400).await.unwrap(), 1);
-        assert_eq!(get(&pool, id).await.unwrap().unwrap().stage, "ready");
+        let row = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.stage, "fail");
+        assert_eq!(row.error_type.as_deref(), Some("submit_interrupted"));
     }
 
     /// 放回认领只对「确定没花钱」的条目生效。

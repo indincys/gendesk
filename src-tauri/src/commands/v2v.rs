@@ -64,13 +64,6 @@ pub struct V2vSettings {
     /// 常驻的非 VIP 队列（自动补单）。默认关 —— 见 `v2v::autofill` 的四道闸。
     #[serde(default)]
     pub autofill: AutofillCfg,
-    /// 同时最多有几条在即梦手上（0028）。**所有**提交路径共用它 —— 人点确认提交、
-    /// 常驻队列补单、失败重跑，抢的都是即梦那一份账户级并发配额。
-    ///
-    /// 默认 1 是实测值：一批 9 条同时提交，只有 1 条真的入队，其余 8 条回来
-    /// `ExceedConcurrencyLimit`。超出的条目不再往外发，而是留在本地队列排队等空位。
-    #[serde(default = "d_in_flight")]
-    pub max_in_flight: i64,
     /// 成片交付目录。空 = 默认 `{app_data}/outputs/视频`。
     ///
     /// 成片是 B-roll 素材，下游是剪辑而不是发布链，故它必须落在用户自己的工作目录里
@@ -97,10 +90,6 @@ fn d_model() -> String {
 fn d_true() -> bool {
     true
 }
-fn d_in_flight() -> i64 {
-    runner::DEFAULT_MAX_IN_FLIGHT
-}
-
 impl Default for V2vSettings {
     fn default() -> Self {
         Self {
@@ -113,7 +102,6 @@ impl Default for V2vSettings {
             poll_enabled: true,
             timeout_hours: runner::DEFAULT_TIMEOUT_HOURS,
             autofill: AutofillCfg::default(),
-            max_in_flight: d_in_flight(),
             clips_output_dir: String::new(),
         }
     }
@@ -135,6 +123,14 @@ impl V2vSettings {
     /// 传 0 比传 null 常见，两种都该是「不限」而不是「立刻超时」。
     pub fn timeout_secs(&self) -> Option<i64> {
         self.timeout_hours.filter(|h| *h > 0).map(|h| h * 3600)
+    }
+    /// 所有模型通道默认使用同一套自动探测策略；100 只是单轮安全护栏，不是容量真值。
+    pub fn concurrency_ceiling(&self, _channel: &str) -> i64 {
+        runner::DEFAULT_MAX_IN_FLIGHT
+    }
+    /// 每条模型通道各自学习、各自退避，互不共享容量结论。
+    pub fn concurrency_policy(&self) -> runner::ConcurrencyPolicy {
+        runner::ConcurrencyPolicy::automatic()
     }
     pub fn root(&self) -> std::path::PathBuf {
         if self.handoff_root.trim().is_empty() {
@@ -467,13 +463,12 @@ pub struct QueueStats {
     pub next_poll_in: Option<i64>,
     /// 超时上限小时数；None = 不限。
     pub timeout_hours: Option<i64>,
-    /// **默认通道**生效的在跑上限（配置值与实测值取小）。
+    /// **默认通道**此刻的发现窗口：拒收冷却期用最近拒收点，到期后重开到 100。
     ///
     /// 逐条的上限请读 [`ChannelStat::limit`] —— 上限是按通道算的（0031），
-    /// 这一项只是没有通道上下文时的兜底（设置页那句「同时在跑上限」）。
+    /// 这一项只是没有通道上下文时的兜底；逐通道状态互不共享。
     pub in_flight_limit: i64,
-    /// 默认通道本次运行实测到的上限；有值即「我们在这条通道上撞过
-    /// `ExceedConcurrencyLimit`，所以就算你设得更大也只能跑这么多」。
+    /// 默认通道最近一次明确拒收时的在跑数；冷却后会自动重新向上探测。
     pub observed_limit: Option<i64>,
     /// **本地队列**里等空位的条数（0028），跨通道求和。
     pub queued: i64,
@@ -507,7 +502,7 @@ pub struct ChannelStat {
     pub running: i64,
     /// 这条通道生效的在跑上限。
     pub limit: i64,
-    /// 这条通道实测到的上限（撞过墙才有值）。
+    /// 这条通道最近一次明确拒收时的在跑数（撞过墙才有值）。
     pub observed_limit: Option<i64>,
     /// 人已放行、在本地等这条通道空位的条数 —— 界面上那句「本地队列 N 个」。
     pub queued: i64,
@@ -542,19 +537,22 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
     let channels = repo::channel_stats(&state.db, &s.model_version)
         .await?
         .into_iter()
-        .map(|c| ChannelStat {
-            label: dreamina::short_label(&c.model_version),
-            vip: dreamina::is_vip(&c.model_version),
-            limit: runner::effective_in_flight(&c.model_version, s.max_in_flight),
-            observed_limit: runner::observed_in_flight_limit(&c.model_version),
-            running: c.running,
-            queued: c.queued,
-            ready: c.ready,
-            front_queue_idx: c.front_queue_idx,
-            oldest_wait: c.oldest_submitted_at.map_or(0, |t| (now - t).max(0)),
-            auto_running: c.auto_running,
-            autofill: s.autofill.model_version.trim() == c.model_version,
-            model_version: c.model_version,
+        .map(|c| {
+            let configured = s.concurrency_ceiling(&c.model_version);
+            ChannelStat {
+                label: dreamina::short_label(&c.model_version),
+                vip: dreamina::is_vip(&c.model_version),
+                limit: runner::effective_in_flight(&c.model_version, configured),
+                observed_limit: runner::observed_in_flight_limit(&c.model_version),
+                running: c.running,
+                queued: c.queued,
+                ready: c.ready,
+                front_queue_idx: c.front_queue_idx,
+                oldest_wait: c.oldest_submitted_at.map_or(0, |t| (now - t).max(0)),
+                auto_running: c.auto_running,
+                autofill: s.autofill.model_version.trim() == c.model_version,
+                model_version: c.model_version,
+            }
         })
         .collect();
     Ok(QueueStats {
@@ -568,7 +566,10 @@ pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats
         eta_secs,
         next_poll_in,
         timeout_hours: s.timeout_hours,
-        in_flight_limit: runner::effective_in_flight(&s.model_version, s.max_in_flight),
+        in_flight_limit: runner::effective_in_flight(
+            &s.model_version,
+            s.concurrency_ceiling(&s.model_version),
+        ),
         observed_limit: runner::observed_in_flight_limit(&s.model_version),
         queued: repo::count_submit_queued(&state.db).await?,
         channels,
@@ -751,7 +752,7 @@ pub async fn v2v_autofill_status(state: State<'_, AppState>) -> AppResult<Autofi
     // 深度受即梦在**这条通道**上的并发上限压制：设成 3 而上限是 1 时，界面必须显示 1
     // —— 否则「常驻 0/3」会让人一直等一个永远不会发生的第二、三条。
     let channel = cfg.model_version.trim();
-    let hard_limit = runner::effective_in_flight(channel, s.max_in_flight);
+    let hard_limit = runner::effective_in_flight(channel, s.concurrency_ceiling(channel));
     let mut out = AutofillStatus {
         enabled: cfg.enabled,
         depth: cfg.depth.min(hard_limit),
@@ -1602,15 +1603,8 @@ pub async fn switch_v2v_channel(
     //
     // 与 `poll_v2v_now` 里那处同源；一条通道提交失败不连坐其余（`drain_queue` 内部保证）。
     if changed > 0 {
-        match runner::drain_queue(
-            &state.db,
-            &s.bin,
-            &s.defaults(),
-            s.max_in_flight,
-            &state.v2v_log,
-        )
-        .await
-        {
+        let policy = s.concurrency_policy();
+        match runner::drain_queue(&state.db, &s.bin, &s.defaults(), &policy, &state.v2v_log).await {
             // 刚发出去的单子要过一会儿才有队列位次（实测健康单 25 秒内才拿到），
             // 故请求一次补扫而不是立刻扫 —— 同 `submit_v2v_clips` 的处置。
             Ok(sum) if sum.submitted > 0 => runner::request_sweep_soon(now_unix()),
@@ -1652,7 +1646,7 @@ pub struct SubmitPreview {
     pub estimated_credits: i64,
     /// 查不到单价的组合（`model/res`，去重）—— 有值时预估必须标成「≥」。
     pub unpriced: Vec<String>,
-    /// 这一批按通道拆开的「现在就发得出去几条」（0031）。
+    /// 这一批按通道拆开的「本轮最多会试发几条」（0031）。远端提前拒收时会更少。
     ///
     /// **由 Rust 算**：空位是逐通道的，前端拿一个全局上限减一个全局在跑数，
     /// 会在一批横跨两条通道时给出一个谁也不对的数 —— 而那个数就印在「确认提交」旁边。
@@ -1666,9 +1660,14 @@ pub struct PreviewLane {
     pub label: String,
     /// 这一批里走这条通道的条数。
     pub total: i64,
-    /// 其中现在就会真的发出去的条数（其余留在本地队列，出一条补一条）。
+    /// 本轮最多尝试发出的条数；远端提前拒收/回执不明会立即刹车，实际可能更少。
     pub goes_now: i64,
+    /// 当前发现窗口：拒收冷却期使用最近拒收点，到期后重新打开到探测护栏。
     pub limit: i64,
+    /// 自动发现的单轮安全护栏（所有通道默认 100），不代表远端一定接得住。
+    pub probe_ceiling: i64,
+    /// 本次进程里最近一次明确拒收时的在跑数；冷却后会重新探测，没撞过墙则为空。
+    pub observed_limit: Option<i64>,
 }
 
 /// 提交前的余额，**单独一条命令**。
@@ -1758,13 +1757,15 @@ pub async fn preview_v2v_commands(
     }
     let mut lanes = Vec::with_capacity(lane_counts.len());
     for (channel, total) in lane_counts {
-        let free =
-            runner::free_slots(&state.db, &s.model_version, &channel, s.max_in_flight).await?;
+        let ceiling = s.concurrency_ceiling(&channel);
+        let free = runner::free_slots(&state.db, &s.model_version, &channel, ceiling).await?;
         lanes.push(PreviewLane {
             label: dreamina::short_label(&channel),
             total,
             goes_now: total.min(free),
-            limit: runner::effective_in_flight(&channel, s.max_in_flight),
+            limit: runner::effective_in_flight(&channel, ceiling),
+            probe_ceiling: ceiling,
+            observed_limit: runner::observed_in_flight_limit(&channel),
         });
     }
     Ok(SubmitPreview {
@@ -1777,10 +1778,9 @@ pub async fn preview_v2v_commands(
 
 /// 放行一批到即梦。
 ///
-/// **不再是「N 条一起砸过去」**：即梦对每条模型通道各有一个并发上限（实测 2.0fast
-/// 只跑得下 1 条），超出的部分会被它以 `ExceedConcurrencyLimit` 逐条弹回来。所以这里
-/// 只发得下的那几条，其余留在本地队列（0028），由轮询循环在空位腾出来时按放行顺序
-/// 自动补上 —— **逐通道各补各的**（0031）。
+/// **不再是「N 条一起砸过去」**：同一模型通道逐条读取接单/计费回执，第一份明确未计费
+/// 的 `ExceedConcurrencyLimit` 会让该通道立即停发并收敛发现窗口。被拒的一条与尚未发送
+/// 的尾部都留在本地 FIFO，由轮询循环自动补上；其它模型通道并行推进、互不连坐。
 #[tauri::command]
 #[specta::specta]
 pub async fn submit_v2v_clips(
@@ -1789,12 +1789,13 @@ pub async fn submit_v2v_clips(
     ids: Vec<i64>,
 ) -> AppResult<SubmitSummary> {
     let s = load_settings(&state.db).await?;
+    let policy = s.concurrency_policy();
     let sum = runner::release_and_submit(
         &state.db,
         &s.bin,
         &ids,
         &s.defaults(),
-        s.max_in_flight,
+        &policy,
         &state.v2v_log,
     )
     .await?;
@@ -1900,6 +1901,7 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
     let pool = state.db.clone();
     let dirs = state.dirs.clone();
     let log = state.v2v_log.clone();
+    let policy = s.concurrency_policy();
     tauri::async_runtime::spawn(async move {
         let progress_app = app.clone();
         let result = runner::refresh_now(
@@ -1928,9 +1930,7 @@ pub async fn poll_v2v_now(state: State<'_, AppState>, app: AppHandle) -> AppResu
                 (0, Some(format!("{e}")))
             }
         };
-        if let Err(e) =
-            runner::drain_queue(&pool, &s.bin, &s.defaults(), s.max_in_flight, &log).await
-        {
+        if let Err(e) = runner::drain_queue(&pool, &s.bin, &s.defaults(), &policy, &log).await {
             log.error("submit", None, format!("本地队列补位失败：{e}"), None);
         }
         emit_changed(&pool, &app, None).await;
@@ -2831,5 +2831,22 @@ mod tests {
         assert_eq!(partial.bin, "/opt/dreamina");
         assert!(partial.poll_enabled, "缺失的布尔项须回落到默认 true");
         assert!(!partial.handoff_root.is_empty(), "缺失的交接根须回落默认值");
+    }
+
+    // 旧版本保存过人工并发数；升级后它们只能被兼容读取，不能继续暗中限制任何通道。
+    #[test]
+    fn legacy_concurrency_settings_are_ignored_and_not_written_back() {
+        let legacy = r#"{
+            "bin":"dreamina",
+            "maxInFlight":1,
+            "channelProbeLimits":{"seedance2.0fast_vip":7}
+        }"#;
+        let s: V2vSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.concurrency_ceiling("seedance2.0fast_vip"), 100);
+        assert_eq!(s.concurrency_ceiling("seedance2.0mini"), 100);
+
+        let wire = serde_json::to_string(&s).unwrap();
+        assert!(!wire.contains("maxInFlight"), "{wire}");
+        assert!(!wire.contains("channelProbeLimits"), "{wire}");
     }
 }

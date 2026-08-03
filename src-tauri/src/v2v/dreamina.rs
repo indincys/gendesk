@@ -469,6 +469,7 @@ pub fn extract_json(stdout: &str) -> AppResult<serde_json::Value> {
 ///
 /// 提交返回体的确切形状随版本变（顶层 / 嵌在 data 里都可能），而我们只需要那一个值。
 /// 递归查找让「字段挪了个层级」这种变动不至于让整条链断掉。
+#[cfg(test)]
 pub fn extract_submit_id(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::Object(map) => {
@@ -921,12 +922,22 @@ pub struct SubmitReceipt {
     /// 提交回体里的 `credit_count`。**健康的提交当场就有它**（实测 8 / 44 两档）；
     /// 缺席是最早可得的异常信号。
     pub credit_count: Option<i64>,
+    /// 提交回体里的失败原文。并发拒收会在这里明确给出 `ret=1310`。
+    pub fail_reason: String,
 }
 
 impl SubmitReceipt {
     /// 回执是否看起来正常。用于**记日志**，不用于拒收 —— 见 `submit()` 的说明。
     pub fn looks_healthy(&self) -> bool {
         self.credit_count.is_some() && classify_status(&self.gen_status) != Outcome::Failed
+    }
+
+    /// 只有远端**明确**说并发已满、且回体没有任何计费记录，才允许自动退回候补。
+    ///
+    /// 单有 submit_id 不是接单证据：即梦实测会给被 1310 拒收的请求分配 id。反过来，
+    /// 只要有计费字段就绝不自动重提，即使同时出现了失败文案，避免重复扣费。
+    pub fn unbilled_concurrency_reject(&self) -> bool {
+        self.credit_count.is_none() && is_concurrency_reject(&self.fail_reason)
     }
 }
 
@@ -939,6 +950,7 @@ impl SubmitReceipt {
             submit_id: submit_id.to_string(),
             gen_status: "querying".into(),
             credit_count: Some(credit),
+            fail_reason: String::new(),
         }
     }
 
@@ -948,18 +960,60 @@ impl SubmitReceipt {
             submit_id: submit_id.to_string(),
             gen_status: "querying".into(),
             credit_count: None,
+            fail_reason: String::new(),
         }
+    }
+}
+
+/// 从包含 `submit_id` 的那一层读取完整提交回执。
+///
+/// CLI 版本升级时有过顶层对象与 `{data:{...}}` 两种形状。字段必须跟着 id 所在对象读，
+/// 否则嵌套形状会丢掉计费记录，进而把一笔已扣费任务误认成可重提。
+fn parse_submit_receipt(v: &serde_json::Value) -> Option<SubmitReceipt> {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(submit_id) = map
+                .get("submit_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let credit_count = map
+                    .get("credit_count")
+                    .and_then(|x| x.as_i64())
+                    .or_else(|| {
+                        map.get("commerce_info")
+                            .and_then(|c| c.get("credit_count"))
+                            .and_then(|x| x.as_i64())
+                    });
+                return Some(SubmitReceipt {
+                    submit_id: submit_id.to_string(),
+                    gen_status: map
+                        .get("gen_status")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    credit_count,
+                    fail_reason: map
+                        .get("fail_reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+            map.values().find_map(parse_submit_receipt)
+        }
+        serde_json::Value::Array(arr) => arr.iter().find_map(parse_submit_receipt),
+        _ => None,
     }
 }
 
 /// 提交一条图生视频任务，返回回执。
 ///
-/// **回执异常不在这里报错**。CLI skill 写的是「`gen_status` 为 fail 才算提交失败」，
-/// 但本仓库的铁律更严：拿到 submit_id 就必须记下来（`额度不可撤回`）。一条既有
-/// submit_id 又缺 `credit_count` 的回执，究竟是没扣费还是只是回体少给了一个字段，
-/// 提交这一刻答不了 —— 而猜错的代价不对称：判它没扣费就丢掉 submit_id，万一扣了
-/// 就是花钱买了个认不出主人的孤儿。所以这里照收，把判断交给轮询（`is_phantom`），
-/// 那时有连续多轮的观测可用，比一次回体可靠得多。
+/// **普通的异常回执不在这里报错**。拿到 submit_id 就必须交给上层记下来：一条既有 id
+/// 又缺 `credit_count` 的回执，究竟是没扣费还是只是少给字段，提交这一刻答不了；丢掉 id
+/// 再重提可能花两份钱。唯一可自动退回的是同时带明确 `ret=1310` 且无计费字段的回执，
+/// 由 [`SubmitReceipt::unbilled_concurrency_reject`] 识别。其它未决回执保留 id、暂停该通道
+/// 继续扩容，等轮询拿到计费/位次或失败结论。
 pub async fn submit(
     bin: &str,
     image: &Path,
@@ -979,20 +1033,11 @@ pub async fn submit(
     let argv = command_line(&bin, &image.to_string_lossy(), prompt, &opts);
     let stdout = run(argv.clone(), log, who, true, Timeout::Submit).await?;
     let v = extract_json(&stdout)?;
-    let submit_id = extract_submit_id(&v).ok_or_else(|| {
+    parse_submit_receipt(&v).ok_or_else(|| {
         AppError::Internal(format!(
             "提交成功但未能从返回里取到 submit_id。命令：{}",
             display_command(&argv)
         ))
-    })?;
-    Ok(SubmitReceipt {
-        submit_id,
-        gen_status: v
-            .get("gen_status")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        credit_count: v.get("credit_count").and_then(|x| x.as_i64()),
     })
 }
 
@@ -1457,6 +1502,7 @@ mod tests {
             submit_id: extract_submit_id(&v).unwrap(),
             gen_status: v["gen_status"].as_str().unwrap_or_default().to_string(),
             credit_count: v["credit_count"].as_i64(),
+            fail_reason: String::new(),
         };
         assert_eq!(r.credit_count, Some(8));
         assert!(r.looks_healthy());
@@ -1466,6 +1512,33 @@ mod tests {
         let bare = SubmitReceipt::bare("027e202c");
         assert!(!bare.looks_healthy());
         assert_eq!(bare.submit_id, "027e202c");
+    }
+
+    #[test]
+    fn immediate_concurrency_reject_requires_explicit_reason_and_no_billing() {
+        let rejected = extract_json(
+            r#"{"data":{"submit_id":"remote-reject","gen_status":"fail",
+                 "fail_reason":"api error: ret=1310, message=ExceedConcurrencyLimit"}}"#,
+        )
+        .unwrap();
+        let receipt = parse_submit_receipt(&rejected).unwrap();
+        assert_eq!(receipt.submit_id, "remote-reject", "拒收也可能分配任务 ID");
+        assert!(receipt.unbilled_concurrency_reject());
+
+        let billed = extract_json(
+            r#"{"submit_id":"contradictory","gen_status":"fail","credit_count":44,
+                "fail_reason":"ret=1310 ExceedConcurrencyLimit"}"#,
+        )
+        .unwrap();
+        assert!(
+            !parse_submit_receipt(&billed)
+                .unwrap()
+                .unbilled_concurrency_reject(),
+            "一旦有计费证据就绝不能自动重提"
+        );
+
+        let id_only = SubmitReceipt::bare("id-alone");
+        assert!(!id_only.unbilled_concurrency_reject());
     }
 
     // 计费型号来自**回执**而不是我们的输入：`--model_version` 被上游忽略或降级时，

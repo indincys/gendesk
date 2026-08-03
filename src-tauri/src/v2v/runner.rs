@@ -3538,6 +3538,86 @@ fi
         ));
     }
 
+    /// 有本地候补时，即使队首刚刚问过、普通退避尚未到点，补位扫描也必须权威查询它。
+    /// `list_task` 刻意回空，复刻 CLI 本地缓存没有这条任务的情况；真正的远端状态只能
+    /// 由 `query_result` 拿到。这个组合正是旧逻辑会把 Fast 2.0 拖回 5/10 分钟档的边界。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backlog_sweep_reprobes_a_freshly_polled_front_missing_from_list_task() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (pool, d) = crate::db::test_support::test_pool().await;
+        let ids = seed_ready(&pool, 2).await;
+        let channel = "seedance2.0fast";
+        repo::set_params(&pool, &ids, Some(channel), Some(4), Some("720p"), 200)
+            .await
+            .unwrap();
+        repo::mark_submitted(
+            &pool,
+            ids[0],
+            &dreamina::SubmitReceipt::healthy("front-paid", 8),
+            300,
+        )
+        .await
+        .unwrap();
+        let now = now_unix();
+        repo::mark_polled(
+            &pool,
+            ids[0],
+            "front-paid",
+            "querying",
+            Some(9),
+            Some(8),
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+        repo::mark_submit_queued(&pool, &ids[1..], now)
+            .await
+            .unwrap();
+
+        let bin = d.path().join("fake-dreamina-sweep");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+printf '%s\n' "$1" >> "$0.calls"
+case "$1" in
+  list_task) printf '%s\n' '[]' ;;
+  query_result) printf '%s\n' '{"submit_id":"front-paid","gen_status":"querying","credit_count":8,"queue_info":{"queue_idx":7,"queue_length":100}}' ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&bin, permissions).unwrap();
+
+        let dirs = DataDirs::new(d.path().join("data"));
+        let sum = sweep_once(
+            &pool,
+            &dirs,
+            &bin.to_string_lossy(),
+            channel,
+            None,
+            &Activity::silent(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sum.polled, 2, "一次 list_task + 一次队首 query_result");
+        assert_eq!(sum.skipped, 0, "有候补的队首不能被普通退避跳过");
+        assert_eq!(
+            std::fs::read_to_string(bin.with_extension("calls")).unwrap(),
+            "list_task\nquery_result\n"
+        );
+        let front = repo::get(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(front.stage, "run");
+        assert_eq!(front.queue_idx, Some(7), "权威位次必须落库");
+        assert_eq!(repo::count_submit_queued(&pool).await.unwrap(), 1);
+    }
+
     /// 空的在跑集合**照样算跑过一轮**。
     ///
     /// 反过来的话 `LAST_SWEEP` 永远停在 0，循环里那句「到点了吗」恒为真：每 6 秒

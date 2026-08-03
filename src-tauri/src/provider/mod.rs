@@ -4,6 +4,7 @@
 //! V2 接入其它兼容模型 = 新增 trait 实现，不动引擎。
 
 pub mod openai;
+mod resource;
 pub mod sanitize;
 
 use std::path::PathBuf;

@@ -41,12 +41,19 @@ export function AppShell() {
 
   // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）；启动检查更新一次。
   useEffect(() => {
+    let disposed = false;
     let cleanup: (() => void) | undefined;
     void initEngine().then((fn) => {
-      cleanup = fn;
+      // StrictMode 会“挂载 → 立即清理 → 再挂载”来找副作用。init 是异步的，第一次
+      // 清理可能早于 listen 完成；若直接赋值，第一套监听永远没人释放，高频事件翻倍。
+      if (disposed) fn();
+      else cleanup = fn;
     });
     void unwrap(commands.checkUpdateNow()).catch(() => {}); // 启动后台检查
-    return () => cleanup?.();
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
   }, [initEngine]);
 
   // 订阅发布模块事件（徽章 / 收件箱收录）。

@@ -6,6 +6,7 @@ import { errorLabel, statusVisual } from "@/lib/status";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { FolderOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -18,6 +19,9 @@ const FILTERS: { key: string; label: string; match: (s: string) => boolean }[] =
   { key: "review", label: "待验收", match: (s) => s === "rev" },
   { key: "done", label: "已完成", match: (s) => s === "pass" || s === "rej" },
 ];
+
+/** 普通任务行定高；展开错误详情时由 virtualizer 只测量视口内的少数动态行。 */
+const TASK_ROW_HEIGHT = 40;
 
 export function TasksPage() {
   const go = useUiStore((s) => s.go);
@@ -94,6 +98,17 @@ export function TasksPage() {
         (q === "" || t.refName.toLowerCase().includes(q) || t.promptCode.toLowerCase().includes(q)),
     );
   }, [tasks, filter, search]);
+
+  // 500+ 任务若全部挂进 DOM，每次进度刷新都会让 WebView 对几百行做样式与布局。
+  // 这里只保留视口附近的行；任务 id 做稳定 key，状态更新不会把测量缓存按索引串行。
+  const taskScrollRef = useRef<HTMLDivElement>(null);
+  const taskVirt = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => taskScrollRef.current,
+    estimateSize: () => TASK_ROW_HEIGHT,
+    getItemKey: (index) => visible[index]?.id ?? index,
+    overscan: 8,
+  });
 
   // E06：失败任务按错误类型分组计数。
   const failByType = useMemo(() => {
@@ -310,7 +325,7 @@ export function TasksPage() {
   const showProgress = total > 0 && remaining > 0;
 
   return (
-    <PageScaffold title="任务队列" caption="全部任务">
+    <PageScaffold title="任务队列" caption="全部任务" bodyClassName="taskpage">
       <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
         <div className="fx ac gap6">
           <SumBadge cls="b-gray" n={counts.q} label="待处理" />
@@ -472,7 +487,7 @@ export function TasksPage() {
         </div>
       )}
 
-      <div style={{ overflow: "auto", minHeight: 0 }}>
+      <div className="taskscroll" ref={taskScrollRef}>
         <div className="tgrid th">
           <span className="fx ac">
             <button
@@ -490,123 +505,143 @@ export function TasksPage() {
           <span className="tc">自动恢复</span>
           <span />
         </div>
-        {visible.map((t, idx) => {
-          const v = statusVisual(t.status);
-          const pct = progress[t.id]?.pct ?? (t.status === "rev" || t.status === "pass" ? 100 : 0);
-          return (
-            <div className={cn("tgrid tr", sel.has(t.id) && "selrow")} key={t.id}>
-              <span className="fx ac">
-                <button
-                  type="button"
-                  className={cn("ckb", sel.has(t.id) && "on")}
-                  title="选择任务（⇧ 范围多选）"
-                  onClick={(e) => pickSel(idx, t.id, e.shiftKey)}
-                />
-              </span>
-              <span>
-                <span className={cn("bdg", v.badgeClass)}>
-                  {v.spinner && <i className="spn s9" />}
-                  {v.label}
+        <div className="taskvirt" style={{ height: taskVirt.getTotalSize() }}>
+          {taskVirt.getVirtualItems().map((row) => {
+            const t = visible[row.index];
+            if (!t) return null;
+            const idx = row.index;
+            const v = statusVisual(t.status);
+            const pct =
+              progress[t.id]?.pct ?? (t.status === "rev" || t.status === "pass" ? 100 : 0);
+            return (
+              <div
+                ref={taskVirt.measureElement}
+                data-index={row.index}
+                className={cn("tgrid tr taskvrow", sel.has(t.id) && "selrow")}
+                key={row.key}
+                style={{ transform: `translateY(${row.start}px)` }}
+              >
+                <span className="fx ac">
+                  <button
+                    type="button"
+                    className={cn("ckb", sel.has(t.id) && "on")}
+                    title="选择任务（⇧ 范围多选）"
+                    onClick={(e) => pickSel(idx, t.id, e.shiftKey)}
+                  />
                 </span>
-              </span>
-              <span className="fx ac gap8 ohide">
-                <span className="ph thumb" style={thumbStyle(t.resultThumbPath)} />
-                <span className="mono fs11 nowrap ohide">{t.refName}</span>
-              </span>
-              <span className="fx ac gap7 ohide">
-                <button
-                  type="button"
-                  className="pid nowrap ohide"
-                  title="查看提示词原文"
-                  onClick={() => setPromptView(t)}
-                >
-                  {promptLabel(t.promptCode, t.promptTitle)}
-                </button>
-                <span className="t3 fs11 nowrap ohide">{t.groupName}</span>
-              </span>
-              <span>{t.keyAlias && <span className="chip">{t.keyAlias}</span>}</span>
-              <span className="fx ac gap8 ohide">
-                {(t.status === "run" || t.status === "retry") && (
-                  <>
-                    <div className="pg">
-                      <i style={{ width: `${pct}%` }} />
-                    </div>
-                    <span
-                      className="mono fs10 t3 noshrink"
-                      style={{ width: 30, textAlign: "right" }}
-                    >
-                      {pct}%
-                    </span>
-                  </>
-                )}
-                {t.status === "fail" &&
-                  (() => {
-                    const act = errAction(t);
-                    return (
-                      <span className="col gap2 ohide" style={{ minWidth: 0 }}>
-                        <span className="fx ac gap6 ohide">
-                          <span className="terr">{errorLabel(t.errorType)}</span>
-                          <button
-                            type="button"
-                            className="fs11 nowrap"
-                            style={{ color: "var(--acc2)", textDecoration: "underline" }}
-                            onClick={act.run}
-                          >
-                            {act.label}
-                          </button>
-                          {t.errorMessage && (
+                <span>
+                  <span className={cn("bdg", v.badgeClass)}>
+                    {v.spinner && <i className="spn s9" />}
+                    {v.label}
+                  </span>
+                </span>
+                <span className="fx ac gap8 ohide">
+                  <span className="ph thumb" style={thumbStyle(t.resultThumbPath)} />
+                  <span className="mono fs11 nowrap ohide">{t.refName}</span>
+                </span>
+                <span className="fx ac gap7 ohide">
+                  <button
+                    type="button"
+                    className="pid nowrap ohide"
+                    title="查看提示词原文"
+                    onClick={() => setPromptView(t)}
+                  >
+                    {promptLabel(t.promptCode, t.promptTitle)}
+                  </button>
+                  <span className="t3 fs11 nowrap ohide">{t.groupName}</span>
+                </span>
+                <span>{t.keyAlias && <span className="chip">{t.keyAlias}</span>}</span>
+                <span className="fx ac gap8 ohide">
+                  {(t.status === "run" || t.status === "retry") && (
+                    <>
+                      <div className="pg">
+                        <i style={{ width: `${pct}%` }} />
+                      </div>
+                      <span
+                        className="mono fs10 t3 noshrink"
+                        style={{ width: 30, textAlign: "right" }}
+                      >
+                        {pct}%
+                      </span>
+                    </>
+                  )}
+                  {t.status === "fail" &&
+                    (() => {
+                      const act = errAction(t);
+                      return (
+                        <span className="col gap2 ohide" style={{ minWidth: 0 }}>
+                          <span className="fx ac gap6 ohide">
+                            <span className="terr">{errorLabel(t.errorType)}</span>
                             <button
                               type="button"
-                              className="fs10 t3 nowrap"
-                              onClick={() => toggleErr(t.id)}
+                              className="fs11 nowrap"
+                              style={{ color: "var(--acc2)", textDecoration: "underline" }}
+                              onClick={act.run}
                             >
-                              {expandedErr.has(t.id) ? "收起" : "详情"}
+                              {act.label}
                             </button>
+                            {t.errorMessage && (
+                              <button
+                                type="button"
+                                className="fs10 t3 nowrap"
+                                onClick={() => toggleErr(t.id)}
+                              >
+                                {expandedErr.has(t.id) ? "收起" : "详情"}
+                              </button>
+                            )}
+                          </span>
+                          {expandedErr.has(t.id) && t.errorMessage && (
+                            <span className="fs10 t3" style={{ wordBreak: "break-all" }}>
+                              {t.errorMessage}
+                            </span>
                           )}
                         </span>
-                        {expandedErr.has(t.id) && t.errorMessage && (
-                          <span className="fs10 t3" style={{ wordBreak: "break-all" }}>
-                            {t.errorMessage}
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })()}
-                {t.status === "rev" && (
-                  <span className="fs11 nowrap" style={{ color: "var(--ok)" }}>
-                    已生成 · 待验收
-                  </span>
-                )}
-                {t.status === "pass" && <span className="fs11 t3">已通过</span>}
-                {t.status === "rej" && <span className="fs11 t3">未通过</span>}
-              </span>
-              <span className="tc mono fs11 t3">{t.retryCount || ""}</span>
-              <span className="tract">
-                {t.status === "fail" && (
-                  <>
-                    {t.errorType === "ContentPolicy" ? (
-                      <button type="button" className="btn pri sm" onClick={() => openReword(t)}>
-                        改词后恢复
-                      </button>
-                    ) : (
-                      <>
-                        <button type="button" className="btn sm gho" onClick={() => recoverOne(t)}>
-                          恢复
-                        </button>
-                        <button type="button" className="btn sm gho" onClick={() => openReword(t)}>
+                      );
+                    })()}
+                  {t.status === "rev" && (
+                    <span className="fs11 nowrap" style={{ color: "var(--ok)" }}>
+                      已生成 · 待验收
+                    </span>
+                  )}
+                  {t.status === "pass" && <span className="fs11 t3">已通过</span>}
+                  {t.status === "rej" && <span className="fs11 t3">未通过</span>}
+                </span>
+                <span className="tc mono fs11 t3">{t.retryCount || ""}</span>
+                <span className="tract">
+                  {t.status === "fail" && (
+                    <>
+                      {t.errorType === "ContentPolicy" ? (
+                        <button type="button" className="btn pri sm" onClick={() => openReword(t)}>
                           改词后恢复
                         </button>
-                      </>
-                    )}
-                    <button type="button" className="btn sm gho" onClick={() => deleteOne(t)}>
-                      删除
-                    </button>
-                  </>
-                )}
-              </span>
-            </div>
-          );
-        })}
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="btn sm gho"
+                            onClick={() => recoverOne(t)}
+                          >
+                            恢复
+                          </button>
+                          <button
+                            type="button"
+                            className="btn sm gho"
+                            onClick={() => openReword(t)}
+                          >
+                            改词后恢复
+                          </button>
+                        </>
+                      )}
+                      <button type="button" className="btn sm gho" onClick={() => deleteOne(t)}>
+                        删除
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
         {tasks.length === 0 && (
           <div className="bigempty">
             <div className="fs13 fw5 t2">当前没有任务</div>

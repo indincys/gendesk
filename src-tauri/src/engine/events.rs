@@ -26,7 +26,7 @@ pub struct TaskStatusChanged {
     pub api_key_id: Option<i64>,
 }
 
-/// `task://progress`（250ms 节流）
+/// `task://progress`（按全局活跃 worker 数自适应节流）
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskProgress {

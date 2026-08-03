@@ -155,22 +155,22 @@ impl ImageProvider for OpenAiCompatible {
         req: GenRequest,
         progress: Option<ProgressFn>,
     ) -> Result<GenImage, ProviderError> {
-        // 读参考图 → multipart
-        let image_bytes = tokio::fs::read(&req.image_path).await.map_err(|e| {
-            ProviderError::new(ProviderErrorKind::Other, None, format!("读参考图失败：{e}"))
-        })?;
-        let file_name = req
-            .image_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("image.png")
-            .to_string();
+        // 参考图直接流进 multipart。旧实现先把每份参考图完整读进 Vec；250 并发下即使
+        // 大家用的是同一张图，也会在内存里复制 250 份并一直持有到请求结束。
+        let part = reqwest::multipart::Part::file(&req.image_path)
+            .await
+            .map_err(|e| {
+                ProviderError::new(
+                    ProviderErrorKind::Other,
+                    None,
+                    format!("打开参考图失败：{e}"),
+                )
+            })?;
 
         // 输出处理开关须在下方消费 size/quality 前读取（避免 params 部分移动后再借用）。
         let clear_meta = req.params.clear_meta();
         let remove_c2pa = req.params.remove_c2pa();
 
-        let part = reqwest::multipart::Part::bytes(image_bytes).file_name(file_name);
         let mut form = reqwest::multipart::Form::new()
             .part("image", part)
             .text("prompt", req.prompt)
@@ -224,6 +224,10 @@ impl ImageProvider for OpenAiCompatible {
             return Err(ProviderError::new(kind, Some(code), truncate(&msg, 300)));
         }
 
+        // 只闸成功结果的本地物化，不闸上面的远端生成请求。250 路都可以在上游运行，
+        // 但回到本机后最多只有一个小窗口同时持有 JSON/base64/下载缓冲与输出图。
+        let result_permit = super::resource::acquire_result().await;
+
         // 解析成功响应
         let body = resp
             .text()
@@ -236,6 +240,7 @@ impl ImageProvider for OpenAiCompatible {
                 format!("响应解析失败：{e}"),
             )
         })?;
+        drop(body);
         let datum = parsed.data.into_iter().next().ok_or_else(|| {
             ProviderError::new(ProviderErrorKind::BadResponse, None, "响应无图像")
         })?;
@@ -260,7 +265,21 @@ impl ImageProvider for OpenAiCompatible {
             ));
         };
 
-        deliver(&raw, want_format.as_deref(), clear_meta, remove_c2pa)
+        // 图片解码/重编码是同步 CPU + 大位图工作，不能直接堵 Tokio worker。并且它与
+        // 随后的缩略图共用 files::decode 的进程级预算，避免两条链各自“最多 3”叠成 6。
+        let delivered = crate::files::decode::run_bounded(move |_permit| {
+            deliver(&raw, want_format.as_deref(), clear_meta, remove_c2pa)
+        })
+        .await
+        .map_err(|e| {
+            ProviderError::new(
+                ProviderErrorKind::Other,
+                None,
+                format!("图片交付任务失败：{e}"),
+            )
+        })?;
+        drop(result_permit);
+        delivered
     }
 }
 

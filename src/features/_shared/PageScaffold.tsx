@@ -9,11 +9,14 @@ export function PageScaffold({
   caption,
   right,
   children,
+  bodyClassName,
 }: {
   title: string;
   caption?: string;
   right?: ReactNode;
   children?: ReactNode;
+  /** 页面主体需要自管滚动/布局时附加；默认仍由 `.pbody` 滚动。 */
+  bodyClassName?: string;
 }) {
   return (
     <div className="col f1 ohide" data-screen-label={title}>
@@ -23,7 +26,9 @@ export function PageScaffold({
         <div className="f1" />
         {right}
       </div>
-      <div className="pbody">{children ?? <MilestoneNote page={title} />}</div>
+      <div className={bodyClassName ? `pbody ${bodyClassName}` : "pbody"}>
+        {children ?? <MilestoneNote page={title} />}
+      </div>
     </div>
   );
 }

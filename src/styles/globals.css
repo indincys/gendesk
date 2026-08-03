@@ -849,6 +849,28 @@ a:hover {
 }
 
 /* ============================ 任务表 ============================ */
+.taskpage {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.taskscroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.taskvirt {
+  position: relative;
+  width: 100%;
+}
+.taskvrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
 .tgrid {
   display: grid;
   /* 任务6：首列为多选勾选框。 */

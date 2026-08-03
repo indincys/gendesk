@@ -3265,7 +3265,7 @@ passed: number;
  */
 rejected: number; total: number }
 /**
- * `task://progress`（250ms 节流）
+ * `task://progress`（按全局活跃 worker 数自适应节流）
  */
 export type TaskProgress = { taskId: number; pct: number; phase: Phase }
 export type TaskStatus = 

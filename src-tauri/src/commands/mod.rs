@@ -9,6 +9,7 @@ pub mod batches;
 pub mod delivery;
 pub mod intake;
 pub mod misc;
+pub mod poster;
 pub mod prompts;
 pub mod publish_library;
 pub mod publish_products;

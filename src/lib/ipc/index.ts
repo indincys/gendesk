@@ -115,12 +115,31 @@ export type {
   IntakeSettings,
   IntakeChanged,
   IntakeProgress,
+  LivePhotoStatus,
   JobView,
   JobPreview,
   JobPreviewItem,
   // 交付（与 `自动发布` 的契约）
   DeliverySettings,
+  PosterBatch,
+  PosterSettings,
+  PosterPreview,
+  PosterChoice,
+  PosterGroup,
+  PosterProduct,
 } from "./bindings";
+
+export async function subscribeLivePhoto(handler: (error: string | null) => void) {
+  if (!isTauri()) return () => {};
+  return events.livePhotoChanged.listen(({ payload }) => handler(payload.error));
+}
+
+/** Poster 交接状态变化；待确认弹窗与设置页共用同一份后端台账。 */
+export async function subscribePoster(handler: () => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.posterChanged.listen(handler);
+  return () => un();
+}
 
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
 export class IpcError extends Error {

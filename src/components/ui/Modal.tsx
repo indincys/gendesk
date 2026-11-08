@@ -4,6 +4,7 @@ import { type ReactNode, useEffect } from "react";
 
 /** 弹窗（原型 .ovl/.mdl）。Esc / 点击遮罩关闭。 */
 export function Modal({
+  id,
   title,
   width = "w420",
   onClose,
@@ -11,6 +12,7 @@ export function Modal({
   footer,
   headerExtra,
 }: {
+  id?: string;
   title: ReactNode;
   width?: "w360" | "w420" | "w640" | "w700";
   onClose: () => void;
@@ -30,7 +32,14 @@ export function Modal({
   }, [onClose]);
 
   return (
-    <div className="ovl" onClick={onClose}>
+    <div
+      id={id}
+      className="ovl"
+      role="dialog"
+      aria-modal="true"
+      aria-label={typeof title === "string" ? title : undefined}
+      onClick={onClose}
+    >
       <div className={cn("mdl", width)} onClick={(e) => e.stopPropagation()}>
         <div className="mhead">
           <span className="fw6 fs13">{title}</span>

@@ -14,6 +14,7 @@ use crate::db::repo::{
 };
 use crate::error::AppResult;
 use crate::files;
+use crate::library::Organization;
 use crate::state::AppState;
 
 /// 一张图的验收落点：源、去处、以及它这一次拿到的身份。
@@ -21,9 +22,13 @@ use crate::state::AppState;
 /// UID 必须在**拷贝之前**就定下来（文件名里有它），所以发号排在整批拷贝之前、
 /// 作品行落库之后由 `attach_work` 认领。见 `db::repo::names` 的模块注释。
 struct AcceptPlan {
+    poster_identity: (String, String),
+    snapshot_path: Option<PathBuf>,
+    organization_json: String,
     task_id: i64,
     src: String,
     out_path: PathBuf,
+    live_photo_dir: Option<PathBuf>,
     /// publish 图片素材库的落点（该子系统已停止投入，保留不再演进）。
     asset: Option<(PathBuf, String, i64)>,
     /// 交付批内的相对路径（写进 manifest 的那个 `file`）。
@@ -32,6 +37,8 @@ struct AcceptPlan {
     item_name: String,
     /// 本次发放的 UID。
     uid: String,
+    /// 仅供审稿后的选择，不交给 Poster；拒绝导入后可清理。
+    poster_path: Option<PathBuf>,
 }
 
 /// 待验收项视图。
@@ -40,11 +47,7 @@ struct AcceptPlan {
 pub struct ReviewItemView {
     pub id: i64,
     pub batch_id: i64,
-    /// 这一批的名字。一次工单 = 一个 run（0045），故对收件进来的批它就是**投单名**；
-    /// 生成页手动建的批没有名字，前端退回 `#{batchId}`。
-    ///
-    /// 批次退到幕后之后，人在验收页看到的分节标题应该是「哪一次投单」而不是一个
-    /// 内部自增 id —— 那个数字对人不表达任何东西。
+    /// 提交备注，旧工单可能把工单标识存到了这里。
     pub batch_note: Option<String>,
     pub ref_name: String,
     pub prompt_code: String,
@@ -67,6 +70,18 @@ pub struct ReviewItemView {
     pub created_at: i64,
     /// 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
     pub skill: Option<String>,
+    pub ref_id: i64,
+    pub item_name: String,
+    pub group_id: Option<i64>,
+    #[sqlx(skip)]
+    pub organization: Option<Organization>,
+}
+
+#[derive(FromRow)]
+struct ReviewRow {
+    #[sqlx(flatten)]
+    view: ReviewItemView,
+    params_json: String,
 }
 
 /// 验收结果。
@@ -86,6 +101,8 @@ pub struct AcceptResult {
 }
 
 const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, b.note AS batch_note,
+        t.params_json, t.ref_image_id AS ref_id, g.id AS group_id,
+        COALESCE(NULLIF(TRIM(p.item_name),''),p.title,'') AS item_name,
         COALESCE(r.name,'') AS ref_name,
         COALESCE(p.code,'') AS prompt_code, COALESCE(g.name,'') AS group_name,
         k.name AS key_alias, t.result_image_path, t.result_thumb_path, t.prompt_text_snapshot AS prompt_text,
@@ -105,6 +122,15 @@ pub async fn list_pending_review(
     state: State<'_, AppState>,
     batch_id: Option<i64>,
 ) -> AppResult<Vec<ReviewItemView>> {
+    let mut rows = pending_review_rows(&state.db, batch_id).await?;
+    backfill_sizes(&state.db, &mut rows).await;
+    Ok(rows)
+}
+
+async fn pending_review_rows(
+    pool: &sqlx::SqlitePool,
+    batch_id: Option<i64>,
+) -> AppResult<Vec<ReviewItemView>> {
     // 批次倒序：最近一批排在最顶部，往下依次是更早的批次；批次内保持生成序（id 升序），
     // 参考图 × 提示词的对应关系读起来才连贯。
     const ORDER: &str = " ORDER BY t.batch_id DESC, t.id ASC";
@@ -115,13 +141,19 @@ pub async fn list_pending_review(
         ),
         None => (format!("{REVIEW_SELECT}{ORDER}"), None),
     };
-    let mut q = sqlx::query_as::<_, ReviewItemView>(&sql);
+    let mut q = sqlx::query_as::<_, ReviewRow>(&sql);
     if let Some(b) = bind {
         q = q.bind(b);
     }
-    let mut rows = q.fetch_all(&state.db).await?;
-    backfill_sizes(&state.db, &mut rows).await;
-    Ok(rows)
+    Ok(q.fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|mut row| {
+            // 历史或损坏的参数快照不妨碍查看图片；归属交给界面的历史分组处理。
+            row.view.organization = Organization::from_params(&row.params_json).ok().flatten();
+            row.view
+        })
+        .collect())
 }
 
 /// 补齐 0027 之前生成的结果图像素，并写回库里（补一次，此后不再算）。
@@ -169,6 +201,7 @@ async fn backfill_sizes(pool: &sqlx::SqlitePool, rows: &mut [ReviewItemView]) {
 /// 验收通过内部承载。
 #[derive(FromRow)]
 struct AcceptRow {
+    params_json: String,
     id: i64,
     batch_id: i64,
     /// 批次名 = 投单名（一次工单 = 一个 run）。写进 manifest 的 `jobId`。
@@ -195,7 +228,7 @@ struct AcceptRow {
     item_purpose: String,
 }
 
-const ACCEPT_SELECT: &str = "SELECT t.id, t.batch_id, b.note AS batch_note,
+const ACCEPT_SELECT: &str = "SELECT t.params_json, t.id, t.batch_id, b.note AS batch_note,
         t.ref_image_id, t.prompt_id,
         t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
@@ -260,6 +293,27 @@ pub async fn accept_tasks(
     app: tauri::AppHandle,
     task_ids: Vec<i64>,
 ) -> AppResult<AcceptResult> {
+    let _guard = state.review_lock.lock().await;
+    let poster_batch = crate::poster::new_id();
+    let poster_enabled =
+        crate::poster::begin_review(&state.db, &state.dirs.root, &poster_batch).await?;
+    let result = accept_inner(&state, &app, &task_ids, &poster_batch, poster_enabled).await;
+    // 即使旧验收流程在后续收尾报错，已经提交的作品也要给用户一个明确的选择。
+    if poster_enabled {
+        let finished = crate::poster::finish_acceptance(&state.db, &poster_batch).await;
+        crate::commands::poster::emit(&app);
+        finished?;
+    }
+    result
+}
+
+async fn accept_inner(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    task_ids: &[i64],
+    poster_batch: &str,
+    poster_enabled: bool,
+) -> AppResult<AcceptResult> {
     let mut promoted: Vec<String> = Vec::new();
     let mut accepted = 0i64;
     let mut batches: Vec<i64> = Vec::new();
@@ -268,12 +322,10 @@ pub async fn accept_tasks(
     let at = now_unix();
     let date = files::date_yymmdd(at);
 
-    let rows = accept_rows(&state.db, &task_ids).await?;
-    // 本次交付批的目录。一次验收一个，与 intake 工单目录形制对称。
-    let delivery_dir = crate::commands::delivery::load_settings(&state.db)
-        .await?
-        .root_path()
-        .join(crate::delivery::batch_dir_name(at));
+    let rows = accept_rows(&state.db, task_ids).await?;
+    let library_root = crate::library::root(&state.db).await?;
+    let delivery_dir = library_root.join("成品").join("生成图片");
+    let live_photo_enabled = crate::live_photo::enabled(&state.db).await?;
     // 算出每张的落点（纯字符串活，留在这边），再一次性交给阻塞线程去拷。
     let publish_root = if rows.iter().any(|row| row.sku_id.is_some()) {
         Some(crate::commands::publish_settings::root_local(&state.db).await?)
@@ -306,6 +358,7 @@ pub async fn accept_tasks(
     }
 
     let mut jobs: Vec<AcceptPlan> = Vec::new();
+    let mut live_photo_dirs = std::collections::HashMap::new();
     for row in &rows {
         let Some(src) = row.result_image_path.clone() else {
             continue; // 无结果图，跳过
@@ -316,8 +369,15 @@ pub async fn accept_tasks(
         };
         // 交付批内按 SKU 分子目录。键来自作品的快照列（style + sku_code），
         // **不从文件名解析** —— 从中文文件名反推 SKU 是静默失败（分错目录不报错）。
-        let sku_folder = crate::delivery::sku_dir_name(&row.item_style, &row.item_sku);
-        let out_dir = delivery_dir.join(&sku_folder);
+        let organization = crate::library::Organization::from_params(&row.params_json)?
+            .unwrap_or_else(|| {
+                crate::library::Organization::legacy(
+                    &row.item_sku,
+                    &row.item_style,
+                    &row.group_name,
+                )
+            });
+        let out_dir = organization.directory(&library_root, true, false);
         // 任务1：输出扩展名跟随源结果格式（默认 jpg；用户保留原格式时可能 png）。
         let ext = files::output_ext_from_path(&src);
         // 文件名 = `{语义名}-{uid}.{EXT}`。
@@ -325,9 +385,31 @@ pub async fn accept_tasks(
         // 这里**不再走 `dedupe_name`**：UID 是全局唯一的（`issued_names.uid` 上有唯一
         // 索引，撞了就重摇），所以撞名在结构上已经不可能。留着那个 `_2` 后缀反而有害
         // —— 它会造出一个 manifest 里没有、下游也认不出来的名字。
-        let filename = format!("{}.{ext}", name_repo::compose(&item_name, &uid));
+        let filename = crate::library::filename(&item_name, &uid, at, &ext);
         let out_path = out_dir.join(&filename);
-        let rel_in_batch = format!("{sku_folder}/{filename}");
+        let live_photo_dir = if live_photo_enabled {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                live_photo_dirs.entry(row.batch_id)
+            {
+                entry.insert(
+                    crate::live_photo::batch_dir(
+                        &state.db,
+                        &library_root,
+                        row.batch_id,
+                        row.batch_note.as_deref(),
+                    )
+                    .await?,
+                );
+            }
+            live_photo_dirs.get(&row.batch_id).cloned()
+        } else {
+            None
+        };
+        let rel_in_batch = out_path
+            .strip_prefix(&delivery_dir)
+            .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
+            .to_string_lossy()
+            .to_string();
         let asset = match (row.sku_id, publish_root.as_ref()) {
             (Some(sku_id), Some(root)) => {
                 let rel = crate::publish::paths::RelPath::from_parts([
@@ -341,11 +423,24 @@ pub async fn accept_tasks(
             _ => None,
         };
         jobs.push(AcceptPlan {
+            poster_identity: organization.poster_keys(&row.item_sku, &row.item_style),
+            snapshot_path: PathBuf::from(&src)
+                .starts_with(library_root.join("_草稿"))
+                .then(|| {
+                    state.dirs.results().join(format!(
+                        "task{}_{uid}.{}",
+                        row.id,
+                        ext.to_lowercase()
+                    ))
+                }),
+            organization_json: serde_json::to_string(&organization)?,
             task_id: row.id,
             src,
-            out_path,
+            out_path: out_path.clone(),
+            live_photo_dir,
             rel_in_batch,
             asset,
+            poster_path: poster_enabled.then_some(out_path),
             item_name,
             uid,
         });
@@ -362,6 +457,9 @@ pub async fn accept_tasks(
         .iter()
         .flat_map(|j| {
             let mut pairs = vec![(PathBuf::from(&j.src), j.out_path.clone())];
+            if let Some(snapshot) = &j.snapshot_path {
+                pairs.push((PathBuf::from(&j.src), snapshot.clone()));
+            }
             if let Some((asset_dest, _, _)) = &j.asset {
                 pairs.push((PathBuf::from(&j.src), asset_dest.clone()));
             }
@@ -392,6 +490,7 @@ pub async fn accept_tasks(
         let work_id = work_repo::insert(
             &mut tx,
             &work_repo::NewWork {
+                organization_json: plan.organization_json.clone(),
                 task_id: row.id,
                 image_path: out_path.to_string_lossy().to_string(),
                 thumb_path: thumb,
@@ -418,13 +517,61 @@ pub async fn accept_tasks(
         // 号认领主人。放在同一个事务里：作品行与「这个号归谁」要么一起成立，
         // 要么一起不成立，中间态会让台账指向一个不存在的作品 id。
         name_repo::attach_work(&mut tx, &plan.uid, work_id).await?;
+        if let Some(poster_path) = &plan.poster_path {
+            sqlx::query(
+                "INSERT INTO poster_images(batch_id,work_id,uid,item_name,sku,style,image_path)
+            VALUES(?,?,?,?,?,?,?)",
+            )
+            .bind(poster_batch)
+            .bind(work_id)
+            .bind(&plan.uid)
+            .bind(&plan.item_name)
+            .bind(&plan.poster_identity.0)
+            .bind(&plan.poster_identity.1)
+            .bind(poster_path.to_string_lossy().as_ref())
+            .execute(&mut *tx)
+            .await?;
+        }
         if let Some((_, rel, sku_id)) = asset.as_ref() {
             image_repo::insert(&mut tx, *sku_id, rel, rel, "works", Some(work_id)).await?;
         }
+        let claimed =
+            sqlx::query("UPDATE tasks SET status='pass',updated_at=? WHERE id=? AND status='rev'")
+                .bind(at)
+                .bind(row.id)
+                .execute(&mut *tx)
+                .await?;
+        if claimed.rows_affected() != 1 {
+            return Err(crate::error::AppError::InvalidInput(
+                "图片状态已变化，请刷新后验收".into(),
+            ));
+        }
+        if let Some(snapshot) = &plan.snapshot_path {
+            sqlx::query("UPDATE tasks SET result_image_path=? WHERE id=?")
+                .bind(snapshot.to_string_lossy().as_ref())
+                .bind(row.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(dir) = &plan.live_photo_dir {
+            crate::live_photo::enqueue(&mut tx, out_path, dir).await?;
+        }
         tx.commit().await?;
+        if let Some(snapshot) = &plan.snapshot_path {
+            copied_guard.preserve(snapshot);
+            if let Err(e) = std::fs::remove_file(src) {
+                tracing::warn!(error=%e, "已通过图片的草稿副本待清理");
+            }
+        }
         copied_guard.preserve(out_path);
+        if let Some(poster_path) = &plan.poster_path {
+            copied_guard.preserve(poster_path);
+        }
         if let Some((asset_path, _, _)) = asset.as_ref() {
             copied_guard.preserve(asset_path);
+        }
+        if plan.live_photo_dir.is_some() {
+            crate::live_photo::notify(state, app);
         }
 
         // R8：微调过则写回提示词库。
@@ -463,29 +610,27 @@ pub async fn accept_tasks(
             accepted_at: at,
         });
 
-        task_repo::set_status(&state.db, row.id, "pass").await?;
         accepted += 1;
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
     }
 
-    // ── 交付收尾：写 manifest → **最后**写 READY。
-    //
-    // 放在库都写完之后：READY 一落地，对方就可能把整个目录搬走，而搬走之后
-    // `image_path` 就悬空了 —— 那是**允许**的（D3：交付即交出所有权），但库里那几行
-    // 必须已经存在，否则连「这张图交付过」都答不出来。
-    //
-    // 写失败不回滚验收：文件已经躺在那儿了，而验收是人的判断，不该因为一次写盘失败
-    // 被撤销。留一条 ERROR，人可以手动补一份 READY（同 v2v 交付拷贝失败不回滚验收）。
-    if let Err(e) = crate::delivery::finalize(&delivery_dir, &manifest) {
-        tracing::error!(error = %e, dir = %delivery_dir.display(), "交付批收尾失败（图已拷到位，缺 manifest / READY）");
+    // 内容清单写在独立的内部台账；用户目录只出现内容归属，不出现验收批次。
+    let record_dir = state.dirs.root.join("作品记录");
+    for row in &manifest {
+        if let Err(error) = crate::poster::storage::atomic_write(
+            &record_dir.join(format!("{}.json", row.uid)),
+            &serde_json::to_vec_pretty(row)?,
+        ) {
+            tracing::warn!(%error, "作品已通过；内部清单待修复");
+        }
     }
 
     // 入队 + 物化工单。**放在验收循环之后**：一批验收只重写一次工单，而不是每张一次。
     let queued_v2v = crate::commands::v2v::enqueue_works(&state.db, &to_queue).await?;
     if queued_v2v > 0 {
-        crate::commands::v2v::refresh_handoff(&state.db, &app).await;
+        crate::commands::v2v::refresh_handoff(&state.db, app).await;
     }
 
     for b in &batches {
@@ -521,15 +666,26 @@ fn rejected_file_paths(image: &Option<String>, thumb: &Option<String>) -> Vec<St
 #[tauri::command]
 #[specta::specta]
 pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> AppResult<i64> {
+    let _guard = state.review_lock.lock().await;
     let mut rejected = 0i64;
     let mut batches: Vec<i64> = Vec::new();
+    let at = now_unix();
+    let rows = accept_rows(&state.db, &task_ids).await?;
+    let mut tx = state.db.begin().await?;
 
-    // 一条 IN 查询取回整批，而不是每条一次 SELECT。
-    for row in accept_rows(&state.db, &task_ids).await? {
+    for row in rows {
+        let changed =
+            sqlx::query("UPDATE tasks SET status='rej',updated_at=? WHERE id=? AND status='rev'")
+                .bind(at)
+                .bind(row.id)
+                .execute(&mut *tx)
+                .await?;
+        if changed.rows_affected() == 0 {
+            continue;
+        }
         // E02：原图不再立即物理删除，随缩略图一并暂存进废纸篓 file_paths，
         // 由「彻底删除/清空废纸篓」时的 purge 统一物理删除。误触「不通过」不再丢原图。
         let file_paths = rejected_file_paths(&row.result_image_path, &row.result_thumb_path);
-        let mut tx = state.db.begin().await?;
         trash_repo::insert(
             &mut tx,
             &trash_repo::NewTrashItem {
@@ -545,14 +701,12 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
             },
         )
         .await?;
-        tx.commit().await?;
-
-        task_repo::set_status(&state.db, row.id, "rej").await?;
         rejected += 1;
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
     }
+    tx.commit().await?;
 
     for b in &batches {
         let _ = task_repo::archive_if_all_terminal(&state.db, *b).await;
@@ -610,16 +764,45 @@ mod tests {
                 .bind(tid).execute(&pool).await.unwrap();
         }
 
-        let sql = format!("{REVIEW_SELECT} ORDER BY t.batch_id DESC, t.id ASC");
-        let rows = sqlx::query_as::<_, ReviewItemView>(&sql)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        let rows = pending_review_rows(&pool, None).await.unwrap();
         let order: Vec<(i64, i64)> = rows.iter().map(|r| (r.batch_id, r.id)).collect();
         assert_eq!(
             order,
             vec![(2, 2), (2, 3), (1, 1)],
             "最近批次(2)整体排在更早批次(1)之前，批次内按 id 升序"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_review_exposes_names_and_tolerates_legacy_parameters() {
+        let (pool, _d) = test_pool().await;
+        seed_task(&pool, "rev").await;
+        sqlx::query("UPDATE prompts SET title='旧提示词标题' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET params_json='bad legacy data' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows = pending_review_rows(&pool, Some(1)).await.unwrap();
+        assert_eq!(rows[0].item_name, "旧提示词标题");
+        assert!(rows[0].organization.is_none());
+
+        sqlx::query("UPDATE prompts SET item_name='桌面场景第一张' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET params_json=? WHERE id=1")
+            .bind(r#"{"organization":{"product":"明星日历","style":"款式甲","requirement":"桌面场景"}}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows = pending_review_rows(&pool, Some(1)).await.unwrap();
+        assert_eq!(rows[0].item_name, "桌面场景第一张");
+        assert_eq!(
+            rows[0].organization.as_ref().unwrap().requirement,
+            "桌面场景"
         );
     }
 

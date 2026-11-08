@@ -103,22 +103,11 @@ export function V2vSection() {
           成片目录
         </span>
         <DescriptionHint label="成片目录说明">
-          验收通过后按组名与编号复制到这里；应用内成片仍会保留。
+          与图片共用作品根目录，按产品、款式、需求整理；应用内部保留恢复所需快照。
         </DescriptionHint>
       </div>
       <div className="fx ac gap10">
         <div className="pathwell f1">{clipsDir || "—"}</div>
-        <button
-          type="button"
-          className="btn sm"
-          onClick={async () => {
-            const dir = await unwrap(commands.pickClipsOutputDir()).catch(() => null);
-            if (dir) await save({ clipsOutputDir: dir });
-          }}
-        >
-          <FolderOpen className="ic12" />
-          更改目录
-        </button>
         <button
           type="button"
           className="btn sm gho"

@@ -19,6 +19,7 @@ pnpm tsc --noEmit
 
 step "4/9 前端单测（vitest）"
 pnpm vitest run
+pnpm test:cli
 
 step "5/9 前端构建"
 pnpm vite build

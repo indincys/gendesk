@@ -26,6 +26,38 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{AppError, AppResult};
 
+/// The exact read/decode path shared by read-only preflight and reference import.
+pub struct InspectedImage {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub oversize: bool,
+    pub image: DynamicImage,
+}
+
+pub fn inspect_image(path: &std::path::Path, permit: &DecodePermit) -> AppResult<InspectedImage> {
+    let bytes = std::fs::read(path)?;
+    let (width, height) = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()?
+        .into_dimensions()?;
+    let oversize = width > super::UPLOAD_MAX_EDGE
+        || height > super::UPLOAD_MAX_EDGE
+        || bytes.len() as u64 > super::UPLOAD_MAX_BYTES;
+    let target = if oversize {
+        super::UPLOAD_MAX_EDGE
+    } else {
+        super::THUMB_MAX
+    };
+    let image = decode_scaled(&bytes, target, permit)?;
+    Ok(InspectedImage {
+        bytes,
+        width,
+        height,
+        oversize,
+        image,
+    })
+}
+
 /// 同时在跑的解码数上限。
 ///
 /// **约束是内存不是核**：回落路径（PNG，或我们不敢碰的 JPEG）仍会物化整张位图，

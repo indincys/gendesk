@@ -123,6 +123,38 @@ async diagnosticsInfo() : Promise<Result<string, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getLivePhotoStatus() : Promise<Result<LivePhotoStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_live_photo_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setLivePhotoEnabled(enabled: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_live_photo_enabled", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retryLivePhotos() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_live_photos") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openLivePhotoDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_live_photo_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listApiKeys() : Promise<Result<ApiKeyView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_api_keys") };
@@ -650,6 +682,70 @@ async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getPosterSettings() : Promise<Result<PosterSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_poster_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updatePosterSettings(settings: PosterSettings) : Promise<Result<PosterSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_poster_settings", { settings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listPosterBatches() : Promise<Result<PosterBatch[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_poster_batches") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewPosterBatch(batchId: string) : Promise<Result<PosterPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_poster_batch", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async decidePosterBatch(batchId: string, choices: PosterChoice[] | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("decide_poster_batch", { batchId, choices }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retryPosterImports() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_poster_imports") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pickPosterApp() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_poster_app") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pickPosterLibrary() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_poster_library") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listWorks(filter: WorkFilter, page: number | null) : Promise<Result<WorkView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_works", { filter, page }) };
@@ -781,10 +877,9 @@ async scanIntakeNow() : Promise<Result<JobView[], AppError>> {
 }
 },
 /**
- * 重试：删掉台账那行，让下一次扫描重新收录它。
+ * 重试：沿原台账和持久检查点恢复，只补未完成步骤，不重新导入已有身份。
  * 
- * **只对失败的工单开放**：成功的工单目录已经移走了，删掉记录不会让它重跑，
- * 只会让台账少一行历史。重复到达时若另一轮已经完成，则按幂等成功处理。
+ * 失败或中断的工单沿原身份恢复；另一轮已经完成时按幂等成功处理。
  */
 async retryIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
     try {
@@ -2026,6 +2121,8 @@ inboxIngestEvent: InboxIngestEvent,
 intakeChanged: IntakeChanged,
 intakeProgress: IntakeProgress,
 keyHealth: KeyHealth,
+livePhotoChanged: LivePhotoChanged,
+posterChanged: PosterChanged,
 publishBadgesEvent: PublishBadgesEvent,
 refImportProgress: RefImportProgress,
 sheetChangedEvent: SheetChangedEvent,
@@ -2045,6 +2142,8 @@ inboxIngestEvent: "inbox-ingest-event",
 intakeChanged: "intake-changed",
 intakeProgress: "intake-progress",
 keyHealth: "key-health",
+livePhotoChanged: "live-photo-changed",
+posterChanged: "poster-changed",
 publishBadgesEvent: "publish-badges-event",
 refImportProgress: "ref-import-progress",
 sheetChangedEvent: "sheet-changed-event",
@@ -2860,6 +2959,8 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  * Key 健康状态。
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
+export type LivePhotoChanged = { error: string | null }
+export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
 /**
  * 物化结果摘要。
  */
@@ -2895,6 +2996,7 @@ resPrices: ResPrice[];
  * 是否是 vip 通道 —— 界面上要把它标出来（同规格贵 5.5 倍，只买到不排队）。
  */
 vip: boolean }
+export type Organization = { product: string; style: string; requirement: string; source: string }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 /**
  * 平台标签信息（暴露给前端做矩阵/选择器渲染，避免前端重复中文映射）。
@@ -2902,6 +3004,17 @@ export type Phase = "queued" | "requestStarted" | "generating" | "downloading" |
 export type PlatformInfo = { code: string; zh: string }
 export type PostImageView = { assetId: number; skuId: number; skuCode: string; ord: number; path: string; thumb: string }
 export type PostView = { id: number; contentCode: string; seq: number; kind: string; titleId: number | null; bodyId: number | null; title: string; body: string; topics: string[]; edited: boolean; images: PostImageView[]; tasks: PublishTaskView[] }
+export type PosterBatch = { id: string; createdAt: number; state: string; lastError: string; count: number }
+export type PosterChanged = { at: number }
+export type PosterChoice = { key: string; productId: string }
+export type PosterGroup = { key: string; sku: string; style: string; count: number; productId: string | null; warning: string }
+export type PosterPreview = { groups: PosterGroup[]; products: PosterProduct[] }
+export type PosterProduct = { id: string; name: string; isGeneric?: boolean }
+export type PosterSettings = { 
+/**
+ * 只有主动开启才在审稿后询问；旧设置没有此字段时也保持关闭。
+ */
+enabled?: boolean; executable: string; libraryRoot: string }
 /**
  * 确认卡上一条通道的分账。
  */
@@ -3174,11 +3287,7 @@ failures: string[] }
  */
 export type ReviewItemView = { id: number; batchId: number; 
 /**
- * 这一批的名字。一次工单 = 一个 run（0045），故对收件进来的批它就是**投单名**；
- * 生成页手动建的批没有名字，前端退回 `#{batchId}`。
- * 
- * 批次退到幕后之后，人在验收页看到的分节标题应该是「哪一次投单」而不是一个
- * 内部自增 id —— 那个数字对人不表达任何东西。
+ * 提交备注，旧工单可能把工单标识存到了这里。
  */
 batchNote: string | null; refName: string; promptCode: string; groupName: string; keyAlias: string | null; resultImagePath: string | null; resultThumbPath: string | null; promptText: string; 
 /**
@@ -3200,7 +3309,7 @@ createdAt: number;
 /**
  * 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
  */
-skill: string | null }
+skill: string | null; refId: number; itemName: string; groupId: number | null; organization: Organization | null }
 /**
  * 即梦会话（`--session` 的可选值）。
  */

@@ -541,6 +541,17 @@ pub(crate) async fn commit_preview(
     preview: &ImportPreview,
     ctx: &str,
 ) -> AppResult<ImportResult> {
+    let mut tx = pool.begin().await?;
+    let result = commit_preview_in_tx(&mut tx, preview, ctx).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn commit_preview_in_tx(
+    conn: &mut sqlx::SqliteConnection,
+    preview: &ImportPreview,
+    ctx: &str,
+) -> AppResult<ImportResult> {
     let is_temp = ctx == "generate";
     let source = if is_temp { "temp_import" } else { "library" };
 
@@ -549,7 +560,6 @@ pub(crate) async fn commit_preview(
         return Err(AppError::InvalidInput("没有可导入的提示词".into()));
     }
 
-    let mut tx = pool.begin().await?;
     let mut group_ids = Vec::new();
     let mut prompt_ids = Vec::new();
     let mut inserted = 0i64;
@@ -571,17 +581,17 @@ pub(crate) async fn commit_preview(
         };
         let prefix = sanitize_prefix(&pg.prefix).unwrap_or_else(|| gen_prefix_from_name(name));
         // 复用已有同前缀分组，或新建。
-        let group_id = match repo::find_group_by_prefix(pool, &prefix).await? {
+        let group_id = match repo::find_group_by_prefix(&mut *conn, &prefix).await? {
             Some(existing) => existing.id,
-            None => repo::create_group(&mut tx, name, &prefix, &pg.scene, is_temp).await?,
+            None => repo::create_group(&mut *conn, name, &prefix, &pg.scene, is_temp).await?,
         };
         group_ids.push(group_id);
 
         for p in prompts {
-            let number = ids::allocate(&mut tx, &prefix).await?;
+            let number = ids::allocate(&mut *conn, &prefix).await?;
             let code = ids::format_code(&prefix, number);
             let pid = repo::insert_prompt(
-                &mut tx,
+                &mut *conn,
                 &repo::NewPrompt {
                     group_id,
                     code: &code,
@@ -615,16 +625,15 @@ pub(crate) async fn commit_preview(
         validate_purposes(&pg.purposes)?;
         // **导入只增不减**：追加进已有组（同前缀二次导入）时，绝不因为这份新 txt
         // 不带那个标签就把上次标好的抹掉。
-        let mut merged = repo::group_tags(pool, group_id).await?;
+        let mut merged = repo::group_tags(&mut *conn, group_id).await?;
         for t in &pg.tags {
             if !merged.contains(t) {
                 merged.push(t.clone());
             }
         }
-        repo::bind_group_tags(&mut tx, group_id, &merged).await?;
+        repo::bind_group_tags(&mut *conn, group_id, &merged).await?;
     }
 
-    tx.commit().await?;
     Ok(ImportResult {
         group_ids,
         inserted,

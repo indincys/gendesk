@@ -33,6 +33,10 @@ function sortDrops(paths: string[]): { txt: string | undefined; images: string[]
 }
 
 export function GeneratePage() {
+  const product = useGenerateStore((s) => s.product);
+  const contentStyle = useGenerateStore((s) => s.style);
+  const requirement = useGenerateStore((s) => s.requirement);
+  const setOrganization = useGenerateStore((s) => s.setOrganization);
   const go = useUiStore((s) => s.go);
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
 
@@ -46,13 +50,15 @@ export function GeneratePage() {
   const mapping = useGenerateStore((s) => s.mapping);
   const setMapping = useGenerateStore((s) => s.setMapping);
   // E16 / D1：生成参数，null = 未设置（不传该参数，跟随提示词）。
-  // 只保留真的会用到的三项：比例（画幅首选，size 只有部分模型认）+ 精确尺寸 + 输出格式。
+  // 比例、精确尺寸、输出格式、生成质量。新生成默认 quality=high。
   const aspectRatio = useGenerateStore((s) => s.aspectRatio);
   const setAspectRatio = useGenerateStore((s) => s.setAspectRatio);
   const size = useGenerateStore((s) => s.size);
   const setSize = useGenerateStore((s) => s.setSize);
   const outputFormat = useGenerateStore((s) => s.outputFormat);
   const setOutputFormat = useGenerateStore((s) => s.setOutputFormat);
+  const quality = useGenerateStore((s) => s.quality);
+  const setQuality = useGenerateStore((s) => s.setQuality);
   // 任务1 输出处理：去水印档位 + 清除 AI 元数据 + 去除 C2PA。
   const watermark = useGenerateStore((s) => s.watermark);
   const setWatermark = useGenerateStore((s) => s.setWatermark);
@@ -235,12 +241,20 @@ export function GeneratePage() {
       ["aspect_ratio", "aspectRatio", aspectRatio],
       ["size", "size", size],
       ["output_format", "outputFormat", outputFormat],
+      ["quality", "quality", quality],
     ] as [string, string, unknown][]
   ).filter(([, , v]) => v != null && v !== "");
   const wire = Object.fromEntries(wireEntries.map(([w, , v]) => [w, v]));
 
   const buildParamsJson = () => {
-    const p: Record<string, unknown> = {};
+    const p: Record<string, unknown> = {
+      organization: {
+        product: product.trim(),
+        style: contentStyle.trim(),
+        requirement: requirement.trim(),
+        source: "手动创建",
+      },
+    };
     for (const [, snapKey, v] of wireEntries) p[snapKey] = v;
     // 任务1：输出处理开关随批次记忆（后端缺省视为开启，故显式写入以便「再来一批」还原）。
     p.watermark = watermark;
@@ -716,6 +730,23 @@ export function GeneratePage() {
             </div>
             <div className="psep" />
             <div className="prow2">
+              <span className="plabel">生成质量</span>
+              <select
+                className="inp"
+                value={quality ?? ""}
+                onChange={(e) => setQuality(e.target.value || null)}
+              >
+                <option value="">跟随模型</option>
+                {["auto", "low", "medium", "high", "xhigh", "max", "standard", "hd"].map((q) => (
+                  <option key={q} value={q}>
+                    {q}
+                  </option>
+                ))}
+              </select>
+              <span className="fs11 t3">默认 high；可用档位由模型决定</span>
+            </div>
+            <div className="psep" />
+            <div className="prow2">
               <span className="plabel">去水印</span>
               <div className="seg">
                 <span
@@ -789,7 +820,7 @@ export function GeneratePage() {
               <button
                 type="button"
                 className="btn pri sm"
-                disabled={starting}
+                disabled={starting || !requirement.trim()}
                 onClick={() => void start()}
               >
                 <Play className="ic12" />
@@ -799,6 +830,37 @@ export function GeneratePage() {
           }
         >
           <div className="col gap10">
+            <div className="fs12 fw6">内容归属</div>
+            <label className="col gap6 fs12">
+              产品或项目（选填）
+              <input
+                className="inp"
+                value={product}
+                onChange={(e) => setOrganization("product", e.target.value)}
+                placeholder="例如：陶瓷水杯"
+              />
+            </label>
+            <label className="col gap6 fs12">
+              款式（选填）
+              <input
+                className="inp"
+                value={contentStyle}
+                onChange={(e) => setOrganization("style", e.target.value)}
+                placeholder="例如：奶油白款"
+              />
+            </label>
+            <label className="col gap6 fs12">
+              需求名称
+              <input
+                className="inp"
+                value={requirement}
+                onChange={(e) => setOrganization("requirement", e.target.value)}
+                placeholder="例如：厨房场景图"
+              />
+            </label>
+            <div className="fs11 t3">
+              同一产品、款式、需求的图片持续归入同一目录；再次生成请沿用相同名称。
+            </div>
             <SummaryLine label="任务总数" value={`${combos} 组合 = ${taskTotal}`} />
             <SummaryLine label="预计请求数" value={`${taskTotal} 次（不含自动恢复）`} />
             <SummaryLine

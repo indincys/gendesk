@@ -130,6 +130,26 @@ pub struct TaskSpec {
     pub params_json: String,
 }
 
+/// 本地参考图附件随任务参数快照持久化；不会进入生成参数的远端字段。
+/// 旧任务无此键时沿用主图，损坏或缺图必须拒绝，不能静默少传参考。
+pub(crate) fn reference_ids(params_json: &str, primary: i64) -> AppResult<Vec<i64>> {
+    if params_json.trim().is_empty() {
+        return Ok(vec![primary]);
+    }
+    let params: serde_json::Value = serde_json::from_str(params_json)?;
+    let Some(raw) = params.get("referenceImageIds") else {
+        return Ok(vec![primary]);
+    };
+    let ids: Vec<i64> = serde_json::from_value(raw.clone())?;
+    let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+    if ids.is_empty() || ids.len() > 16 || ids[0] != primary || unique.len() != ids.len() {
+        return Err(crate::error::AppError::InvalidInput(
+            "任务参考图附件无效或主图顺序不匹配".into(),
+        ));
+    }
+    Ok(ids)
+}
+
 /// 组合展开并创建批次（R1 挂靠模型，一次事务）。返回 (batch_id, 任务数)。
 ///
 /// **一个组合 = 一个任务 = 一张图。** 抽卡（同一条提示词跑 k 次）已随生成侧收敛下线：
@@ -173,6 +193,18 @@ pub async fn create_batch_from_specs(
     params_json: &str,
     specs: &[TaskSpec],
 ) -> AppResult<(i64, i64)> {
+    let mut tx = pool.begin().await?;
+    let result = create_batch_from_specs_in_tx(&mut tx, output_dir, params_json, specs).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn create_batch_from_specs_in_tx(
+    conn: &mut sqlx::SqliteConnection,
+    output_dir: &str,
+    params_json: &str,
+    specs: &[TaskSpec],
+) -> AppResult<(i64, i64)> {
     if specs.is_empty() {
         return Err(crate::error::AppError::InvalidInput(
             "这一单展开后没有任何任务".into(),
@@ -180,33 +212,46 @@ pub async fn create_batch_from_specs(
     }
     let task_count = specs.len() as i64;
 
-    let mut tx = pool.begin().await?;
-    let batch_id = task_repo::create_batch(&mut tx, output_dir, params_json).await?;
+    let batch_id = task_repo::create_batch(&mut *conn, output_dir, params_json).await?;
 
     // batch_refs 的主键是 (batch_id, ref_image_id)，故每张参考图只记一行 ——
     // 多个条目共用一张图时，记的是它第一次出现时挂的那个组。
     let mut seen_refs: Vec<i64> = Vec::new();
     for s in specs {
-        if seen_refs.contains(&s.ref_image_id) {
-            continue;
+        for ref_id in reference_ids(&s.params_json, s.ref_image_id)? {
+            if seen_refs.contains(&ref_id) {
+                continue;
+            }
+            seen_refs.push(ref_id);
+            task_repo::add_batch_ref(&mut *conn, batch_id, ref_id, s.prompt_group_id).await?;
+            // E32 挂靠记忆：记录该参考图本次挂靠的组，下批预填。
+            sqlx::query("UPDATE ref_images SET last_group_id = ?2 WHERE id = ?1")
+                .bind(ref_id)
+                .bind(s.prompt_group_id)
+                .execute(&mut *conn)
+                .await?;
         }
-        seen_refs.push(s.ref_image_id);
-        task_repo::add_batch_ref(&mut tx, batch_id, s.ref_image_id, s.prompt_group_id).await?;
-        // E32 挂靠记忆：记录该参考图本次挂靠的组，下批预填。
-        sqlx::query("UPDATE ref_images SET last_group_id = ?2 WHERE id = ?1")
-            .bind(s.ref_image_id)
-            .bind(s.prompt_group_id)
-            .execute(&mut *tx)
-            .await?;
     }
     for s in specs {
+        let mut task_params: serde_json::Value =
+            serde_json::from_str(if s.params_json.trim().is_empty() {
+                params_json
+            } else {
+                &s.params_json
+            })?;
+        if task_params.get("organization").is_none() {
+            if let Some(org) = crate::library::Organization::from_params(params_json)? {
+                task_params["organization"] = serde_json::to_value(org)?;
+            }
+        }
+        crate::library::Organization::from_params(&task_params.to_string())?;
         task_repo::insert_task(
-            &mut tx,
+            &mut *conn,
             batch_id,
             s.ref_image_id,
             s.prompt_id,
             &s.prompt_text,
-            &s.params_json,
+            &task_params.to_string(),
         )
         .await?;
     }
@@ -219,10 +264,9 @@ pub async fn create_batch_from_specs(
     let mut group_ids: Vec<i64> = specs.iter().map(|s| s.prompt_group_id).collect();
     group_ids.sort_unstable();
     group_ids.dedup();
-    ref_repo::archive_many(&mut tx, &ref_ids, at).await?;
-    prompt_repo::archive_groups(&mut tx, &group_ids, at).await?;
+    ref_repo::archive_many(&mut *conn, &ref_ids, at).await?;
+    prompt_repo::archive_groups(&mut *conn, &group_ids, at).await?;
 
-    tx.commit().await?;
     Ok((batch_id, task_count))
 }
 
@@ -323,6 +367,24 @@ mod tests {
     use crate::db::repo::refs as ref_repo;
     use crate::db::test_support::test_pool;
     use crate::secrets::MemoryStore;
+
+    #[test]
+    fn persisted_reference_metadata_is_strict_and_legacy_tasks_keep_their_primary() {
+        assert_eq!(reference_ids("", 7).unwrap(), vec![7]);
+        assert_eq!(reference_ids("{}", 7).unwrap(), vec![7]);
+        assert_eq!(
+            reference_ids(r#"{"referenceImageIds":[7,9]}"#, 7).unwrap(),
+            vec![7, 9]
+        );
+        for raw in [
+            r#"{"referenceImageIds":[]}"#,
+            r#"{"referenceImageIds":[9,7]}"#,
+            r#"{"referenceImageIds":[7,7]}"#,
+            r#"{"referenceImageIds":"7,9"}"#,
+        ] {
+            assert!(reference_ids(raw, 7).is_err());
+        }
+    }
 
     fn row(id: i64, account: &str, enabled: i64, concurrency: i64) -> ApiKeyRow {
         ApiKeyRow {

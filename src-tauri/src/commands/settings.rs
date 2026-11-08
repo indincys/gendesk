@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -117,7 +117,7 @@ pub async fn load_settings(
 }
 
 async fn load(state: &AppState) -> AppResult<Settings> {
-    let default_dir = state.dirs.outputs().to_string_lossy().to_string();
+    let default_dir = crate::library::default_root().to_string_lossy().to_string();
     load_settings(&state.db, &default_dir).await
 }
 
@@ -137,6 +137,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> AppResult<Settings> {
 #[specta::specta]
 pub async fn update_settings(
     state: State<'_, AppState>,
+    app: AppHandle,
     patch: SettingsPatch,
 ) -> AppResult<Settings> {
     let mut s = load(&state).await?;
@@ -147,6 +148,14 @@ pub async fn update_settings(
         s.retry_count = v;
     }
     if let Some(v) = patch.output_dir {
+        if !std::path::Path::new(&v).is_absolute() {
+            return Err(AppError::InvalidInput("作品根目录必须是绝对路径".into()));
+        }
+        for area in ["成品", "_草稿", "_归档"] {
+            app.asset_protocol_scope()
+                .allow_directory(std::path::Path::new(&v).join(area), true)
+                .map_err(|e| AppError::Io(e.to_string()))?;
+        }
         s.output_dir = v;
     }
     if let Some(v) = patch.motion {
@@ -290,7 +299,7 @@ pub async fn open_logs_dir(state: State<'_, AppState>, app: AppHandle) -> AppRes
 #[tauri::command]
 #[specta::specta]
 pub async fn open_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    let dir = state.dirs.outputs();
+    let dir = crate::library::root(&state.db).await?;
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)

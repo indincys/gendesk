@@ -3,9 +3,9 @@ import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
 import { IntakeConfirmModal } from "@/features/settings/IntakeConfirmModal";
-import { commands, subscribeIntake, unwrap } from "@/lib/ipc";
+import { PosterImportModal } from "@/features/settings/PosterImportModal";
+import { commands, subscribeIntake, subscribeLivePhoto, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
-import { windowControls } from "@/lib/window";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
 import { usePublishStore } from "@/stores/publish";
@@ -38,6 +38,13 @@ export function AppShell() {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    const subscription = subscribeLivePhoto((error) => {
+      if (error) toast.error("实况图转换失败，可在设置中重试", { id: "live-photo-error" });
+    });
+    return () => void subscription.then((unlisten) => unlisten());
+  }, []);
 
   // 订阅引擎事件（事件驱动徽章/任务镜像，不轮询）；启动检查更新一次。
   useEffect(() => {
@@ -89,11 +96,8 @@ export function AppShell() {
         } else if (j.status === "hold") {
           // 超阈值：琥珀而不是红——它不是错误，是在等人表态。
           //
-          // **确认卡当场在这里弹出来**，而不是让人自己走到设置页去找：系统通知只能
-          // 说「有一份工单在等」，说不清「哪个组配了哪几张图」，而那恰恰是要核的东西。
-          // 同时把窗口叫到前面来——投单那一刻人在 Claude Code 里，GenDesk 可能在后台。
+          // 保留应用内确认卡，用户打开 GenDesk 时就能核对挂靠。
           setHoldJob(j.id);
-          void windowControls.focus();
           toast.warning(`工单「${j.jobId}」${j.message}，请核对挂靠后确认`);
         } else {
           // 失败必须是红的且带原因：静默失败的工单等于「投了单什么也没发生」。
@@ -106,7 +110,7 @@ export function AppShell() {
       cleanup = fn;
     });
     return () => cleanup?.();
-  }, [refreshBadges]);
+  }, [refreshBadges, setHoldJob]);
 
   // 切页刷新废纸篓 + 发布 + 视频徽章（增删后即时反映，非定时轮询）。
   useEffect(() => {
@@ -126,6 +130,7 @@ export function AppShell() {
         </div>
       </div>
       <HelpPanel />
+      <PosterImportModal />
       {holdJob !== null && (
         <IntakeConfirmModal
           jobId={holdJob}

@@ -7,8 +7,14 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::db::now_unix;
 
+fn default_organization_json() -> String {
+    "{}".into()
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct AcceptedWorkRow {
+    #[serde(default = "default_organization_json")]
+    pub organization_json: String,
     pub id: i64,
     /// 0008 起可空：批次被清理后作品仍在，只是不再指向任何任务。
     /// 提示词成为消耗品之后这会是**常态**而不是例外。
@@ -50,6 +56,7 @@ pub struct AcceptedWorkRow {
 
 #[derive(Debug, Clone, Default)]
 pub struct NewWork {
+    pub organization_json: String,
     pub task_id: i64,
     pub image_path: String,
     pub thumb_path: String,
@@ -72,8 +79,8 @@ pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sql
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO accepted_works (task_id, image_path, thumb_path, prompt_id, prompt_text,
             group_id, ref_image_id, batch_id, accepted_at, prompt_code, group_name, sku_id,
-            item_name, uid, sku_code, style, purpose)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            item_name, uid, sku_code, style, purpose, organization_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          RETURNING id",
     )
     .bind(w.task_id)
@@ -93,6 +100,11 @@ pub async fn insert(conn: &mut SqliteConnection, w: &NewWork) -> Result<i64, sql
     .bind(&w.sku_code)
     .bind(&w.style)
     .bind(&w.purpose)
+    .bind(if w.organization_json.is_empty() {
+        "{}"
+    } else {
+        &w.organization_json
+    })
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -135,8 +147,8 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     sqlx::query(
         "INSERT INTO accepted_works (id, task_id, image_path, thumb_path, prompt_id, prompt_text,
             group_id, ref_image_id, batch_id, favorite, accepted_at, prompt_code, group_name, sku_id,
-            item_name, uid, sku_code, style, purpose)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            item_name, uid, sku_code, style, purpose, organization_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
     )
     .bind(row.id)
     .bind(task_id)
@@ -159,6 +171,7 @@ pub async fn restore(pool: &SqlitePool, row: &AcceptedWorkRow) -> Result<bool, s
     .bind(&row.sku_code)
     .bind(&row.style)
     .bind(&row.purpose)
+    .bind(if row.organization_json.is_empty() { "{}" } else { &row.organization_json })
     .execute(pool)
     .await?;
     Ok(dropped)
@@ -205,6 +218,7 @@ mod tests {
 
     fn row(task_id: Option<i64>) -> AcceptedWorkRow {
         AcceptedWorkRow {
+            organization_json: "{}".into(),
             id: 1,
             task_id,
             image_path: "/o.jpg".into(),
@@ -225,6 +239,27 @@ mod tests {
             style: "王一博".into(),
             purpose: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn old_trash_payload_restores_valid_empty_ownership_and_new_payload_keeps_ownership() {
+        let (pool, _dir) = test_pool().await;
+        let mut payload = serde_json::to_value(row(None)).unwrap();
+        payload.as_object_mut().unwrap().remove("organization_json");
+        let old: AcceptedWorkRow = serde_json::from_value(payload).unwrap();
+        restore(&pool, &old).await.unwrap();
+        let back = get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(back.organization_json, "{}");
+        delete(&pool, 1).await.unwrap();
+        let mut next = row(None);
+        next.organization_json =
+            serde_json::json!({"product":"水杯","style":"白色款","requirement":"场景展示"})
+                .to_string();
+        restore(&pool, &next).await.unwrap();
+        assert_eq!(
+            get(&pool, 1).await.unwrap().unwrap().organization_json,
+            next.organization_json
+        );
     }
 
     /// 原任务已经退休时，还原**照样成立**，只是 task_id 写成 NULL。

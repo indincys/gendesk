@@ -13,7 +13,6 @@ use tauri_specta::Event;
 use crate::db::now_unix;
 use crate::db::repo::{settings as settings_repo, trash as trash_repo, v2v as repo};
 use crate::error::{AppError, AppResult};
-use crate::files;
 use crate::state::AppState;
 use crate::v2v::activity::ActivityEntry;
 use crate::v2v::autofill::AutofillCfg;
@@ -139,18 +138,7 @@ impl V2vSettings {
             std::path::PathBuf::from(self.handoff_root.trim())
         }
     }
-    /// 成片交付目录。空/仅空白 → 默认 `{app_data}/outputs/视频`。
-    pub fn clips_dir(&self, dirs: &crate::files::DataDirs) -> std::path::PathBuf {
-        if self.clips_output_dir.trim().is_empty() {
-            dirs.outputs().join(DEFAULT_CLIPS_SUBDIR)
-        } else {
-            std::path::PathBuf::from(self.clips_output_dir.trim())
-        }
-    }
 }
-
-/// 默认交付目录在 `outputs/` 下的子目录名。与图片输出同级，一眼看得出是视频。
-pub const DEFAULT_CLIPS_SUBDIR: &str = "视频";
 
 /// 读设置（缺失/损坏都回默认值，绝不让整页打不开）。
 pub async fn load_settings(pool: &SqlitePool) -> AppResult<V2vSettings> {
@@ -214,9 +202,9 @@ pub async fn pick_clips_output_dir(app: AppHandle) -> AppResult<Option<String>> 
 #[tauri::command]
 #[specta::specta]
 pub async fn v2v_clips_dir(state: State<'_, AppState>) -> AppResult<String> {
-    let settings = load_settings(&state.db).await?;
-    Ok(settings
-        .clips_dir(&state.dirs)
+    Ok(crate::library::root(&state.db)
+        .await?
+        .join("成品/生成视频")
         .to_string_lossy()
         .to_string())
 }
@@ -2236,12 +2224,18 @@ fn export_clip_blocking(
     let Some(src) = clip.video_path.as_deref().filter(|p| !p.is_empty()) else {
         return Ok(None);
     };
-    let group = if clip.group_name.trim().is_empty() {
-        "未分组".to_string()
+    let organization: crate::library::Organization =
+        serde_json::from_str(if clip.organization_json.is_empty() {
+            "{}"
+        } else {
+            &clip.organization_json
+        })?;
+    let organization = if organization == crate::library::Organization::default() {
+        crate::library::Organization::legacy("", "", &clip.group_name)
     } else {
-        files::sanitize_filename(&clip.group_name)
+        organization
     };
-    let dir = dir_base.join(group);
+    let dir = organization.directory(&dir_base, true, true);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
 
     // 编号去连字符，与图片输出命名同口径（files::output_filename）。
@@ -2261,22 +2255,28 @@ fn export_clip_blocking(
     } else {
         String::new()
     };
-    let name = format!(
-        "{code}_{}{attempt}.{ext}",
-        files::date_yymmdd(clip.reviewed_at.unwrap_or_else(now_unix))
+    let name = crate::library::filename(
+        &if organization.requirement.is_empty() {
+            code
+        } else {
+            organization.requirement.clone()
+        },
+        &format!("clip{}{attempt}", clip.id),
+        clip.reviewed_at.unwrap_or_else(now_unix),
+        &ext,
     );
     let dest = dir.join(name);
-    std::fs::copy(src, &dest).map_err(|e| AppError::Io(e.to_string()))?;
+    crate::library::copy_immutable(std::path::Path::new(src), &dest)?;
     Ok(Some(dest.to_string_lossy().to_string()))
 }
 
 /// [`export_clip_blocking`] 的异步包装：把那几十 MB 的拷贝挪出异步执行器。
 async fn export_clip(
-    settings: &V2vSettings,
+    _settings: &V2vSettings,
     state: &State<'_, AppState>,
     clip: &repo::ClipRow,
 ) -> AppResult<Option<String>> {
-    let base = settings.clips_dir(&state.dirs);
+    let base = crate::library::root(&state.db).await?;
     let clip = clip.clone();
     tokio::task::spawn_blocking(move || export_clip_blocking(base, &clip))
         .await
@@ -2344,8 +2344,7 @@ pub async fn redeliver_v2v_clips(
 #[specta::specta]
 pub async fn open_clips_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
-    let settings = load_settings(&state.db).await?;
-    let dir = settings.clips_dir(&state.dirs);
+    let dir = crate::library::root(&state.db).await?.join("成品/生成视频");
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
@@ -2544,6 +2543,57 @@ pub async fn remove_v2v_clips(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn approved_videos_share_content_directory_across_runs_and_retries_never_overwrite() {
+        let (pool, root) = crate::db::test_support::test_pool().await;
+        let org = crate::library::Organization::legacy("陶瓷水杯", "奶油白款", "旋转展示");
+        let json = serde_json::to_string(&org).unwrap();
+        let source = root.path().join("source.mp4");
+        std::fs::write(&source, b"video-one").unwrap();
+        let mut paths = Vec::new();
+        for id in 1..=2 {
+            sqlx::query("INSERT INTO accepted_works(id,image_path,thumb_path,prompt_text,accepted_at,organization_json) VALUES(?,'/image','/thumb','prompt',1,?)")
+                .bind(id).bind(&json).execute(&pool).await.unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            repo::enqueue(&mut tx, id, None, &format!("run-{id}"), None, "prompt", 1)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            sqlx::query("UPDATE v2v_clips SET video_path=?,reviewed_at=1 WHERE work_id=?")
+                .bind(source.to_string_lossy().as_ref())
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // 父图可独立删除；视频归属必须继续由自己的快照回答。
+            sqlx::query("DELETE FROM accepted_works WHERE id=?")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let clip = repo::get(&pool, id).await.unwrap().unwrap();
+            assert_eq!(clip.organization_json, json);
+            let path = export_clip_blocking(root.path().into(), &clip)
+                .unwrap()
+                .unwrap();
+            paths.push(std::path::PathBuf::from(&path));
+            assert_eq!(
+                export_clip_blocking(root.path().into(), &clip).unwrap(),
+                Some(path)
+            );
+        }
+        assert_ne!(paths[0], paths[1]);
+        assert_eq!(paths[0].parent(), paths[1].parent());
+        assert_eq!(
+            paths[0].parent().unwrap(),
+            org.directory(root.path(), true, true)
+        );
+        std::fs::write(&source, b"different-video").unwrap();
+        let clip = repo::get(&pool, 1).await.unwrap().unwrap();
+        assert!(export_clip_blocking(root.path().into(), &clip).is_err());
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"video-one");
+    }
+
     // 撤销令牌走一趟前端再回来，必须一个字段都不掉。
     //
     // 它是 JSON 序列化过去、原样传回来的（前端只当信封），所以「加了列却忘了塞进
@@ -2652,6 +2702,7 @@ mod tests {
     fn billed_reads_every_receipt_not_just_the_obvious_one() {
         fn row(credit: Option<i64>, submit_credit: Option<i64>) -> repo::ClipRow {
             repo::ClipRow {
+                organization_json: "{}".into(),
                 id: 1,
                 work_id: 1,
                 group_id: None,
@@ -2721,6 +2772,7 @@ mod tests {
     fn awaiting_download_is_told_apart_from_still_running() {
         fn row(stage: &str, gen: Option<&str>, path: Option<&str>) -> repo::ClipRow {
             repo::ClipRow {
+                organization_json: "{}".into(),
                 stage: stage.into(),
                 gen_status: gen.map(str::to_string),
                 video_path: path.map(str::to_string),

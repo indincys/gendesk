@@ -12,7 +12,10 @@ mod files;
 mod ids;
 mod importer;
 mod intake;
+mod library;
+mod live_photo;
 mod logging;
+mod poster;
 mod provider;
 mod publish;
 mod purpose;
@@ -27,6 +30,14 @@ use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 pub use error::{AppError, AppResult};
+
+/// Headless validation entry. Deliberately never constructs AppState or opens a database.
+pub fn validate_intake_cli() -> AppResult<serde_json::Value> {
+    let input: intake::preflight::ExternalInput = serde_json::from_reader(std::io::stdin())?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::Internal(format!("启动预检运行时失败：{e}")))?;
+    runtime.block_on(intake::preflight::external(input))
+}
 
 /// 构造 tauri-specta Builder —— 命令/事件的单一登记点。
 ///
@@ -47,6 +58,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings::open_output_dir,
             commands::settings::open_path_in_folder,
             commands::settings::diagnostics_info,
+            live_photo::get_live_photo_status,
+            live_photo::set_live_photo_enabled,
+            live_photo::retry_live_photos,
+            live_photo::open_live_photo_dir,
             // api_keys 域
             commands::api_keys::list_api_keys,
             commands::api_keys::add_api_key,
@@ -99,6 +114,14 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::review::list_pending_review,
             commands::review::accept_tasks,
             commands::review::reject_tasks,
+            commands::poster::get_poster_settings,
+            commands::poster::update_poster_settings,
+            commands::poster::list_poster_batches,
+            commands::poster::preview_poster_batch,
+            commands::poster::decide_poster_batch,
+            commands::poster::retry_poster_imports,
+            commands::poster::pick_poster_app,
+            commands::poster::pick_poster_library,
             // works 域
             commands::works::list_works,
             commands::works::toggle_work_favorite,
@@ -245,6 +268,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::publish_sheets::open_task_sheet_dir,
         ])
         .events(collect_events![
+            commands::poster::PosterChanged,
+            live_photo::LivePhotoChanged,
             engine::events::TaskStatusChanged,
             engine::events::TaskProgress,
             engine::events::BatchSummary,
@@ -280,6 +305,16 @@ fn ts_config() -> specta_typescript::Typescript {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = specta_builder();
+    let background_intake = is_background_intake(std::env::args().nth(1).as_deref());
+    let mut context = tauri::generate_context!();
+    let mut window_state = tauri_plugin_window_state::Builder::default();
+    if background_intake {
+        for window in &mut context.config_mut().app.windows {
+            window.visible = false;
+            window.focus = false;
+        }
+        window_state = window_state.skip_initial_state("main");
+    }
 
     // 开发构建时把最新绑定写出到前端；生产构建不含此步。
     #[cfg(debug_assertions)]
@@ -295,13 +330,15 @@ pub fn run() {
     let app_builder = if debug_data_dir_override().is_some() {
         app_builder
     } else {
-        app_builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            shell::show_main_window(app);
+        app_builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !is_background_intake(argv.get(1).map(String::as_str)) {
+                shell::show_main_window(app);
+            }
         }))
     };
 
     app_builder
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(window_state.build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -310,6 +347,18 @@ pub fn run() {
         .manage(commands::updater::PendingUpdate::default())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            if background_intake {
+                use tauri_plugin_window_state::{StateFlags, WindowExt};
+                // Tao activates the app before Ready, even when all windows start hidden.
+                app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+                // Restore geometry without bringing a saved visible/fullscreen window forward.
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.restore_state(
+                        StateFlags::all() - (StateFlags::VISIBLE | StateFlags::FULLSCREEN),
+                    );
+                }
+            }
             // 事件挂载（当前无事件；M1/M2 增加后由 builder 统一登记）。
             builder.mount_events(app);
 
@@ -319,7 +368,9 @@ pub fn run() {
             if let Err(err) = setup_app(app) {
                 tracing::error!(error = %err, "应用初始化失败，退出");
                 eprintln!("[gendesk] 应用初始化失败: {err}");
-                fatal_dialog(&err.to_string());
+                if !background_intake {
+                    fatal_dialog(&err.to_string());
+                }
                 std::process::exit(1);
             }
 
@@ -332,19 +383,30 @@ pub fn run() {
         // **这里不碰 `ExitRequested`**：窗口永不销毁，「窗口全关就退出」那条路本来
         // 就不会走到；而更新器的「重启安装」（`AppHandle::restart`）用的正是同一个事件，
         // 拦它等于把更新装不上。退出的确认在 `shell::request_quit` 里，那才是唯一入口。
-        .build(tauri::generate_context!())
+        .build(context)
         .unwrap_or_else(|e| {
             // 启动失败无法进入日志系统，退回 stderr 并非零退出。
             eprintln!("[gendesk] 应用启动失败: {e}");
-            fatal_dialog(&e.to_string());
+            if !background_intake {
+                fatal_dialog(&e.to_string());
+            }
             std::process::exit(1);
         })
-        .run(|_app, _event| {
+        .run(move |_app, _event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                shell::show_main_window(_app);
+            match _event {
+                tauri::RunEvent::Ready if background_intake => {
+                    // Restore the Dock entry after startup so users can open the window to review.
+                    let _ = _app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+                tauri::RunEvent::Reopen { .. } => shell::show_main_window(_app),
+                _ => {}
             }
         });
+}
+
+fn is_background_intake(arg: Option<&str>) -> bool {
+    cfg!(target_os = "macos") && arg == Some("--background-intake")
 }
 
 /// 启动失败时弹一个原生对话框，然后才退出。
@@ -414,6 +476,7 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Ok(pool) => pool,
         Err(err) => return Err(db::explain_connect_error(&err).into()),
     };
+    tauri::async_runtime::block_on(poster::initialize(&pool))?;
 
     // 密钥存本地加密文件（见 secrets.rs 模块头安全水位）。旧版把 Key 放系统钥匙串，
     // 自签名下每次更新都弹授权 → 启动时做一次性迁移（幂等，失败只 warn 不阻断启动，
@@ -427,9 +490,13 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let secrets: Arc<dyn secrets::SecretStore> = store;
 
     // 读设置 → 启动引擎（中断恢复 + 调度循环）。
-    let default_out = dirs.outputs().to_string_lossy().to_string();
+    let default_out = library::default_root().to_string_lossy().to_string();
     let settings =
         tauri::async_runtime::block_on(commands::settings::load_settings(&pool, &default_out))?;
+    for area in ["成品", "_草稿", "_归档"] {
+        app.asset_protocol_scope()
+            .allow_directory(std::path::Path::new(&settings.output_dir).join(area), true)?;
+    }
     let strategy = engine::strategy::Strategy::from_str_or_default(&settings.schedule_strategy);
     let factory: Arc<dyn engine::ProviderFactory> = Arc::new(engine::OpenAiFactory::new(
         std::time::Duration::from_secs(10),
@@ -483,6 +550,9 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         v2v_log.clone(),
         intake_scan_lock.clone(),
     ));
+    // 只重试已有明确同意记录的批次；待确认、跳过的批次永远不会自动导入。
+    commands::poster::start_delivery(app.handle().clone());
+    live_photo::start(app.handle().clone());
 
     // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
     let publish_state = publish::PublishState::new(pool.clone(), app.handle().clone());
@@ -512,6 +582,10 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // **启动补跑是这条链路的关键**：应用没开的时候投的单，磁盘上一直等着；
     // 这一刻把它们收进来，「GenDesk 得开着才能投单」这个限制就不存在了。
     if let Ok(iset) = tauri::async_runtime::block_on(commands::intake::load_settings(&pool)) {
+        // 隔离 WebView 验收不能覆盖正式 CLI 的发现文件。
+        if debug_data_dir_override().is_none() {
+            commands::intake::write_connection(&iset);
+        }
         if iset.enabled {
             let root = iset.root_path();
             let ctx = intake::ingest::Ctx {
@@ -524,7 +598,10 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             };
             match intake::watcher::start(ctx.clone(), root.clone(), app.handle().clone()) {
                 Ok(w) => {
-                    app.manage(w);
+                    let state = app.state::<state::AppState>();
+                    if let Ok(mut current) = state.intake_watcher.lock() {
+                        *current = Some(w);
+                    };
                 }
                 Err(err) => tracing::warn!(error = %err, "启动生图收件目录监听失败"),
             }
@@ -608,6 +685,73 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// 显式的离线维护 CLI；不启动 GUI、调度器或生图请求。
+pub fn organize_library_cli(args: &[String]) -> AppResult<()> {
+    let mut values = std::collections::HashMap::new();
+    let mut apply = false;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--apply" {
+            apply = true;
+            index += 1;
+            continue;
+        }
+        if ![
+            "--database",
+            "--root",
+            "--assignments",
+            "--poster-bin",
+            "--report",
+        ]
+        .contains(&args[index].as_str())
+            || index + 1 >= args.len()
+        {
+            return Err(AppError::InvalidInput("用法：organize-library --database <库> --root <作品根> --assignments <归属JSON> --report <报告JSON> [--poster-bin <Poster>] [--apply]".into()));
+        }
+        values.insert(
+            args[index].as_str(),
+            std::path::PathBuf::from(&args[index + 1]),
+        );
+        index += 2;
+    }
+    if apply {
+        #[cfg(unix)]
+        if let Some(database) = values.get("--database") {
+            let output = std::process::Command::new("lsof")
+                .arg("-t")
+                .arg(database)
+                .output()?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(AppError::InvalidInput(
+                    "无法确认运行库是否关闭，未整理".into(),
+                ));
+            }
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|pid| pid.trim().parse::<u32>().ok() != Some(std::process::id()))
+            {
+                return Err(AppError::InvalidInput(
+                    "运行库仍被其他进程打开，请先退出对应 GenDesk 再整理".into(),
+                ));
+            }
+        }
+    }
+    let required = |key| {
+        values
+            .get(key)
+            .ok_or_else(|| AppError::InvalidInput(format!("缺少 {key}")))
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(library::maintenance::organize(
+        required("--database")?,
+        required("--root")?,
+        required("--assignments")?,
+        values.get("--poster-bin").map(|p| p.as_path()),
+        required("--report")?,
+        apply,
+    ))
 }
 
 #[cfg(test)]

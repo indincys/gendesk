@@ -89,7 +89,11 @@ pub async fn get_batch(pool: &SqlitePool, id: i64) -> Result<Option<BatchRow>, s
 }
 
 /// 批次备注名（E10）：空串归一为 NULL（清除备注）。
-pub async fn rename_batch(pool: &SqlitePool, id: i64, note: &str) -> Result<(), sqlx::Error> {
+pub async fn rename_batch<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    id: i64,
+    note: &str,
+) -> Result<(), sqlx::Error> {
     let trimmed = note.trim();
     let value: Option<&str> = if trimmed.is_empty() {
         None
@@ -220,7 +224,8 @@ pub async fn fetch_queued(pool: &SqlitePool, limit: i64) -> Result<Vec<TaskRow>,
         .await
 }
 
-/// 通用状态置换（仅写 status + updated_at）。合法性由调度器状态机守卫。
+/// 测试夹具的状态置换，仅写 status + updated_at。
+#[cfg(test)]
 pub async fn set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1")
         .bind(id)

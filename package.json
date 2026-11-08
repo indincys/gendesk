@@ -1,15 +1,21 @@
 {
   "name": "gendesk",
-  "version": "0.34.1",
+  "version": "0.36.1",
   "description": "GenDesk — 内部图片生产工具（本地批量图生图流水线）",
   "type": "module",
   "private": true,
+  "bin": {
+    "gendesk": "scripts/gendesk.mjs"
+  },
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "dev": "vite",
+    "gendesk": "node scripts/gendesk.mjs",
+    "install:cli": "node scripts/install-gendesk.mjs",
+    "test:cli": "node --test scripts/gendesk.test.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

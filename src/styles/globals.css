@@ -1052,11 +1052,56 @@ a:hover {
 }
 
 /* ============================ 验收 / 作品网格 ============================ */
-/* T1：验收网格改「虚拟化 + 等高方格」。滚动容器 .rvscroll(=.pbody) 承载滚动，
-   内部 .rvirt 撑总高，虚拟行 .rvrow 绝对定位由 translateY 摆放。横向 padding 落在
-   滚动容器上（绝对定位行随定位祖先 .rvirt 内缩），故行 left:0/width:100% 自动对齐。 */
+.rbody {
+  overflow: hidden;
+}
+.rworkspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.rtoolbar {
+  min-height: 52px;
+  flex-wrap: wrap;
+  padding-block: 8px;
+}
+.rtoolbar .rng {
+  width: 74px;
+}
+.rtoolbar :focus-visible,
+.rworkspace .rck:focus-visible,
+.rworkspace .hbtn:focus-visible {
+  outline: 2px solid var(--acc2);
+  outline-offset: 2px;
+}
+.rstatus {
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.rmode {
+  min-height: 28px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--line2);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--t2);
+  font-size: 11px;
+}
+.rselection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: none;
+  gap: 8px;
+  padding: 6px 18px;
+  background: var(--accbg);
+  color: var(--t1);
+  font-size: 12px;
+}
 .rvscroll {
-  padding: 16px 18px 80px;
+  padding-inline: 18px;
+  outline: none;
 }
 .rvirt {
   position: relative;
@@ -1071,7 +1116,7 @@ a:hover {
   /* 上边不留 —— 卡片行的高度必须精确等于 `图高 + CARD_META_H + ROW_GAP`，
      多出来的 4px 会让虚拟化算的位置一路比实际短。 */
   padding-top: 0;
-  padding-bottom: 12px;
+  padding-bottom: 14px;
 }
 /* 标题行**定高**：虚拟化按 ReviewPage 里的 DAY_HEAD_H / CLUSTER_HEAD_H 摆位，
    而那一版不再回头测量。这里跟着内容长一个像素，相邻两行就会叠在一起。
@@ -1085,8 +1130,8 @@ a:hover {
   padding: 18px 0 4px;
 }
 .rvrow.head.cluster {
-  height: 60px;
-  padding: 12px 0 12px;
+  height: 68px;
+  padding: 8px 0 10px;
 }
 /* 日期头：整宽 + 一条贯穿线。它要能在滚动里一眼扫到，故是这一页唯一带贯穿线的元素 ——
    任务簇头再醒目一档就分不出哪个是上级了。与废纸篓的 `.trday` 是同一个形状。 */
@@ -1160,7 +1205,7 @@ a:hover {
 .rjimg .thumbimg {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 .rjimg .thumbfill {
   height: 100%;
@@ -1231,8 +1276,10 @@ a:hover {
   box-shadow: var(--sh1);
   opacity: 0;
   z-index: 2;
+  cursor: pointer;
 }
-.rcard:hover .rck {
+.rcard:hover .rck,
+.rcard:focus-within .rck {
   opacity: 1;
 }
 .rcard.sel .rck {
@@ -1251,7 +1298,13 @@ a:hover {
   transition: opacity 0.12s;
   z-index: 2;
 }
-.rcard:hover .hacts {
+.rjcard .hacts {
+  max-width: calc(100% - 36px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.rcard:hover .hacts,
+.rcard:focus-within .hacts {
   opacity: 1;
 }
 .hbtn {
@@ -1281,6 +1334,15 @@ a:hover {
   height: 20px;
   margin-top: 6px;
   min-width: 0;
+}
+.rtitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--t1);
+  font-size: 11px;
 }
 /* E13 首次引导浮层（右下角卡片，非模态遮挡）。 */
 .onbwrap {
@@ -1330,66 +1392,43 @@ a:hover {
   color: #fff;
 }
 
-/* E24 验收聚类分段小标题（跨整行）。 */
-/* 任务7：验收分组头做成醒目的整宽色带（左侧强调条 + 底纹），成组识别更清晰。 */
 .rclhead {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--t1);
-  letter-spacing: 0.01em;
-  /* 定高（36 = 60 - 上下各 12 的行内边距）。见 `.rvrow.head` 的说明。 */
-  height: 36px;
-  padding: 0 11px;
+  gap: 10px;
+  height: 50px;
+  padding: 0 10px 0 12px;
   background: var(--sub);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--acc2);
   border-radius: 9px;
 }
-/* 段头上的时间与 skill —— 「这批是什么时候跑的、哪个 skill 写的词」。 */
-.rcltime {
-  flex: none;
-  font: 500 10.5px var(--mono);
-  color: var(--t2);
+.rclcopy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
 }
-.rclskill {
-  flex: none;
-  max-width: 180px;
+.rclname,
+.rcltime {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 500 10px var(--mono);
-  color: var(--ok2);
-  background: var(--okbg);
-  border: 1px solid var(--okln);
-  border-radius: 5px;
-  padding: 1px 6px;
-}
-.rcltag {
-  flex: none;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--t3);
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 1px 6px;
-  letter-spacing: 0.02em;
 }
 .rclname {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+.rcltime,
+.rclcnt {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--t2);
 }
 .rclcnt {
   flex: none;
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--t3);
 }
 .rdet {
   position: absolute;
@@ -1474,6 +1513,28 @@ a:hover {
   flex-direction: column;
   min-height: 0;
 }
+.rdhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rd-line);
+}
+.rdhead .rcltime,
+.rdhead .icb {
+  color: var(--rd-t2);
+}
+.rdet:focus {
+  outline: none;
+}
+.rdbar .icb,
+.rdbar button[aria-pressed] {
+  color: var(--rd-t2);
+}
+.rdbar button[aria-pressed="true"] {
+  color: var(--rd-t1);
+  background: var(--rd-line);
+}
 .rdbar {
   display: flex;
   align-items: center;
@@ -1496,6 +1557,11 @@ a:hover {
 .rdet.dark .rdside .ptext {
   color: var(--rd-t1);
 }
+.rdet.dark .rdside .pid {
+  color: var(--rd-t2);
+  border-color: var(--rd-line);
+  background: var(--rd-bg);
+}
 .rdet.dark .rdside .t3,
 .rdet.dark .rdside .fs11.t3 {
   color: var(--rd-t3) !important;
@@ -1503,8 +1569,8 @@ a:hover {
 .rdet.dark .rdbar {
   border-top-color: var(--rd-line);
 }
-.rdet.dark .rdside > div:first-child {
-  border-bottom-color: var(--rd-line) !important;
+.rdet.dark .rdbar .btn.dng {
+  color: var(--rd-t2);
 }
 /* E08 参考图对比角标 + 侧栏切换控件。 */
 .refbadge {
@@ -1527,6 +1593,7 @@ a:hover {
   border-radius: 9px;
   border: 1px solid var(--rd-line);
   background: oklch(100% 0 0 / 0.05);
+  color: var(--rd-t1);
   cursor: pointer;
   text-align: left;
 }
@@ -1549,22 +1616,26 @@ a:hover {
   white-space: pre-wrap;
 }
 .hintbar {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 14px;
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 14px;
-  background: oklch(100% 0 0 / 0.92);
-  border: 1px solid var(--line);
-  box-shadow: var(--sh2);
-  border-radius: 99px;
-  padding: 7px 16px;
-  font-size: 11.5px;
-  color: var(--t3);
-  z-index: 6;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 6px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--t2);
+  font-size: 11px;
+}
+.hintbar span {
   white-space: nowrap;
+}
+.hintbar kbd {
+  font: 500 10px var(--mono);
+  background: var(--sub);
+  border: 1px solid var(--line2);
+  border-radius: 4px;
+  padding: 0 4px;
 }
 /* 任务3：作品库瀑布流，缩略图按自然比例展示。 */
 .wgrid {

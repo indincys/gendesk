@@ -41,6 +41,7 @@ interface EngineState {
   /** 自动暂停原因（E05 全局熔断）；null = 非自动暂停。 */
   autoPauseReason: string | null;
   trashCount: number;
+  reviewRevision: number;
 
   /** 应用内更新态 */
   updateReady: boolean;
@@ -68,6 +69,7 @@ export const useEngineStore = create<EngineState>((set) => ({
   paused: false,
   autoPauseReason: null,
   trashCount: 0,
+  reviewRevision: 0,
   updateReady: false,
   updateVersion: null,
   tasks: [],
@@ -179,6 +181,9 @@ export const useEngineStore = create<EngineState>((set) => ({
           tasks,
           paused,
           autoPauseReason,
+          reviewRevision:
+            s.reviewRevision +
+            (Array.from(statuses.values()).some((event) => event.status === "rev") ? 1 : 0),
         };
       });
     };

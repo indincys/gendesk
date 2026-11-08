@@ -26,18 +26,23 @@
 //! 整批拷完 → 写 `manifest.jsonl` → **最后**写 `READY.txt`。对方没看到 READY
 //! 就一个字节都不碰 —— 与 intake 那一侧同一条规矩，方向相反而已。
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Serialize;
 
 /// 清单文件名（一行一图的 JSON Lines）。
+#[cfg(test)]
 pub const MANIFEST: &str = "manifest.jsonl";
 /// 就绪标记。**最后写**。
+#[cfg(test)]
 pub const READY: &str = "READY.txt";
 /// SKU / 风格都不知道时的落脚目录（生成页手动建的批、历史数据）。
 ///
 /// **不猜**：从中文文件名反推 SKU 会分错目录且不报错。宁可全堆在一个明说
 /// 「没归类」的目录里，让人一眼看见。
+#[cfg(test)]
 pub const UNSORTED: &str = "未分类";
 
 /// 默认交付根。
@@ -49,17 +54,11 @@ pub fn default_root() -> PathBuf {
     home.join("GenDesk交付")
 }
 
-/// 本次交付批的目录名：`交付-YYMMDD-HHMM`。
-///
-/// 与工单目录 `投单-260804-1530` 同形，两边摆在一起读得出对应关系。
-pub fn batch_dir_name(at: i64) -> String {
-    format!("交付-{}", crate::files::stamp_yymmdd_hhmm(at))
-}
-
 /// SKU 子目录名：`{风格}-{SKU}`。
 ///
 /// 键来自作品的快照列（`style` / `sku_code`），**不从文件名解析**。两者缺一
 /// 就整个退回 [`UNSORTED`] —— 半个键分出来的目录比没分更难收拾。
+#[cfg(test)]
 pub fn sku_dir_name(style: &str, sku_code: &str) -> String {
     let (s, k) = (style.trim(), sku_code.trim());
     if s.is_empty() || k.is_empty() {
@@ -93,6 +92,7 @@ pub struct ManifestRow {
 }
 
 /// 把一批 manifest 行写成 JSON Lines。
+#[cfg(test)]
 pub fn manifest_body(rows: &[ManifestRow]) -> Result<String, String> {
     let mut s = String::new();
     for r in rows {
@@ -107,6 +107,7 @@ pub fn manifest_body(rows: &[ManifestRow]) -> Result<String, String> {
 ///
 /// 顺序是承重的：对方的 watcher 认 READY，看见它就会把整个目录搬走。先写 READY
 /// 再写 manifest，等于让对方搬走一个没有清单的目录 —— 而那时文件已经不在我们这边了。
+#[cfg(test)]
 pub fn finalize(dir: &Path, rows: &[ManifestRow]) -> Result<(), String> {
     let body = manifest_body(rows)?;
     std::fs::write(dir.join(MANIFEST), body).map_err(|e| format!("写 manifest 失败：{e}"))?;

@@ -23,6 +23,12 @@ pub struct AppState {
     /// 必须有个地方存放「大家共用的那一把」；同时也让每个测试拿到自己的锁，
     /// 而不是去抢一个进程单例。
     pub intake_scan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 设置变动时替换监听，确保 CLI 发现的新交接根立即有效。
+    pub intake_watcher: std::sync::Mutex<Option<crate::intake::watcher::IntakeWatcher>>,
+    /// 串行验收，避免不同入口同时通过同一任务；Poster 队列另用独立锁。
+    pub review_lock: tokio::sync::Mutex<()>,
+    pub poster_lock: tokio::sync::Mutex<()>,
+    pub live_photo_wake: tokio::sync::Notify,
 }
 
 impl AppState {
@@ -41,6 +47,10 @@ impl AppState {
             engine,
             v2v_log,
             intake_scan_lock,
+            intake_watcher: std::sync::Mutex::new(None),
+            review_lock: tokio::sync::Mutex::new(()),
+            poster_lock: tokio::sync::Mutex::new(()),
+            live_photo_wake: tokio::sync::Notify::new(),
         }
     }
 }

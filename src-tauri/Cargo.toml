@@ -1,6 +1,6 @@
 [package]
 name = "gendesk"
-version = "0.34.1"
+version = "0.36.1"
 description = "GenDesk — 内部图片生产工具"
 authors = ["GenDesk"]
 edition = "2021"
@@ -66,6 +66,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # API Key 密钥文件加密（XChaCha20-Poly1305；默认特性含 getrandom → OsRng 出主密钥/nonce）
 chacha20poly1305 = "0.10"
+sha2 = "0.10"
 
 # 旧版密钥来源：系统钥匙串。仅供 secrets::migrate_from_keyring 一次性迁移读取，
 # 迁移期结束后随 KeyringStore 一并移除（见 docs/V2-backlog.md）。
@@ -108,9 +109,9 @@ tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 proptest = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 wiremock = "0.6"

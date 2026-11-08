@@ -8,6 +8,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 /// 看板/详情视图（含来自 accepted_works 的父图信息）。
 #[derive(Debug, Clone, FromRow)]
 pub struct ClipRow {
+    pub organization_json: String,
     pub id: i64,
     pub work_id: i64,
     pub group_id: Option<i64>,
@@ -83,7 +84,7 @@ pub struct ClipRow {
     pub accepted_at: i64,
 }
 
-const SELECT: &str = "SELECT c.id, c.work_id, c.group_id, c.group_name, c.batch_id, c.stage,
+const SELECT: &str = "SELECT CASE WHEN c.organization_json='' OR c.organization_json='{}' THEN COALESCE(w.organization_json,'{}') ELSE c.organization_json END AS organization_json, c.id, c.work_id, c.group_id, c.group_name, c.batch_id, c.stage,
         c.source_prompt, c.variable_part, c.video_prompt, c.model_version, c.duration,
         c.video_resolution, c.submit_id, c.credit_count, c.video_path, c.poster_path,
         c.width, c.height, c.fps, c.duration_sec, c.attempt, c.error_type, c.error_message,
@@ -115,8 +116,8 @@ pub async fn enqueue(
     let res = sqlx::query(
         "INSERT OR IGNORE INTO v2v_clips
            (work_id, group_id, group_name, batch_id, stage, source_prompt, variable_part,
-            created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'rewrite', ?5, '', ?6, ?6)",
+            created_at, updated_at, organization_json)
+         VALUES (?1, ?2, ?3, ?4, 'rewrite', ?5, '', ?6, ?6, COALESCE((SELECT organization_json FROM accepted_works WHERE id=?1),'{}'))",
     )
     .bind(work_id)
     .bind(group_id)

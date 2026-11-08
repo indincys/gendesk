@@ -36,13 +36,18 @@ export function Stepper({
 }
 
 /** 开关（原型 .sw）。 */
-export function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+export function Toggle({
+  label,
+  on,
+  onClick,
+}: { label?: string; on: boolean; onClick: () => void }) {
   return (
     <span
       className={cn("sw", on && "on")}
       onClick={onClick}
       onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onClick()}
       role="switch"
+      aria-label={label}
       aria-checked={on}
       tabIndex={0}
     >

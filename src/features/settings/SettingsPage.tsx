@@ -2,8 +2,9 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { DescriptionHint } from "@/components/ui/Tooltip";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { DeliverySection } from "@/features/settings/DeliverySection";
 import { IntakeSection } from "@/features/settings/IntakeSection";
+import { LivePhotoSection } from "@/features/settings/LivePhotoSection";
+import { PosterSection } from "@/features/settings/PosterSection";
 import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
 import { V2vSection } from "@/features/settings/V2vSection";
 import {
@@ -346,10 +347,10 @@ export function SettingsPage() {
           </div>
         </section>
 
-        {/* ---------------- 输出与归档 ---------------- */}
+        {/* ---------------- 作品目录与归档 ---------------- */}
         <section className="sec">
           <div className="sechead">
-            <span className="fw6 fs13">输出与归档</span>
+            <span className="fw6 fs13">作品目录与归档</span>
           </div>
           <div className="fx ac gap10">
             <div className="pathwell f1">{settings?.outputDir || "（默认输出目录）"}</div>
@@ -382,17 +383,9 @@ export function SettingsPage() {
               更改目录
             </button>
           </div>
-          <div className="fx ac gap8 mt10 wrap">
-            <span className="fs12 t2 nowrap">命名规则</span>
-            <span className="chip">参考图名</span>
-            <span className="t3">_</span>
-            <span className="chip">日期</span>
-            <span className="t3">_</span>
-            <span className="chip">提示词编号</span>
-            <span className="t3 fs12">→</span>
-            <span className="chip" style={{ color: "var(--acc2)" }}>
-              productA_260708_DZ0001.JPG
-            </span>
+          <div className="fs11 t3 mt10">
+            图片和视频统一放在此根目录：成品或草稿 → 生成图片或生成视频 → 产品 → 款式 →
+            需求。同一需求多次生成与审稿持续归入同一目录。更改根目录只影响后续文件。
           </div>
           {/* E40 / D3：废纸篓保留期 */}
           <div className="fx ac gap10 mt14 wrap">
@@ -452,11 +445,13 @@ export function SettingsPage() {
           </div>
         </section>
 
+        <LivePhotoSection />
+
         {/* ---------------- 与 Claude Code / Codex 的两条链路 ---------------- */}
         <IntakeSection />
 
         {/* ---------------- 交付（与 `自动发布` 的唯一契约） ---------------- */}
-        <DeliverySection />
+        <PosterSection />
 
         {/* ---------------- 发布与同步（发布模块 P1） ---------------- */}
         <V2vSection />

@@ -15,6 +15,10 @@ function apply<T>(u: Updater<T>, prev: T): T {
  * Rust createBatch 落库真相。挂靠记忆（E32）另在 Rust 侧按参考图落库，二者互补。
  */
 interface GenerateState {
+  product: string;
+  style: string;
+  requirement: string;
+  setOrganization: (field: "product" | "style" | "requirement", value: string) => void;
   selGroupIds: number[];
   selRefIds: number[];
   mapping: Record<number, number>;
@@ -26,6 +30,8 @@ interface GenerateState {
   size: string | null;
   /** 输出格式 "png" / "jpeg"；它同时决定本地交付的文件格式。 */
   outputFormat: string | null;
+  /** 新生成默认 high；null 用于还原未传质量的旧批次。 */
+  quality: string | null;
   // 任务1 输出处理：去水印档位（V1 仅 "none"）+ 清除 AI 元数据 + 去除 C2PA。
   watermark: string;
   clearAiMetadata: boolean;
@@ -37,6 +43,7 @@ interface GenerateState {
   setAspectRatio: (v: string | null) => void;
   setSize: (v: string | null) => void;
   setOutputFormat: (v: string | null) => void;
+  setQuality: (v: string | null) => void;
   setWatermark: (v: string) => void;
   setClearAiMetadata: (v: boolean) => void;
   setRemoveC2pa: (v: boolean) => void;
@@ -47,6 +54,8 @@ interface GenerateState {
       aspectRatio?: string | null;
       size?: string | null;
       outputFormat?: string | null;
+      quality?: string | null;
+      organization?: { product?: string; style?: string; requirement?: string };
       watermark?: string | null;
       clearAiMetadata?: boolean | null;
       removeC2pa?: boolean | null;
@@ -57,12 +66,17 @@ interface GenerateState {
 export const useGenerateStore = create<GenerateState>()(
   persist(
     (set) => ({
+      product: "",
+      style: "",
+      requirement: "",
+      setOrganization: (field, value) => set({ [field]: value }),
       selGroupIds: [],
       selRefIds: [],
       mapping: {},
       aspectRatio: null,
       size: null,
       outputFormat: null,
+      quality: "high",
       watermark: "none",
       clearAiMetadata: true,
       removeC2pa: true,
@@ -73,6 +87,7 @@ export const useGenerateStore = create<GenerateState>()(
       setAspectRatio: (v) => set({ aspectRatio: v }),
       setSize: (v) => set({ size: v }),
       setOutputFormat: (v) => set({ outputFormat: v }),
+      setQuality: (v) => set({ quality: v }),
       setWatermark: (v) => set({ watermark: v }),
       setClearAiMetadata: (v) => set({ clearAiMetadata: v }),
       setRemoveC2pa: (v) => set({ removeC2pa: v }),
@@ -81,9 +96,13 @@ export const useGenerateStore = create<GenerateState>()(
           selRefIds: [...new Set(refs.map((r) => r.refImageId))],
           selGroupIds: [...new Set(refs.map((r) => r.promptGroupId))],
           mapping: Object.fromEntries(refs.map((r) => [r.refImageId, r.promptGroupId])),
+          product: params.organization?.product ?? "",
+          style: params.organization?.style ?? "",
+          requirement: params.organization?.requirement ?? "",
           aspectRatio: params.aspectRatio ?? null,
           size: params.size ?? null,
           outputFormat: params.outputFormat ?? null,
+          quality: params.quality ?? null,
           watermark: params.watermark ?? "none",
           // 缺省（旧批次快照无此字段）视为开启，与生成页默认一致。
           clearAiMetadata: params.clearAiMetadata ?? true,

@@ -57,11 +57,17 @@ pub fn companion_size(aspect_ratio: &str) -> Option<&'static str> {
 /// 故只开这两个——多开一个取值就要多守一条链路。
 pub const OUTPUT_FORMATS: &[&str] = &["png", "jpeg"];
 
+/// 模型质量档位；standard / hd 保留给兼容端点，实际支持取决于所用模型。
+pub const QUALITIES: &[&str] = &[
+    "auto", "low", "medium", "high", "xhigh", "max", "standard", "hd",
+];
+pub const DEFAULT_QUALITY: &str = "high";
+
 /// 生成参数（E16 / 决策 D1）：默认全部空 = 不向 API 传该字段，以提示词与模型默认为准；
 /// 显式设置则透传（软件设置优先于提示词内同类描述，由 API 侧覆盖）。
 ///
-/// **只保留真的会用到的三项**（比例/尺寸/输出格式）。端点文档里还有
-/// quality / response_format / background / output_compression / extra_fields 等，
+/// 新任务入口默认 quality=high；旧快照缺少 quality 仍不补发，保留当时的请求语义。
+/// 端点文档里还有 response_format / background / output_compression / extra_fields 等，
 /// 一律不做——参数摆在界面上却没人用，只会让「到底哪个在起作用」更难回答。
 /// `n` 恒为 1 由请求本身给定：一条提示词 = 一个任务 = 一张图。发 `n=k` 是错的——
 /// 一次响应里 k 张图只有一张能落进当前任务，其余照样计费。
@@ -82,6 +88,8 @@ pub struct GenParams {
     /// 输出格式："png" / "jpeg"（受控取值见 [`OUTPUT_FORMATS`]）。
     /// 它同时决定**本地交付格式**：选了 PNG 就必须拿到 .png，见 `openai::deliver`。
     pub output_format: Option<String>,
+    /// 生成质量（与本地 JPEG 压缩质量无关）。缺省仅供兼容旧任务快照。
+    pub quality: Option<String>,
     /// 输出处理（任务1）：清除 AI 元数据（EXIF/XMP/PNG 文本/IPTC）。缺省视为开启。
     pub clear_ai_metadata: Option<bool>,
     /// 输出处理（任务1）：去除 C2PA 内容凭据（JUMBF/`caBX`）。缺省视为开启。
@@ -128,6 +136,14 @@ impl GenParams {
                 return Err(format!(
                     "不支持的输出格式「{f}」，可用：{}",
                     OUTPUT_FORMATS.join(" / ")
+                ));
+            }
+        }
+        if let Some(q) = &self.quality {
+            if !QUALITIES.contains(&q.as_str()) {
+                return Err(format!(
+                    "不支持的生成质量「{q}」，可用：{}",
+                    QUALITIES.join(" / ")
                 ));
             }
         }
@@ -178,6 +194,8 @@ fn round_to_multiple(v: u32) -> u32 {
 pub struct GenRequest {
     pub prompt: String,
     pub image_path: PathBuf,
+    /// 主图之后的有序附件，对应提示词中的 Image 2、Image 3…。
+    pub additional_image_paths: Vec<PathBuf>,
     pub model: String,
     pub params: GenParams,
 }
@@ -285,10 +303,11 @@ mod tests {
     fn absent_keys_mean_follow_prompt_defaults() {
         let p = GenParams::from_json("{}");
         assert!(p.aspect_ratio.is_none() && p.size.is_none() && p.output_format.is_none());
+        assert!(p.quality.is_none(), "旧任务快照不得被升级为 high");
         assert!(p.clear_meta() && p.remove_c2pa());
     }
 
-    // 只保留会用到的三项；文档里其余参数**不做**，出现在快照里也只当作未知键忽略。
+    // 其余参数出现在快照里也只当作未知键忽略；quality 已接通。
     #[test]
     fn unused_documented_params_stay_out_of_the_wire_struct() {
         let p = GenParams::parse_checked(
@@ -297,13 +316,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.aspect_ratio.as_deref(), Some("9:16"));
+        assert_eq!(p.quality.as_deref(), Some("standard"));
         let json = serde_json::to_string(&p).unwrap();
-        for k in [
-            "quality",
-            "responseFormat",
-            "background",
-            "outputCompression",
-        ] {
+        for k in ["responseFormat", "background", "outputCompression"] {
             assert!(!json.contains(k), "{k} 不该进 GenParams：{json}");
         }
     }
@@ -315,6 +330,20 @@ mod tests {
         // jpg / webp 不是端点的取值，早报比让远端 400 强。
         assert!(GenParams::parse_checked(r#"{"outputFormat":"jpg"}"#).is_err());
         assert!(GenParams::parse_checked(r#"{"outputFormat":"webp"}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_quality_before_submission() {
+        for q in super::QUALITIES {
+            assert!(GenParams::parse_checked(&format!(r#"{{"quality":"{q}"}}"#)).is_ok());
+        }
+        for json in [
+            r#"{"quality":"hgh"}"#,
+            r#"{"quality":""}"#,
+            r#"{"quality":123}"#,
+        ] {
+            assert!(GenParams::parse_checked(json).is_err());
+        }
     }
 
     // 用户实际踩的坑：1080 不是 16 的倍数 → 端点 400。预检须在花钱之前拦下，

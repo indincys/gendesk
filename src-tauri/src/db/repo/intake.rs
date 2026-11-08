@@ -9,7 +9,7 @@ use crate::intake::JobView;
 /// 该工单是否已经处理过（任何状态都算）。
 ///
 /// error 与 hold 也挡住重投：失败的工单里可能已经有一半东西进了库，而 hold 是在等人
-/// 表态——两种情况自动重来都不对。重来是人的决定（设置页「重试」/「确认开跑」删掉这行）。
+/// 表态——两种情况自动重来都不对。恢复由收录层按检查点处理，只有未导入的 hold 可在确认后重新记账。
 pub async fn exists(pool: &SqlitePool, job_id: &str) -> Result<bool, sqlx::Error> {
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intake_jobs WHERE job_id = ?1")
         .bind(job_id)
@@ -19,8 +19,8 @@ pub async fn exists(pool: &SqlitePool, job_id: &str) -> Result<bool, sqlx::Error
 }
 
 /// 动手之前先记账。返回行 id。
-pub async fn insert_running(
-    pool: &SqlitePool,
+pub async fn insert_running<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
     job_id: &str,
     dir_name: &str,
 ) -> Result<i64, sqlx::Error> {
@@ -43,7 +43,11 @@ fn to_json<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-pub async fn mark_done(pool: &SqlitePool, id: i64, done: &Applied) -> Result<(), sqlx::Error> {
+pub async fn mark_done<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    id: i64,
+    done: &Applied,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE intake_jobs
             SET status = 'done', batch_ids = ?2, task_count = ?3, group_count = ?4,
@@ -63,12 +67,8 @@ pub async fn mark_done(pool: &SqlitePool, id: i64, done: &Applied) -> Result<(),
     Ok(())
 }
 
-/// 失败：连**已经导入了多少**一起记下来。
-///
-/// 收录不是一个能整体回滚的事务：参考图要拷文件、建缩略图，建批要发编号，
-/// 而中途失败时前面那些已经落库、批次可能已经在跑。原来这一行只存一句错误原文，
-/// 于是「这份工单到底做到哪了」在库里没有任何痕迹，回执还写着「没有导入任何东西」
-/// —— 人照着那句话删掉台账行重投，就会得到第二份提示词和第二个批次。
+/// Persist the last committed stage counts. Its identities are in intake_checkpoints.
+/// A final batch can only become visible in the same transaction as a done ledger.
 pub async fn mark_error(
     pool: &SqlitePool,
     id: i64,
@@ -180,6 +180,17 @@ pub async fn get_optional(pool: &SqlitePool, id: i64) -> Result<Option<JobView>,
     Ok(r.map(to_view))
 }
 
+pub async fn get_by_job_id(
+    pool: &SqlitePool,
+    job_id: &str,
+) -> Result<Option<JobView>, sqlx::Error> {
+    let r: Option<Row> = sqlx::query_as(&format!("{SELECT} WHERE job_id = ?1"))
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map(to_view))
+}
+
 /// 最近若干条（设置页列表）。
 pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobView>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
@@ -191,7 +202,7 @@ pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobView>, 
     Ok(rows.into_iter().map(to_view).collect())
 }
 
-/// 删掉一行 = 允许该工单重新收录（设置页「重试」/「确认开跑」）。返回是否删到。
+/// Remove only an unimported hold row during confirmation. Retry must retain identities.
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
     let n = sqlx::query("DELETE FROM intake_jobs WHERE id = ?1")
         .bind(id)
@@ -199,4 +210,57 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
         .await?
         .rows_affected();
     Ok(n > 0)
+}
+
+pub async fn checkpoint(pool: &SqlitePool, job_id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT state_json FROM intake_checkpoints WHERE job_id = ?")
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn save_checkpoint(
+    conn: &mut sqlx::SqliteConnection,
+    job_id: &str,
+    state: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO intake_checkpoints (job_id, state_json, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json, updated_at=excluded.updated_at")
+        .bind(job_id).bind(state).bind(now_unix()).execute(conn).await?;
+    Ok(())
+}
+
+pub async fn mark_running<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE intake_jobs SET status='running', message='', updated_at=?2 WHERE id=?1")
+        .bind(id)
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Bind a previously unparseable, proven-empty order to its now-known identity atomically.
+pub async fn rebind_empty_job(
+    pool: &SqlitePool,
+    id: i64,
+    job_id: &str,
+    state: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM intake_checkpoints WHERE job_id=(SELECT job_id FROM intake_jobs WHERE id=?)",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE intake_jobs SET job_id=?2 WHERE id=?1")
+        .bind(id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    save_checkpoint(&mut tx, job_id, state).await?;
+    tx.commit().await?;
+    Ok(())
 }

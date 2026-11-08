@@ -8,14 +8,18 @@ GenDesk：内部图片生产工具。Tauri 2 桌面应用，单实例、纯本�
 前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），二者只经
 tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon。
 
-三条流水线：**生图**（工单 → 批量生成 → 人工验收 → **按确定的名字交付**）·
+三条流水线：**生图**（工单 → 批量生成 → 人工验收 → **按产品、款式、需求归档**）·
 **图生视频 v2v**（验收图 → skill 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
 **工单收件 intake**（外部 skill 投单 → 自动导入 → 建批开跑）。
 
-**生成侧已收敛为纯生成工具**：SKU 归属、素材库、任务单全部移交 `自动发布`
-（`/Users/indincys/Documents/自动发布`）。两者之间的契约是**交付目录 + manifest**，
-不是共享数据库。`publish/` 子系统（素材包/日内容套装/任务单/回执）**代码保留、
-不再使用、不再投入**，表也不删；相关词条留在下方「发布」段仅供读懂存量代码。
+**生成侧为通用生成工具**：主成品出口由 `library.rs` 统一管理，按产品、款式、需求组织；不再以一次验收或运行批次建成品目录。
+历史 `自动发布` 的目录 + manifest 协议已停写；`publish/` 子系统（素材包/任务单等）
+保留兼容代码与表、不再投入。相关旧词条仅供读懂存量；新路径规则见 `docs/作品目录整理.md`。
+
+**Poster 图片接入**：可选功能默认关闭（含旧设置升级）。开启「审稿后询问导入 Poster」后才逐批询问，用户确认才入交接队列；取消不导入、关窗保留待确认。关闭时不创建新交接记录/副本，不弹窗、不启动后台导入批次；已有数据保留。
+`poster/` 维护款式到 Poster 商品 ID 的适配、成品引用、请求/回执与安全重试（0046），
+只调用 Poster 通用 `export-image-products` / `import-images` CLI，不写对方 SQLite。
+20 款与旧 SKU 的约定仅在 GenDesk；Poster 接口不含任何生成渠道规则。见 `docs/Poster图片接入.md`。
 
 ## 常用命令
 
@@ -24,6 +28,7 @@ tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 mac
 | 目的                    | 命令                                                                         |
 | --------------------- | -------------------------------------------------------------------------- |
 | 启动双端开发                | `pnpm tauri dev`                                                           |
+| Harness 投单            | `pnpm gendesk submit --manifest <清单.json> --open --wait 30`；见 `docs/命令行生图接入.md` |
 | **全门禁（CI 镜像，提交前必跑）**  | `pnpm check`                                                               |
 | 前端类型检查 / 单测 / lint 修复 | `pnpm typecheck` · `pnpm test` · `pnpm lint:fix`                           |
 | 架构铁律检查                | `pnpm guardrails`                                                          |
@@ -61,7 +66,7 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 | `publish/`   | 发布与资产管理（**已冻结，不再投入**；`paths` 仍被交付/图库复用）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                            |
 | `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `handoff`(交接目录往返) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。                                  |
 | `intake/`    | 工单收件 v2：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`。                                                                                       |
-| `delivery.rs`| 交付：批目录命名 · SKU 子目录键 · `manifest.jsonl` · 最后写 READY。与 `自动发布` 的唯一契约。                                                     |
+| `delivery.rs`| 旧交付格式兼容；新作品目录规则见 `library.rs`。                                                     |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
 | `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                 |
 
@@ -87,7 +92,7 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
   → 落盘 results/ + 缩略图 → 状态迁移 rev（待验收）
   → EventSink 推 task://status-changed · task://progress · batch://summary（250ms 节流）
   → stores/engine 镜像 → 任务页/导航徽章
-  → accept_tasks：发 UID → 整批拷进交付目录 → 写作品快照 → manifest → 最后 READY
+  → accept_tasks：发 UID → 按内容归属拷进成品目录 → 写作品及归属快照 → 内部作品记录
 
 生成页手动建批走 `commands::batches::create_batch` → `engine::create_batch`
 （挂靠模型：参考图 × 挂靠组的全部提示词），与上面那条共用同一段建批尾巴。
@@ -105,6 +110,10 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
    **定义了的 class 必须有人用**、**不写 Tailwind 工具类**（本仓库全用自定义类）。
 
 ## IPC 约定
+
+外部 harness 优先使用 `scripts/gendesk.mjs` 文件工单客户端，不直接读写 SQLite。完整外部契约只维护在 `docs/命令行生图接入.md`；CLI / 应用 0.36.1，工单 version=1。macOS/Unix 用 `pnpm install:cli` 同步独立 CLI 副本，`--version` 与 `doctor` 区分客户端版本和应用连接能力。新单提供 organization，无 SKU 不编造编号，旧 sku/style 格式仍兼容。只写词不投单。CLI 的 `ingested` 只表示已收录建批；人工验收仍在应用中进行。收件设置变动时监听随之重建，CLI 从固定位置 `~/GenDesk交接/连接.json` 发现实际交接根。每份工单的 `回执.json` 由 Rust 从台账生成，与文本回执并存。0.36.1 的 validate 经应用二进制 validate-intake 只读入口复用 Rust 解析/参数/归属/图片解码，不启动 AppState 或打开数据库。0048 检查点与各阶段导入同事务，批次与 done 台账同事务；重试不删台账，只补缺失步骤。无检查点的历史部分导入或中断单拒绝盲目重放。
+
+工单条目支持 `ref` 单图或 `refs` 有序多图（二选一，上限 16）。主商品仍是首图；Rust 将整组 ID 写入任务 `params_json.referenceImageIds` 本地字段并登记全部 `batch_refs`，调度器严格恢复整组附件顺序。单图 multipart 沿用 `image`，多图使用有序 `image[]`；图片不会因多附件拆成多任务。确认预览显示主图缩略图及全部参考文件名。CLI 以连接快照 `features: ["ordered-references"]` 判断运行应用是否支持多参考。
 
 - `src/lib/ipc/bindings.ts` 由 **tauri-specta 自动生成，禁手改**。改动命令/事件后须在
   `lib.rs` 的 `specta_builder()` 登记 → `cargo test --lib export_bindings` 重新生成 →
@@ -146,8 +155,7 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 `purpose::code_of` 与 `intake::normalize_purpose` 这一对里 · **号池**：编号递增发放回收优先，
 与业务写同事务 · **UID**：验收通过那一刻发的 4 位 `[a-z0-9]`，全局唯一、**不回收**，
 台账 `issued_names` 只增不删且不设外键（作品删了、文件早交付出去了，台账仍要答得出
-「这个号发过」）；交付文件名 = `{语义名}-{uid}.{EXT}`，语义名由 skill 给、GenDesk **一个字符
-都不改** ·
+「这个号发过」）；交付文件名 = `YYYY-MM-DD_内容名称_稳定身份.扩展名`，原语义名由 skill 给并存档，最终路径按 `library.rs` 规范化，稳定身份防覆盖 ·
 **废纸篓**：暂存不物理删，**可还原回原位**（作品是唯一「删除即真删行」的实体，故
 `trash_items.payload_json` 存整行快照，还原连 id 一起写回）· **伪进度**：生图 API 无真实进度。
 
@@ -164,7 +172,7 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 数着 A 通道的空位往 B 发单；简写单点 `dreamina::short_label` 随 `ModelInfo.label` 下发，
 前端不自己 `replace(/^seedance/)` · **封面**：clip 自己的文件副本，绝不指向
 `accepted_works.thumb_path`（清废纸篓会物理删 file\_paths）· **交付**：验收通过即**拷贝**（不移动）
-成片到 `outputs/视频/`，拷贝失败**不回滚验收**，故 `undelivered` 是合法状态兼侧栏徽章。
+成片到 `成品/生成视频/产品/款式/需求/`，拷贝失败**不回滚验收**，故 `undelivered` 是合法状态兼侧栏徽章。
 
 **发布** — **SKU**：款式一级分类，下挂素材/标题/正文三池 · **素材包**：视频型=1 视频(+封面)，
 图集型=N 图(+封面)，**入库即 active**；「已用尽/冷却中」是台账派生态不落库 · **日内容套装**：
@@ -182,12 +190,12 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 （skill 出工单、GenDesk 收），两者共用 `publish::inbox::watcher::coalesce` ·
 **正文里零元信息**：旧格式的组头键只在该组第一条正文之前生效，而正文是长叙事，
 「比例：3:4 的竖构图」这种开头会被当元信息吃掉且不报错——新格式把元信息全放进 JSON，
-这个风险从结构上消失 · **挂靠不猜**：`items[].ref` **每条必填**，且必须真的存在 ·
+这个风险从结构上消失 · **挂靠不猜**：每条必填 `ref` 或有序 `refs`（二选一，1～16 张），且必须真的存在 ·
 **一一对应**：`prompts/` 与 `items` 多一个少一个都拒单（少跑一张图是不报错的失败）·
 **version 必须为 1**：不认识的版本按 1 读会得到「看起来成功了的错误结果」，而这条链路每错
 一次都花钱 · **一份工单 = 一个 run**：参数下沉到 `tasks.params_json`（0045），不再决定切分；
 读取单点 `dispatcher::task_params`，任务级优先、批次级兜底 ·
-**job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账在**动手之前** ·
+**job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账与空检查点同事务、在**动手之前**，阶段进度与对应写入同事务；恢复保留原行和身份 ·
 **阈值(默认 100 张)**：超了转 `hold` **什么都不导入** + 弹应用内可视化确认卡 ·
 **归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
 静默改值正是「我明明写了 9:16 却不生效」的成因）· **写路径只有一条**：提示词走
@@ -195,23 +203,16 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 `commands::refs::ingest_one`，与手动导入同一套前缀分配/用途判定/缩略图口径 ·
 **失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
 会让人点重试拿到第二份提示词）· skill 装在用户级 `~/.claude/skills/`（仓库内
-`.claude/skills/gendesk-intake/` 是源，改完要同步过去）。
+`.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
 
-**交付** — 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.EXT`
-+ `manifest.jsonl` + **最后写的 READY.txt**（先写 READY 等于让对方搬走一个没有清单的目录）·
-**下游读 manifest，不解析文件名**：从中文名反推 SKU 是静默失败（分错目录不报错）·
-子目录键来自作品快照列 `style`+`sku_code`，**缺一就整个退回「未分类」** ·
-目录名用**本地时刻**（`files::stamp_yymmdd_hhmm`）· **交付即交出所有权**：对方搬走后
-`image_path` 允许悬空，UI 走 `file_exists` 懒检测，救回路径是 `reexport_work`
-（从 `results/{task_id}` 快照重出，**复用原 uid、不重新发号**）· 收尾失败**不回滚验收** ·
-旧落点 `outputs/{批次}/{分组}/` 已停写，`open_outputs_dir` 只是给存量留的入口。
+**作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。旧交付批协议停写，相关兼容数据保留；已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 
 ## 高代价陷阱（改代码前必读）
 
 实测得出、代价不对称、且从代码结构上看不出来的事实。
 
-**生图参数** — 进 multipart 的只有三个（`provider::GenParams`）：`aspect_ratio` / `size` /
-`output_format`，外加恒定 `n=1`。**画幅两个字段都要发**：实测单发 `aspectRatio: "9:16"` 回来
+**生图参数** — 进 multipart 的生成参数（`provider::GenParams`）：`aspect_ratio` / `size` /
+`output_format` / `quality`，外加恒定 `n=1`。新任务默认 `quality=high`；旧任务快照缺少此键仍沿用旧语义。**画幅两个字段都要发**：实测单发 `aspectRatio: "9:16"` 回来
 整批是 1024×1024 正方形，单发 `size: "1080x1920"` 则整批 400（边长非 16 倍数）；配套值单点
 `provider::RATIO_SIZES`（同时满足「正好是该比例」与「两边都是 16 的倍数」）。**回来的像素不由
 我们定**（发 `1088*1920` 上游给 941×1672），这些值是**比例的载体**不是交付分辨率。
@@ -274,7 +275,7 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 —— 后者含左右内边距，每行会宽出一个 padding，最后一张被挤出边界。
 
 **事务粒度** — `accept_tasks` 明确**不做单事务**（与直觉相反）：拷贝无法回滚，第 150 张失败会把
-前 149 条作品记录回滚掉而文件已在 outputs/ 里；现在的顺序（先整批拷完、任一张失败就一行库都
+前 149 条作品记录回滚掉而文件已在成品目录里；现在的顺序（先整批拷完、任一张失败就一行库都
 不写）反而更接近原子。
 
 **迁移** — 本次收敛新增 0044（命名与发号台账）与 0045（参数下沉 + 用途载体）。
@@ -316,8 +317,8 @@ sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库�
 - 发版流程与更新签名密钥见 README.md。
 
 参考物：`docs/prototype/*.dc.html`（像素基准）· `docs/prototype/Design-Tokens.md` ·
-`docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/收件箱收录格式规范.md` ·
-`docs/提示词skill标准产出规范.md`。
+`docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/命令行生图接入.md` ·
+`docs/提示词skill标准产出规范.md`。`docs/收件箱收录格式规范.md` 仅描述冻结的发布文案旧链路，不是生图入口。
 
 **版本演进史不在本文件里**，去 `git log`（提交信息与代码注释保留了实测数据与取舍理由；
 早期 UX 条目编号可用 `git log --grep=E30b` 定位）。本文件只记**当前仍然成立的约束**。

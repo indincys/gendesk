@@ -1,14 +1,24 @@
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { type PackGroup, moveByRow, packGroups } from "@/features/_shared/justified";
-import { clusterTime, dayLabel, faceOf, groupByTimeline, hhmm } from "@/features/_shared/timeline";
+import { moveByRow, packGroups } from "@/features/_shared/justified";
+import { dayLabel, hhmm } from "@/features/_shared/timeline";
 import { assetSrc, bg } from "@/lib/img";
 import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useEngineStore } from "@/stores/engine";
+import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Check, Clock, Maximize2, X } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, Clock, Maximize2, Trash2, X } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import {
+  type ReviewHead,
+  type ReviewMode,
+  buildSections,
+  itemLabel,
+  readableName,
+  refLabel,
+} from "./model";
 
 /** 一张图的宽高比。缺尺寸时用 1（历史任务后端会补齐，这里只兜住补不到的极端情况）。 */
 function ratioOf(it: ReviewItemView): number {
@@ -20,170 +30,60 @@ function ratioOf(it: ReviewItemView): number {
 /** 卡片间距，参与齐行的宽度分配 —— 不算进去每行最后一张会被挤出边界。 */
 const GAP = 10;
 
-/**
- * 行高的三个常量。**它们与 `globals.css` 里的固定高度是一对，改一处必须改另一处**。
- *
- * 这不是可有可无的洁癖：虚拟化按这几个数摆位，而这一版**不再回头测量**
- * （见 `useVirtualizer` 处的说明）。算少了，相邻两行就真的叠在一起。
- * 所以 `.rmeta` / `.rclhead` / `.rvday` 在 CSS 里都是**定高**的，不许跟着内容长。
- */
-/** 卡片下方那一行编号（`.rmeta` 定高 20 + margin-top 6）。 */
+// 与 globals.css 中卡片元数据、行距和分组头的固定尺寸一致。
 const CARD_META_H = 26;
-/** 行与行之间（`.rvrow` 的 padding-bottom）。 */
-const ROW_GAP = 12;
-/** 日期头整块（`.rvrow.head.day` 定高）。 */
+const ROW_GAP = 14;
 const DAY_HEAD_H = 50;
-/** 任务簇 / 分组头整块（`.rvrow.head.cluster` 定高）。 */
-const CLUSTER_HEAD_H = 60;
+const CLUSTER_HEAD_H = 68;
 
-/** 段头的两种内容。 */
-type ReviewHead =
-  | { kind: "day"; label: string; count: number }
-  | {
-      kind: "cluster";
-      /** 「投单」「参考图」「提示词组」「Key」—— 这一段是按什么分的。 */
-      tag: string;
-      name: string;
-      count: number;
-      /** 这一段发生在什么时候（`HH:MM` 或区间）。 */
-      time: string;
-      /** 写出这批词的 skill；混了就是「N 个 skill」，一条都没有则为 null。 */
-      skill: string | null;
-      /** 本段全部 id —— 「通过本组」直接用它，不必再按段键反查。 */
-      ids: number[];
-    };
+const OTHER_MODES = [
+  { id: "time", label: "按时间" },
+  { id: "ref", label: "按参考图" },
+  { id: "group", label: "按提示词组" },
+  { id: "key", label: "按 Key" },
+] as const;
 
-type ReviewSection = PackGroup<ReviewItemView, ReviewHead>;
-
-/** 一段里的 skill 归属。混了就报「N 个」而不是挑第一个。 */
-function skillOf(items: readonly ReviewItemView[]): string | null {
-  const set = new Set(items.map((i) => i.skill).filter((s): s is string => s != null && s !== ""));
-  if (set.size === 0) return null;
-  return set.size === 1 ? (([...set][0] ?? null) as string | null) : `${set.size} 个 skill`;
-}
-
-/**
- * 按当前档把这一屏切成段。
- *
- * 「时间」档走两级（日 → 任务簇，判据与废纸篓同源）；其余四档一段一个键，
- * 段头照样报**时间**与 **skill** —— 那两样在哪一档下都是人要问的。
- */
-function buildSections(
-  items: readonly ReviewItemView[],
-  mode: "batch" | "time" | "ref" | "group" | "key",
-  now: number,
-): ReviewSection[] {
-  if (mode === "time") {
-    return groupByTimeline(items, {
-      at: (i) => i.createdAt,
-      clusterKey: (i) => i.batchId,
-      tieBreak: (i) => i.id,
-      now,
-    }).flatMap((day) =>
-      day.clusters.map((c, i) => ({
-        key: c.key,
-        heads: [
-          ...(i === 0 ? [{ kind: "day" as const, label: day.label, count: day.count }] : []),
-          {
-            kind: "cluster" as const,
-            tag: "投单",
-            // 一次任务里可能横跨几个提示词组，故报**组成**而不是挑一个组名。
-            name: faceOf(c.items, (x) => x.groupName) || "未分组",
-            count: c.items.length,
-            time: clusterTime(c),
-            skill: skillOf(c.items),
-            ids: c.items.map((x) => x.id),
-          },
-        ],
-        items: c.items,
-      })),
-    );
-  }
-
-  const tag = { batch: "投单", ref: "参考图", group: "提示词组", key: "Key" }[mode];
-  // 「投单」档的段名读批次备注（收件进来的批 = 投单名）；生成页手动建的批没有名字，
-  // 退回 `#{batchId}` —— 内部自增 id 对人不表达任何东西，只在没有别的可说时才露面。
-  const keyOf = (i: ReviewItemView) =>
-    mode === "batch"
-      ? i.batchNote?.trim() || `#${i.batchId}`
-      : mode === "ref"
-        ? i.refName
-        : mode === "group"
-          ? i.groupName
-          : (i.keyAlias ?? "未标注 Key");
-
-  const arr = [...items];
-  if (mode === "batch") {
-    // 投单倒序（新的在上），单内保持生成序。后端已是此序，这里显式排一遍，
-    // 使「仅看待定」筛掉部分项后顺序依然确定。
-    arr.sort((a, b) => b.batchId - a.batchId || a.id - b.id);
-  } else if (mode === "ref") {
-    arr.sort((a, b) => a.refName.localeCompare(b.refName) || a.id - b.id);
-  } else if (mode === "group") {
-    arr.sort((a, b) => a.groupName.localeCompare(b.groupName) || a.id - b.id);
-  } else {
-    // "~" 使无 Key（keyAlias 为空）项排到末尾。
-    arr.sort((a, b) => (a.keyAlias ?? "~").localeCompare(b.keyAlias ?? "~") || a.id - b.id);
-  }
-
-  const out: ReviewSection[] = [];
-  for (const it of arr) {
-    const k = keyOf(it);
-    const last = out[out.length - 1];
-    if (last && last.key === k) {
-      (last.items as ReviewItemView[]).push(it);
-      continue;
-    }
-    out.push({ key: k, heads: [], items: [it] });
-  }
-  return out.map((sec) => {
-    const items = sec.items as ReviewItemView[];
-    const times = items.map((i) => i.createdAt);
-    return {
-      ...sec,
-      heads: [
-        {
-          kind: "cluster" as const,
-          tag,
-          name: sec.key,
-          count: items.length,
-          time: clusterTime({
-            from: Math.min(...times),
-            to: Math.max(...times),
-          }),
-          skill: skillOf(items),
-          ids: items.map((i) => i.id),
-        },
-      ],
-    };
-  });
-}
-
-/** 段头。时间与 skill 是这一版新加的两样 —— 它们在哪一档下都是人要问的。 */
 function ClusterHead({
   head,
+  busy,
   onAccept,
   onReject,
 }: {
   head: Extract<ReviewHead, { kind: "cluster" }>;
+  busy: boolean;
   onAccept: (ids: number[]) => void;
   onReject: (ids: number[]) => void;
 }) {
+  const count = head.ids.length;
   return (
     <div className="rclhead">
-      <span className="rcltag">{head.tag}</span>
-      <span className="rclname" title={head.name}>
-        {head.name}
-      </span>
-      <span className="rcltime">{head.time}</span>
-      {head.skill && <span className="rclskill">{head.skill}</span>}
-      <span className="rclcnt">{head.count} 张</span>
-      {/* T3：分段验收——对本段下全部项批量通过 / 移废纸篓。 */}
-      <button type="button" className="btn xs" onClick={() => onAccept(head.ids)}>
+      <div className="rclcopy">
+        <h2 className="rclname" title={head.name}>
+          {head.name}
+        </h2>
+        <span className="rcltime" title={head.detail}>
+          {head.detail}
+        </span>
+      </div>
+      <span className="rclcnt">{count} 张待验收</span>
+      <button
+        type="button"
+        className="btn xs"
+        disabled={busy}
+        title={`通过「${head.name}」当前显示的 ${count} 张图片`}
+        onClick={() => onAccept(head.ids)}
+      >
         通过本组
       </button>
-      <button type="button" className="btn xs gho dng" onClick={() => onReject(head.ids)}>
-        本组移废纸篓
+      <button
+        type="button"
+        className="btn xs gho"
+        disabled={busy}
+        aria-label={`将「${head.name}」当前显示的 ${count} 张图片移入废纸篓`}
+        title="本组移入废纸篓"
+        onClick={() => onReject(head.ids)}
+      >
+        <Trash2 className="ic12" />
       </button>
     </div>
   );
@@ -199,6 +99,7 @@ type ReviewCardProps = {
   selected: boolean;
   focused: boolean;
   pending: boolean;
+  busy: boolean;
   onCardClick: (idx: number, shift: boolean) => void;
   onAccept: (id: number) => void;
   onReject: (id: number) => void;
@@ -214,6 +115,7 @@ const ReviewCard = memo(function ReviewCard({
   selected,
   focused,
   pending,
+  busy,
   onCardClick,
   onAccept,
   onReject,
@@ -221,11 +123,12 @@ const ReviewCard = memo(function ReviewCard({
   onZoom,
   onHover,
 }: ReviewCardProps) {
+  const name = itemLabel(item);
   return (
     <div
       className={cn("rcard rjcard", selected && "sel", focused && "focus", pending && "pend")}
       style={{ width }}
-      title={[item.promptCode, item.groupName, item.skill, hhmm(item.createdAt)]
+      title={[name, item.promptCode, readableName(item.groupName), item.skill]
         .filter(Boolean)
         .join(" · ")}
       onClick={(e) => onCardClick(idx, e.shiftKey)}
@@ -235,15 +138,26 @@ const ReviewCard = memo(function ReviewCard({
     >
       {/* 图框铺满这一格：格子本身已按真实宽高比算好，故 cover 不会裁掉任何东西。 */}
       <NatThumb path={item.resultThumbPath} className="rcimg rjimg" />
-      <span className={cn("rck", selected && "on")}>
+      <button
+        type="button"
+        className="rck"
+        aria-label={`选择 ${name}`}
+        aria-pressed={selected}
+        onFocus={() => onHover(idx)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onCardClick(idx, e.shiftKey);
+        }}
+      >
         <Check className="ic12" />
-      </span>
+      </button>
       {pending && <span className="rpend">待定</span>}
       <div className="hacts">
         <button
           type="button"
           className="hbtn"
           title="通过"
+          disabled={busy}
           onClick={(e) => {
             e.stopPropagation();
             onAccept(item.id);
@@ -254,7 +168,8 @@ const ReviewCard = memo(function ReviewCard({
         <button
           type="button"
           className="hbtn"
-          title="不通过"
+          title="移入废纸篓"
+          disabled={busy}
           onClick={(e) => {
             e.stopPropagation();
             onReject(item.id);
@@ -265,7 +180,8 @@ const ReviewCard = memo(function ReviewCard({
         <button
           type="button"
           className={cn("hbtn", pending && "on")}
-          title="标记待定（稍后再定）"
+          aria-pressed={pending}
+          title={pending ? "取消待定" : "标记待定"}
           onClick={(e) => {
             e.stopPropagation();
             // T2：点击后失焦，键盘焦点回网格，消除「再按空格/回车双触发」。
@@ -288,610 +204,701 @@ const ReviewCard = memo(function ReviewCard({
           <Maximize2 className="ic12" />
         </button>
       </div>
-      {/* 定高一行（`.rmeta`）：行高要在渲染前算得死，见 `CARD_META_H`。
-          **skill 不放在这里** —— 一格只有 80–150px 宽，再塞一枚标就会把编号与参考图名
-          一起挤没。它在段头上（那是「这批词谁写的」该被回答的地方）、在悬停提示里、
-          也在大图右栏里。 */}
       <div className="rmeta">
-        <span className="pid">{item.promptCode}</span>
-        <span className="fs10 t3 mono nowrap ohide">{item.refName}</span>
+        <span className="rtitle">{name}</span>
       </div>
     </div>
   );
 });
 
 export function ReviewPage() {
-  const [items, setItems] = useState<ReviewItemView[]>([]);
+  const [items, setItems] = useState<ReviewItemView[] | null>(null);
+  const [loadError, setLoadError] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cols, setCols] = useState(5);
-  // E09：网格键盘焦点（全局序号，索引进打包器给的 flat）。
-  const [focus, setFocus] = useState(0);
-  // E38：待定标记（纯 UI 态，不入库）——沉底 + 角标 + 可筛选。
+  const [focusId, setFocusId] = useState<number | null>(null);
   const [pending, setPending] = useState<Set<number>>(new Set());
   const [onlyPending, setOnlyPending] = useState(false);
-  // E24：排序模式——时间序 / 按参考图聚类 / 按提示词组聚类。
-  // 任务7：默认按提示词组分组显示（分组头醒目、便于成组验收）。
-  // 默认按投单聚类：最近一次投单在最顶部，往下依次是更早的。
-  // 一次工单 = 一个 run（0045），故「批次」这个内部单元与「投单」是一一对应的。
-  const [sortMode, setSortMode] = useState<"batch" | "time" | "ref" | "group" | "key">("batch");
-  // E38：shift 范围多选锚点（全局序号）。
+  const [sortMode, setSortMode] = useState<ReviewMode>("requirement");
   const lastClicked = useRef<number | null>(null);
-  // E08：大图参考图对比——持久切换 compareRef，或按住空格临时 peek。
   const [compareRef, setCompareRef] = useState(false);
   const [holdRef, setHoldRef] = useState(false);
-  // 齐行排版所需的容器宽度。**只随窗口/侧栏变化**，与图片加载无关——
-  // 用图片自身尺寸去反推布局才会抖，用容器宽度不会。
-  const [measureW, setMeasureW] = useState(1100);
-  const [zoom, setZoom] = useState<number | null>(null); // index into items
+  const [measureW, setMeasureW] = useState(0);
+  const [zoom, setZoom] = useState(false);
   const [processed, setProcessed] = useState(0);
-  /**
-   * 「今天/昨天」的参照时刻。整页只取一次（进页面时），不跟着秒走：
-   * 跨零点时标题从「今天」变「昨天」是对的，但那要等下一次进页面 ——
-   * 每秒重算会让整棵派生树每秒重建一遍，而这一页可能挂着几百张图。
-   */
+  const [busy, setBusy] = useState(false);
   const [now] = useState(() => Math.floor(Date.now() / 1000));
-  // 正在处理中的任务 id（防长按 ⏎ / 连点重复提交同一任务，后端另有幂等守卫兜底）。
-  const inFlight = useRef<Set<number>>(new Set());
-  // T1：虚拟化滚动容器（`.pbody` 承载滚动）。
+  const inFlight = useRef(false);
+  const loadSequence = useRef(0);
   const parentRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const wasZoom = useRef(false);
+  const reviewRevision = useEngineStore((s) => s.reviewRevision);
+  const modKey = useUiStore((s) => modKeyLabel(s.platform));
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     try {
-      setItems(await unwrap(commands.listPendingReview(null)));
-      setSel(new Set());
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
+      const result = await unwrap(commands.listPendingReview(null));
+      if (sequence !== loadSequence.current) return;
+      setItems(result);
+      setLoadError("");
+    } catch (error) {
+      if (sequence !== loadSequence.current) return;
+      setLoadError(error instanceof Error ? error.message : "无法读取待验收图片");
     }
   }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 生图结束后的批量事件触发重载
   useEffect(() => {
     void load();
-  }, [load]);
+    return () => {
+      loadSequence.current++;
+    };
+  }, [load, reviewRevision]);
 
-  // 容器宽度：齐行的行高由它推出，故必须在渲染前就是对的。
-  // 依赖 items.length 是因为滚动容器只在有待验收项时才挂载（空态是另一棵子树）。
-  const hasItems = items.length > 0;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 容器挂载/卸载随 hasItems 切换，须重挂观察器
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(([e]) => {
-      const w = e?.contentRect.width;
-      if (w) setMeasureW((cur) => (Math.abs(w - cur) > 1 ? w : cur));
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setMeasureW(entry.contentRect.width);
     });
-    ro.observe(el);
-    setMeasureW(el.clientWidth);
-    return () => ro.disconnect();
-  }, [hasItems]);
-
-  const removeIds = (ids: number[]) => {
-    setItems((cur) => cur.filter((i) => !ids.includes(i.id)));
-    setSel(new Set());
-    setProcessed((p) => p + ids.length);
-  };
-
-  const accept = useCallback(async (ids: number[]) => {
-    const fresh = ids.filter((id) => !inFlight.current.has(id));
-    if (fresh.length === 0) return;
-    for (const id of fresh) inFlight.current.add(id);
-    try {
-      const res = await unwrap(commands.acceptTasks(fresh));
-      removeIds(fresh);
-      for (const g of res.promotedGroups) toast(`「${g}」已自动写入提示词库`);
-      toast.success(`已通过 ${res.accepted} 张`);
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
-    } finally {
-      for (const id of fresh) inFlight.current.delete(id);
-    }
+    observer.observe(el);
+    return () => observer.disconnect();
   }, []);
 
-  const reject = useCallback(async (ids: number[]) => {
-    const fresh = ids.filter((id) => !inFlight.current.has(id));
-    if (fresh.length === 0) return;
-    for (const id of fresh) inFlight.current.add(id);
-    try {
-      const n = await unwrap(commands.rejectTasks(fresh));
-      removeIds(fresh);
-      toast(`${n} 张移入废纸篓`);
-    } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
-    } finally {
-      for (const id of fresh) inFlight.current.delete(id);
-    }
+  const process = useCallback(
+    async (ids: number[], action: "accept" | "reject") => {
+      if (ids.length === 0 || inFlight.current) return;
+      inFlight.current = true;
+      setBusy(true);
+      try {
+        if (action === "accept") {
+          const result = await unwrap(commands.acceptTasks(ids));
+          setProcessed((count) => count + result.accepted);
+          for (const name of result.promotedGroups) {
+            toast(`「${readableName(name) || "本组提示词"}」已写入文案库`);
+          }
+          toast.success(`已通过 ${result.accepted} 张`);
+        } else {
+          const count = await unwrap(commands.rejectTasks(ids));
+          setProcessed((total) => total + count);
+          toast(`${count} 张移入废纸篓`);
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "验收操作失败");
+      } finally {
+        // 部分成功或状态已被其它入口改动时，按后端的实际待验收列表继续。
+        await load();
+        inFlight.current = false;
+        setBusy(false);
+      }
+    },
+    [load],
+  );
+  const accept = useCallback((ids: number[]) => void process(ids, "accept"), [process]);
+  const reject = useCallback((ids: number[]) => void process(ids, "reject"), [process]);
+
+  const toggleSel = useCallback((id: number) => {
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
-  const toggleSel = useCallback(
-    (id: number) =>
-      setSel((s) => {
-        const n = new Set(s);
-        if (n.has(id)) n.delete(id);
-        else n.add(id);
-        return n;
-      }),
-    [],
-  );
+  const togglePending = useCallback((id: number) => {
+    setPending((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
-  const togglePending = useCallback(
-    (id: number) =>
-      setPending((s) => {
-        const n = new Set(s);
-        if (n.has(id)) n.delete(id);
-        else n.add(id);
-        return n;
-      }),
-    [],
-  );
-
-  /**
-   * 显示序与分段。
-   *
-   * ## 「时间」档现在是两级分段（日 → 任务簇），不再是一条平铺的流
-   *
-   * 从前它 `clusterKey` 返回 null —— 也就是**完全没有标题**：几百张图连成一片，
-   * 「这批是什么时候跑的」在这一页上一个字都没有。判据与废纸篓同源
-   * （`_shared/timeline`），于是同一批图在两页会被切成同样的段。
-   *
-   * ## 待定项不再沉底
-   *
-   * 那条老规则（时间序下把标记待定的稳定沉底）与时间轴直接打架：沉底之后它们会
-   * 落在一个与自己生成时刻无关的位置上，而这一档的全部意义就是位置=时刻。
-   * 待定仍有角标、仍能用「仅看待定」筛。
-   */
+  const pendingCount = items?.filter((item) => pending.has(item.id)).length ?? 0;
   const filtered = useMemo(
-    () => (onlyPending ? items.filter((i) => pending.has(i.id)) : items),
+    () => (onlyPending ? (items ?? []).filter((item) => pending.has(item.id)) : (items ?? [])),
     [items, onlyPending, pending],
   );
-
+  const visibleIds = useMemo(() => new Set(filtered.map((item) => item.id)), [filtered]);
+  const selectedIds = useMemo(() => [...sel].filter((id) => visibleIds.has(id)), [sel, visibleIds]);
   const sections = useMemo(() => buildSections(filtered, sortMode, now), [filtered, sortMode, now]);
-
-  // 齐行打包走抽出来的纯函数（`_shared/justified.ts`，另有测试）：算的是「每张占多宽、
-  // 每行多高」，而验收判的恰恰是构图与边缘，排错一格等于给人看了一张裁过的图。
-  // 逐段分别打包 —— 一行绝不横跨两段，段与段之间才有看得见的断口。
   const { blocks, cardRow, flat } = useMemo(
-    () =>
-      packGroups(sections, {
-        width: Math.max(240, measureW),
-        perRow: cols,
-        gap: GAP,
-        ratioOf,
-      }),
+    () => packGroups(sections, { width: measureW, perRow: cols, gap: GAP, ratioOf }),
     [sections, cols, measureW],
   );
 
-  /**
-   * 行高**精确可算**，故 estimateSize 就是真值 —— 而这正是滚动不卡的全部依据。
-   *
-   * 这一版去掉了 `ref={virt.measureElement}`。它做两件事，两件都是坏的：
-   * 每一行渲染后读一次 `getBoundingClientRect`（滚动时是持续的强制同步布局，
-   * 就是那个卡顿），以及**在测量结果回来之前**按估值摆位 —— 而旧估值算少了：
-   * 卡片行少算了编号那一行的 8px、分组头行少算了 10px，于是相邻两行**真的会叠在
-   * 一起**，直到测量把它们推开。现在高度由 CSS 定死、由这里算死，两个毛病一起没了。
-   */
+  // 同样的行数也可能有不同的行高，令虚拟列表随排版重新计算偏移。
+  const getItemKey = useCallback((index: number) => blocks[index]?.key ?? index, [blocks]);
   const virt = useVirtualizer({
-    count: blocks.length,
+    count: measureW > 0 ? blocks.length : 0,
     getScrollElement: () => parentRef.current,
-    estimateSize: (i) => {
-      const b = blocks[i];
-      if (!b) return CARD_META_H + ROW_GAP;
-      if (b.kind === "head") return b.head.kind === "day" ? DAY_HEAD_H : CLUSTER_HEAD_H;
-      return b.h + CARD_META_H + ROW_GAP;
+    getItemKey,
+    paddingStart: 8,
+    paddingEnd: 12,
+    estimateSize: (index) => {
+      const block = blocks[index];
+      if (block?.kind === "head") return block.head.kind === "day" ? DAY_HEAD_H : CLUSTER_HEAD_H;
+      return (block?.h ?? 0) + CARD_META_H + ROW_GAP;
     },
     overscan: 6,
   });
 
-  // 大图逐张模式键盘
-  useEffect(() => {
-    if (zoom === null) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") return setZoom(null);
-      if (e.key === "ArrowLeft") setZoom((z) => (z === null ? null : Math.max(0, z - 1)));
-      else if (e.key === "ArrowRight")
-        setZoom((z) => (z === null ? null : Math.min(flat.length - 1, z + 1)));
-      else if (e.key === "Enter") {
-        const it = flat[zoom];
-        if (it) void accept([it.id]);
-      } else if (e.key === "Backspace") {
-        const it = flat[zoom];
-        if (it) void reject([it.id]);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, flat, accept, reject]);
+  const focus = flat.findIndex((item) => item.id === focusId);
+  const previousFlat = useRef(flat);
+  useLayoutEffect(() => {
+    if (focus < 0) {
+      const previous = previousFlat.current;
+      const index = previous.findIndex((item) => item.id === focusId);
+      // 当前图消失时先找原顺序的下一张，再往前找上一张。
+      const next =
+        index < 0
+          ? flat[0]
+          : (previous.slice(index + 1).find((item) => visibleIds.has(item.id)) ??
+            previous
+              .slice(0, index)
+              .reverse()
+              .find((item) => visibleIds.has(item.id)) ??
+            flat[0]);
+      setFocusId(next?.id ?? null);
+      if (!next) setZoom(false);
+    }
+    previousFlat.current = flat;
+  }, [flat, focus, focusId, visibleIds]);
 
-  // 大图模式下列表变化后修正索引
-  useEffect(() => {
-    if (zoom !== null && zoom >= flat.length) setZoom(flat.length > 0 ? flat.length - 1 : null);
-  }, [flat, zoom]);
+  const scrollToCard = useCallback(
+    (index: number) => {
+      const row = cardRow[index];
+      if (row !== undefined) virt.scrollToIndex(row, { align: "auto" });
+    },
+    [virt, cardRow],
+  );
 
-  // E08：切换到另一张图时复位参考图对比态。
-  useEffect(() => {
+  const onHover = useCallback((index: number) => setFocusId(flat[index]?.id ?? null), [flat]);
+  const navigate = useCallback(
+    (index: number) => {
+      const next = Math.max(0, Math.min(index, flat.length - 1));
+      onHover(next);
+      if (!zoom) scrollToCard(next);
+    },
+    [flat.length, onHover, scrollToCard, zoom],
+  );
+  const onZoom = useCallback(
+    (index: number) => {
+      onHover(index);
+      setZoom(true);
+    },
+    [onHover],
+  );
+  const closeZoom = useCallback(() => {
+    setZoom(false);
+    scrollToCard(focus);
+  }, [focus, scrollToCard]);
+
+  useLayoutEffect(() => {
+    if (zoom) detailRef.current?.focus();
+    else if (wasZoom.current) parentRef.current?.focus({ preventScroll: true });
+    wasZoom.current = zoom;
+  }, [zoom]);
+
+  // 对比状态属于当前图片。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 切换图片或重开详情时复位
+  useLayoutEffect(() => {
     setCompareRef(false);
     setHoldRef(false);
-  }, [zoom]);
+  }, [focusId, zoom]);
 
-  // E08：大图模式按住空格临时 peek 参考图，松开回到生成图。
   useEffect(() => {
-    if (zoom === null) return;
-    const down = (e: KeyboardEvent) => {
-      if (e.key === " ") {
-        e.preventDefault();
-        setHoldRef(true);
-      }
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.key === " ") setHoldRef(false);
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, [zoom]);
-
-  // E09：网格模式键盘流（大图打开时让位）。
-  useEffect(() => {
-    if (zoom !== null) return;
     const onKey = (e: KeyboardEvent) => {
-      // T2：焦点落在任何交互控件（悬浮按钮 / 每行滑块 / 输入）上时让位给原生行为，
-      // 避免 window 处理器与控件双触发、或方向键被滑块吞掉导致网格导航失灵。
-      const el = e.target as HTMLElement | null;
-      if (el?.closest("button, input, textarea, select, [contenteditable=true]")) return;
-      const n = flat.length;
-      if (n === 0) return;
-      if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) {
+      if (
+        e.defaultPrevented ||
+        e.isComposing ||
+        useUiStore.getState().helpOpen ||
+        document.querySelector(".ovl")
+      )
+        return;
+      const item = flat[focus];
+      if (!item) return;
+      const target = e.target as HTMLElement | null;
+      if (zoom && e.key === "Escape") {
         e.preventDefault();
-        setSel(new Set(flat.map((i) => i.id)));
+        closeZoom();
         return;
       }
-      if (e.key === "ArrowRight") {
+      if (zoom && e.key === "Tab") {
+        const buttons =
+          detailRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+        if (!buttons?.length) return;
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (e.shiftKey ? target === first || target === detailRef.current : target === last) {
+          e.preventDefault();
+          (e.shiftKey ? last : first)?.focus();
+        }
+        return;
+      }
+      if (target?.closest("input, select, textarea, [contenteditable=true]")) return;
+      if (target?.closest("button") && ["Enter", " ", "Backspace"].includes(e.key)) return;
+      if (!zoom && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
-        setFocus((f) => Math.min(n - 1, f + 1));
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        setFocus((f) => Math.max(0, f - 1));
-      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        // 齐行下每行张数不固定，故上下移动要走行模型而不是「加减 cols」。
-        // 保持列位：落到目标行里同样的第几张（不够就取最后一张）。
-        setFocus((f) => moveByRow(blocks, cardRow, f, e.key === "ArrowDown" ? 1 : -1));
-      } else if (e.key === " ") {
-        e.preventDefault();
-        const it = flat[focus];
-        if (it) toggleSel(it.id);
-      } else if (e.key === "Enter") {
-        const ids = sel.size > 0 ? [...sel] : flat[focus] ? [flat[focus].id] : [];
-        if (ids.length) void accept(ids);
-      } else if (e.key === "Backspace") {
-        const it = flat[focus];
-        if (it) void reject([it.id]);
-      } else if (e.key === "z" || e.key === "Z") {
-        if (flat[focus]) setZoom(focus);
-      } else if (e.key === "s" || e.key === "S") {
-        const it = flat[focus];
-        if (it) togglePending(it.id);
+        setSel(new Set(flat.map((entry) => entry.id)));
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      switch (e.key) {
+        case "ArrowLeft":
+        case "ArrowRight":
+          e.preventDefault();
+          navigate(focus + (e.key === "ArrowLeft" ? -1 : 1));
+          break;
+        case "ArrowUp":
+        case "ArrowDown":
+          if (zoom) return;
+          e.preventDefault();
+          navigate(moveByRow(blocks, cardRow, focus, e.key === "ArrowDown" ? 1 : -1));
+          break;
+        case " ":
+          e.preventDefault();
+          if (zoom) setHoldRef(true);
+          else if (!e.repeat) toggleSel(item.id);
+          break;
+        case "Enter":
+          e.preventDefault();
+          if (!e.repeat) accept(!zoom && selectedIds.length ? selectedIds : [item.id]);
+          break;
+        case "Backspace":
+          e.preventDefault();
+          if (!e.repeat) reject([item.id]);
+          break;
+        case "s":
+        case "S":
+          if (!e.repeat) togglePending(item.id);
+          break;
+        case "z":
+        case "Z":
+          if (!zoom && !e.repeat) onZoom(focus);
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zoom, flat, focus, blocks, cardRow, sel, accept, reject, toggleSel, togglePending]);
+  }, [
+    zoom,
+    flat,
+    focus,
+    blocks,
+    cardRow,
+    selectedIds,
+    accept,
+    reject,
+    toggleSel,
+    togglePending,
+    navigate,
+    onZoom,
+    closeZoom,
+  ]);
 
-  // E09：焦点越界修正 + 滚动进视野（T1：虚拟化 scrollToIndex 定位所在行）。
   useEffect(() => {
-    if (focus >= flat.length) setFocus(Math.max(0, flat.length - 1));
-  }, [flat, focus]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: virt 实例稳定，仅在焦点/行模型变化时滚动
-  useEffect(() => {
-    const row = cardRow[focus];
-    if (row !== undefined) virt.scrollToIndex(row, { align: "auto" });
-  }, [focus, cardRow]);
+    if (!zoom) return;
+    const release = () => setHoldRef(false);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === " ") release();
+    };
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", release);
+    };
+  }, [zoom]);
 
-  // E38：网格点选——shift 从锚点范围加选，否则切换单项并设锚点。
   const onCardClick = useCallback(
-    (idx: number, shift: boolean) => {
-      setFocus(idx);
-      if (shift && lastClicked.current !== null) {
-        const a = Math.min(lastClicked.current, idx);
-        const b = Math.max(lastClicked.current, idx);
-        setSel((s) => {
-          const n = new Set(s);
-          for (let i = a; i <= b; i++) {
-            const it = flat[i];
-            if (it) n.add(it.id);
-          }
-          return n;
-        });
+    (index: number, shift: boolean) => {
+      const item = flat[index];
+      if (!item) return;
+      setFocusId(item.id);
+      const anchor = shift ? flat.findIndex((entry) => entry.id === lastClicked.current) : -1;
+      if (anchor >= 0) {
+        const range = flat.slice(Math.min(anchor, index), Math.max(anchor, index) + 1);
+        setSel((prev) => new Set([...prev, ...range.map((entry) => entry.id)]));
       } else {
-        const it = flat[idx];
-        if (it) toggleSel(it.id);
-        lastClicked.current = idx;
+        toggleSel(item.id);
+        lastClicked.current = item.id;
       }
     },
     [flat, toggleSel],
   );
 
-  // T1：卡片稳定回调（id/idx 基），保证 ReviewCard memo 生效。
-  const onAccept = useCallback((id: number) => void accept([id]), [accept]);
-  const onReject = useCallback((id: number) => void reject([id]), [reject]);
-  const onZoom = useCallback((idx: number) => setZoom(idx), []);
-  const onHover = useCallback((idx: number) => setFocus(idx), []);
+  const onAccept = useCallback((id: number) => accept([id]), [accept]);
+  const onReject = useCallback((id: number) => reject([id]), [reject]);
 
-  // T3：分段验收——对某一段下的全部项批量通过 / 移废纸篓。
-  // 复用 accept/reject（含 inFlight 幂等守卫），触发既有自动转正/写回等副作用。
-  // 段头自己带着本段的 id 清单（`buildSections` 就是按它分的段），不必再按键反查 ——
-  // 反查要求「段键」在两处算得一模一样，而那正是最容易分叉的地方。
-  const acceptCluster = useCallback((ids: number[]) => void accept(ids), [accept]);
-  const rejectCluster = useCallback((ids: number[]) => void reject(ids), [reject]);
+  function changeView(mode: ReviewMode, pendingOnly: boolean) {
+    if (mode === sortMode && pendingOnly === onlyPending) return;
+    setSortMode(mode);
+    setOnlyPending(pendingOnly);
+    setSel(new Set());
+    setFocusId(null);
+    lastClicked.current = null;
+    parentRef.current?.scrollTo({ top: 0 });
+  }
 
-  const zoomItem = zoom !== null ? flat[zoom] : undefined;
+  const zoomItem = zoom ? flat[focus] : undefined;
 
   return (
-    <PageScaffold title="图片验收" caption="按原图比例排版 · 网格粗筛 · 大图逐张精审">
-      <div className="phd" style={{ borderBottom: "none", minHeight: 0, paddingTop: 8 }}>
-        <span className="cnt">{items.length} 待验收</span>
-        {processed > 0 && <span className="pcap">本批已处理 {processed}</span>}
-        {pending.size > 0 && (
-          <button
-            type="button"
-            className={cn("btn sm gho", onlyPending && "on")}
-            onClick={() => setOnlyPending((v) => !v)}
-            title="仅看标记为待定的图片"
+    <PageScaffold title="图片验收" caption="浏览生成结果，标记待定或逐张精审" bodyClassName="rbody">
+      <div className="rworkspace" inert={zoom}>
+        <div className="phd rtoolbar">
+          <div className="fx ac gap8">
+            <span className="rstatus" aria-live="polite">
+              {items === null ? "正在加载" : `${items.length} 张待验收`}
+            </span>
+            {processed > 0 && <span className="pcap">本次已处理 {processed} 张</span>}
+          </div>
+          <div className="f1" />
+          {pendingCount > 0 || onlyPending ? (
+            <button
+              type="button"
+              className={cn("btn sm gho", onlyPending && "on")}
+              aria-pressed={onlyPending}
+              onClick={() => changeView(sortMode, !onlyPending)}
+            >
+              {onlyPending ? "显示全部" : `仅看待定 · ${pendingCount}`}
+            </button>
+          ) : null}
+          <div className="seg" role="group" aria-label="验收分组方式">
+            <button
+              type="button"
+              className={cn("sgi", sortMode === "requirement" && "on")}
+              aria-pressed={sortMode === "requirement"}
+              onClick={() => changeView("requirement", onlyPending)}
+            >
+              按需求
+            </button>
+            <button
+              type="button"
+              className={cn("sgi", sortMode === "batch" && "on")}
+              aria-pressed={sortMode === "batch"}
+              onClick={() => changeView("batch", onlyPending)}
+            >
+              按提交
+            </button>
+          </div>
+          <select
+            className="rmode"
+            aria-label="其他分组方式"
+            value={sortMode === "requirement" || sortMode === "batch" ? "" : sortMode}
+            onChange={(e) => {
+              const mode = OTHER_MODES.find(({ id }) => id === e.target.value);
+              if (mode) changeView(mode.id, onlyPending);
+            }}
           >
-            {onlyPending ? "显示全部" : `仅看待定 · ${pending.size}`}
-          </button>
-        )}
-        <div className="f1" />
-        {sel.size > 0 && (
-          <>
-            <span className="fs12 t2 nowrap">已选 {sel.size}</span>
-            <button type="button" className="btn sm" onClick={() => accept([...sel])}>
+            <option value="" disabled>
+              其他分组
+            </option>
+            {OTHER_MODES.map(({ id, label }) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <label className="fx ac gap8 fs11 t2 nowrap">
+            缩略图大小
+            <input
+              type="range"
+              min={3}
+              max={8}
+              value={11 - cols}
+              onChange={(e) => setCols(11 - Number(e.target.value))}
+              className="rng"
+            />
+          </label>
+        </div>
+        {selectedIds.length > 0 && (
+          <div className="rselection">
+            <span className="fw6">已选 {selectedIds.length} 张</span>
+            <div className="f1" />
+            <button
+              type="button"
+              className="btn xs"
+              disabled={busy}
+              onClick={() => accept(selectedIds)}
+            >
               通过所选
             </button>
-            <button type="button" className="btn sm gho dng" onClick={() => reject([...sel])}>
+            <button
+              type="button"
+              className="btn xs gho dng"
+              disabled={busy}
+              onClick={() => reject(selectedIds)}
+            >
               移入废纸篓
             </button>
-            <button type="button" className="btn sm gho" onClick={() => setSel(new Set())}>
-              清除
+            <button type="button" className="btn xs gho" onClick={() => setSel(new Set())}>
+              清除选择
             </button>
-            <span style={{ width: 1, height: 16, background: "var(--line2)" }} />
-          </>
-        )}
-        <div className="seg">
-          <span
-            className={cn("sgi", sortMode === "batch" && "on")}
-            onClick={() => setSortMode("batch")}
-            title="最近一次投单在最顶部，往下依次是更早的"
-          >
-            按投单
-          </span>
-          <span
-            className={cn("sgi", sortMode === "time" && "on")}
-            onClick={() => setSortMode("time")}
-          >
-            时间
-          </span>
-          <span
-            className={cn("sgi", sortMode === "ref" && "on")}
-            onClick={() => setSortMode("ref")}
-          >
-            按参考图
-          </span>
-          <span
-            className={cn("sgi", sortMode === "group" && "on")}
-            onClick={() => setSortMode("group")}
-          >
-            按提示词组
-          </span>
-          <span
-            className={cn("sgi", sortMode === "key" && "on")}
-            onClick={() => setSortMode("key")}
-          >
-            按 Key
-          </span>
-        </div>
-        {/* 齐行下每行张数随比例浮动，故这里给的是**大小**而不是精确列数。 */}
-        <span className="fs11 t3 nowrap" title="图片显示大小（每行放几张的目标值）">
-          大小
-        </span>
-        <input
-          type="range"
-          min={3}
-          max={8}
-          value={cols}
-          onChange={(e) => setCols(Number(e.target.value))}
-          // T2：拖动/调整后失焦，方向键网格导航恢复（否则方向键继续改滑块值）。
-          onMouseUp={(e) => e.currentTarget.blur()}
-          onKeyUp={(e) => e.currentTarget.blur()}
-          className="rng"
-        />
-      </div>
-
-      {items.length === 0 ? (
-        <div className="bigempty">
-          <div className="fs13 fw5 t2">没有待验收的图片</div>
-          <div className="fs12 t3">生成完成的任务会自动进入这里 — 网格粗筛，大图逐张精审</div>
-        </div>
-      ) : (
-        <div className="pbody rvscroll" ref={parentRef}>
-          <div className="rvirt" style={{ height: virt.getTotalSize() }}>
-            {virt.getVirtualItems().map((v) => {
-              const b = blocks[v.index];
-              if (!b) return null;
-              return (
-                <div
-                  key={v.key}
-                  data-index={v.index}
-                  className={cn("rvrow", b.kind === "head" && `head ${b.head.kind}`)}
-                  style={{ transform: `translateY(${v.start}px)` }}
-                >
-                  {b.kind === "head" ? (
-                    b.head.kind === "day" ? (
-                      <div className="rvday">
-                        <span className="d">{b.head.label}</span>
-                        <span className="ln" />
-                        <span className="n">{b.head.count} 张</span>
-                      </div>
-                    ) : (
-                      <ClusterHead
-                        head={b.head}
-                        onAccept={acceptCluster}
-                        onReject={rejectCluster}
-                      />
-                    )
-                  ) : (
-                    <div className="rjrow" style={{ "--rjh": `${b.h}px` } as React.CSSProperties}>
-                      {b.items.map(({ it, idx, w }) => (
-                        <ReviewCard
-                          key={it.id}
-                          item={it}
-                          idx={idx}
-                          width={w}
-                          selected={sel.has(it.id)}
-                          focused={idx === focus}
-                          pending={pending.has(it.id)}
-                          onCardClick={onCardClick}
-                          onAccept={onAccept}
-                          onReject={onReject}
-                          onTogglePending={togglePending}
-                          onZoom={onZoom}
-                          onHover={onHover}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
           </div>
+        )}
+        {loadError && (
+          <div className="rselection" role="alert">
+            <span>读取待验收图片失败 · {loadError}</span>
+            <button type="button" className="btn xs" onClick={() => void load()}>
+              重新加载
+            </button>
+          </div>
+        )}
+        <div className="pbody rvscroll" ref={parentRef} tabIndex={-1}>
+          {filtered.length === 0 ? (
+            <div className="bigempty">
+              <div className="fs13 fw5 t2">
+                {onlyPending
+                  ? "没有标记为待定的图片"
+                  : items === null
+                    ? loadError
+                      ? "暂时无法打开验收列表"
+                      : "正在加载图片…"
+                    : "没有待验收的图片"}
+              </div>
+              {onlyPending ? (
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => changeView(sortMode, false)}
+                >
+                  返回全部图片
+                </button>
+              ) : (
+                items && <div className="fs12 t3">生成完成的图片会自动进入这里</div>
+              )}
+            </div>
+          ) : (
+            <div className="rvirt" style={{ height: virt.getTotalSize() }}>
+              {virt.getVirtualItems().map((v) => {
+                const block = blocks[v.index];
+                if (!block) return null;
+                return (
+                  <div
+                    key={v.key}
+                    className={cn("rvrow", block.kind === "head" && `head ${block.head.kind}`)}
+                    style={{ transform: `translateY(${v.start}px)` }}
+                  >
+                    {block.kind === "head" ? (
+                      block.head.kind === "day" ? (
+                        <div className="rvday">
+                          <span className="d">{block.head.label}</span>
+                          <span className="ln" />
+                          <span className="n">{block.head.count} 张</span>
+                        </div>
+                      ) : (
+                        <ClusterHead
+                          head={block.head}
+                          busy={busy}
+                          onAccept={accept}
+                          onReject={reject}
+                        />
+                      )
+                    ) : (
+                      <div
+                        className="rjrow"
+                        style={{ "--rjh": `${block.h}px` } as React.CSSProperties}
+                      >
+                        {block.items.map(({ it, idx, w }) => (
+                          <ReviewCard
+                            key={it.id}
+                            item={it}
+                            idx={idx}
+                            width={w}
+                            selected={sel.has(it.id)}
+                            focused={it.id === focusId}
+                            pending={pending.has(it.id)}
+                            busy={busy}
+                            onCardClick={onCardClick}
+                            onAccept={onAccept}
+                            onReject={onReject}
+                            onTogglePending={togglePending}
+                            onZoom={onZoom}
+                            onHover={onHover}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
-
-      {items.length > 0 && (
-        <div className="hintbar">
-          <span className="fx ac gap6">
-            <span className="kbd">↑</span>
-            <span className="kbd">↓</span>
-            <span className="kbd">←</span>
-            <span className="kbd">→</span>移动焦点
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">空格</span>选中
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">⏎</span>通过焦点/所选
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">⌫</span>不通过
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">S</span>待定
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">Z</span>大图
-          </span>
-          <span className="fx ac gap6">
-            <span className="kbd">⌘A</span>全选 · <span className="kbd">⇧</span>点选范围
-          </span>
-        </div>
-      )}
+        {filtered.length > 0 && (
+          <div className="hintbar">
+            <span>
+              <kbd>↑ ↓ ← →</kbd> 移动
+            </span>
+            <span>
+              <kbd>空格</kbd> 选中
+            </span>
+            <span>
+              <kbd>⏎</kbd> 通过
+            </span>
+            <span>
+              <kbd>⌫</kbd> 移入废纸篓
+            </span>
+            <span>
+              <kbd>S</kbd> 待定
+            </span>
+            <span>
+              <kbd>Z</kbd> 大图
+            </span>
+            <span>
+              <kbd>{modKey === "⌘" ? "⌘A" : "Ctrl+A"}</kbd> 全选
+            </span>
+            <span>
+              <kbd>⇧</kbd> 点选范围
+            </span>
+          </div>
+        )}
+      </div>
 
       {zoomItem &&
         (() => {
           const refPath = zoomItem.refImagePath ?? zoomItem.refThumbPath;
           const showingRef = (compareRef || holdRef) && !!refPath;
+          const organization = zoomItem.organization;
+          const context = [organization?.product, organization?.style, organization?.requirement]
+            .filter(Boolean)
+            .join(" · ");
           return (
-            <div className="rdet dark">
+            <div
+              className="rdet dark"
+              ref={detailRef}
+              tabIndex={-1}
+              role="dialog"
+              aria-modal="true"
+              aria-label="图片精审"
+            >
               <div className="rdimgw">
                 <BigImage
                   path={
                     showingRef ? refPath : (zoomItem.resultImagePath ?? zoomItem.resultThumbPath)
                   }
-                  caption={
-                    showingRef ? `REF · ${zoomItem.refName}` : `GEN · ${zoomItem.promptCode}`
-                  }
+                  caption={showingRef ? refLabel(zoomItem) : itemLabel(zoomItem)}
                 />
                 {showingRef && <span className="refbadge">参考图</span>}
               </div>
               <div className="rdside">
-                <div
-                  className="fx ac gap8"
-                  style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}
-                >
-                  <span className="pid">{zoomItem.promptCode}</span>
-                  <span className="fs12 fw5 nowrap ohide f1">{zoomItem.groupName}</span>
-                  <button type="button" className="icb" onClick={() => setZoom(null)}>
+                <div className="rdhead">
+                  <div className="rclcopy">
+                    <h2 className="rclname" title={itemLabel(zoomItem)}>
+                      {itemLabel(zoomItem)}
+                    </h2>
+                    <span className="rcltime" title={context}>
+                      {context || readableName(zoomItem.groupName) || "图片精审"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="icb"
+                    aria-label="关闭大图"
+                    title="关闭大图 Esc"
+                    onClick={closeZoom}
+                  >
                     <X className="ic12" />
                   </button>
                 </div>
                 <div className="f1" style={{ overflow: "auto", padding: "12px 14px" }}>
                   <div className="fx ac gap6 wrap">
-                    <span className="chip">{zoomItem.refName}</span>
-                    {zoomItem.keyAlias && <span className="chip">{zoomItem.keyAlias}</span>}
-                    {/* 判一张图判不下来时，「这条词是谁写的、什么时候跑的」是接着要问的两件事。 */}
-                    {zoomItem.skill && <span className="sk">{zoomItem.skill}</span>}
+                    {zoomItem.promptCode && <span className="pid">{zoomItem.promptCode}</span>}
+                    <span className="chip" title={zoomItem.batchNote ?? undefined}>
+                      提交 #{zoomItem.batchId}
+                    </span>
                     <span className="chip">
                       {dayLabel(zoomItem.createdAt, now)} {hhmm(zoomItem.createdAt)}
                     </span>
+                    {zoomItem.skill && <span className="sk">{zoomItem.skill}</span>}
                   </div>
                   {refPath && (
                     <>
-                      <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
-                        参考图对比
-                      </div>
+                      <div className="fs11 fw6 t3 mt14">参考图对比</div>
                       <button
                         type="button"
                         className={cn("refcmp mt6", showingRef && "on")}
-                        title="点击切换对比 · 或在大图上按住空格临时查看"
-                        onClick={() => setCompareRef((v) => !v)}
+                        aria-pressed={compareRef}
+                        title={refLabel(zoomItem)}
+                        onClick={(e) => {
+                          setCompareRef((value) => !value);
+                          if (e.detail) detailRef.current?.focus();
+                        }}
                       >
                         <span className="ph refcmpimg" style={bg(zoomItem.refThumbPath)} />
-                        <span className="fs11 t2 f1">
-                          {showingRef ? "正在看参考图 · 点击回到生成图" : "点击对比参考图"}
+                        <span className="fs11 f1">
+                          {showingRef ? "返回生成图" : "查看主参考图"}
                         </span>
-                        <span className="kbd">空格</span>
+                        <span className="kbd">按住空格</span>
                       </button>
                     </>
                   )}
-                  <div className="fs11 fw6 t3 mt14" style={{ letterSpacing: ".05em" }}>
-                    提示词原文
-                  </div>
+                  <div className="fs11 fw6 t3 mt14">提示词原文</div>
                   <div className="ptext mt6">{zoomItem.promptText}</div>
                 </div>
                 <div className="rdbar">
                   <button
                     type="button"
                     className="icb"
-                    onClick={() => setZoom((z) => (z === null ? null : Math.max(0, z - 1)))}
+                    aria-label="上一张"
+                    disabled={focus === 0}
+                    onClick={(e) => {
+                      navigate(focus - 1);
+                      if (e.detail) detailRef.current?.focus();
+                    }}
                   >
                     ‹
                   </button>
-                  <span className="mono fs11 t3 nowrap">
-                    {zoom !== null ? zoom + 1 : 0} / {flat.length}
+                  <span className="mono fs11 t3 nowrap" aria-live="polite">
+                    {focus + 1} / {flat.length}
                   </span>
                   <button
                     type="button"
                     className="icb"
-                    onClick={() =>
-                      setZoom((z) => (z === null ? null : Math.min(flat.length - 1, z + 1)))
-                    }
+                    aria-label="下一张"
+                    disabled={focus + 1 >= flat.length}
+                    onClick={(e) => {
+                      navigate(focus + 1);
+                      if (e.detail) detailRef.current?.focus();
+                    }}
                   >
                     ›
                   </button>
                   <div className="f1" />
                   <button
                     type="button"
-                    className="btn sm gho dng"
-                    onClick={() => reject([zoomItem.id])}
+                    className="btn xs gho"
+                    title={pending.has(zoomItem.id) ? "取消待定 S" : "标记待定 S"}
+                    aria-label="待定"
+                    aria-pressed={pending.has(zoomItem.id)}
+                    onClick={(e) => {
+                      togglePending(zoomItem.id);
+                      if (e.detail) detailRef.current?.focus();
+                    }}
                   >
-                    不通过 ⌫
+                    <Clock className="ic12" />
                   </button>
                   <button
                     type="button"
-                    className="btn pri sm"
+                    className="btn xs gho dng"
+                    title="移入废纸篓 ⌫"
+                    disabled={busy}
+                    onClick={() => reject([zoomItem.id])}
+                  >
+                    移废纸篓
+                  </button>
+                  <button
+                    type="button"
+                    className="btn pri xs"
+                    title="通过 ⏎"
+                    disabled={busy}
                     onClick={() => accept([zoomItem.id])}
                   >
-                    通过 ⏎
+                    通过
                   </button>
                 </div>
               </div>

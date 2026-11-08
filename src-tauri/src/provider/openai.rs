@@ -157,26 +157,30 @@ impl ImageProvider for OpenAiCompatible {
     ) -> Result<GenImage, ProviderError> {
         // 参考图直接流进 multipart。旧实现先把每份参考图完整读进 Vec；250 并发下即使
         // 大家用的是同一张图，也会在内存里复制 250 份并一直持有到请求结束。
-        let part = reqwest::multipart::Part::file(&req.image_path)
-            .await
-            .map_err(|e| {
+        // 输出处理开关须在下方消费 size/quality 前读取（避免 params 部分移动后再借用）。
+        let clear_meta = req.params.clear_meta();
+        let remove_c2pa = req.params.remove_c2pa();
+
+        let field = if req.additional_image_paths.is_empty() {
+            "image"
+        } else {
+            "image[]"
+        };
+        let mut form = reqwest::multipart::Form::new()
+            .text("prompt", req.prompt)
+            .text("model", req.model)
+            // n 恒为 1：一个任务 = 一张图。
+            .text("n", "1");
+        for path in std::iter::once(req.image_path).chain(req.additional_image_paths) {
+            let part = reqwest::multipart::Part::file(&path).await.map_err(|e| {
                 ProviderError::new(
                     ProviderErrorKind::Other,
                     None,
                     format!("打开参考图失败：{e}"),
                 )
             })?;
-
-        // 输出处理开关须在下方消费 size/quality 前读取（避免 params 部分移动后再借用）。
-        let clear_meta = req.params.clear_meta();
-        let remove_c2pa = req.params.remove_c2pa();
-
-        let mut form = reqwest::multipart::Form::new()
-            .part("image", part)
-            .text("prompt", req.prompt)
-            .text("model", req.model)
-            // n 恒为 1：一个任务 = 一张图。
-            .text("n", "1");
+            form = form.part(field, part);
+        }
         // E16 / D1：仅透传显式设置的参数；未设置不带该字段（跟随提示词/模型默认）。
         // 字段名与端点文档的参数表一一对应；比例首选 aspect_ratio（size 只有部分模型认）。
         let p = req.params;
@@ -185,6 +189,7 @@ impl ImageProvider for OpenAiCompatible {
             ("aspect_ratio", p.aspect_ratio),
             ("size", p.size),
             ("output_format", p.output_format),
+            ("quality", p.quality),
         ] {
             if let Some(v) = value {
                 form = form.text(name, v);
@@ -429,6 +434,7 @@ mod tests {
         GenRequest {
             prompt: "a".into(),
             image_path: p,
+            additional_image_paths: Vec::new(),
             model: "gpt-image-2".into(),
             params: crate::provider::GenParams::default(),
         }
@@ -452,6 +458,39 @@ mod tests {
             .unwrap();
         // 应为合法 JPEG
         assert!(image::load_from_memory(&out.bytes).is_ok());
+    }
+
+    #[tokio::test]
+    async fn ordered_multiple_references_reach_multipart_without_collapsing() {
+        let server = ok_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir.path().join("product.png");
+        let desk = dir.path().join("desk.png");
+        std::fs::write(&product, tiny_png()).unwrap();
+        std::fs::write(&desk, tiny_png()).unwrap();
+        let mut input = req(product);
+        input.additional_image_paths.push(desk);
+        provider(&server.uri()).generate(input, None).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert_eq!(body.matches("name=\"image[]\"").count(), 2);
+        assert!(
+            body.find("filename=\"product.png\"").unwrap()
+                < body.find("filename=\"desk.png\"").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_secondary_reference_never_submits_a_partial_request() {
+        let server = ok_server().await;
+        let (_dir, product) = ref_file().await;
+        let mut input = req(product);
+        input
+            .additional_image_paths
+            .push(std::path::PathBuf::from("/missing/desk.png"));
+        assert!(provider(&server.uri()).generate(input, None).await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     // 挂一个恒定成功的 /images/edits mock，返回该 server。
@@ -479,7 +518,7 @@ mod tests {
             .unwrap();
         let reqs = server.received_requests().await.unwrap();
         let body = String::from_utf8_lossy(&reqs[0].body);
-        for f in ["aspect_ratio", "size", "output_format"] {
+        for f in ["aspect_ratio", "size", "output_format", "quality"] {
             assert!(
                 !body.contains(&format!("name=\"{f}\"")),
                 "未设置时请求体不应带 {f}"
@@ -500,6 +539,7 @@ mod tests {
             aspect_ratio: Some("9:16".into()),
             size: Some("1024x1024".into()),
             output_format: Some("png".into()),
+            quality: Some("high".into()),
             ..Default::default()
         };
         provider(&server.uri()).generate(r, None).await.unwrap();
@@ -509,6 +549,7 @@ mod tests {
             ("aspect_ratio", "9:16"),
             ("size", "1024x1024"),
             ("output_format", "png"),
+            ("quality", "high"),
         ] {
             assert!(
                 body.contains(&format!("name=\"{f}\"")),

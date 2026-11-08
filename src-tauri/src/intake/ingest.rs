@@ -18,7 +18,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use super::{JobView, Plan};
-use crate::commands::prompts::{build_preview_from_parsed, commit_preview};
+use crate::commands::prompts::{build_preview_from_parsed, commit_preview_in_tx};
 use crate::commands::refs::ingest_one;
 use crate::db::now_unix;
 use crate::db::repo::intake as repo;
@@ -92,26 +92,63 @@ pub async fn scan(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
     scan_locked(ctx, root).await
 }
 
-/// 重试一份失败/中断的工单。
-///
-/// 查台账、删旧行和重新扫描必须与普通扫描共用**同一段临界区**。否则快速点两次时，
-/// 第二次会删掉第一次扫描刚插入的 `running` 行；第一次收录其实已经建批并移档，最后
-/// 回读台账却只得到 `RowNotFound`，界面便显示一条与事实相反的数据库错误。
-///
-/// 旧行不存在或已经变成 `done` 都按“另一轮已经处理”成功返回，使本操作具备幂等性。
+/// Resume only the unfinished stages of the same ledger row under the shared scan lock.
+/// Stage identities live in SQLite; missing legacy identities are never guessed.
 pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<ScanResult> {
     let _guard = ctx.scan_lock.lock().await;
-    match repo::get_optional(&ctx.pool, row_id).await? {
-        Some(job) if job.status == "done" => return Ok(Vec::new()),
-        Some(_) => {
-            repo::delete(&ctx.pool, row_id).await?;
-        }
-        None => {
-            // 上一次调用可能已删掉台账、却在开始扫描前被中断。继续扫目录既能恢复它，
-            // 若工单已经被处理并移档也只会得到空结果。
-        }
+    let Some(job) = repo::get_optional(&ctx.pool, row_id).await? else {
+        return Ok(Vec::new());
+    };
+    if job.status == "done" {
+        return Ok(Vec::new());
     }
-    scan_locked(ctx, root).await
+    if job.status == "hold" {
+        return scan_locked(ctx, root).await;
+    }
+    let saved = repo::checkpoint(&ctx.pool, &job.job_id).await?;
+    if saved.is_none()
+        && (job.status == "running"
+            || job.group_count > 0
+            || job.ref_count > 0
+            || !job.batch_ids.is_empty())
+    {
+        return Err(AppError::InvalidInput(
+            "这份旧工单没有恢复检查点，无法确认已导入身份；已保留台账，请先核对遗留，不能整单重放"
+                .into(),
+        ));
+    }
+    let dir = super::pending_dir(root).join(&job.dir_name);
+    let plan = super::plan(&dir, &job.dir_name).map_err(AppError::InvalidInput)?;
+    if plan.job_id != job.job_id {
+        let mut checkpoint: Checkpoint = match saved {
+            Some(raw) => serde_json::from_str(&raw)?,
+            None => Checkpoint {
+                unbound_identity: job.job_id == job.dir_name,
+                ..Default::default()
+            },
+        };
+        if !checkpoint.unbound_identity
+            || !checkpoint.fingerprint.is_empty()
+            || !checkpoint.prompt_ids.is_empty()
+            || !checkpoint.refs.is_empty()
+            || job.group_count > 0
+            || job.ref_count > 0
+            || !job.batch_ids.is_empty()
+        {
+            return Err(AppError::InvalidInput("重试不能修改原工单 jobId".into()));
+        }
+        checkpoint.unbound_identity = false;
+        repo::rebind_empty_job(
+            &ctx.pool,
+            row_id,
+            &plan.job_id,
+            &serde_json::to_string(&checkpoint)?,
+        )
+        .await?;
+    }
+    repo::mark_running(&ctx.pool, row_id).await?;
+    let result = run_plan(ctx, root, &plan, row_id).await?;
+    Ok(result.into_iter().collect())
 }
 
 /// 已持有 `scan_lock` 的扫描主体。只允许 [`scan`] 与 [`retry_job`] 调用。
@@ -171,12 +208,45 @@ async fn ingest_dir(
     //
     //    只在**一个回执都没有**时写：已成功但移档失败的（有 结果.txt）、
     //    已记 error / hold 的（有 错误.txt / 待确认.txt）都是稳态，不该被反复打扰。
-    if repo::exists(&ctx.pool, &plan.job_id).await? {
-        if !has_receipt(dir) {
-            write_receipt(dir, super::DUPLICATE_FILE, &duplicate_text(&plan.job_id));
-            tracing::warn!(job_id = %plan.job_id, "工单名与台账重复，未收录");
+    if let Some(mut previous) = repo::get_by_job_id(&ctx.pool, &plan.job_id).await? {
+        // Commit can precede the receipt write or archival by an interruption. Reconcile
+        // the same content from the durable done ledger instead of replaying its batch.
+        if previous.status == "done" && previous.dir_name == dir_name {
+            if let Some(raw) = repo::checkpoint(&ctx.pool, &plan.job_id).await? {
+                let checkpoint: Checkpoint = serde_json::from_str(&raw)?;
+                if super::preflight::check(&plan)
+                    .await
+                    .is_ok_and(|checked| checked.fingerprint == checkpoint.fingerprint)
+                {
+                    write_receipt(
+                        dir,
+                        super::RESULT_FILE,
+                        &result_text(&plan, &checkpoint.applied),
+                    );
+                    if write_json_receipt(dir, &previous) {
+                        move_to_consumed(root, dir, dir_name);
+                    }
+                    return Ok(None);
+                }
+            }
         }
-        return Ok(None);
+        // 文件确认与 UI 确认使用同一个临界区；只解除本目录的 hold，绝不重放 error/run/done。
+        if previous.status == "hold"
+            && previous.dir_name == dir_name
+            && dir.join(super::CONFIRM_FILE).is_file()
+        {
+            repo::delete(&ctx.pool, previous.id).await?;
+        } else {
+            if !has_receipt(dir) {
+                write_receipt(dir, super::DUPLICATE_FILE, &duplicate_text(&plan.job_id));
+                previous.status = "duplicate".into();
+                previous.dir_name = dir_name.to_string();
+                previous.message = duplicate_text(&plan.job_id);
+                write_json_receipt(dir, &previous);
+                tracing::warn!(job_id = %plan.job_id, "工单名与台账重复，未收录");
+            }
+            return Ok(None);
+        }
     }
 
     // 3. 阈值。**确认.txt 是确认的唯一表达**——设置页那个按钮做的事就是替你写下它，
@@ -188,27 +258,55 @@ async fn ingest_dir(
     }
 
     // 4. 记账在动手之前。
-    let row_id = repo::insert_running(&ctx.pool, &plan.job_id, &plan.dir_name).await?;
+    let row_id = start_job(ctx, &plan.job_id, &plan.dir_name).await?;
+    write_json_receipt(dir, &repo::get(&ctx.pool, row_id).await?);
 
+    run_plan(ctx, root, &plan, row_id).await
+}
+
+async fn run_plan(ctx: &Ctx, root: &Path, plan: &Plan, row_id: i64) -> AppResult<Option<JobView>> {
     // 5. 干活。进度直接写进 `done`，失败时它就是「做到哪了」的如实交代。
     let mut done = Applied::default();
-    match apply(ctx, &plan, &mut done).await {
+    match apply(ctx, plan, row_id, &mut done).await {
         Ok(()) => {
-            repo::mark_done(&ctx.pool, row_id, &done).await?;
-            write_receipt(&plan.dir, super::RESULT_FILE, &result_text(&plan, &done));
+            write_receipt(&plan.dir, super::RESULT_FILE, &result_text(plan, &done));
+            let view = repo::get(&ctx.pool, row_id).await?;
+            let receipt_written = write_json_receipt(&plan.dir, &view);
             // 移档留证（同 v0.9.0 / v2v）：成功的工单从收件目录消失，人一眼看得出还剩什么。
             // 移不动就留着——DB 那行已经挡住重投了，最坏只是目录里多一份留档。
-            move_to_consumed(root, &plan.dir, &plan.dir_name);
+            if receipt_written {
+                move_to_consumed(root, &plan.dir, &plan.dir_name);
+            }
             ctx.engine.kick();
-            Ok(Some(repo::get(&ctx.pool, row_id).await?))
+            Ok(Some(view))
         }
         Err(e) => {
             let msg = e.to_string();
             repo::mark_error(&ctx.pool, row_id, &msg, &done).await?;
             write_receipt(&plan.dir, super::ERROR_FILE, &error_text(&msg, &done));
-            Ok(Some(repo::get(&ctx.pool, row_id).await?))
+            let view = repo::get(&ctx.pool, row_id).await?;
+            write_json_receipt(&plan.dir, &view);
+            Ok(Some(view))
         }
     }
+}
+
+// New jobs always acquire an empty recovery identity in the same transaction as their ledger.
+async fn start_job(ctx: &Ctx, job_id: &str, dir_name: &str) -> AppResult<i64> {
+    start_job_with_state(ctx, job_id, dir_name, &Checkpoint::default()).await
+}
+
+async fn start_job_with_state(
+    ctx: &Ctx,
+    job_id: &str,
+    dir_name: &str,
+    state: &Checkpoint,
+) -> AppResult<i64> {
+    let mut tx = ctx.pool.begin().await?;
+    let id = repo::insert_running(&mut *tx, job_id, dir_name).await?;
+    repo::save_checkpoint(&mut tx, job_id, &serde_json::to_string(state)?).await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// 校验阶段就失败的工单：记一行 error（同样占住去重键，不会每轮重报）+ 写 错误.txt。
@@ -219,15 +317,37 @@ async fn record_failure(
     job_id: &str,
     msg: String,
 ) -> AppResult<Option<JobView>> {
+    // Parameter/body validation can fail even when the envelope already contains a valid
+    // explicit jobId. Retain it instead of substituting the directory name.
+    let explicit = std::fs::read_to_string(dir.join(super::ORDER))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("jobId")
+                .or_else(|| value.get("job_id"))
+                .or_else(|| value.get("id"))
+                .and_then(|id| id.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        });
+    let job_id = explicit.as_deref().unwrap_or(job_id);
     if repo::exists(&ctx.pool, job_id).await? {
         return Ok(None);
     }
-    let row_id = repo::insert_running(&ctx.pool, job_id, dir_name).await?;
+    let state = Checkpoint {
+        unbound_identity: explicit.is_none(),
+        ..Default::default()
+    };
+    let row_id = start_job_with_state(ctx, job_id, dir_name, &state).await?;
     // 校验阶段就失败 —— 库里确实一个字节都没变，这里的「没有导入任何东西」是真话。
     let nothing = Applied::default();
     repo::mark_error(&ctx.pool, row_id, &msg, &nothing).await?;
     write_receipt(dir, super::ERROR_FILE, &error_text(&msg, &nothing));
-    Ok(Some(repo::get(&ctx.pool, row_id).await?))
+    let view = repo::get(&ctx.pool, row_id).await?;
+    write_json_receipt(dir, &view);
+    Ok(Some(view))
 }
 
 /// 超阈值：**什么都不导入**，记一行 hold + 写 待确认.txt。
@@ -238,18 +358,20 @@ async fn record_hold(
     threshold: i64,
 ) -> AppResult<Option<JobView>> {
     let msg = format!("共 {total} 张图（{total} 个条目），超过阈值 {threshold}，等待确认");
-    let row_id = repo::insert_running(&ctx.pool, &plan.job_id, &plan.dir_name).await?;
+    let row_id = start_job(ctx, &plan.job_id, &plan.dir_name).await?;
     repo::mark_hold(&ctx.pool, row_id, &msg, total, total).await?;
     write_receipt(
         &plan.dir,
         super::HOLD_FILE,
         &hold_text(plan, total, threshold),
     );
-    Ok(Some(repo::get(&ctx.pool, row_id).await?))
+    let view = repo::get(&ctx.pool, row_id).await?;
+    write_json_receipt(&plan.dir, &view);
+    Ok(Some(view))
 }
 
 /// 一次收录的产出（写台账用）。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Applied {
     pub batch_ids: Vec<i64>,
     pub params_json: Vec<String>,
@@ -259,13 +381,82 @@ pub struct Applied {
     pub ref_count: i64,
 }
 
-/// 导入提示词 → 导入参考图 → 按参数分桶建批开跑。
-///
-/// **进度写进 `out` 而不是只在成功时返回**：这一串动作里没有一步是能整体回滚的
-/// （参考图要拷文件建缩略图，建批要发编号，第一个批次建完就已经在跑了）。中途失败时
-/// 「已经导入了多少」必须留下痕迹，否则台账那行只剩一句错误原文，而回执还在说
-/// 「没有导入任何东西」—— 人照着那句话重投，就会得到第二份提示词和第二个批次。
-async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    #[serde(default)]
+    unbound_identity: bool,
+    fingerprint: String,
+    prompt_ids: Vec<i64>,
+    group_ids: Vec<i64>,
+    refs: Vec<(PathBuf, i64)>,
+    applied: Applied,
+}
+
+impl Checkpoint {
+    async fn save(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        plan: &Plan,
+        row_id: i64,
+        finished: bool,
+    ) -> AppResult<()> {
+        repo::save_checkpoint(&mut *conn, &plan.job_id, &serde_json::to_string(self)?).await?;
+        repo::mark_done(&mut *conn, row_id, &self.applied).await?;
+        if !finished {
+            repo::mark_running(&mut *conn, row_id).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Each imported stage and its identity checkpoint commit together. The final batch,
+/// tasks and done receipt commit together, so a process interruption cannot replay a batch.
+async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppResult<()> {
+    let saved = repo::checkpoint(&ctx.pool, &plan.job_id).await?;
+    let mut checkpoint: Checkpoint = match saved {
+        Some(raw) => serde_json::from_str(&raw)?,
+        None => Checkpoint::default(),
+    };
+    *out = checkpoint.applied.clone();
+    let checked = super::preflight::check(plan).await?;
+    if !checkpoint.fingerprint.is_empty()
+        && checkpoint.fingerprint != checked.fingerprint
+        && (!checkpoint.prompt_ids.is_empty() || !checkpoint.refs.is_empty())
+    {
+        return Err(AppError::InvalidInput("工单内容或参考图已改变，不能复用已导入检查点；请还原原内容后重试，或先核对原工单再另行授权新单".into()));
+    }
+    if checkpoint.prompt_ids.is_empty()
+        && ctx.threshold > 0
+        && plan.task_count() > ctx.threshold
+        && !plan.dir.join(super::CONFIRM_FILE).is_file()
+    {
+        return Err(AppError::InvalidInput(
+            "修订工单超过当前阈值，请先明确确认再重试".into(),
+        ));
+    }
+    checkpoint.fingerprint = checked.fingerprint;
+    checkpoint.unbound_identity = false;
+    if checkpoint
+        .refs
+        .iter()
+        .any(|(path, _)| !plan.distinct_refs().contains(path))
+    {
+        return Err(AppError::InvalidInput(
+            "参考图路径与已导入检查点不一致，请还原原工单路径".into(),
+        ));
+    }
+    if !checkpoint.applied.batch_ids.is_empty() {
+        // A committed batch is terminal even if an old UI/receipt still reports an error.
+        let mut tx = ctx.pool.begin().await?;
+        checkpoint.save(&mut tx, plan, row_id, true).await?;
+        tx.commit().await?;
+        *out = checkpoint.applied;
+        return Ok(());
+    }
+    let mut tx = ctx.pool.begin().await?;
+    checkpoint.save(&mut tx, plan, row_id, false).await?;
+    tx.commit().await?;
+
     // ── 提示词：一单一组，一条条目 = 一条提示词。走的是手动导入那条落库路径
     //    （`build_preview_from_parsed` → `commit_preview`），故前缀分配、号池、
     //    用途校验三处口径与手工导入完全一致 —— 铁律「写路径只有一条」。
@@ -305,16 +496,37 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
         };
         g.purpose_inferred = false;
     }
-    let result = commit_preview(&ctx.pool, &preview, "library").await?;
-    out.group_count = result.prompt_ids.len() as i64;
-    if result.prompt_ids.len() != plan.items.len() || result.group_ids.len() != 1 {
-        // 理论上不会发生（空正文已在校验里排除）；真发生了宁可整单失败也不要错配挂靠——
-        // 配错的后果是整批图配错提示词，而那要到验收时才看得出来。
-        return Err(AppError::Internal(
-            "提示词落库数与工单条目数不一致，已中止（未建批次）".into(),
+    if checkpoint.prompt_ids.is_empty() {
+        let mut tx = ctx.pool.begin().await?;
+        let result = commit_preview_in_tx(&mut tx, &preview, "library").await?;
+        if result.prompt_ids.len() != plan.items.len() || result.group_ids.len() != 1 {
+            return Err(AppError::Internal(
+                "提示词落库数与工单条目数不一致，已回滚".into(),
+            ));
+        }
+        checkpoint.prompt_ids = result.prompt_ids;
+        checkpoint.group_ids = result.group_ids;
+        checkpoint.applied.group_count = checkpoint.prompt_ids.len() as i64;
+        checkpoint.save(&mut tx, plan, row_id, false).await?;
+        tx.commit().await?;
+        *out = checkpoint.applied.clone();
+    }
+    if checkpoint.prompt_ids.len() != plan.items.len() || checkpoint.group_ids.len() != 1 {
+        return Err(AppError::InvalidInput(
+            "提示词恢复检查点不完整，已停止重试".into(),
         ));
     }
-    let group_id = result.group_ids[0];
+    for id in &checkpoint.prompt_ids {
+        if !crate::db::repo::prompts::get(&ctx.pool, *id)
+            .await?
+            .is_some_and(|prompt| prompt.status == "active")
+        {
+            return Err(AppError::InvalidInput(
+                "已导入提示词被删除，不能自动重新导入".into(),
+            ));
+        }
+    }
+    let group_id = checkpoint.group_ids[0];
 
     // ── 参考图：可选的图库分组（重名复用，不报错）。
     let ref_group_id = match &plan.ref_group {
@@ -327,35 +539,38 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
         None => None,
     };
     ctx.dirs.init()?;
-    let refs_dir = ctx.dirs.refs();
-    let thumbs_dir = ctx.dirs.thumbs();
-
-    // ── 参考图落盘。**按去重后的清单**：多个条目共用一张原图是常态（正面/侧面
-    //    各写一条词却挂同一张），逐条入库会得到几份内容相同的行，而落盘与缩略图
-    //    还各花一遍 CPU。
-    //
-    //    分块并行落盘，块内并发、块间串行、**插库严格按原顺序**。
-    //
-    //    为什么不干脆「全部解完再全部插库」：失败回执是承重的（谎称「没有导入任何
-    //    东西」会让人点重试拿到第二份提示词），两段式会在解码阶段失败时留下一整批
-    //    谁也不知道存在的孤儿文件，而台账上 ref_count 还是 0。分块把孤儿窗口压到
-    //    一个块以内，且 ref_count 是可见地往前走的。
     let wanted = plan.distinct_refs();
     let total_refs = wanted.len() as i64;
-    let mut ref_ids: Vec<(PathBuf, i64)> = Vec::with_capacity(wanted.len());
-    for chunk in wanted.chunks(crate::files::decode::max_concurrent()) {
-        let jobs = chunk.iter().map(|path| {
-            let p = path.to_string_lossy().to_string();
-            let (rd, td) = (refs_dir.clone(), thumbs_dir.clone());
-            // 解码 + 缩放 + 重编码是纯 CPU，留在异步执行器上会把整个 IPC 卡住
-            // （v0.14.0）；`bounded` 同时把它纳入进程级解码预算。
-            crate::files::decode::bounded(move |permit| ingest_one(&p, &rd, &td, permit))
+    for (path, id) in &checkpoint.refs {
+        let existing = refs_repo::get(&ctx.pool, *id).await?;
+        if !existing.is_some_and(|r| r.deleted_at.is_none() && Path::new(&r.file_path).is_file()) {
+            return Err(AppError::InvalidInput(format!(
+                "已导入参考图被删除或缺失：{}，不能自动重新导入",
+                path.display()
+            )));
+        }
+    }
+    let pending: Vec<_> = wanted
+        .iter()
+        .filter(|path| !checkpoint.refs.iter().any(|(source, _)| source == *path))
+        .collect();
+    for chunk in pending.chunks(crate::files::decode::max_concurrent()) {
+        let prepared = chunk.iter().map(|path| {
+            let expected = checked
+                .references
+                .iter()
+                .find(|r| &r.source == *path)
+                .map(|r| r.content_hash.as_str());
+            prepare_reference(ctx, &plan.job_id, path, expected)
         });
-        // `join_all` 按输入顺序返回，故这里天然保序。
-        for (path, ing) in chunk.iter().zip(futures_util::future::join_all(jobs).await) {
+        for (path, ing) in chunk
+            .iter()
+            .zip(futures_util::future::join_all(prepared).await)
+        {
             let ing = ing?;
+            let mut tx = ctx.pool.begin().await?;
             let id = refs_repo::insert(
-                &ctx.pool,
+                &mut *tx,
                 &refs_repo::NewRefImage {
                     name: ing.name,
                     ref_group_id,
@@ -370,27 +585,46 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
                 },
             )
             .await?;
-            out.ref_count += 1;
+            checkpoint.refs.push(((*path).clone(), id));
+            checkpoint.applied.ref_count = checkpoint.refs.len() as i64;
+            checkpoint.save(&mut tx, plan, row_id, false).await?;
+            tx.commit().await?;
+            *out = checkpoint.applied.clone();
             ctx.progress.refs(&plan.job_id, out.ref_count, total_refs);
-            ref_ids.push((path.clone(), id));
         }
     }
+    let ref_ids = &checkpoint.refs;
 
     // ── 配对：items[i] 的参考图 ↔ prompt_ids[i]。两个清单同序是上面那句
     //    「落库数不一致就整单失败」在守着的东西。
     let mut specs = Vec::with_capacity(plan.items.len());
-    for (it, prompt_id) in plan.items.iter().zip(result.prompt_ids.iter().copied()) {
-        let ref_image_id = ref_ids
+    for (it, prompt_id) in plan.items.iter().zip(checkpoint.prompt_ids.iter().copied()) {
+        let ids: Vec<i64> = it
+            .ref_paths
             .iter()
-            .find(|(p, _)| p == &it.ref_path)
-            .map(|(_, id)| *id)
-            .ok_or_else(|| AppError::Internal(format!("条目「{}」的参考图没能入库", it.name)))?;
+            .map(|path| {
+                ref_ids
+                    .iter()
+                    .find(|(p, _)| p == path)
+                    .map(|(_, id)| *id)
+                    .ok_or_else(|| {
+                        AppError::Internal(format!("条目「{}」的参考图没能入库", it.name))
+                    })
+            })
+            .collect::<AppResult<_>>()?;
+        let ref_image_id = ids[0];
+        let mut params_json = it.params_json.clone();
+        if ids.len() > 1 {
+            let mut params: serde_json::Value = serde_json::from_str(&params_json)?;
+            params["referenceImageIds"] = serde_json::json!(ids);
+            params_json = params.to_string();
+        }
         specs.push(engine::TaskSpec {
             ref_image_id,
             prompt_id,
             prompt_group_id: group_id,
             prompt_text: it.prompt_text.clone(),
-            params_json: it.params_json.clone(),
+            params_json,
         });
     }
 
@@ -399,21 +633,60 @@ async fn apply(ctx: &Ctx, plan: &Plan, out: &mut Applied) -> AppResult<()> {
     // 批次级 params_json 留空：这一单的参数在任务行上，批次级那份只是生成页手动建批
     // 的兜底。写一个「代表性的」进去反而骗人 —— 一单里可能有三种画幅。
     let output_dir = ctx.dirs.outputs().to_string_lossy().to_string();
+    let mut tx = ctx.pool.begin().await?;
     let (batch_id, task_count) =
-        engine::create_batch_from_specs(&ctx.pool, &output_dir, "{}", &specs).await?;
-    // 批次名 = 投单名。批次退到幕后之后，验收页的分节标题读的就是它 —— 让人看见
-    // 「哪一次投单」，而不是一个对人不表达任何东西的内部自增 id。
-    // 备注失败不该让一个已经跑起来的批次算作「工单失败」。
-    let _ = task_repo::rename_batch(&ctx.pool, batch_id, &plan.note).await;
-    out.batch_ids.push(batch_id);
-    // params_json / wire_json 此后是「这一单用过的几套参数」，**不再与 batch_ids 同序**
-    // （0023 的表注释写于按参数拆批的年代）。batch_ids 现在恒为一个元素。
+        engine::create_batch_from_specs_in_tx(&mut tx, &output_dir, "{}", &specs).await?;
+    task_repo::rename_batch(&mut *tx, batch_id, &plan.note).await?;
+    checkpoint.applied.batch_ids = vec![batch_id];
     for (params, wire) in plan.param_sets() {
-        out.params_json.push(params);
-        out.wire_json.push(wire);
+        checkpoint.applied.params_json.push(params);
+        checkpoint.applied.wire_json.push(wire);
     }
-    out.task_count += task_count;
+    checkpoint.applied.task_count = task_count;
+    checkpoint.save(&mut tx, plan, row_id, true).await?;
+    tx.commit().await?;
+    *out = checkpoint.applied;
     Ok(())
+}
+
+async fn prepare_reference(
+    ctx: &Ctx,
+    job_id: &str,
+    path: &Path,
+    expected_hash: Option<&str>,
+) -> AppResult<crate::commands::refs::Ingested> {
+    let expected_hash = expected_hash.ok_or_else(|| AppError::Internal("参考图预检缺失".into()))?;
+    let job_hash = crate::files::content_hash_bytes(job_id.as_bytes());
+    let source_hash = crate::files::content_hash_bytes(path.to_string_lossy().as_bytes());
+    // A committed reference is skipped above. Only this uncommitted reference owns these
+    // private paths; restart may remove its orphan files before materializing it again.
+    let rd = ctx
+        .dirs
+        .refs()
+        .join("intake")
+        .join(&job_hash)
+        .join(&source_hash);
+    let td = ctx
+        .dirs
+        .thumbs()
+        .join("intake")
+        .join(&job_hash)
+        .join(&source_hash);
+    for dir in [&rd, &td] {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+        std::fs::create_dir_all(dir)?;
+    }
+    let source = path.to_string_lossy().to_string();
+    let ing =
+        crate::files::decode::bounded(move |permit| ingest_one(&source, &rd, &td, permit)).await?;
+    if ing.content_hash.as_deref() != Some(expected_hash) {
+        return Err(AppError::InvalidInput(
+            "参考图在预检后发生变化，未导入本张".into(),
+        ));
+    }
+    Ok(ing)
 }
 
 /// 成功后移档到 `_已收录/<目录名>-<ts>`。失败只记日志：DB 那行已经挡住重投了。
@@ -435,6 +708,15 @@ fn write_receipt(dir: &Path, name: &str, body: &str) {
     if let Err(e) = std::fs::write(dir.join(name), body) {
         tracing::warn!(error = %e, file = %name, "写工单回执失败");
     }
+}
+
+fn write_json_receipt(dir: &Path, job: &JobView) -> bool {
+    let receipt = serde_json::json!({ "version": 1, "job": job });
+    if let Err(e) = super::write_json(&dir.join(super::RECEIPT_FILE), &receipt) {
+        tracing::warn!(error = %e, "写 JSON 工单回执失败");
+        return false;
+    }
+    true
 }
 
 /// 这份工单是否已经有过交代。用来区分「稳态的重复扫描」与「静默吞掉的重名工单」。
@@ -506,30 +788,13 @@ fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
 /// 第一个批次建完那一刻就已经在花钱跑了。原来这里无条件写「没有导入任何东西」，
 /// 而人照着它去点「重试」，得到的是第二份提示词和第二个批次 —— 花两份钱。
 fn error_text(msg: &str, done: &Applied) -> String {
-    let mut s = format!("GenDesk 收录这份工单时失败了：\n\n{msg}\n\n");
-    if done.group_count == 0 && done.ref_count == 0 && done.batch_ids.is_empty() {
-        s.push_str("库里**没有导入任何东西**，改好之后直接重投即可。\n\n");
-    } else {
-        s.push_str(&format!(
-            "但**已经导入了一部分**，重投前必须先处理它们，否则会得到第二份：\n\
-             · 提示词：{} 条\n· 参考图：{} 张\n",
-            done.group_count, done.ref_count
-        ));
-        if done.batch_ids.is_empty() {
-            s.push_str("· 批次：未建（这一单还没开始花钱）\n\n");
-        } else {
-            s.push_str(&format!(
-                "· 批次：{}（**已经在跑，正在花钱**）—— 不想要就去任务页中止并删除\n\n",
-                done.batch_ids
-                    .iter()
-                    .map(|b| format!("#{b}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ));
-        }
-    }
-    s.push_str("处理完之后，在 GenDesk 设置页「Claude Code 收件」里点「重试」。\n");
-    s
+    format!(
+        "GenDesk 收录失败：\n\n{msg}\n\n已记录的导入进度：提示词 {} 条，参考图 {} 张，任务 {} 个，批次 {:?}。\n\n\
+         新工单保留了导入身份检查点：在设置页对原工单点“重试”只补未完成步骤，不能换 ID 整单重投。\n\
+         已有导入后不得修改原正文、归属、参数或参考图；内容冲突时会停止恢复。\n\
+         没有检查点的历史部分导入或中断工单不会盲目重放，请保留回执核对遗留。\n",
+        done.group_count, done.ref_count, done.task_count, done.batch_ids
+    )
 }
 
 #[cfg(test)]
@@ -643,6 +908,245 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ordered_reference_pair_is_persisted_with_one_task_and_both_batch_refs() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 100);
+        let dir = make_job(home.path(), "two-references", "", &simple("日历场景"));
+        std::fs::write(dir.join("refs/desk.png"), png()).unwrap();
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("工单.json")).unwrap()).unwrap();
+        spec["items"][0].as_object_mut().unwrap().remove("ref");
+        spec["items"][0]["refs"] = serde_json::json!(["refs/a.png", "refs/desk.png"]);
+        std::fs::write(dir.join("工单.json"), spec.to_string()).unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
+        assert_eq!(jobs[0].task_count, 1);
+        assert_eq!(jobs[0].ref_count, 2);
+        assert_eq!(count(&pool, "batch_refs").await, 2);
+        let (primary, raw): (i64, String) =
+            sqlx::query_as("SELECT ref_image_id, params_json FROM tasks")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let refs: Vec<i64> = sqlx::query_scalar("SELECT id FROM ref_images ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(engine::reference_ids(&raw, primary).unwrap(), refs);
+    }
+
+    #[tokio::test]
+    async fn missing_or_ambiguous_secondary_reference_rejects_before_any_import() {
+        for extra in [
+            serde_json::json!(["refs/a.png", "refs/missing.png"]),
+            serde_json::json!(["refs/a.png", "refs/a.png"]),
+        ] {
+            let (pool, _d) = test_pool().await;
+            let home = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let (ctx, _) = ctx_for(&pool, data.path(), 100);
+            let dir = make_job(home.path(), "bad-pair", "", &simple("日历场景"));
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.join("工单.json")).unwrap()).unwrap();
+            spec["items"][0].as_object_mut().unwrap().remove("ref");
+            spec["items"][0]["refs"] = extra;
+            std::fs::write(dir.join("工单.json"), spec.to_string()).unwrap();
+            let jobs = scan(&ctx, home.path()).await.unwrap();
+            assert_eq!(jobs[0].status, "error");
+            assert_eq!(count(&pool, "tasks").await, 0);
+            assert_eq!(count(&pool, "prompts").await, 0);
+            assert_eq!(count(&pool, "ref_images").await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_manifest_to_real_rust_import_and_cli_receipt() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        std::fs::write(home.path().join("商品实拍.png"), png()).unwrap();
+        std::fs::write(
+            home.path().join("场景正文.txt"),
+            "比例：3:4 的竖构图\n保留商品外观",
+        )
+        .unwrap();
+        let manifest = home.path().join("场景任务.json");
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "defaults": { "ratio": "3:4", "format": "jpg" },
+                "items": [
+                    {"name":"桌面正面", "sku":"55", "style":"台历桌面",
+                     "promptFile":"场景正文.txt", "ref":"商品实拍.png"},
+                    {"name":"桌面侧面", "sku":"55", "style":"台历桌面",
+                     "promptFile":"场景正文.txt", "ref":"商品实拍.png", "ratio":"9:16"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cli = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/gendesk.mjs");
+        let discovery = home.path().join("GenDesk交接");
+        std::fs::create_dir_all(&discovery).unwrap();
+        std::fs::write(
+            discovery.join("连接.json"),
+            serde_json::json!({
+                "version": 1, "root": home.path(), "enabled": true,
+                "features": ["ordered-references", "generation-quality", "intake-preflight", "resumable-intake"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .env("HOME", home.path())
+            // cargo test also builds the actual app binary for tests/intake_preflight.rs.
+            .env(
+                "GENDESK_APP_BIN",
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("gendesk{}", std::env::consts::EXE_SUFFIX)),
+            )
+            .arg(&cli)
+            .args(["submit", "--manifest"])
+            .arg(manifest)
+            .arg("--root")
+            .arg(home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let submitted: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let job_id = submitted["jobId"].as_str().unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
+        assert_eq!(jobs[0].task_count, 2);
+        assert_eq!(jobs[0].ref_count, 1);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1);
+        assert_eq!(count(&pool, "tasks").await, 2);
+        assert!(jobs[0].wire_json[0].contains("1536x2048"));
+        assert!(jobs[0].wire_json[1].contains("1152x2048"));
+        assert!(jobs[0].wire_json.iter().all(|s| s.contains("jpeg")));
+        assert!(jobs[0]
+            .wire_json
+            .iter()
+            .all(|s| s.contains("\"quality\":\"high\"")));
+
+        let status = std::process::Command::new("node")
+            .arg(cli)
+            .args(["status", job_id, "--root"])
+            .arg(home.path())
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let receipt: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(receipt["status"], "ingested");
+        assert_eq!(receipt["receipt"]["batchIds"][0], jobs[0].batch_ids[0]);
+        assert_eq!(receipt["receipt"]["taskCount"], 2);
+    }
+
+    #[tokio::test]
+    async fn external_confirmation_without_db_access_runs_once_and_exports_json() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 1);
+        let dir = make_job(
+            home.path(),
+            "external-confirm",
+            "",
+            &[
+                ("桌面正面", "正文一", "a.png", ""),
+                ("桌面侧面", "正文二", "a.png", ""),
+            ],
+        );
+        let held = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(held[0].status, "hold");
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(super::super::RECEIPT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["version"], 1);
+        assert_eq!(receipt["job"]["status"], "hold");
+        assert_eq!(count(&pool, "tasks").await, 0);
+
+        // 外部 harness 只写文件，不能像 UI 命令那样删除台账行。
+        std::fs::write(dir.join(super::super::CONFIRM_FILE), "confirmed").unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, "done");
+        assert_eq!(jobs[0].task_count, 2);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1);
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert_eq!(count(&pool, "tasks").await, 2);
+        let archived = std::fs::read_dir(super::super::consumed_dir(home.path()))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(archived.join(super::super::RECEIPT_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["job"]["status"], "done");
+        assert_eq!(receipt["job"]["taskCount"], 2);
+        assert_eq!(receipt["job"]["batchIds"][0], jobs[0].batch_ids[0]);
+        assert!(!archived.join("回执.json.pending").exists());
+    }
+
+    #[tokio::test]
+    async fn confirmation_file_never_replays_an_error_or_another_directory() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 500);
+        let dir = make_job(home.path(), "external-error", "", &simple("桌面正面"));
+        let id = repo::insert_running(&pool, "external-error", "external-error")
+            .await
+            .unwrap();
+        repo::mark_error(&pool, id, "部分导入失败", &Applied::default())
+            .await
+            .unwrap();
+        std::fs::write(dir.join(super::super::CONFIRM_FILE), "confirmed").unwrap();
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+        assert_eq!(count(&pool, "tasks").await, 0);
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(super::super::RECEIPT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["job"]["status"], "duplicate");
+        assert_eq!(repo::get(&pool, id).await.unwrap().status, "error");
+
+        let other = make_job(
+            home.path(),
+            "another-directory",
+            r#", "jobId":"held-elsewhere""#,
+            &simple("桌面远景"),
+        );
+        let held = repo::insert_running(&pool, "held-elsewhere", "original-directory")
+            .await
+            .unwrap();
+        repo::mark_hold(&pool, held, "等待确认", 1, 1)
+            .await
+            .unwrap();
+        std::fs::write(other.join(super::super::CONFIRM_FILE), "confirmed").unwrap();
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert_eq!(repo::get(&pool, held).await.unwrap().status, "hold");
+        assert_eq!(count(&pool, "tasks").await, 0);
     }
 
     // 端到端：工单落地 → 提示词进库、参考图进库、批次建成、任务展开、调度器被唤醒。
@@ -852,6 +1356,17 @@ mod tests {
         let old_id = repo::insert_running(&pool, "job-retry", "job-retry")
             .await
             .unwrap();
+        // New interrupted jobs own a durable checkpoint. Legacy running rows without one
+        // cannot prove zero imports and are deliberately covered by the legacy refusal test.
+        let mut tx = pool.begin().await.unwrap();
+        repo::save_checkpoint(
+            &mut tx,
+            "job-retry",
+            &serde_json::to_string(&Checkpoint::default()).unwrap(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
 
         let (c1, c2) = (ctx.clone(), ctx.clone());
         let (h1, h2) = (home.path().to_path_buf(), home.path().to_path_buf());
@@ -1254,5 +1769,256 @@ mod tests {
         assert_eq!(jobs[0].status, "error");
         assert!(jobs[0].message.contains("旧格式"), "{}", jobs[0].message);
         assert!(dir.join(super::super::ERROR_FILE).is_file(), "要留下回执");
+    }
+
+    #[tokio::test]
+    async fn corrupt_reference_is_rejected_before_import_and_can_be_fixed_without_changing_job_id()
+    {
+        let (pool, _db) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        let dir = make_job(home.path(), "bad-image", "", &simple("正文样本"));
+        std::fs::write(dir.join("refs/a.png"), b"broken image").unwrap();
+        let failed = scan(&ctx, home.path()).await.unwrap().remove(0);
+        assert_eq!(failed.status, "error");
+        assert!(failed.message.contains("解码失败"));
+        for table in ["prompts", "ref_images", "tasks", "batches"] {
+            assert_eq!(count(&pool, table).await, 0);
+        }
+        std::fs::write(dir.join("refs/a.png"), png()).unwrap();
+        let resumed = retry_job(&ctx, home.path(), failed.id)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(resumed.id, failed.id);
+        assert_eq!(resumed.status, "done", "{}", resumed.message);
+        assert_eq!(count(&pool, "prompts").await, 1);
+        assert_eq!(count(&pool, "ref_images").await, 1);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn partial_import_resumes_same_prompt_and_reference_ids_after_restart_and_concurrent_retry(
+    ) {
+        let (pool, _db) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        let dir = make_job(
+            home.path(),
+            "partial-resume",
+            "",
+            &[
+                ("第一场景", "第一正文", "a.png", ""),
+                ("第二场景", "第二正文", "b.png", ""),
+            ],
+        );
+        sqlx::query("CREATE TRIGGER fail_second_reference BEFORE INSERT ON ref_images WHEN NEW.name='b' BEGIN SELECT RAISE(FAIL, 'injected reference failure'); END")
+            .execute(&pool).await.unwrap();
+        let failed = scan(&ctx, home.path()).await.unwrap().remove(0);
+        assert_eq!(failed.status, "error");
+        assert_eq!(failed.group_count, 2);
+        assert_eq!(failed.ref_count, 1);
+        assert_eq!(count(&pool, "batches").await, 0);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+        let prompts: Vec<i64> = sqlx::query_scalar("SELECT id FROM prompts ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let reference: i64 = sqlx::query_scalar("SELECT id FROM ref_images")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Changing content after a committed stage must preserve the original imported rows.
+        std::fs::write(dir.join("prompts/第一场景.txt"), "被修改正文").unwrap();
+        let refused = retry_job(&ctx, home.path(), failed.id)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(refused.status, "error");
+        assert!(refused.message.contains("已改变"));
+        assert_eq!(count(&pool, "prompts").await, 2);
+        assert_eq!(count(&pool, "ref_images").await, 1);
+        std::fs::write(dir.join("prompts/第一场景.txt"), "第一正文").unwrap();
+        sqlx::query("DROP TRIGGER fail_second_reference")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Reconstruct the context: only the persisted database checkpoint survives.
+        let (resumed_ctx, resumed_kick) = ctx_for(&pool, data.path(), 100);
+        repo::mark_running(&pool, failed.id).await.unwrap();
+        let (a, b) = tokio::join!(
+            retry_job(&resumed_ctx, home.path(), failed.id),
+            retry_job(&resumed_ctx, home.path(), failed.id)
+        );
+        let jobs: Vec<_> = a.unwrap().into_iter().chain(b.unwrap()).collect();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, failed.id);
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
+        assert_eq!(count(&pool, "prompts").await, 2);
+        assert_eq!(count(&pool, "ref_images").await, 2);
+        assert_eq!(count(&pool, "tasks").await, 2);
+        assert_eq!(count(&pool, "batches").await, 1);
+        let after: Vec<i64> = sqlx::query_scalar("SELECT id FROM prompts ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, prompts);
+        let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ref_images WHERE id=?")
+            .bind(reference)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retained, 1);
+        assert_eq!(resumed_kick.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_rolls_back_imported_rows_and_final_receipt_failure_rolls_back_batch(
+    ) {
+        for stage in ["prompts", "refs", "batch"] {
+            let (pool, _db) = test_pool().await;
+            let home = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+            make_job(home.path(), "atomic-stage", "", &simple("场景样本"));
+            let trigger = match stage {
+                "prompts" => "CREATE TRIGGER fail_stage BEFORE UPDATE ON intake_checkpoints WHEN json_array_length(json_extract(NEW.state_json,'$.prompt_ids'))>0 BEGIN SELECT RAISE(FAIL,'checkpoint failure'); END",
+                "refs" => "CREATE TRIGGER fail_stage BEFORE UPDATE ON intake_checkpoints WHEN json_array_length(json_extract(NEW.state_json,'$.refs'))>0 BEGIN SELECT RAISE(FAIL,'checkpoint failure'); END",
+                _ => "CREATE TRIGGER fail_stage BEFORE UPDATE ON intake_jobs WHEN NEW.task_count>0 BEGIN SELECT RAISE(FAIL,'receipt failure'); END",
+            };
+            sqlx::query(trigger).execute(&pool).await.unwrap();
+            let failed = scan(&ctx, home.path()).await.unwrap().remove(0);
+            assert_eq!(failed.status, "error", "{stage}");
+            assert_eq!(count(&pool, "batches").await, 0, "{stage}");
+            assert_eq!(count(&pool, "tasks").await, 0, "{stage}");
+            assert_eq!(
+                count(&pool, "prompts").await,
+                if stage == "prompts" { 0 } else { 1 }
+            );
+            assert_eq!(
+                count(&pool, "ref_images").await,
+                if stage == "batch" { 1 } else { 0 }
+            );
+            assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+            sqlx::query("DROP TRIGGER fail_stage")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let jobs = retry_job(&ctx, home.path(), failed.id).await.unwrap();
+            assert_eq!(jobs[0].status, "done", "{stage}: {}", jobs[0].message);
+            for table in ["prompts", "ref_images", "tasks", "batches"] {
+                assert_eq!(count(&pool, table).await, 1, "{stage}: {table}");
+            }
+            assert_eq!(kick.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_partial_or_ambiguous_running_jobs_are_not_replayed() {
+        let (pool, _db) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        make_job(home.path(), "legacy-partial", "", &simple("旧场景"));
+        let id = repo::insert_running(&pool, "legacy-partial", "legacy-partial")
+            .await
+            .unwrap();
+        assert!(retry_job(&ctx, home.path(), id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("没有恢复检查点"));
+        repo::mark_error(
+            &pool,
+            id,
+            "old partial failure",
+            &Applied {
+                group_count: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(retry_job(&ctx, home.path(), id).await.is_err());
+        assert_eq!(count(&pool, "intake_jobs").await, 1);
+        assert_eq!(count(&pool, "prompts").await, 0);
+        assert_eq!(count(&pool, "tasks").await, 0);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn validation_failure_preserves_explicit_identity_and_repaired_json_can_bind_an_empty_job(
+    ) {
+        for broken_json in [false, true] {
+            let (pool, _db) = test_pool().await;
+            let home = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let (ctx, _) = ctx_for(&pool, data.path(), 100);
+            let dir = make_job(
+                home.path(),
+                "package-directory",
+                ",\"jobId\":\"stable-job\",\"defaults\":{\"ratio\":\"bad\"}",
+                &simple("场景样本"),
+            );
+            let file = dir.join(super::super::ORDER);
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            if broken_json {
+                std::fs::write(&file, "{broken").unwrap();
+            }
+            let failed = scan(&ctx, home.path()).await.unwrap().remove(0);
+            assert_eq!(failed.status, "error");
+            assert_eq!(count(&pool, "prompts").await, 0);
+            if !broken_json {
+                assert_eq!(failed.job_id, "stable-job");
+            }
+            spec["defaults"]["ratio"] = "3:4".into();
+            std::fs::write(&file, spec.to_string()).unwrap();
+            let resumed = retry_job(&ctx, home.path(), failed.id)
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(resumed.id, failed.id);
+            assert_eq!(resumed.job_id, "stable-job");
+            assert_eq!(resumed.status, "done", "{}", resumed.message);
+            assert_eq!(count(&pool, "intake_jobs").await, 1);
+            assert_eq!(count(&pool, "prompts").await, 1);
+            assert_eq!(count(&pool, "batches").await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_committed_job_repairs_a_failed_receipt_write_without_reimporting() {
+        let (pool, _db) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 100);
+        let dir = make_job(home.path(), "receipt-recovery", "", &simple("场景样本"));
+        // A filesystem fault, after the DB transaction, must leave the package discoverable.
+        std::fs::create_dir(dir.join("回执.json.pending")).unwrap();
+        let completed = scan(&ctx, home.path()).await.unwrap().remove(0);
+        assert_eq!(completed.status, "done");
+        assert!(dir.is_dir());
+        assert_eq!(count(&pool, "batches").await, 1);
+        std::fs::remove_dir(dir.join("回执.json.pending")).unwrap();
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert!(!dir.exists());
+        let archived = std::fs::read_dir(super::super::consumed_dir(home.path()))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(archived.join(super::super::RECEIPT_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["job"]["status"], "done");
+        assert_eq!(receipt["job"]["id"], completed.id);
+        for table in ["prompts", "ref_images", "batches", "tasks"] {
+            assert_eq!(count(&pool, table).await, 1, "{table}");
+        }
     }
 }

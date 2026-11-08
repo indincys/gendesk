@@ -69,6 +69,7 @@ pub async fn create_batch(
     // 静默退化成空 → 选了 9:16 却一个字段都没发出去」。
     crate::provider::GenParams::parse_checked(&input.params_json)
         .map_err(AppError::InvalidInput)?;
+    crate::library::Organization::from_params(&input.params_json)?;
     let mappings: Vec<RefMapping> = input
         .refs
         .iter()
@@ -120,7 +121,7 @@ pub async fn estimate_task_seconds(state: State<'_, AppState>) -> AppResult<Opti
 #[specta::specta]
 pub async fn open_outputs_dir(state: State<'_, AppState>, app: tauri::AppHandle) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
-    let dir = state.dirs.outputs();
+    let dir = crate::library::root(&state.db).await?;
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)

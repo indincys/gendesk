@@ -57,7 +57,10 @@ pub struct NewRefImage {
     pub ephemeral: bool,
 }
 
-pub async fn insert(pool: &SqlitePool, r: &NewRefImage) -> Result<i64, sqlx::Error> {
+pub async fn insert<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    r: &NewRefImage,
+) -> Result<i64, sqlx::Error> {
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO ref_images (name, ref_group_id, file_path, thumb_path, width, height, file_size,
             content_hash, upload_path, ephemeral, created_at)

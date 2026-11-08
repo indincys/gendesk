@@ -2177,6 +2177,7 @@ mod tests {
 
     fn clip(model: Option<&str>, dur: Option<i64>, res: Option<&str>) -> repo::ClipRow {
         repo::ClipRow {
+            organization_json: "{}".into(),
             id: 1,
             work_id: 1,
             group_id: None,

@@ -100,6 +100,22 @@ pub async fn load_settings(pool: &SqlitePool) -> AppResult<IntakeSettings> {
         .unwrap_or_default())
 }
 
+/// 固定位置的无密钥连接快照，供 CLI 发现自定义交接根；不宣称进程在线。
+pub(crate) fn write_connection(settings: &IntakeSettings) {
+    let value = serde_json::json!({
+        "version": 1,
+        "root": settings.root_path(),
+        "enabled": settings.enabled,
+        "taskThreshold": settings.task_threshold,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "features": ["ordered-references", "generation-quality", "content-organization", "intake-preflight", "resumable-intake", "background-intake"],
+        "validatorPath": std::env::current_exe().ok(),
+    });
+    if let Err(e) = intake::write_json(&intake::default_root().join("连接.json"), &value) {
+        tracing::warn!(error = %e, "写 CLI 连接快照失败");
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_intake_settings(state: State<'_, AppState>) -> AppResult<IntakeSettings> {
@@ -115,7 +131,27 @@ pub async fn update_intake_settings(
 ) -> AppResult<IntakeSettings> {
     let json = serde_json::to_string(&settings)
         .map_err(|e| AppError::Internal(format!("设置序列化失败：{e}")))?;
-    settings_repo::set_by_key(&state.db, KEY, &json).await?;
+    // 与收录共用锁：不能在参考图导入一半时 abort 旧 watcher 的 worker。
+    // 先启好新监听再保存设置；目录不可监听时保留原配置和原监听。
+    {
+        let _guard = state.intake_scan_lock.lock().await;
+        let next = if settings.enabled {
+            Some(intake::watcher::start(
+                ctx_of(&state, settings.task_threshold),
+                settings.root_path(),
+                app.clone(),
+            )?)
+        } else {
+            None
+        };
+        settings_repo::set_by_key(&state.db, KEY, &json).await?;
+        let mut current = state
+            .intake_watcher
+            .lock()
+            .map_err(|_| AppError::Internal("收件监听锁损坏".into()))?;
+        *current = next;
+        write_connection(&settings);
+    }
     // 目录可能被改到别处 / 刚打开开关 / 刚调高阈值 → 立刻在新位置按新阈值扫一次，
     // 别让用户干等下一次事件。
     if settings.enabled {
@@ -155,10 +191,9 @@ pub async fn scan_intake_now(
     Ok(jobs)
 }
 
-/// 重试：删掉台账那行，让下一次扫描重新收录它。
+/// 重试：沿原台账和持久检查点恢复，只补未完成步骤，不重新导入已有身份。
 ///
-/// **只对失败的工单开放**：成功的工单目录已经移走了，删掉记录不会让它重跑，
-/// 只会让台账少一行历史。重复到达时若另一轮已经完成，则按幂等成功处理。
+/// 失败或中断的工单沿原身份恢复；另一轮已经完成时按幂等成功处理。
 #[tauri::command]
 #[specta::specta]
 pub async fn retry_intake_job(
@@ -303,10 +338,12 @@ fn build_preview(
             style: it.style.clone(),
             prompt: it.prompt_text.clone(),
             ref_file_name: it
-                .ref_path
-                .file_name()
+                .ref_paths
+                .iter()
+                .filter_map(|p| p.file_name())
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
+                .collect::<Vec<_>>()
+                .join(" + "),
             ref_path: it.ref_path.to_string_lossy().to_string(),
             params_json: it.params_json.clone(),
             wire_json: it.wire_json.clone(),

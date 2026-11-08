@@ -24,6 +24,13 @@ pub struct IntakeWatcher {
     _worker: tauri::async_runtime::JoinHandle<()>,
 }
 
+impl Drop for IntakeWatcher {
+    fn drop(&mut self) {
+        // 更换交接根/关闭收件后，旧目录排队中的事件不能继续导入。
+        self._worker.abort();
+    }
+}
+
 /// 在交接根上启动监听。目录不存在时先建。
 pub fn start(ctx: Ctx, root: PathBuf, app: AppHandle) -> AppResult<IntakeWatcher> {
     let pending = super::pending_dir(&root);

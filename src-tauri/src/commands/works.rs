@@ -306,7 +306,16 @@ pub(crate) async fn reexport_from_snapshot(
         .and_then(|s| s.to_str())
         .unwrap_or("jpg")
         .to_lowercase();
-    let src = results_dir.join(format!("{task_id}.{ext}"));
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT result_image_path FROM tasks WHERE id=?")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let src = stored
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| results_dir.join(format!("{task_id}.{ext}")));
     if !src.is_file() {
         return Err(AppError::InvalidInput(
             "资产区源快照已不存在（可能随批次清理删除），无法重新导出".into(),

@@ -129,34 +129,15 @@ pub(crate) fn ingest_one(
         .unwrap_or("png")
         .to_lowercase();
 
-    let bytes = std::fs::read(&src)?;
+    let inspected = files::decode::inspect_image(&src, permit)?;
+    let bytes = inspected.bytes;
+    let (w, h) = (inspected.width, inspected.height);
+    let oversize = inspected.oversize;
+    let img = inspected.image;
     let file_size = bytes.len() as i64;
-    // E30b：内容 hash（去重比对用）。用手里这份字节，与落盘的内容同源。
     let content_hash = Some(files::content_hash_bytes(&bytes));
-
-    // 落进 refs/。这里用 write 而不是 copy，是为了保证「哈希算的」与「盘上存的」
-    // 是同一串字节；权限位差异对库内文件没有意义。别改回 copy。
     let dest = unique_path(refs_dir, &stem, &ext);
     std::fs::write(&dest, &bytes)?;
-
-    // 尺寸只读文件头。这也是写进 ref_images.width/height 的那个值，必须是原图尺寸。
-    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&bytes))
-        .with_guessed_format()?
-        .into_dimensions()?;
-
-    // E41：长边或字节数超限就出一份上传用压缩副本。判定在解码之前。
-    let oversize = w > files::UPLOAD_MAX_EDGE
-        || h > files::UPLOAD_MAX_EDGE
-        || bytes.len() as u64 > files::UPLOAD_MAX_BYTES;
-
-    // 唯一一次解码。超限图解到 ≥2048（上传副本要），否则解到 ≥512（只做缩略图）。
-    // 6240 宽的源在 1/2 档解出 3120，两个派生物都够。
-    let target = if oversize {
-        files::UPLOAD_MAX_EDGE
-    } else {
-        files::THUMB_MAX
-    };
-    let img = files::decode::decode_scaled(&bytes, target, permit)?;
 
     let thumb = unique_path(thumbs_dir, &stem, "jpg");
     files::write_thumbnail_from(&img, &thumb)?;

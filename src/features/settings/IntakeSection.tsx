@@ -246,16 +246,13 @@ export function IntakeSection() {
                       ? "正在收录；若应用曾异常退出，可点“恢复收录”"
                       : j.message || "收录失败（修正工单后可重试）"}
                   </span>
-                  {/* 失败的工单可能已经导入了一半：收录没有一步能整体回滚（参考图要拷
-                      文件，建批要发编号，第一个批次建完就已经在花钱跑了）。「重试」
-                      会从头再来一遍，所以已经落地的那部分必须摆在按钮**旁边**，
-                      否则点下去得到的是第二份提示词和第二个批次。 */}
+                  {/* 保留已导入的身份供恢复复用；历史无检查点工单由后端明确拒绝盲目重放。 */}
                   {(j.groupCount > 0 || j.refCount > 0 || j.batchIds.length > 0) && (
                     <span className="fs11" style={{ color: "var(--wr)" }}>
-                      已导入 {j.groupCount} 组 · {j.refCount} 图
+                      已导入 {j.groupCount} 条提示词 · {j.refCount} 图
                       {j.batchIds.length > 0 &&
                         ` · 批次 ${j.batchIds.map((b) => `#${b}`).join(" ")} 已在跑`}
-                      ，重试前先处理掉
+                      ，请保留这些内容，按错误说明恢复未完成部分
                     </span>
                   )}
                   <button

@@ -540,14 +540,18 @@ impl Scheduler {
         self.spawn_progress_ticker(task.id, started, expected, done.clone());
 
         // 组装请求。
-        let outcome = match (self.ref_path(task.ref_image_id).await, key_cfg.clone()) {
-            (Some(image_path), Some(cfg)) => {
+        let outcome = match (
+            self.reference_paths(task.id, task.ref_image_id).await,
+            key_cfg.clone(),
+        ) {
+            (Some((image_path, additional_image_paths)), Some(cfg)) => {
                 let provider = self.factory.build(&cfg);
                 // E16 / D1：取批次生成参数快照，仅透传显式设置项。
                 let params = self.task_params(task.id, task.batch_id).await;
                 let req = GenRequest {
                     prompt: task.prompt_text_snapshot.clone(),
                     image_path,
+                    additional_image_paths,
                     model: cfg.model.clone(),
                     params,
                 };
@@ -598,7 +602,25 @@ impl Scheduler {
         let results = self.dirs.results();
         let _ = tokio::fs::create_dir_all(&results).await;
         // 输出处理（任务1）：默认为 jpg；用户保留原格式时 ext 可能是 png。
-        let full = results.join(format!("{}.{}", task.id, img.ext));
+        let full = match crate::library::Organization::from_params(&task.params_json) {
+            Ok(Some(organization)) => match crate::library::root(&self.pool).await {
+                Ok(root) => {
+                    let dir = organization.directory(&root, false, false);
+                    let _ = tokio::fs::create_dir_all(&dir).await;
+                    dir.join(crate::library::filename(
+                        &organization.requirement,
+                        &format!("task{}", task.id),
+                        task.created_at,
+                        &img.ext,
+                    ))
+                }
+                Err(e) => {
+                    tracing::error!(error=%e, "作品目录不可用，结果保留在内部快照区");
+                    results.join(format!("{}.{}", task.id, img.ext))
+                }
+            },
+            _ => results.join(format!("{}.{}", task.id, img.ext)),
+        };
         let thumb = self.dirs.thumbs().join(format!("result_{}.jpg", task.id));
         // 写盘失败（磁盘满等）不能静默转 rev，否则用户在验收页看到空图；标失败让其可重试。
         if let Err(e) = tokio::fs::write(&full, &img.bytes).await {
@@ -779,6 +801,25 @@ impl Scheduler {
         .ok()
         .flatten()
         .map(std::path::PathBuf::from)
+    }
+
+    async fn reference_paths(
+        &self,
+        task_id: i64,
+        primary: i64,
+    ) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+        let raw: String = sqlx::query_scalar("SELECT params_json FROM tasks WHERE id = ?1")
+            .bind(task_id)
+            .fetch_one(&self.pool)
+            .await
+            .ok()?;
+        let ids = super::reference_ids(&raw, primary).ok()?;
+        let mut paths = Vec::with_capacity(ids.len());
+        for id in ids {
+            paths.push(self.ref_path(id).await?);
+        }
+        let mut paths = paths.into_iter();
+        Some((paths.next()?, paths.collect()))
     }
 
     /// 本任务的生成参数（E16 / D1）。**任务级优先，批次级兜底**。
@@ -1124,6 +1165,37 @@ mod tests {
         peak: Arc<AtomicI64>,
         pool: SqlitePool,
         _dir: tempfile::TempDir,
+    }
+
+    #[tokio::test]
+    async fn persisted_references_keep_order_and_missing_attachment_does_not_fall_back() {
+        let h = setup(
+            1,
+            &[(1, 1)],
+            Duration::ZERO,
+            Arc::new(|_| Ok(())),
+            Strategy::RoundRobin,
+            0,
+        )
+        .await;
+        sqlx::query("UPDATE ref_images SET file_path='/product' WHERE id=1")
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO ref_images (id,name,file_path,upload_path,thumb_path,width,height,file_size,created_at) VALUES (2,'desk','/desk','/background_upload','/t',1,1,1,0)").execute(&h.pool).await.unwrap();
+        sqlx::query("UPDATE tasks SET params_json = ? WHERE id = 1")
+            .bind(r#"{"referenceImageIds":[1,2]}"#)
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        let (product, others) = h.sched.reference_paths(1, 1).await.unwrap();
+        assert_eq!(product, std::path::PathBuf::from("/product"));
+        assert_eq!(others, vec![std::path::PathBuf::from("/background_upload")]);
+        sqlx::query("DELETE FROM ref_images WHERE id=2")
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        assert!(h.sched.reference_paths(1, 1).await.is_none());
     }
 
     async fn setup(

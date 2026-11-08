@@ -47,6 +47,7 @@
 //! 这类问题的成因（v0.15.2）。
 
 pub mod ingest;
+pub mod preflight;
 pub mod watcher;
 
 use std::collections::HashSet;
@@ -72,6 +73,22 @@ pub const REFS: &str = "refs";
 pub const ERROR_FILE: &str = "错误.txt";
 pub const HOLD_FILE: &str = "待确认.txt";
 pub const RESULT_FILE: &str = "结果.txt";
+/// 机器可读回执，与文本回执并存；只表示收录状态，不表示生图/验收完成。
+pub const RECEIPT_FILE: &str = "回执.json";
+
+/// 文件信箱的 JSON 发布：先写同目录临时文件再 rename，读者不会读到半份 JSON。
+/// 调用者负责串行写同一个目标；收录侧由 scan_lock 保证。
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> crate::error::AppResult<()> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| crate::error::AppError::Internal(format!("JSON 序列化失败：{e}")))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staging = path.with_extension("json.pending");
+    std::fs::write(&staging, bytes)?;
+    std::fs::rename(staging, path)?;
+    Ok(())
+}
 /// 工单名撞上台账里已有的 jobId：去重挡住了它，**但这不是稳态**。
 /// 去重本身是对的（半份工单重放会造重复提示词、重复花钱），错的是不吭声——
 /// 一份带着 READY.txt、永远不会被处理、也没人知道为什么的工单，
@@ -114,6 +131,7 @@ pub fn consumed_dir(root: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OrderSpec {
+    pub organization: Option<crate::library::Organization>,
     /// 格式版本。必须是 [`ORDER_VERSION`]。
     pub version: Option<i64>,
     /// 工单标识（去重键）。缺省取工单目录名。
@@ -142,6 +160,7 @@ pub struct OrderSpec {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ItemSpec {
+    pub organization: Option<crate::library::Organization>,
     /// 语义名，如 `W-王一博-55-正面`。**GenDesk 一个字符都不改**（P1）。
     /// 它同时是 `prompts/{name}.txt` 的文件名。
     pub name: String,
@@ -152,12 +171,14 @@ pub struct ItemSpec {
     /// 参考图：工单目录内的相对路径，如 `refs/王一博-正面.jpg`。**每条必填**。
     #[serde(rename = "ref", alias = "image", alias = "refImage")]
     pub ref_path: String,
+    /// 有序多参考图；与 ref 二选一。第一张仍是任务的主商品图。
+    pub refs: Vec<String>,
     /// 条目级参数（覆盖 `defaults`）。
     #[serde(flatten)]
     pub params: ParamsSpec,
 }
 
-/// 生成参数。**只有这三项会发到远端**（v0.15.2），加上恒定的 `n=1`。
+/// 生成参数：比例 / 尺寸 / 输出格式 / 质量，加上恒定的 `n=1`。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ParamsSpec {
@@ -166,6 +187,7 @@ pub struct ParamsSpec {
     pub size: Option<String>,
     #[serde(alias = "output_format", alias = "format")]
     pub output_format: Option<String>,
+    pub quality: Option<String>,
     #[serde(alias = "clear_ai_metadata")]
     pub clear_ai_metadata: Option<bool>,
     #[serde(alias = "remove_c2pa")]
@@ -180,6 +202,7 @@ impl ParamsSpec {
             aspect_ratio: pick(&self.aspect_ratio, &base.aspect_ratio),
             size: pick(&self.size, &base.size),
             output_format: pick(&self.output_format, &base.output_format),
+            quality: pick(&self.quality, &base.quality),
             clear_ai_metadata: self.clear_ai_metadata.or(base.clear_ai_metadata),
             remove_c2pa: self.remove_c2pa.or(base.remove_c2pa),
         }
@@ -214,6 +237,7 @@ pub struct PlannedItem {
     pub prompt_text: String,
     /// 参考图绝对路径（已确认存在）。
     pub ref_path: PathBuf,
+    pub ref_paths: Vec<PathBuf>,
     /// 本条生效的参数快照（与生成页 `buildParamsJson` 同形）。
     pub params_json: String,
     /// 实际会进 multipart 的字段。
@@ -233,8 +257,10 @@ impl Plan {
     pub fn distinct_refs(&self) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
         for it in &self.items {
-            if !out.contains(&it.ref_path) {
-                out.push(it.ref_path.clone());
+            for path in &it.ref_paths {
+                if !out.contains(path) {
+                    out.push(path.clone());
+                }
             }
         }
         out
@@ -295,6 +321,10 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String), String> {
             .filter(|v| !v.is_empty())
     };
     let aspect_ratio = norm(&p.aspect_ratio);
+    let quality = match &p.quality {
+        Some(v) => v.trim().to_lowercase(),
+        None => crate::provider::DEFAULT_QUALITY.to_string(),
+    };
     // 只写了比例没写尺寸时补上配套尺寸：实测单发 aspect_ratio 会回整批正方形
     // （见 `provider::RATIO_SIZES`）。这是**补一个缺失字段**，不是改用户写下的取值——
     // 他若自己写了尺寸，哪怕与比例不符也照发，归一化只管拼法不管取值。
@@ -316,6 +346,7 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String), String> {
         ("aspect_ratio", "aspectRatio", aspect_ratio),
         ("size", "size", size),
         ("output_format", "outputFormat", output_format),
+        ("quality", "quality", Some(quality)),
     ] {
         if let Some(v) = value {
             snap.insert(snap_key.into(), serde_json::Value::String(v.clone()));
@@ -398,6 +429,15 @@ pub fn plan(dir: &Path, dir_name: &str) -> Result<Plan, String> {
 }
 
 fn plan_from_spec(dir: &Path, dir_name: &str, spec: &OrderSpec) -> Result<Plan, String> {
+    plan_with_inputs(dir, dir_name, spec, None)
+}
+
+fn plan_with_inputs(
+    dir: &Path,
+    dir_name: &str,
+    spec: &OrderSpec,
+    external: Option<&preflight::ExternalInput>,
+) -> Result<Plan, String> {
     match spec.version {
         Some(v) if v == ORDER_VERSION => {}
         Some(v) => {
@@ -440,42 +480,93 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &OrderSpec) -> Result<Plan, 
         }
         let sku = it.sku.trim();
         let style = it.style.trim();
-        if sku.is_empty() || style.is_empty() {
+        if (sku.is_empty() || style.is_empty())
+            && it.organization.is_none()
+            && spec.organization.is_none()
+        {
             return Err(format!(
                 "items[{i}]「{name}」缺 sku 或 style。交付时按 style + sku 分子目录，\
                  缺了就只能靠猜——而从中文名反推 SKU 是静默失败（分错目录不报错）。"
             ));
         }
         // 挂靠不猜：每条必填、且必须真的存在。
-        if it.ref_path.trim().is_empty() {
+        if !it.ref_path.trim().is_empty() && !it.refs.is_empty() {
+            return Err(format!("items[{i}]「{name}」的 ref 与 refs 只能填写一种"));
+        }
+        let raw_refs = if it.refs.is_empty() {
+            vec![it.ref_path.clone()]
+        } else {
+            it.refs.clone()
+        };
+        if raw_refs.iter().any(|r| r.trim().is_empty()) {
             return Err(format!(
-                "items[{i}]「{name}」没写 ref：每个条目都必须点名参考图"
+                "items[{i}]「{name}」没写 ref/refs：每个条目都必须点名参考图"
             ));
         }
-        let ref_path = safe_join(dir, &it.ref_path)?;
-        if !ref_path.is_file() {
-            return Err(format!(
-                "items[{i}]「{name}」的参考图不存在：{}",
-                it.ref_path.trim()
-            ));
+        if raw_refs.len() > 16 {
+            return Err(format!("items[{i}]「{name}」最多支持 16 张参考图"));
         }
+        let mut ref_paths = Vec::new();
+        for raw in &raw_refs {
+            let packaged_path = safe_join(dir, raw)?;
+            let path = match external {
+                Some(input) => input
+                    .references
+                    .get(raw)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| format!("参考图映射缺失：{raw}"))?,
+                None => packaged_path,
+            };
+            if !path.is_file() {
+                return Err(format!(
+                    "items[{i}]「{name}」的参考图不存在：{}",
+                    raw.trim()
+                ));
+            }
+            if ref_paths.contains(&path) {
+                return Err(format!("items[{i}]「{name}」重复引用同一张图"));
+            }
+            ref_paths.push(path);
+        }
+        let ref_path = ref_paths[0].clone();
         // 正文：一条一文件，文件名 = 条目名。
         let txt = dir.join(PROMPTS).join(format!("{name}.txt"));
-        let prompt_text = std::fs::read_to_string(&txt)
-            .map_err(|e| format!("读不到 {PROMPTS}/{name}.txt：{e}"))?
-            .trim()
-            .to_string();
+        let prompt_text = match external {
+            Some(input) => input
+                .prompts
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("正文映射缺失：{name}"))?,
+            None => std::fs::read_to_string(&txt)
+                .map_err(|e| format!("读不到 {PROMPTS}/{name}.txt：{e}"))?,
+        }
+        .trim()
+        .to_string();
         if prompt_text.is_empty() {
             return Err(format!("{PROMPTS}/{name}.txt 是空的"));
         }
-        let (params_json, wire_json) = build_params(&it.params.overlay(&spec.defaults))
+        let (mut params_json, wire_json) = build_params(&it.params.overlay(&spec.defaults))
             .map_err(|e| format!("items[{i}]「{name}」的参数有问题：{e}"))?;
+        let organization = it
+            .organization
+            .as_ref()
+            .or(spec.organization.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::library::Organization::legacy(sku, style, spec.note.as_deref().unwrap_or(""))
+            });
+        organization.validate().map_err(|e| e.to_string())?;
+        let mut params: serde_json::Value =
+            serde_json::from_str(&params_json).map_err(|e| e.to_string())?;
+        params["organization"] = serde_json::to_value(&organization).map_err(|e| e.to_string())?;
+        params_json = params.to_string();
         items.push(PlannedItem {
             name: name.to_string(),
             sku: sku.to_string(),
             style: style.to_string(),
             prompt_text,
             ref_path,
+            ref_paths,
             params_json,
             wire_json,
         });
@@ -485,7 +576,15 @@ fn plan_from_spec(dir: &Path, dir_name: &str, spec: &OrderSpec) -> Result<Plan, 
     //
     // 多出来的那一份要么是 skill 漏写了 items 条目，要么是上一版工单的残留 —— 两种
     // 都意味着这份工单与写它的人以为的不一样，而少跑一张图是**不报错**的失败。
-    let extras = stray_prompt_files(dir, &names);
+    let extras = match external {
+        Some(input) => input
+            .prompts
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .cloned()
+            .collect(),
+        None => stray_prompt_files(dir, &names),
+    };
     if !extras.is_empty() {
         return Err(format!(
             "{PROMPTS}/ 里有 items 之外的正文：{}。要么给它们补上 items 条目，\
@@ -603,6 +702,29 @@ mod tests {
         {"name":"W-王一博-55-侧面","sku":"55","style":"王一博","ref":"refs/侧面.jpg",
          "ratio":"3:4","size":"1088x1440"}
       ]}"#;
+
+    #[test]
+    fn explicit_ownership_survives_parameter_snapshot_without_becoming_remote_fields() {
+        let d = make_dir(
+            r#"{"version":1,"organization":{"product":"陶瓷水杯","style":"奶油白款","requirement":"厨房场景图","source":"任务单"},"items":[{"name":"杯子场景","ref":"refs/a.jpg"}]}"#,
+            &[("杯子场景", "正文")],
+            &["a.jpg"],
+        );
+        let first = plan(d.path(), "run-a").unwrap();
+        let second = plan(d.path(), "run-b").unwrap();
+        let a = crate::library::Organization::from_params(&first.items[0].params_json)
+            .unwrap()
+            .unwrap();
+        let b = crate::library::Organization::from_params(&second.items[0].params_json)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            a.directory(Path::new("/library"), true, false),
+            PathBuf::from("/library/成品/生成图片/陶瓷水杯/奶油白款/厨房场景图")
+        );
+        assert!(!first.items[0].wire_json.contains("organization"));
+    }
 
     // 主路径：两条目、各自的图与参数、整单级用途。
     #[test]
@@ -804,6 +926,30 @@ mod tests {
         let w: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(w["aspect_ratio"], "9:16");
         assert_eq!(w["n"], 1);
+        assert_eq!(p.quality.as_deref(), Some("high"));
+        assert_eq!(w["quality"], "high");
+    }
+
+    #[test]
+    fn item_quality_overrides_defaults_and_reaches_snapshot_and_wire() {
+        let base = params_from(r#"{"quality":"medium"}"#);
+        let item = params_from(r#"{"quality":" MAX "}"#);
+        for (params, expected) in [
+            (ParamsSpec::default().overlay(&base), "medium"),
+            (item.overlay(&base), "max"),
+            (ParamsSpec::default(), "high"),
+        ] {
+            let (snap, wire) = build_params(&params).unwrap();
+            assert_eq!(
+                GenParams::parse_checked(&snap).unwrap().quality.as_deref(),
+                Some(expected)
+            );
+            let wire: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(wire["quality"], expected);
+        }
+        for bad in [r#"{"quality":""}"#, r#"{"quality":"hgh"}"#] {
+            assert!(build_params(&params_from(bad)).is_err());
+        }
     }
 
     // 拼法归一化：jpg → jpeg、全角冒号 → 半角。取值本身不替用户改。

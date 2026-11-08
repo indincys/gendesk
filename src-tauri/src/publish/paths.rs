@@ -64,6 +64,10 @@ impl CreatedFilesGuard {
         self.paths.retain(|candidate| candidate != path);
     }
 
+    pub fn track(&mut self, path: std::path::PathBuf) {
+        self.paths.push(path);
+    }
+
     pub fn preserve_all(&mut self) {
         self.paths.clear();
     }

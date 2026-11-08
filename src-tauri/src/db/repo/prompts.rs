@@ -81,8 +81,8 @@ pub async fn archive_groups(
     Ok(())
 }
 
-pub async fn find_group_by_prefix(
-    pool: &SqlitePool,
+pub async fn find_group_by_prefix<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
     prefix: &str,
 ) -> Result<Option<GroupRow>, sqlx::Error> {
     sqlx::query_as::<_, GroupRow>("SELECT * FROM prompt_groups WHERE prefix = ?1")
@@ -280,7 +280,10 @@ pub async fn rename_group(pool: &SqlitePool, id: i64, name: &str) -> Result<bool
 }
 
 /// 分组绑定的标签名（V1 标签绑定在 prompt_group 级）。
-pub async fn group_tags(pool: &SqlitePool, group_id: i64) -> Result<Vec<String>, sqlx::Error> {
+pub async fn group_tags<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    group_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
         "SELECT t.name FROM tags t
          JOIN tag_bindings b ON b.tag_id = t.id

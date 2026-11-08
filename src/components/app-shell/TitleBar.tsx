@@ -1,5 +1,5 @@
+import { UpdateInstallButton } from "@/components/app-shell/UpdateInstallButton";
 import { V2vTitleChrome } from "@/features/v2v/V2vTitleChrome";
-import { commands, unwrap } from "@/lib/ipc";
 import { windowControls } from "@/lib/window";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
@@ -51,14 +51,10 @@ export function TitleBar() {
       <div className="f1" />
 
       {updateReady && (
-        <button
-          type="button"
-          className="pill"
-          onClick={() => void unwrap(commands.installUpdate()).catch(() => {})}
-        >
+        <UpdateInstallButton className="pill">
           <span className="pdot" />
           {updateVersion ? `v${updateVersion} ` : ""}已就绪 · 重启安装
-        </button>
+        </UpdateInstallButton>
       )}
 
       {isWin && (

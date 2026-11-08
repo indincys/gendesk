@@ -4,6 +4,7 @@ import {
   type TaskProgress,
   type TaskStatusChanged,
   type TaskView,
+  type UpdateStateChanged,
   commands,
   subscribeEngine,
   unwrap,
@@ -43,9 +44,11 @@ interface EngineState {
   trashCount: number;
   reviewRevision: number;
 
-  /** 应用内更新态 */
+  /** 应用内更新态：Rust 定时检查后经 `update://state` 推送；updateReady = 已下载待重启安装。 */
+  updateState: string;
   updateReady: boolean;
   updateVersion: string | null;
+  applyUpdateState: (p: UpdateStateChanged) => void;
   tasks: TaskView[];
 
   /** 订阅引擎事件（仅 Tauri 环境）。返回反订阅函数。 */
@@ -70,8 +73,11 @@ export const useEngineStore = create<EngineState>((set) => ({
   autoPauseReason: null,
   trashCount: 0,
   reviewRevision: 0,
+  updateState: "idle",
   updateReady: false,
   updateVersion: null,
+  applyUpdateState: (p) =>
+    set({ updateState: p.state, updateReady: p.state === "ready", updateVersion: p.version }),
   tasks: [],
 
   init: async () => {
@@ -211,10 +217,7 @@ export const useEngineStore = create<EngineState>((set) => ({
         scheduleFlush();
       },
       onUpdateState: (p) =>
-        set({
-          updateReady: p.state === "ready",
-          updateVersion: p.version,
-        }),
+        set({ updateState: p.state, updateReady: p.state === "ready", updateVersion: p.version }),
     });
     return () => {
       unsubscribe();

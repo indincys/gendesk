@@ -169,6 +169,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // updater 域
             commands::updater::check_update_now,
             commands::updater::install_update,
+            commands::updater::get_update_state,
             // backup 域（E19 数据备份与数据目录可见性）
             commands::backup::data_dir_info,
             commands::backup::open_data_dir,
@@ -449,6 +450,9 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 只重试已登记、尚未完成的 Poster 交接批次。
     commands::poster::start_delivery(app.handle().clone());
     live_photo::start(app.handle().clone());
+
+    // 应用内更新：启动后与每 6 小时自查一次，后台下载，界面只负责「重启安装」。
+    commands::updater::start(app.handle().clone());
 
     // Agent CLI 控制通道。隔离数据目录的调试实例不覆盖正式连接文件。
     if let Err(err) = control::start(app.handle().clone(), debug_data_dir_override().is_none()) {

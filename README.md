@@ -39,8 +39,13 @@ gendesk v2v pending
 
 ## 发布（M4）
 
-发版 = 改 `src-tauri/tauri.conf.json` 的 `version` + 打 tag `vX.Y.Z` 并推送，其余由
-`.github/workflows/release.yml` 自动完成（双端构建、minisign 签名、上传产物与 `latest.json`）。
+发版 = 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`（及 `Cargo.lock`）与
+`scripts/gendesk.mjs` 的版本号 → 合入 main → 打 tag `vX.Y.Z` 并推送，其余由
+`.github/workflows/release.yml` 自动完成（双端构建、minisign 签名、上传产物与 `latest.json`，
+最后 `verify-updater` 校验两端平台齐全且可下载）。
+
+应用内更新：应用启动 20 秒后与每 6 小时自动检查 `latest.json`，有新版就后台下载，标题栏与
+设置 › 通用 › 更新出现「重启安装」；有生图任务在跑时先确认再重启。
 
 ### 更新签名密钥（重要）
 

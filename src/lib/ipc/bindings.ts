@@ -1283,7 +1283,7 @@ async countTrash() : Promise<Result<number, AppError>> {
 }
 },
 /**
- * 手动/启动检查更新：有新版则后台下载并暂存，emit ready。
+ * 手动检查更新：有新版则后台下载并暂存，返回版本号；已是最新返回 None。
  */
 async checkUpdateNow() : Promise<Result<string | null, AppError>> {
     try {
@@ -1299,6 +1299,17 @@ async checkUpdateNow() : Promise<Result<string | null, AppError>> {
 async installUpdate() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_update") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 当前更新状态（页面晚于事件挂载时补读）。
+ */
+async getUpdateState() : Promise<Result<UpdateStateChanged, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_update_state") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2552,7 +2563,7 @@ key: string | null }
  */
 export type UpdateStateChanged = { 
 /**
- * checking / downloading / ready / uptodate / error
+ * idle / checking / downloading / ready / uptodate / error
  */
 state: string; version: string | null }
 /**

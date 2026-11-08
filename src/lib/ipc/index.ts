@@ -82,6 +82,7 @@ export type {
   PosterGroup,
   PosterProduct,
   AgentCliInfo,
+  UpdateStateChanged,
 } from "./bindings";
 
 export async function subscribeLivePhoto(handler: (error: string | null) => void) {

@@ -46,7 +46,10 @@ export function AppShell() {
       if (disposed) fn();
       else cleanup = fn;
     });
-    void unwrap(commands.checkUpdateNow()).catch(() => {}); // 启动后台检查
+    // 更新检查由 Rust 定时跑；这里只补读启动早期已经发出的状态。
+    void unwrap(commands.getUpdateState())
+      .then(useEngineStore.getState().applyUpdateState)
+      .catch(() => {});
     return () => {
       disposed = true;
       cleanup?.();

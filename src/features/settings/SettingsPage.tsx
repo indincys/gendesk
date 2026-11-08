@@ -1,3 +1,4 @@
+import { UpdateInstallButton } from "@/components/app-shell/UpdateInstallButton";
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { DescriptionHint } from "@/components/ui/Tooltip";
@@ -49,6 +50,9 @@ export function SettingsPage() {
   const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
   // 队列是否有在途任务（run/retry）——运行中禁止备份（避免边写边打包）。
   const queueRunning = useEngineStore((s) => Object.values(s.summaries).some((b) => b.running > 0));
+  const updateState = useEngineStore((s) => s.updateState);
+  const updateReady = useEngineStore((s) => s.updateReady);
+  const updateVersion = useEngineStore((s) => s.updateVersion);
 
   const loadKeys = useCallback(async () => {
     try {
@@ -475,18 +479,32 @@ export function SettingsPage() {
               更新
             </span>
             <span className="fs12 nowrap">当前 {version ? `v${version}` : "…"}</span>
-            <button
-              type="button"
-              className="btn sm"
-              onClick={async () => {
-                toast("正在检查更新…");
-                const v = await unwrap(commands.checkUpdateNow()).catch(() => undefined);
-                if (v) toast.success(`发现 v${v} · 已在后台下载完成`);
-                else if (v === null) toast("已是最新版本");
-              }}
-            >
-              检查更新
-            </button>
+            {updateReady ? (
+              <UpdateInstallButton className="btn sm pri">
+                v{updateVersion} 已下载 · 重启安装
+              </UpdateInstallButton>
+            ) : (
+              <button
+                type="button"
+                className="btn sm"
+                disabled={updateState === "checking" || updateState === "downloading"}
+                onClick={async () => {
+                  try {
+                    const v = await unwrap(commands.checkUpdateNow());
+                    if (!v) toast("已是最新版本");
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              >
+                {updateState === "checking"
+                  ? "正在检查…"
+                  : updateState === "downloading"
+                    ? `正在下载 v${updateVersion ?? ""}…`
+                    : "检查更新"}
+              </button>
+            )}
+            <span className="fs11 t3">每 6 小时自动检查，后台下载好后在标题栏提示重启安装</span>
           </div>
           <div className="fx ac gap10 mt10">
             <span className="fs12 t2" style={{ width: 72 }}>

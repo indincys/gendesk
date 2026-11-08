@@ -259,6 +259,9 @@ pub struct DownloadProgress {
 /// 下载进度回调。
 pub type ProgressFn = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
 
+// async_trait 给 trait 里的方法声明加了不带说明的 #[must_use]，而返回值本身是 Pin<Box<dyn Future>>；
+// clippy 1.99 起把这算作 double_must_use。代码是宏生成的，改不到，只能在这里放开。
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ImageProvider: Send + Sync {
     /// 生成一张图。`progress` 在 url 下载阶段被调用（b64 返回无字节进度）。

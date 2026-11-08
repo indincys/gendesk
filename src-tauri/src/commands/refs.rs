@@ -17,29 +17,16 @@ use crate::state::AppState;
 pub struct RefImageView {
     pub id: i64,
     pub name: String,
-    /// 图库分组（0019 起为 `ref_groups.id`，与提示词组无关）。
-    pub group_id: Option<i64>,
     pub file_path: String,
     pub thumb_path: String,
     pub width: i64,
     pub height: i64,
     /// 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
     pub last_group_id: Option<i64>,
-    /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+    /// 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起。
     pub archived: bool,
-    /// 生成页临时上传（0019）：不进长期图库，图库页与「从参考图库选择」都不列它。
+    /// 生成页临时上传（0019）：不参与内容去重，生成页之外不列出。
     pub ephemeral: bool,
-}
-
-/// 图库分组视图（0019）。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RefGroupView {
-    pub id: i64,
-    pub name: String,
-    pub sort_order: i64,
-    /// 组内图片数（不含临时上传与已删除）。
-    pub count: i64,
 }
 
 /// `refs://import-progress`：批量导入逐张进度。
@@ -174,7 +161,6 @@ pub async fn import_ref_images(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     paths: Vec<String>,
-    group_id: Option<i64>,
     ephemeral: bool,
 ) -> AppResult<Vec<RefImageView>> {
     state.dirs.init()?;
@@ -199,7 +185,6 @@ pub async fn import_ref_images(
             Ok(ing) => {
                 let new = repo::NewRefImage {
                     name: ing.name,
-                    ref_group_id: group_id,
                     file_path: ing.file_path,
                     thumb_path: ing.thumb_path,
                     width: ing.width,
@@ -213,7 +198,6 @@ pub async fn import_ref_images(
                 views.push(RefImageView {
                     id,
                     name: new.name,
-                    group_id,
                     file_path: new.file_path,
                     thumb_path: new.thumb_path,
                     width: new.width,
@@ -262,102 +246,7 @@ fn emit_progress(
     .emit(app);
 }
 
-/// 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RefScanItem {
-    pub path: String,
-    pub name: String,
-    pub duplicate: bool,
-    /// 与之重复的已有图名（库内）或本次靠前的文件名。
-    pub dup_of: Option<String>,
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn scan_ref_imports(
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-) -> AppResult<Vec<RefScanItem>> {
-    // 库内 hash → 名称（best-effort 展示重复源）。
-    let existing = repo::active_hash_names(&state.db).await?;
-    let mut seen: std::collections::HashMap<String, String> = existing.into_iter().collect();
-    let mut out = Vec::with_capacity(paths.len());
-    for path in paths {
-        let src = PathBuf::from(&path);
-        let name = src
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(files::sanitize_filename)
-            .unwrap_or_else(|| "未命名".into());
-        let hash = files::content_hash(&src).ok();
-        let dup_of = hash.as_ref().and_then(|h| seen.get(h).cloned());
-        let duplicate = dup_of.is_some();
-        if let Some(h) = hash {
-            seen.entry(h).or_insert_with(|| name.clone());
-        }
-        out.push(RefScanItem {
-            path,
-            name,
-            duplicate,
-            dup_of,
-        });
-    }
-    Ok(out)
-}
-
-/// 批量改分组（E30b）。gid=None 为未分组。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_ref_images_group(
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-    group_id: Option<i64>,
-) -> AppResult<()> {
-    repo::set_group_many(&state.db, &ids, group_id).await?;
-    Ok(())
-}
-
-/// 批量删除参考图 → 进废纸篓（E30b）。
-#[tauri::command]
-#[specta::specta]
-pub async fn trash_ref_images(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
-    for id in ids {
-        trash_one_ref(&state, id).await?;
-    }
-    Ok(())
-}
-
-/// 单张参考图入废纸篓（原图 + 缩略图 + 上传副本一并暂存至清理）。
-async fn trash_one_ref(state: &AppState, id: i64) -> AppResult<()> {
-    let Some(row) = repo::soft_delete(&state.db, id).await? else {
-        return Ok(());
-    };
-    let mut file_paths = vec![row.file_path.clone(), row.thumb_path.clone()];
-    if let Some(up) = &row.upload_path {
-        file_paths.push(up.clone());
-    }
-    let mut tx = state.db.begin().await?;
-    crate::db::repo::trash::insert(
-        &mut tx,
-        &crate::db::repo::trash::NewTrashItem {
-            entity_type: "ref".into(),
-            ref_id: Some(row.id),
-            thumb_path: Some(row.thumb_path.clone()),
-            prompt_text: None,
-            code: None,
-            title: None,
-            source_label: "手动删除".into(),
-            file_paths,
-            payload_json: None,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 列出未删除参考图（供参考图库/生成页选择）。
+/// 列出未删除参考图（供生成页选择）。
 ///
 /// `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
 ///
@@ -378,7 +267,6 @@ pub async fn list_ref_images(
         .map(|r| RefImageView {
             id: r.id,
             name: r.name,
-            group_id: r.ref_group_id,
             file_path: r.file_path,
             thumb_path: r.thumb_path,
             width: r.width,
@@ -388,182 +276,4 @@ pub async fn list_ref_images(
             ephemeral: r.ephemeral,
         })
         .collect())
-}
-
-// ---------- 图库分组（0019） ----------
-
-#[tauri::command]
-#[specta::specta]
-pub async fn list_ref_groups(state: State<'_, AppState>) -> AppResult<Vec<RefGroupView>> {
-    Ok(repo::list_groups(&state.db)
-        .await?
-        .into_iter()
-        .map(|(g, count)| RefGroupView {
-            id: g.id,
-            name: g.name,
-            sort_order: g.sort_order,
-            count,
-        })
-        .collect())
-}
-
-/// 新建图库分组。重名（NOCASE）直接返回既有那个，不报错——用户要的是「有这个组」，
-/// 不是一句「名字被占了」。
-#[tauri::command]
-#[specta::specta]
-pub async fn create_ref_group(state: State<'_, AppState>, name: String) -> AppResult<RefGroupView> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(AppError::InvalidInput("分组名不能为空".into()));
-    }
-    if let Some(g) = repo::find_group_by_name(&state.db, name).await? {
-        let count = repo::list_groups(&state.db)
-            .await?
-            .into_iter()
-            .find(|(r, _)| r.id == g.id)
-            .map(|(_, c)| c)
-            .unwrap_or(0);
-        return Ok(RefGroupView {
-            id: g.id,
-            name: g.name,
-            sort_order: g.sort_order,
-            count,
-        });
-    }
-    let g = repo::create_group(&state.db, name).await?;
-    Ok(RefGroupView {
-        id: g.id,
-        name: g.name,
-        sort_order: g.sort_order,
-        count: 0,
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn rename_ref_group(state: State<'_, AppState>, id: i64, name: String) -> AppResult<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(AppError::InvalidInput("分组名不能为空".into()));
-    }
-    if let Some(other) = repo::find_group_by_name(&state.db, name).await? {
-        if other.id != id {
-            return Err(AppError::InvalidInput(format!("已有同名分组「{name}」")));
-        }
-    }
-    if !repo::rename_group(&state.db, id, name).await? {
-        return Err(AppError::InvalidInput("分组不存在".into()));
-    }
-    Ok(())
-}
-
-/// 删除图库分组。组内图片**不删**，只是回到未分组。
-#[tauri::command]
-#[specta::specta]
-pub async fn delete_ref_group(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    if !repo::delete_group(&state.db, id).await? {
-        return Err(AppError::InvalidInput("分组不存在".into()));
-    }
-    Ok(())
-}
-
-/// 调整参考图分组。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_ref_image_group(
-    state: State<'_, AppState>,
-    id: i64,
-    group_id: Option<i64>,
-) -> AppResult<()> {
-    repo::set_group(&state.db, id, group_id).await?;
-    Ok(())
-}
-
-/// 归档 / 取消归档参考图（0016）。批次开跑后由 `engine::create_batch` 自动归档；
-/// 此命令供参考图库手动恢复（或手动归档一张用不上的旧图）。
-#[tauri::command]
-#[specta::specta]
-pub async fn set_ref_image_archived(
-    state: State<'_, AppState>,
-    id: i64,
-    archived: bool,
-) -> AppResult<()> {
-    if !repo::set_archived(&state.db, id, archived).await? {
-        return Err(AppError::InvalidInput("参考图不存在".into()));
-    }
-    Ok(())
-}
-
-/// 参考图详情（含使用统计）。
-#[derive(Debug, Clone, serde::Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RefImageDetail {
-    pub id: i64,
-    pub name: String,
-    pub group_id: Option<i64>,
-    pub file_path: String,
-    pub thumb_path: String,
-    pub width: i64,
-    pub height: i64,
-    pub used_count: i64,
-    pub works_count: i64,
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn get_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<RefImageDetail> {
-    let r = repo::get(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::InvalidInput("参考图不存在".into()))?;
-    let (used, works) = repo::usage_stats(&state.db, id).await?;
-    Ok(RefImageDetail {
-        id: r.id,
-        name: r.name,
-        group_id: r.ref_group_id,
-        file_path: r.file_path,
-        thumb_path: r.thumb_path,
-        width: r.width,
-        height: r.height,
-        used_count: used,
-        works_count: works,
-    })
-}
-
-/// 更换参考图文件（保留 id 与关联）。
-#[tauri::command]
-#[specta::specta]
-pub async fn replace_ref_image_file(
-    state: State<'_, AppState>,
-    id: i64,
-    path: String,
-) -> AppResult<()> {
-    state.dirs.init()?;
-    let (refs_dir, thumbs_dir) = (state.dirs.refs(), state.dirs.thumbs());
-    // 走 `ingest_one` 而不是在这里再写一遍拷贝 + 缩略图 + hash + 压缩副本：
-    // 那是同一条管线的第二份抄本，而两份抄本只会在下一次改口径时分叉
-    // （E30b 的 hash、E41 的上传副本都是后来补进去的，抄本迟早会漏掉某一次）。
-    // 顺带把这整段纯 CPU/IO 挪进 `spawn_blocking`（同 v0.14.0 导入那次的教训）。
-    let ing =
-        files::decode::bounded(move |permit| ingest_one(&path, &refs_dir, &thumbs_dir, permit))
-            .await?;
-    repo::update_file(
-        &state.db,
-        id,
-        &ing.file_path,
-        &ing.thumb_path,
-        ing.width,
-        ing.height,
-        ing.file_size,
-        ing.content_hash.as_deref(),
-        ing.upload_path.as_deref(),
-    )
-    .await?;
-    Ok(())
-}
-
-/// 删除参考图 → 进废纸篓。
-#[tauri::command]
-#[specta::specta]
-pub async fn trash_ref_image(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    trash_one_ref(&state, id).await
 }

@@ -2,10 +2,8 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { DescriptionHint } from "@/components/ui/Tooltip";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
-import { IntakeSection } from "@/features/settings/IntakeSection";
-import { LivePhotoSection } from "@/features/settings/LivePhotoSection";
-import { PosterSection } from "@/features/settings/PosterSection";
-import { PublishSyncSection } from "@/features/settings/PublishSyncSection";
+import { AgentCliSection } from "@/features/settings/AgentCliSection";
+import { AutomationSection } from "@/features/settings/AutomationSection";
 import { V2vSection } from "@/features/settings/V2vSection";
 import {
   type ApiKeyView,
@@ -21,6 +19,18 @@ import { useSettingsStore } from "@/stores/settings";
 import { ChevronDown, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+
+/** 顶部分区索引：id 与各 section 一一对应。 */
+const SECTIONS = [
+  ["s-keys", "API Key"],
+  ["s-sched", "调度"],
+  ["s-output", "作品目录"],
+  ["s-auto", "审稿后自动化"],
+  ["s-agent", "Agent CLI"],
+  ["s-v2v", "视频生成"],
+  ["s-general", "通用"],
+  ["s-data", "数据"],
+] as const;
 
 export function SettingsPage() {
   const settings = useSettingsStore((s) => s.settings);
@@ -136,10 +146,25 @@ export function SettingsPage() {
   const enabledCount = keys.filter((k) => k.enabled).length;
 
   return (
-    <PageScaffold title="设置" caption="API Key · 调度 · 输出 · 通用">
+    <PageScaffold title="设置" caption="生图接口 · 审稿后自动化 · Agent CLI">
       <div className="swrap">
-        {/* ---------------- API Key（任务4：默认折叠） ---------------- */}
-        <section className="sec">
+        <nav className="snav" aria-label="设置分区">
+          {SECTIONS.map(([id, label]) => (
+            <button
+              type="button"
+              key={id}
+              className="snavi"
+              onClick={() =>
+                document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        {/* ---------------- API Key（默认折叠） ---------------- */}
+        <section className="sec" id="s-keys">
           <div
             className="sechead collh"
             onClick={() => setApiOpen((v) => !v)}
@@ -264,7 +289,7 @@ export function SettingsPage() {
         </section>
 
         {/* ---------------- 调度与自动恢复 ---------------- */}
-        <section className="sec">
+        <section className="sec" id="s-sched">
           <div className="sechead">
             <span className="fw6 fs13">调度</span>
             <DescriptionHint label="调度方式说明">
@@ -275,30 +300,14 @@ export function SettingsPage() {
             <div
               className={cn("rc", settings?.scheduleStrategy === "round_robin" && "on")}
               title="任务平均分配到全部可用 Key"
-              onClick={() =>
-                updateSettings({
-                  scheduleStrategy: "round_robin",
-                  retryCount: null,
-                  outputDir: null,
-                  motion: null,
-                  paused: null,
-                })
-              }
+              onClick={() => updateSettings({ scheduleStrategy: "round_robin" })}
             >
               <div className="fw5 fs13">平均轮询</div>
             </div>
             <div
               className={cn("rc", settings?.scheduleStrategy === "success_rate" && "on")}
               title="优先使用历史成功率较高的 Key"
-              onClick={() =>
-                updateSettings({
-                  scheduleStrategy: "success_rate",
-                  retryCount: null,
-                  outputDir: null,
-                  motion: null,
-                  paused: null,
-                })
-              }
+              onClick={() => updateSettings({ scheduleStrategy: "success_rate" })}
             >
               <div className="fw5 fs13">成功率优先</div>
             </div>
@@ -312,15 +321,7 @@ export function SettingsPage() {
               value={settings?.retryCount ?? 1}
               min={0}
               max={3}
-              onChange={(v) =>
-                updateSettings({
-                  retryCount: v,
-                  scheduleStrategy: null,
-                  outputDir: null,
-                  motion: null,
-                  paused: null,
-                })
-              }
+              onChange={(v) => updateSettings({ retryCount: v })}
             />
           </div>
           <div className="fx ac gap10 mt14 wrap">
@@ -348,7 +349,7 @@ export function SettingsPage() {
         </section>
 
         {/* ---------------- 作品目录与归档 ---------------- */}
-        <section className="sec">
+        <section className="sec" id="s-output">
           <div className="sechead">
             <span className="fw6 fs13">作品目录与归档</span>
           </div>
@@ -370,14 +371,7 @@ export function SettingsPage() {
               className="btn sm"
               onClick={async () => {
                 const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
-                if (dir)
-                  updateSettings({
-                    outputDir: dir,
-                    scheduleStrategy: null,
-                    retryCount: null,
-                    motion: null,
-                    paused: null,
-                  });
+                if (dir) updateSettings({ outputDir: dir });
               }}
             >
               更改目录
@@ -445,63 +439,31 @@ export function SettingsPage() {
           </div>
         </section>
 
-        <LivePhotoSection />
+        <AutomationSection id="s-auto" />
 
-        {/* ---------------- 与 Claude Code / Codex 的两条链路 ---------------- */}
-        <IntakeSection />
+        <AgentCliSection id="s-agent" />
 
-        {/* ---------------- 交付（与 `自动发布` 的唯一契约） ---------------- */}
-        <PosterSection />
-
-        {/* ---------------- 发布与同步（发布模块 P1） ---------------- */}
-        <V2vSection />
-
-        <PublishSyncSection />
+        <V2vSection id="s-v2v" />
 
         {/* ---------------- 通用 ---------------- */}
-        <section className="sec">
+        <section className="sec" id="s-general">
           <div className="sechead">
             <span className="fw6 fs13">通用</span>
           </div>
           <div className="fx ac gap10">
-            <span className="fs12 t2" style={{ width: 72 }}>
-              主题
-            </span>
-            <div className="seg">
-              <span className="sgi on">浅色</span>
-              <span className="sgi dis">深色 · V2</span>
-            </div>
-          </div>
-          <div className="fx ac gap10 mt10">
             <span className="fs12 t2" style={{ width: 72 }}>
               动效
             </span>
             <div className="seg">
               <span
                 className={cn("sgi", (settings?.motion ?? "standard") === "standard" && "on")}
-                onClick={() =>
-                  updateSettings({
-                    motion: "standard",
-                    scheduleStrategy: null,
-                    retryCount: null,
-                    outputDir: null,
-                    paused: null,
-                  })
-                }
+                onClick={() => updateSettings({ motion: "standard" })}
               >
                 标准
               </span>
               <span
                 className={cn("sgi", settings?.motion === "reduced" && "on")}
-                onClick={() =>
-                  updateSettings({
-                    motion: "reduced",
-                    scheduleStrategy: null,
-                    retryCount: null,
-                    outputDir: null,
-                    paused: null,
-                  })
-                }
+                onClick={() => updateSettings({ motion: "reduced" })}
               >
                 减弱
               </span>
@@ -531,7 +493,7 @@ export function SettingsPage() {
               通知
             </span>
             <span className="fs11 t3">
-              批次完成、失败达阈值、Key 熔断、工单收录（开跑/待确认/失败）时发系统通知；
+              批次完成、失败达阈值、Key 熔断、Agent 投单（开跑/待确认/失败）时发系统通知；
               Dock/任务栏角标显示待验收任务数
             </span>
           </div>
@@ -565,7 +527,7 @@ export function SettingsPage() {
           </div>
         </section>
 
-        <section className="sec">
+        <section className="sec" id="s-data">
           <div className="sechead">
             <span className="fw6 fs13">数据</span>
             <span className="fs11 t3">数据目录位置 · 备份导出</span>

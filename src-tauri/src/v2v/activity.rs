@@ -47,7 +47,7 @@ pub struct ActivityEntry {
     pub at: i64,
     /// `info` / `warn` / `error`。
     pub level: String,
-    /// `cli` 调用 · `submit` 提交 · `poll` 轮询 · `media` 落盘 · `handoff` 交接目录。
+    /// `cli` 调用 · `submit` 提交 · `poll` 轮询 · `media` 落盘 · `rewrite` 改写结果。
     pub phase: String,
     pub clip_id: Option<i64>,
     /// 条目编号（如 `BR46-0003`），让日志能和看板上的卡片对上。

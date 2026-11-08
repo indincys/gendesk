@@ -135,11 +135,9 @@ export function V2vPage() {
   // ── 镜像（store 持有，侧栏与顶栏读的是同一份） ──────────
   const enter = useV2vStore((s) => s.enter);
   const reload = useV2vStore((s) => s.reload);
-  const reloadHandoff = useV2vStore((s) => s.reloadHandoff);
   const reloadEff = useV2vStore((s) => s.reloadEff);
   const clips = useV2vStore((s) => s.clips);
   const models = useV2vStore((s) => s.models);
-  const handoff = useV2vStore((s) => s.handoff);
   const autofill = useV2vStore((s) => s.autofill);
   const queue = useV2vStore((s) => s.queue);
   const tick = useV2vStore((s) => s.tick);
@@ -243,17 +241,6 @@ export function V2vPage() {
   /** 进入看片流时钉住显式 ID，避免勾选范围被忽略或后续新任务混入本轮。 */
   const revList = useMemo(() => reviewScope(visible, reviewIds), [visible, reviewIds]);
   const revIndex = curId == null ? -1 : revList.findIndex((r) => r.clip.id === curId);
-
-  // 交接状态跟着**待改写条数**刷新。
-  //
-  // 它只在 mount 与手动「收录改写」之后取一次的话，watcher 会在无人操作时自己收录
-  // —— 于是那个「21 条」在改写落地之后还挂着，恰好在它最要紧的时候是错的。
-  // 不挂在每个 tick 上：`v2v_handoff_status` 会顺手重写工单，不是只读的。
-  const rewriteN = useV2vStore((s) => s.counts.rewrite);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 依赖的是「待改写条数变了」这个信号
-  useEffect(() => {
-    void reloadHandoff();
-  }, [rewriteN]);
 
   // 看片流里光标必须落在待验收序列内：否则画面放的是 list[0]、按钮判的是光标那一条，
   // 两者不是同一个片子 —— 而这里每一次按键都在花钱或毙片。
@@ -598,20 +585,6 @@ export function V2vPage() {
     });
   }, [undo, guard, reload]);
 
-  const ingest = useCallback(
-    () =>
-      guard(async () => {
-        const sum = await unwrap(commands.ingestV2vRewrites());
-        if (sum.applied > 0) toast.success(`已收录 ${sum.applied} 条改写结果`);
-        else if (sum.unmatched > 0 || sum.stale > 0)
-          toast(`未收录：认不出 ${sum.unmatched} 条、已越过待提交 ${sum.stale} 条`);
-        else toast("交接目录里没有新的改写结果");
-        await reloadHandoff();
-        await reload();
-      }),
-    [guard, reload, reloadHandoff],
-  );
-
   /**
    * 立刻问一遍即梦。
    *
@@ -627,10 +600,6 @@ export function V2vPage() {
       .catch((e) => {
         if (e instanceof Error) toast.error(e.message);
       });
-  }, []);
-
-  const openHandoff = useCallback(() => {
-    void unwrap(commands.openHandoffDir()).catch((e) => toast.error(String(e)));
   }, []);
 
   // ── 看片流的单条判定（键盘与按钮共用） ────────────────
@@ -823,8 +792,6 @@ export function V2vPage() {
       if (first != null) setCur(first);
       setScreen("review");
     },
-    onIngest: () => void ingest(),
-    onOpenHandoff: openHandoff,
     onPollNow: pollNow,
     onSwitchChannel: (ids) =>
       setSwitching(ids.map((id) => byId.get(id)).filter((r): r is Row => r != null)),
@@ -913,8 +880,6 @@ export function V2vPage() {
             slice={slice}
             filter={filter}
             face={face}
-            handoff={handoff}
-            rewriteTotal={rewriteN}
             channelLive={channelLive}
             activity={activity}
             badGroup={badGroup}
@@ -922,7 +887,6 @@ export function V2vPage() {
             onRewriteGroup={(ids) => void queueAction(ids, "rewrite")}
             onLog={() => setShowLog(true)}
             onParams={() => setShowParams(true)}
-            onOpenHandoff={openHandoff}
           />
         )}
         <V2vList

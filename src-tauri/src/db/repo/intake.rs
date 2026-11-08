@@ -191,7 +191,17 @@ pub async fn get_by_job_id(
     Ok(r.map(to_view))
 }
 
-/// 最近若干条（设置页列表）。
+/// 该目录名是否已有台账（并发提交时，输的一方据此安静跳过）。
+pub async fn dir_known(pool: &SqlitePool, dir_name: &str) -> Result<bool, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intake_jobs WHERE dir_name = ?1")
+        .bind(dir_name)
+        .fetch_one(pool)
+        .await?;
+    Ok(n > 0)
+}
+
+/// 最近若干条（测试回读台账用）。
+#[cfg(test)]
 pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobView>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
         "{SELECT} ORDER BY created_at DESC, id DESC LIMIT ?1"

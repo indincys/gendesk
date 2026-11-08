@@ -562,7 +562,7 @@ describe("筛选", () => {
    * 两处必须一起改。这条断言看的就是那个口径。
    *
    * 用户报过的原症：21 条待改写时界面同时显示「需要我 0」「待改写 21」「无待办」。
-   * 那 21 条**恰恰卡在人身上** —— GenDesk 已经把工单物化好，在等人去 Claude Code 里
+   * 那 21 条**恰恰卡在人身上** —— GenDesk 的待改写清单随时可取，在等人让 Agent
    * 跑改写。把这一步排除在外，等于让全流水线最大的一处阻塞显示为 0。
    */
   it("「阻在人身上」= 改写 / 放行 / 验收 / 处理异常，不含机器在跑的", () => {
@@ -593,11 +593,12 @@ describe("筛选", () => {
     expect(only(rows, "done").map((r) => r.clip.id)).toEqual([4, 5]);
   });
 
+  // 改写入口从 skill（v2v-rewrite）换成了 CLI 命令，断言随之点名新命令；「点名工具」这条要求不变。
   it("待改写那句既点名动作也点名工具 —— 否则没人知道该去哪儿干什么", () => {
     const [r] = derive([
       clip({ stage: "rewrite", videoPrompt: null, videoPath: null, submitId: null }),
     ]);
-    expect(r?.situation).toContain("v2v-rewrite");
+    expect(r?.situation).toContain("gendesk v2v pending");
     expect(r?.situation).not.toContain("物化");
   });
 

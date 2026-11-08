@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/gendesk-live"],
+    "resources": {
+      "resources/live-photo/": "live-photo/"
+    }
+  }
+}

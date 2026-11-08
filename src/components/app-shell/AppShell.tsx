@@ -2,13 +2,10 @@ import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
-import { IntakeConfirmModal } from "@/features/settings/IntakeConfirmModal";
-import { PosterImportModal } from "@/features/settings/PosterImportModal";
 import { commands, subscribeIntake, subscribeLivePhoto, unwrap } from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
-import { usePublishStore } from "@/stores/publish";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { useV2vStore } from "@/stores/v2v";
@@ -21,18 +18,11 @@ export function AppShell() {
   const route = useUiStore((s) => s.route);
   const platform = useUiStore((s) => s.platform);
   const initEngine = useEngineStore((s) => s.init);
-  const initPublish = usePublishStore((s) => s.init);
   const refreshBadges = useEngineStore((s) => s.refreshBadgeCounts);
-  const refreshPubBadges = usePublishStore((s) => s.refreshBadges);
   const initV2v = useV2vStore((s) => s.init);
   const refreshV2v = useV2vStore((s) => s.refreshCounts);
   const loadSettings = useSettingsStore((s) => s.load);
   const ActivePage = ROUTE_BY_KEY[route].component;
-  // 超阈值工单：在任何页面上都要能当场核对并放行（见下方订阅处的理由）。
-  // 状态在 store 里、卡只在这里挂一次 —— 设置页那个按钮也只是写这同一个字段，
-  // 否则人停在设置页时会同时挂出两份同样的卡。
-  const holdJob = useUiStore((s) => s.holdJob);
-  const setHoldJob = useUiStore((s) => s.setHoldJob);
 
   // 加载设置（E13 引导态 / 动效偏好等全局所需）。
   useEffect(() => {
@@ -63,15 +53,6 @@ export function AppShell() {
     };
   }, [initEngine]);
 
-  // 订阅发布模块事件（徽章 / 收件箱收录）。
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    void initPublish().then((fn) => {
-      cleanup = fn;
-    });
-    return () => cleanup?.();
-  }, [initPublish]);
-
   // 订阅视频流水线事件（侧栏徽章要在任何页面上都是对的）。
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -81,9 +62,9 @@ export function AppShell() {
     return () => cleanup?.();
   }, [initV2v]);
 
-  // 订阅生图工单收件（Claude Code / Codex 投单 → 自动建批）。
+  // 订阅生图工单收件（Agent 经 `gendesk submit` 投单 → 建批开跑）。
   //
-  // 挂在外壳而不是设置页：收录是自动发生的，人当时未必停在设置页，而一个凭空出现的
+  // 挂在外壳而不是某个页面：投单由 Agent 触发，人当时未必停在哪一页，而一个凭空出现的
   // 批次（以及一份静默失败的工单）都需要当场给一句解释。
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -94,11 +75,9 @@ export function AppShell() {
           const b = j.batchIds.map((x) => `#${x}`).join(" ");
           toast(`收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`);
         } else if (j.status === "hold") {
-          // 超阈值：琥珀而不是红——它不是错误，是在等人表态。
-          //
-          // 保留应用内确认卡，用户打开 GenDesk 时就能核对挂靠。
-          setHoldJob(j.id);
-          toast.warning(`工单「${j.jobId}」${j.message}，请核对挂靠后确认`);
+          // 超阈值：琥珀而不是红——它不是错误，是在等人表态。放行只在 Agent 里经用户同意后
+          // `gendesk confirm`，应用这边只提示，不设第二个确认入口。
+          toast.warning(`工单「${j.jobId}」${j.message}，等你在 Agent 里同意后确认开跑`);
         } else {
           // 失败必须是红的且带原因：静默失败的工单等于「投了单什么也没发生」。
           toast.error(`工单「${j.jobId}」收录失败：${j.message}`);
@@ -110,14 +89,14 @@ export function AppShell() {
       cleanup = fn;
     });
     return () => cleanup?.();
-  }, [refreshBadges, setHoldJob]);
+  }, [refreshBadges]);
 
-  // 切页刷新废纸篓 + 发布 + 视频徽章（增删后即时反映，非定时轮询）。
+  // 切页刷新废纸篓 + 视频徽章（增删后即时反映，非定时轮询）。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: route 变化本身就是刷新信号
   useEffect(() => {
     void refreshBadges();
-    void refreshPubBadges();
     void refreshV2v();
-  }, [route, refreshBadges, refreshPubBadges, refreshV2v]);
+  }, [route, refreshBadges, refreshV2v]);
 
   return (
     <div className={`app ${platform === "win" ? "win" : "mac"}`}>
@@ -130,14 +109,6 @@ export function AppShell() {
         </div>
       </div>
       <HelpPanel />
-      <PosterImportModal />
-      {holdJob !== null && (
-        <IntakeConfirmModal
-          jobId={holdJob}
-          onClose={() => setHoldJob(null)}
-          onConfirmed={() => {}}
-        />
-      )}
     </div>
   );
 }

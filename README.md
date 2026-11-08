@@ -1,6 +1,6 @@
 # GenDesk · 内部图片生产工具
 
-本地批量图生图流水线：参考图素材库 → 提示词分组 → 批量生成 → 进度追踪 → 人工验收 → 合格图输出归档。
+本地批量图生图流水线：Agent 经 CLI 投单 → 批量生成 → 进度追踪 → 人工审图 → 合格图归档，可选自动转实况图并导入 Poster。
 Windows 10/11（x64）与 macOS 12+（Apple Silicon）双端，Tauri 2 + React 19 + Rust。**不支持 Intel 芯片 Mac。**
 
 ## 开发
@@ -13,24 +13,29 @@ pnpm check              # 全门禁（提交前必跑，= CI 镜像）
 
 架构约定与铁律见 [CLAUDE.md](CLAUDE.md)。
 
-## 审稿图片进入 Poster
+## 审稿后自动化
 
-Poster 接入默认关闭；在设置中开启后，审稿通过才逐批询问是否导入，确认后按已有商品 ID 静默进入图片库，不自动发布。
-设置、20 款归属与失败恢复见 [Poster 图片接入](docs/Poster图片接入.md)。Poster 侧为任何工具都可调用的通用图片 CLI，无生成渠道专属规则。
+设置 › 审稿后自动化有两个开关，都默认关闭、打开后不再询问：
 
-## Harness / 命令行投单
+- **自动转实况图**（macOS）：应用内置转换助手，后台把通过的图转成 JPG + MOV 实况照片，放在 `成品/实况照片`。
+- **自动导入 Poster**：通过的图按款式进入 Poster 对应商品的图片库存；两项都开时先转实况图，配对完成后连同视频导入。
 
-CLI 0.36.1 接收 UTF-8 正文与本地有序参考图，打包投递并返回 JSON；新任务用 organization 按产品、款式、需求归档，无 SKU 不编造编号。旧 sku/style 单仍兼容。
+归属、失败处理与恢复见 [Poster 图片接入](docs/Poster图片接入.md)。
+
+## Agent CLI
+
+外部 Agent 只通过 `gendesk` 命令与应用交互：CLI 打包清单，经本机控制通道请求收录，应用不监听、不扫描任何目录。GenDesk 未运行时 CLI 在后台启动它。
 
 ```bash
 pnpm install:cli          # macOS/Unix：更新 ~/.local/bin/gendesk 的独立副本
-gendesk --version
 gendesk doctor
 gendesk validate --manifest /路径/场景任务.json
-gendesk submit --manifest /路径/场景任务.json --open --wait 30
+gendesk submit --manifest /路径/场景任务.json
+gendesk status <jobId>
+gendesk v2v pending
 ```
 
-应用升级不会自动同步 CLI；安装器检查版本并原子替换入口。完整字段、单条调用、多参考图、参数继承、稳定去重和回执只维护在 [命令行生图接入](docs/命令行生图接入.md)。validate 通过 Rust 做只读完整预检；新工单失败按检查点恢复，不重复导入已有记录。只写提示词不投单；--wait 只等收录，生成结果在应用中人工验收。skill 交付边界见 [标准产出](docs/提示词skill标准产出规范.md)。
+应用升级不会自动同步 CLI；安装器检查版本并原子替换入口。完整字段、单条调用、多参考图、参数继承、去重、待确认与重试只维护在 [命令行生图接入](docs/命令行生图接入.md)。只写提示词不投单；生成结果在应用里人工审图。skill 交付边界见 [标准产出](docs/提示词skill标准产出规范.md)。
 
 ## 发布（M4）
 
@@ -59,5 +64,4 @@ gendesk submit --manifest /路径/场景任务.json --open --wait 30
 **逐版本记录与设计取舍见 `git log`**（提交信息与代码注释里保留了实测数据与取舍理由）；
 [CLAUDE.md](CLAUDE.md) 只记当前仍然成立的架构约束。
 
-
-0.36.0 起，图片和视频按产品、款式、需求持续归档，不再按验收或运行批次创建成品目录。产品规则不写死在工具里；人工确认卡、CLI 与工单都能提供归属。当前本机作品根为项目根（与 `代码/` 分开），存量整理、快照及外部引用约定见 [作品目录整理](docs/作品目录整理.md)。
+图片和视频按产品、款式、需求持续归档，不再按验收或运行批次创建成品目录。产品规则不写死在工具里；人工确认卡、CLI 与工单都能提供归属。当前本机作品根为项目根（与 `代码/` 分开），存量整理、快照及外部引用约定见 [作品目录整理](docs/作品目录整理.md)。

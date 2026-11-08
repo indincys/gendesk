@@ -12,7 +12,7 @@ export interface RefImportState {
 }
 
 /**
- * 参考图导入（生成页上传 / 图库批量上传共用）。
+ * 参考图导入（生成页上传）。
  *
  * 存在的理由是一条真实事故：导入一次十几张，后端要逐张拷贝 + 解码 + 缩略图 + 压缩副本，
  * 十几秒里界面一声不吭；用户以为没点上，又点、又点，同一批图进库五六遍。
@@ -23,29 +23,22 @@ export function useRefImport() {
   const [state, setState] = useState<RefImportState | null>(null);
   const busy = useRef(false);
 
-  const run = useCallback(
-    async (
-      paths: string[],
-      groupId: number | null,
-      ephemeral: boolean,
-    ): Promise<RefImageView[]> => {
-      if (paths.length === 0 || busy.current) return [];
-      busy.current = true;
-      setState({ done: 0, total: paths.length, name: "", failed: 0 });
-      // 必须先挂监听再发命令：反过来会漏掉前几张的事件（小批量时等于全漏）。
-      const unsub = await subscribeRefImportProgress((p) =>
-        setState({ done: p.done, total: p.total, name: p.name, failed: p.failed }),
-      );
-      try {
-        return await unwrap(commands.importRefImages(paths, groupId, ephemeral));
-      } finally {
-        unsub();
-        setState(null);
-        busy.current = false;
-      }
-    },
-    [],
-  );
+  const run = useCallback(async (paths: string[], ephemeral: boolean): Promise<RefImageView[]> => {
+    if (paths.length === 0 || busy.current) return [];
+    busy.current = true;
+    setState({ done: 0, total: paths.length, name: "", failed: 0 });
+    // 必须先挂监听再发命令：反过来会漏掉前几张的事件（小批量时等于全漏）。
+    const unsub = await subscribeRefImportProgress((p) =>
+      setState({ done: p.done, total: p.total, name: p.name, failed: p.failed }),
+    );
+    try {
+      return await unwrap(commands.importRefImages(paths, ephemeral));
+    } finally {
+      unsub();
+      setState(null);
+      busy.current = false;
+    }
+  }, []);
 
   return { state, busy, run };
 }

@@ -1,4 +1,4 @@
-//! 工单收录：扫描 → 校验 → 阈值 → 导入提示词与参考图 → 按参数分桶建批 → 移档留证。
+//! 工单收录：CLI 指名提交 → 校验 → 阈值 → 导入提示词与参考图 → 按参数分桶建批 → 移档留证。
 //!
 //! ## 顺序不是随便排的
 //!
@@ -8,7 +8,7 @@
 //! 阈值判定排在导入之前，所以超阈值时**库里一个字节都没变**——不存在「提示词进了库
 //! 但没建批」这种要人去收拾的中间态。
 //!
-//! 记账在**动手之前**：进程若在导入中途被杀，那一行会留在 `running`，下次扫描据此
+//! 记账在**动手之前**：进程若在导入中途被杀，那一行会留在 `running`，重复提交据此
 //! 跳过它，而不是从头再来一遍——半个工单重放会造出重复的提示词与重复的批次。
 //! 这与 v0.15.0「提交成功即写 submit_id」是同一条教训：不可撤回的动作，标记要先落。
 
@@ -54,14 +54,14 @@ pub trait ProgressSink: Send + Sync {
     fn refs(&self, job_id: &str, done: i64, total: i64);
 }
 
-/// 不回报。后台扫描与测试用——那些场景没有人在等着看进度。
+/// 不回报。测试用。
 pub struct NoProgress;
 
 impl ProgressSink for NoProgress {
     fn refs(&self, _job_id: &str, _done: i64, _total: i64) {}
 }
 
-/// 收录所需的全部句柄。命令层与后台监听各自构造一个，字段都是 clone 友好的。
+/// 收录所需的全部句柄。每次 CLI 调用各自构造一个，字段都是 clone 友好的。
 #[derive(Clone)]
 pub struct Ctx {
     pub pool: SqlitePool,
@@ -70,32 +70,82 @@ pub struct Ctx {
     pub progress: Arc<dyn ProgressSink>,
     /// 任务数超过它就不自动开跑，转「待确认」。`<= 0` = 不限。
     pub threshold: i64,
-    /// 扫描互斥锁。**必须全进程共用同一把**（见 [`scan`]）。
-    pub scan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 收录互斥锁。**必须全进程共用同一把**：CLI 的重复提交、确认与重试串行执行。
+    pub lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// 一轮扫描的结果：本轮真正处理掉的工单（已跳过的不在其中）。
-pub type ScanResult = Vec<JobView>;
-
-/// 扫描收件目录并逐个收录。**幂等**：已记账的工单一律跳过。
+/// 收录 CLI 指名的一份工单。全进程串行，同一工单无论重复调用多少次都只收录一次。
 ///
-/// **全程持锁串行。** 两条路径会同时触发扫描：设置页点「确认开跑」会直接扫一轮，
-/// 而写下的 `确认.txt` 落在被监听的收件目录里，watcher 防抖 2 秒后也会扫一轮。
-/// 没有这把锁，两轮会在「`repo::exists` 查过了、`insert_running` 还没写」的窗口里
-/// 撞车：`job_id UNIQUE` 保证不会重复花钱，但输的那一轮会把 UNIQUE 冲突当成收录失败
-/// 抛给用户——一份其实跑得好好的工单显示「确认失败」，而本轮剩下的工单被整个放弃。
+/// 没有目录监听，也没有全量扫描：工单只在 `gendesk submit` 明确交给应用时处理，
+/// 其他目录（另一个 Agent 还在写的、早已移档的）一概不碰。
 ///
-/// 这个窗口会随着收录变快而**变宽**（同样的 2 秒防抖，能覆盖的工作变多了），
-/// 所以它不是「以后再说」的问题。
-pub async fn scan(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
-    let _guard = ctx.scan_lock.lock().await;
-    scan_locked(ctx, root).await
+/// 同一目录被并发提交两次时，后到的一方发现目录已被收录移走，返回 `None`
+/// （「没有新动作」），由 CLI 按 jobId 回读状态，而不是报一个假的失败。
+pub async fn submit(ctx: &Ctx, root: &Path, dir_name: &str) -> AppResult<Option<JobView>> {
+    let _guard = ctx.lock.lock().await;
+    if !super::pending_dir(root).join(dir_name).is_dir()
+        && repo::dir_known(&ctx.pool, dir_name).await?
+    {
+        return Ok(None);
+    }
+    let dir = job_dir(root, dir_name)?;
+    if !dir.join(super::READY).is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "工单尚未写完（缺少 {}）：{dir_name}",
+            super::READY
+        )));
+    }
+    ingest_dir(ctx, root, &dir, dir_name).await
 }
 
-/// Resume only the unfinished stages of the same ledger row under the shared scan lock.
+/// 放行一份超阈值待确认的工单。确认只能由 Agent 在用户明确同意后调用。
+pub async fn confirm(ctx: &Ctx, root: &Path, job_id: &str) -> AppResult<Option<JobView>> {
+    let _guard = ctx.lock.lock().await;
+    let job = repo::get_by_job_id(&ctx.pool, job_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput(format!("未找到工单：{job_id}")))?;
+    if job.status != "hold" {
+        return Err(AppError::InvalidInput(
+            "只有「待确认」的工单需要确认".into(),
+        ));
+    }
+    let dir = job_dir(root, &job.dir_name)?;
+    std::fs::write(
+        dir.join(super::CONFIRM_FILE),
+        format!("经 CLI 确认开跑（{}）\n", now_unix()),
+    )
+    .map_err(|e| AppError::Io(format!("写确认文件失败：{e}")))?;
+    ingest_dir(ctx, root, &dir, &job.dir_name).await
+}
+
+/// 按 jobId 重试失败或中断的工单；只补未完成步骤。
+pub async fn retry(ctx: &Ctx, root: &Path, job_id: &str) -> AppResult<Option<JobView>> {
+    let job = repo::get_by_job_id(&ctx.pool, job_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput(format!("未找到工单：{job_id}")))?;
+    Ok(retry_job(ctx, root, job.id).await?.into_iter().next())
+}
+
+/// 收件目录里的一个工单目录。名字只能是单层安全目录名。
+fn job_dir(root: &Path, dir_name: &str) -> AppResult<PathBuf> {
+    let safe = !dir_name.is_empty()
+        && !dir_name.starts_with('_')
+        && !dir_name.starts_with('.')
+        && !dir_name.contains(['/', '\\'])
+        && dir_name != "..";
+    let dir = super::pending_dir(root).join(dir_name);
+    if !safe || !dir.is_dir() {
+        return Err(AppError::InvalidInput(format!(
+            "工单目录不存在：{dir_name}"
+        )));
+    }
+    Ok(dir)
+}
+
+/// Resume only the unfinished stages of the same ledger row under the shared lock.
 /// Stage identities live in SQLite; missing legacy identities are never guessed.
-pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<ScanResult> {
-    let _guard = ctx.scan_lock.lock().await;
+pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<Vec<JobView>> {
+    let _guard = ctx.lock.lock().await;
     let Some(job) = repo::get_optional(&ctx.pool, row_id).await? else {
         return Ok(Vec::new());
     };
@@ -103,7 +153,11 @@ pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<ScanRes
         return Ok(Vec::new());
     }
     if job.status == "hold" {
-        return scan_locked(ctx, root).await;
+        let dir = job_dir(root, &job.dir_name)?;
+        return Ok(ingest_dir(ctx, root, &dir, &job.dir_name)
+            .await?
+            .into_iter()
+            .collect());
     }
     let saved = repo::checkpoint(&ctx.pool, &job.job_id).await?;
     if saved.is_none()
@@ -151,39 +205,6 @@ pub async fn retry_job(ctx: &Ctx, root: &Path, row_id: i64) -> AppResult<ScanRes
     Ok(result.into_iter().collect())
 }
 
-/// 已持有 `scan_lock` 的扫描主体。只允许 [`scan`] 与 [`retry_job`] 调用。
-async fn scan_locked(ctx: &Ctx, root: &Path) -> AppResult<ScanResult> {
-    let pending = super::pending_dir(root);
-    // 目录不存在就先建出来：用户第一次看设置页时应该能直接「打开目录」把工单丢进去。
-    std::fs::create_dir_all(&pending)?;
-
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&pending) else {
-        return Ok(out);
-    };
-    // 目录顺序由文件系统决定，排一下让「先投的先跑」在同一轮里也成立。
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-
-    for dir in dirs {
-        let Some(name) = dir.file_name().map(|s| s.to_string_lossy().to_string()) else {
-            continue;
-        };
-        // `_` 开头是我们自己的簿记目录（_已收录）；没有 READY.txt 说明 skill 还在写。
-        if name.starts_with('_') || !dir.join(super::READY).is_file() {
-            continue;
-        }
-        if let Some(view) = ingest_dir(ctx, root, &dir, &name).await? {
-            out.push(view);
-        }
-    }
-    Ok(out)
-}
-
 /// 收录单个工单目录。已处理过返回 `None`（不是错误——那是稳态）。
 async fn ingest_dir(
     ctx: &Ctx,
@@ -203,7 +224,7 @@ async fn ingest_dir(
     //
     //    挡住之后必须留痕。目录还在收件里、READY.txt 也在，说明有人正等着它跑；
     //    静默返回会让这份工单永远停在「投了没反应」——没有回执、没有台账行、
-    //    设置页点「立即扫描」也什么都不显示。这正是 jobId 默认取目录名的代价：
+    //    `gendesk status` 也查不到。这正是 jobId 默认取目录名的代价：
     //    同一天同一主题投第二次（`20260729-卡套-broll`）必然撞键。
     //
     //    只在**一个回执都没有**时写：已成功但移档失败的（有 结果.txt）、
@@ -249,8 +270,7 @@ async fn ingest_dir(
         }
     }
 
-    // 3. 阈值。**确认.txt 是确认的唯一表达**——设置页那个按钮做的事就是替你写下它，
-    //    所以两条确认路径走的是同一段代码，不可能一条对一条错。
+    // 3. 阈值。**确认.txt 是确认的唯一表达**——`gendesk confirm` 做的事就是替你写下它。
     let confirmed = dir.join(super::CONFIRM_FILE).is_file();
     let total = plan.task_count();
     if !confirmed && ctx.threshold > 0 && total > ctx.threshold {
@@ -528,16 +548,6 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     }
     let group_id = checkpoint.group_ids[0];
 
-    // ── 参考图：可选的图库分组（重名复用，不报错）。
-    let ref_group_id = match &plan.ref_group {
-        Some(name) => Some(
-            match refs_repo::find_group_by_name(&ctx.pool, name).await? {
-                Some(g) => g.id,
-                None => refs_repo::create_group(&ctx.pool, name).await?.id,
-            },
-        ),
-        None => None,
-    };
     ctx.dirs.init()?;
     let wanted = plan.distinct_refs();
     let total_refs = wanted.len() as i64;
@@ -573,7 +583,6 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
                 &mut *tx,
                 &refs_repo::NewRefImage {
                     name: ing.name,
-                    ref_group_id,
                     file_path: ing.file_path,
                     thumb_path: ing.thumb_path,
                     width: ing.width,
@@ -581,7 +590,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
                     file_size: ing.file_size,
                     content_hash: ing.content_hash,
                     upload_path: ing.upload_path,
-                    ephemeral: plan.ephemeral,
+                    ephemeral: false,
                 },
             )
             .await?;
@@ -701,7 +710,7 @@ fn move_to_consumed(root: &Path, dir: &Path, dir_name: &str) {
     }
 }
 
-/// 回执文件：让投单那一侧（Claude Code / Codex）能回读结果，不必猜后面发生了什么。
+/// 回执文件：让投单的 Agent 能回读结果，不必猜后面发生了什么。
 ///
 /// 失败与待确认的目录**不移走**：回执要和提示词文档摆在一起才有用——改完就地重投。
 fn write_receipt(dir: &Path, name: &str, body: &str) {
@@ -739,10 +748,9 @@ fn duplicate_text(job_id: &str) -> String {
          它挡住的是「同一份工单被重放两次」，那会造出重复的提示词、重复的批次、\n\
          重复的钱。但你这一份很可能是**新的内容套了个旧名字**。\n\n\
          怎么办（二选一）：\n\
-         1. 想跑：把工单目录改个没用过的名字（末尾加时间戳最省事），\n\
-            删掉本文件后 READY.txt 保持在，下一轮扫描就会收录；\n\
+         1. 想跑：用新的 `--job-id` 重新 `gendesk submit`；\n\
          2. 确认是重复投递、本来就不该跑：直接删掉整个工单目录。\n\n\
-         想查是哪一份占了这个名字：GenDesk 设置页「Claude Code 收件」的台账里搜这个名字。\n"
+         想查是哪一份占了这个名字：`gendesk status <jobId>`。\n"
     )
 }
 
@@ -773,12 +781,9 @@ fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
          共 {total} 张图 = {total} 个条目（一条 = 一个任务 = 一张图）\n\
          参考图 {} 张 · 将建 1 个批次（一次工单 = 一个 run）\n\
          当前阈值：{threshold}\n\n\
-         确认开跑，二选一：\n\
-         1. 在这个目录里建一个空文件 `{}`\n\
-         2. 或在 GenDesk 设置页「Claude Code 收件」点「确认开跑」（它做的就是第 1 件事）\n\n\
-         不想跑就直接删掉整个工单目录。\n",
+         用户明确同意后运行 `gendesk confirm {}` 开跑；不想跑就直接删掉整个工单目录。\n",
         plan.distinct_refs().len(),
-        super::CONFIRM_FILE,
+        plan.job_id,
     )
 }
 
@@ -790,7 +795,7 @@ fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
 fn error_text(msg: &str, done: &Applied) -> String {
     format!(
         "GenDesk 收录失败：\n\n{msg}\n\n已记录的导入进度：提示词 {} 条，参考图 {} 张，任务 {} 个，批次 {:?}。\n\n\
-         新工单保留了导入身份检查点：在设置页对原工单点“重试”只补未完成步骤，不能换 ID 整单重投。\n\
+         新工单保留了导入身份检查点：用 `gendesk retry <jobId>` 对原工单重试，只补未完成步骤，不能换 ID 整单重投。\n\
          已有导入后不得修改原正文、归属、参数或参考图；内容冲突时会停止恢复。\n\
          没有检查点的历史部分导入或中断工单不会盲目重放，请保留回执核对遗留。\n",
         done.group_count, done.ref_count, done.task_count, done.batch_ids
@@ -896,11 +901,38 @@ mod tests {
                 engine: kick.clone(),
                 progress: progress.clone(),
                 threshold,
-                scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+                lock: Arc::new(tokio::sync::Mutex::new(())),
             },
             kick,
             progress,
         )
+    }
+
+    /// 测试便利：按目录名顺序把收件目录里每份带 READY 的工单逐一 `submit`，
+    /// 只返回本轮真正处理掉的工单（与 CLI 逐份提交同一条代码路径）。
+    async fn scan(ctx: &Ctx, root: &Path) -> AppResult<Vec<JobView>> {
+        let pending = super::super::pending_dir(root);
+        std::fs::create_dir_all(&pending)?;
+        let mut names: Vec<String> = std::fs::read_dir(&pending)?
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with('_'))
+            .collect();
+        names.sort();
+        let mut out = Vec::new();
+        for name in names {
+            // 没写完的跳过（与 CLI 只提交写好 READY 的目录一致）。列目录与提交之间
+            // 另一轮可能已把它收录移走——那时目录已不在，submit 对此返回 None。
+            let dir = pending.join(&name);
+            if dir.exists() && !dir.join(super::super::READY).is_file() {
+                continue;
+            }
+            if let Some(view) = submit(ctx, root, &name).await? {
+                out.push(view);
+            }
+        }
+        Ok(out)
     }
 
     async fn count(pool: &SqlitePool, table: &str) -> i64 {
@@ -964,8 +996,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    /// 端到端：真实 `scripts/gendesk.mjs` 打包 → 控制协议 → 真实 Rust 收录。
+    ///
+    /// 测试里起一个最小控制通道（只认 hello / intake.status / intake.submit），
+    /// 收到 `intake.submit` 就调用本模块的 [`submit`]，与 `control.rs` 的分发一致。
+    #[tokio::test(flavor = "multi_thread")]
     async fn cli_manifest_to_real_rust_import_and_cli_receipt() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
         let (pool, _d) = test_pool().await;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -992,37 +1030,88 @@ mod tests {
         )
         .unwrap();
         let cli = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/gendesk.mjs");
-        let discovery = home.path().join("GenDesk交接");
-        std::fs::create_dir_all(&discovery).unwrap();
+        // cargo test also builds the actual app binary for tests/intake_preflight.rs.
+        let app_bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("gendesk{}", std::env::consts::EXE_SUFFIX));
+        let root = home.path().join("GenDesk交接");
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         std::fs::write(
-            discovery.join("连接.json"),
+            root.join("连接.json"),
             serde_json::json!({
-                "version": 1, "root": home.path(), "enabled": true,
-                "features": ["ordered-references", "generation-quality", "intake-preflight", "resumable-intake"]
+                "version": 2, "protocol": 2, "token": "t",
+                "port": listener.local_addr().unwrap().port(),
+                "appPath": app_bin, "root": root, "taskThreshold": 100,
             })
             .to_string(),
         )
         .unwrap();
-        let output = std::process::Command::new("node")
-            .env("HOME", home.path())
-            // cargo test also builds the actual app binary for tests/intake_preflight.rs.
-            .env(
-                "GENDESK_APP_BIN",
-                std::env::current_exe()
+
+        // 跑一条 CLI 命令，同时在本任务里逐个应答它的请求（CLI 串行发请求）。
+        let run = |args: Vec<String>| {
+            let cli = cli.clone();
+            let home = home.path().to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                std::process::Command::new("node")
+                    .env("HOME", home)
+                    .env("GENDESK_LAUNCH", "0")
+                    .arg(cli)
+                    .args(args)
+                    .output()
                     .unwrap()
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join(format!("gendesk{}", std::env::consts::EXE_SUFFIX)),
-            )
-            .arg(&cli)
-            .args(["submit", "--manifest"])
-            .arg(manifest)
-            .arg("--root")
-            .arg(home.path())
-            .output()
-            .unwrap();
+            })
+        };
+        async fn serve_until(
+            listener: &tokio::net::TcpListener,
+            ctx: &Ctx,
+            root: &Path,
+            mut child: tokio::task::JoinHandle<std::process::Output>,
+        ) -> std::process::Output {
+            loop {
+                tokio::select! {
+                    out = &mut child => return out.unwrap(),
+                    conn = listener.accept() => {
+                        let (stream, _) = conn.unwrap();
+                        let (read, mut write) = stream.into_split();
+                        let mut line = String::new();
+                        BufReader::new(read).read_line(&mut line).await.unwrap();
+                        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        assert_eq!(req["token"], "t");
+                        let args = &req["args"];
+                        let data = match req["cmd"].as_str().unwrap() {
+                            "hello" => serde_json::json!({ "protocol": 2, "root": root }),
+                            "intake.status" => serde_json::json!({
+                                "job": repo::get_by_job_id(&ctx.pool, args["jobId"].as_str().unwrap()).await.unwrap()
+                            }),
+                            "intake.submit" => serde_json::json!({
+                                "job": submit(ctx, root, args["dir"].as_str().unwrap()).await.unwrap()
+                            }),
+                            other => serde_json::json!({ "unexpected": other }),
+                        };
+                        let body = serde_json::json!({ "ok": true, "data": data });
+                        write.write_all(format!("{body}\n").as_bytes()).await.unwrap();
+                        write.shutdown().await.unwrap();
+                    }
+                }
+            }
+        }
+
+        let output = serve_until(
+            &listener,
+            &ctx,
+            &root,
+            run(vec![
+                "submit".into(),
+                "--manifest".into(),
+                manifest.to_string_lossy().into_owned(),
+            ]),
+        )
+        .await;
         assert!(
             output.status.success(),
             "{} {}",
@@ -1030,33 +1119,34 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let submitted: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let job_id = submitted["jobId"].as_str().unwrap();
-        let jobs = scan(&ctx, home.path()).await.unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
-        assert_eq!(jobs[0].task_count, 2);
-        assert_eq!(jobs[0].ref_count, 1);
+        assert_eq!(submitted["status"], "ingested", "{submitted}");
+        let job_id = submitted["jobId"].as_str().unwrap().to_string();
+        let job = repo::get_by_job_id(&pool, &job_id).await.unwrap().unwrap();
+        assert_eq!(job.status, "done", "{}", job.message);
+        assert_eq!(job.task_count, 2);
+        assert_eq!(job.ref_count, 1);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1);
         assert_eq!(count(&pool, "tasks").await, 2);
-        assert!(jobs[0].wire_json[0].contains("1536x2048"));
-        assert!(jobs[0].wire_json[1].contains("1152x2048"));
-        assert!(jobs[0].wire_json.iter().all(|s| s.contains("jpeg")));
-        assert!(jobs[0]
+        assert!(job.wire_json[0].contains("1536x2048"));
+        assert!(job.wire_json[1].contains("1152x2048"));
+        assert!(job.wire_json.iter().all(|s| s.contains("jpeg")));
+        assert!(job
             .wire_json
             .iter()
             .all(|s| s.contains("\"quality\":\"high\"")));
 
-        let status = std::process::Command::new("node")
-            .arg(cli)
-            .args(["status", job_id, "--root"])
-            .arg(home.path())
-            .output()
-            .unwrap();
+        let status = serve_until(
+            &listener,
+            &ctx,
+            &root,
+            run(vec!["status".into(), job_id.clone()]),
+        )
+        .await;
         assert!(status.status.success());
         let receipt: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
         assert_eq!(receipt["status"], "ingested");
-        assert_eq!(receipt["receipt"]["batchIds"][0], jobs[0].batch_ids[0]);
-        assert_eq!(receipt["receipt"]["taskCount"], 2);
+        assert_eq!(receipt["job"]["batchIds"][0], job.batch_ids[0]);
+        assert_eq!(receipt["job"]["taskCount"], 2);
     }
 
     #[tokio::test]
@@ -1314,8 +1404,7 @@ mod tests {
         assert_eq!(seen.last(), Some(&(7, 7)), "最后一条应是 7/7");
     }
 
-    /// 同一个收件目录被并发扫两轮 —— 设置页点「确认开跑」会直接扫一轮，而写下的
-    /// `确认.txt` 落在被监听目录里，watcher 也会扫一轮。结果必须是**恰好一个批次**，
+    /// 同一份工单被两个 CLI 进程并发提交。结果必须是**恰好一个批次**，
     /// 且**两轮都不报错**：输的那一轮该安静地跳过，而不是把 UNIQUE 冲突当成
     /// 「收录失败」抛给用户（一份其实跑得好好的工单显示确认失败）。
     #[tokio::test]
@@ -1683,7 +1772,7 @@ mod tests {
         let held = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(held[0].status, "hold");
 
-        // 「确认」= 删台账行 + 写确认文件（设置页那个按钮做的就是这两件事）。
+        // 「确认」= 删台账行 + 写确认文件（`gendesk confirm` 做的就是这两件事）。
         repo::delete(&pool, held[0].id).await.unwrap();
         std::fs::write(dir.join(super::super::CONFIRM_FILE), "ok").unwrap();
 

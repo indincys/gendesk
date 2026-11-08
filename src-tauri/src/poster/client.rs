@@ -33,6 +33,17 @@ pub struct ImageItem {
     pub sha256: String,
     pub byte_size: u64,
     pub source: String,
+    /// 实况配对视频；有它时 `path` 是同名 JPG，Poster 按内容标识符核对配对。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_video: Option<LiveVideo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveVideo {
+    pub path: String,
+    pub sha256: String,
+    pub byte_size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +86,7 @@ pub fn discover_executable() -> PathBuf {
 async fn run(executable: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
     if !executable.is_absolute() || !executable.is_file() {
         return Err(AppError::InvalidInput(
-            "未找到支持图片接口的 Poster，请在设置 › Poster 图片接入中选择新版 Poster 应用".into(),
+            "未找到支持图片接口的 Poster，请在设置 › 审稿后自动化中选择新版 Poster 应用".into(),
         ));
     }
     let mut cmd = tokio::process::Command::new(executable);
@@ -119,22 +130,31 @@ pub async fn products(executable: &Path) -> AppResult<Vec<PosterProduct>> {
         .collect())
 }
 
+/// Poster `image-import-spec` 是否声明了某项能力。
+async fn require_capability(executable: &Path, capability: &str, missing: &str) -> AppResult<()> {
+    let spec: serde_json::Value =
+        serde_json::from_slice(&run(executable, &["image-import-spec"]).await?)?;
+    if spec["capabilities"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(capability)))
+    {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(missing.into()))
+    }
+}
+
 pub async fn preview_relocation(
     executable: &Path,
     manifest: &Path,
     request: &Request,
 ) -> AppResult<Receipt> {
-    let spec: serde_json::Value =
-        serde_json::from_slice(&run(executable, &["image-import-spec"]).await?)?;
-    if !spec["capabilities"].as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|v| v.as_str() == Some("same-identity-path-relink"))
-    }) {
-        return Err(AppError::InvalidInput(
-            "当前 Poster 尚不支持同图路径重绑，请先更新 Poster，原文件保持不动".into(),
-        ));
-    }
+    require_capability(
+        executable,
+        "same-identity-path-relink",
+        "当前 Poster 尚不支持同图路径重绑，请先更新 Poster，原文件保持不动",
+    )
+    .await?;
     let data = run(executable, &["import-images", &manifest.to_string_lossy()]).await?;
     let receipt: Receipt = serde_json::from_slice(&data)?;
     let mut seen = std::collections::HashSet::new();
@@ -161,6 +181,14 @@ pub async fn preview_relocation(
 }
 
 pub async fn import(executable: &Path, manifest: &Path, request: &Request) -> AppResult<Receipt> {
+    if request.items.iter().any(|item| item.live_video.is_some()) {
+        require_capability(
+            executable,
+            "live-photo",
+            "当前 Poster 尚不支持实况图导入，请先更新 Poster；本批保留，可安全重试",
+        )
+        .await?;
+    }
     let path = manifest.to_string_lossy();
     let data = run(executable, &["import-images", &path, "--apply"]).await?;
     let receipt: Receipt = serde_json::from_slice(&data)
@@ -179,7 +207,10 @@ fn validate_receipt(request: &Request, receipt: &Receipt) -> AppResult<()> {
         && receipt.items.iter().all(|result| {
             seen.insert(&result.external_id)
                 && !result.image_id.is_empty()
-                && matches!(result.status.as_str(), "imported" | "duplicate" | "deleted")
+                && matches!(
+                    result.status.as_str(),
+                    "imported" | "updated" | "duplicate" | "deleted"
+                )
                 && request.items.iter().any(|item| {
                     item.external_id == result.external_id && item.product_id == result.product_id
                 })
@@ -210,6 +241,7 @@ mod tests {
                 sha256: "".into(),
                 byte_size: 1,
                 source: "ai".into(),
+                live_video: None,
             }],
         };
         let mut receipt = Receipt {

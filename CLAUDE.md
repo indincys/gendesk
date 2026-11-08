@@ -8,18 +8,20 @@ GenDesk：内部图片生产工具。Tauri 2 桌面应用，单实例、纯本�
 前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），二者只经
 tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon。
 
-三条流水线：**生图**（工单 → 批量生成 → 人工验收 → **按产品、款式、需求归档**）·
-**图生视频 v2v**（验收图 → skill 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
-**工单收件 intake**（外部 skill 投单 → 自动导入 → 建批开跑）。
+三条流水线：**生图**（Agent 经 `gendesk submit` 投单 → 批量生成 → 人工审图 → **按产品、款式、需求归档**）·
+**图生视频 v2v**（验收图 → Agent 经 `gendesk v2v` 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
+**审稿后自动化**（可选：自动转实况图、自动导入 Poster）。
 
-**生成侧为通用生成工具**：主成品出口由 `library.rs` 统一管理，按产品、款式、需求组织；不再以一次验收或运行批次建成品目录。
-历史 `自动发布` 的目录 + manifest 协议已停写；`publish/` 子系统（素材包/任务单等）
-保留兼容代码与表、不再投入。相关旧词条仅供读懂存量；新路径规则见 `docs/作品目录整理.md`。
+**外部入口只有 Agent CLI**：`control.rs` 在 127.0.0.1 随机端口 + 每次启动的令牌上收 `gendesk` 的请求，
+连接信息写 `~/GenDesk交接/连接.json`。应用**不监听、不扫描任何目录**，也没有启动补扫。
+主成品出口由 `library.rs` 统一管理，按产品、款式、需求组织；不以一次验收或运行批次建成品目录。
 
-**Poster 图片接入**：可选功能默认关闭（含旧设置升级）。开启「审稿后询问导入 Poster」后才逐批询问，用户确认才入交接队列；取消不导入、关窗保留待确认。关闭时不创建新交接记录/副本，不弹窗、不启动后台导入批次；已有数据保留。
-`poster/` 维护款式到 Poster 商品 ID 的适配、成品引用、请求/回执与安全重试（0046），
-只调用 Poster 通用 `export-image-products` / `import-images` CLI，不写对方 SQLite。
-20 款与旧 SKU 的约定仅在 GenDesk；Poster 接口不含任何生成渠道规则。见 `docs/Poster图片接入.md`。
+**审稿后自动化**（设置页同名分区）：两个开关都默认关闭，打开后**不弹窗、不确认**。
+`live_photo.rs` 用内置 Swift 助手 `gendesk-live`（`src-tauri/live-photo/`，build.rs 在 macOS 上编译成
+externalBin，素材在 `resources/live-photo/`）把通过的图转成 JPG + MOV。`poster/` 把每次通过登记成
+一个批次，按 `(sku, style)` → 已保存绑定 → 20 款名单解析 Poster 商品 ID，解析不出整批停在「需处理」；
+两项都开时批次等实况配对落盘再连同视频导入（0050）。只调用 Poster 通用 `export-image-products` /
+`import-images` CLI，不写对方 SQLite。见 `docs/Poster图片接入.md`。
 
 ## 常用命令
 
@@ -28,7 +30,7 @@ tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 mac
 | 目的                    | 命令                                                                         |
 | --------------------- | -------------------------------------------------------------------------- |
 | 启动双端开发                | `pnpm tauri dev`                                                           |
-| Harness 投单            | `pnpm gendesk submit --manifest <清单.json> --open --wait 30`；见 `docs/命令行生图接入.md` |
+| Agent 投单（CLI 测试）  | `pnpm gendesk submit --manifest <清单.json>` · `pnpm test:cli`；见 `docs/命令行生图接入.md` |
 | **全门禁（CI 镜像，提交前必跑）**  | `pnpm check`                                                               |
 | 前端类型检查 / 单测 / lint 修复 | `pnpm typecheck` · `pnpm test` · `pnpm lint:fix`                           |
 | 架构铁律检查                | `pnpm guardrails`                                                          |
@@ -40,10 +42,10 @@ tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 mac
 **跑单个测试**（迭代时别整套跑）：
 
 ```bash
-cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocapture
+cd src-tauri && cargo test --lib refs_insert_list -- --exact --nocapture
 ```
 
-按模块过滤用子串匹配无需 `--exact`：`cargo test --lib publish::planner::`。
+按模块过滤用子串匹配无需 `--exact`：`cargo test --lib poster::`。
 前端：`pnpm vitest run src/routes.test.ts`。
 
 **本机 shell 陷阱**：非交互 shell 里 `cd <repo> && <node/pnpm 命令>` 会被 fnm 的 use-on-cd
@@ -63,15 +65,17 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 | `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                          |
 | `engine/`    | 任务引擎：`dispatcher`(单循环 + per-Key Semaphore) · `status`(7 态机) · `classify`(错误六类) · `progress`(伪进度) · `recovery` · `events`(EventSink 抽象，故引擎可脱离 Tauri 测试)。 |
 | `provider/`  | 生图 Provider 抽象；唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`(元数据/C2PA 剥离)。                                                                      |
-| `publish/`   | 发布与资产管理（**已冻结，不再投入**；`paths` 仍被交付/图库复用）：`paths`(RelPath) · `platform`(五平台单点) · `inbox/` · `planner/` · `xlsx/` · `exporter` · `reconcile` · `ticker`。                            |
-| `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `handoff`(交接目录往返) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。                                  |
-| `intake/`    | 工单收件 v2：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `ingest`(收录 + 去重 + 移档) · `watcher`。                                                                                       |
-| `delivery.rs`| 旧交付格式兼容；新作品目录规则见 `library.rs`。                                                     |
+| `control.rs` | Agent CLI 控制通道（协议 2）：`hello` · `intake.submit/confirm/retry/status` · `overview` · `v2v.pending/rewrite`。外部唯一入口。 |
+| `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `rewrite`(待改写队列与写回) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。 |
+| `intake/`    | 工单收录：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `preflight`(只读预检，供 `validate-intake`) · `ingest`(收录 + 去重 + 移档 + 检查点恢复)。 |
+| `library.rs` | 作品目录规则（产品/款式/需求）；`library/maintenance` 是显式离线整理命令。 |
+| `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
+| `live_photo.rs` | 实况图队列：调用内置 `gendesk-live`，配对完成回填 Poster 批次。 |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
 | `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                 |
 
-`purpose.rs` 与 `publish/platform.rs` 是同一种模式：受控取值的单点定义，在**命令边界**强制
-校验而不只靠 UI 给选择器——命令是公开边界，放进自由字符串就会有三种拼法同时进库。
+`purpose.rs` 是受控取值的单点定义，在**命令边界**强制校验而不只靠 UI 给选择器——命令是公开边界，
+放进自由字符串就会有三种拼法同时进库。
 
 ### 前端（`src/`）
 
@@ -79,13 +83,13 @@ cd src-tauri && cargo test --lib refs_insert_list_setgroup -- --exact --nocaptur
 `routes.tsx` 是**路由/侧栏/⌘K/快捷键的单一来源** · `stores/` Zustand 只做事件镜像与 UI 态 ·
 `lib/ipc/` 唯一 IPC 出入口 · `styles/globals.css` 唯一 token 来源。
 
-`shortcut: number | null` —— 十个数字已用尽，新页无数字快捷键。**不为新页重排既有数字**
-（会把肌肉记忆一次性作废）；⌘5 属于已移除的提示词库页，**留空不复用**。
+`shortcut: number | null` —— 现用 ⌘1–4、⌘7、⌘8。**不为新页重排既有数字**（会把肌肉记忆一次性作废）；
+⌘5、⌘6、⌘9、⌘0 属于已移除的页面，**留空不复用**。
 
 ### 一条生图请求的完整链路（改生成相关代码前先读懂这条）
 
 ```
-skill 写工单.json → intake::plan（全量校验）→ ingest::apply
+gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::plan（全量校验）→ ingest::apply
   → commit_preview（提示词落库，带 item_name/sku/style/purpose）+ 参考图入库
   → engine::create_batch_from_specs（同事务：已配好对的任务 + batch_refs + 归档）
   → Scheduler 循环取 q 态 → per-Key Semaphore 限并发 → provider.generate(multipart)
@@ -93,6 +97,7 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
   → EventSink 推 task://status-changed · task://progress · batch://summary（250ms 节流）
   → stores/engine 镜像 → 任务页/导航徽章
   → accept_tasks：发 UID → 按内容归属拷进成品目录 → 写作品及归属快照 → 内部作品记录
+    → （开关打开时）实况队列 + Poster 批次，审稿结束即后台导入
 
 生成页手动建批走 `commands::batches::create_batch` → `engine::create_batch`
 （挂靠模型：参考图 × 挂靠组的全部提示词），与上面那条共用同一段建批尾巴。
@@ -111,9 +116,9 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 
 ## IPC 约定
 
-外部 harness 优先使用 `scripts/gendesk.mjs` 文件工单客户端，不直接读写 SQLite。完整外部契约只维护在 `docs/命令行生图接入.md`；CLI / 应用 0.36.1，工单 version=1。macOS/Unix 用 `pnpm install:cli` 同步独立 CLI 副本，`--version` 与 `doctor` 区分客户端版本和应用连接能力。新单提供 organization，无 SKU 不编造编号，旧 sku/style 格式仍兼容。只写词不投单。CLI 的 `ingested` 只表示已收录建批；人工验收仍在应用中进行。收件设置变动时监听随之重建，CLI 从固定位置 `~/GenDesk交接/连接.json` 发现实际交接根。每份工单的 `回执.json` 由 Rust 从台账生成，与文本回执并存。0.36.1 的 validate 经应用二进制 validate-intake 只读入口复用 Rust 解析/参数/归属/图片解码，不启动 AppState 或打开数据库。0048 检查点与各阶段导入同事务，批次与 done 台账同事务；重试不删台账，只补缺失步骤。无检查点的历史部分导入或中断单拒绝盲目重放。
+外部 Agent 只用 `scripts/gendesk.mjs`（安装为 `~/.local/bin/gendesk`），不直接读写 SQLite 或交接目录。完整外部契约只维护在 `docs/命令行生图接入.md`；CLI / 应用 0.37.0，控制协议 2，工单 version=1。CLI 打包工单到 `~/GenDesk交接/生图/收件/<jobId>/`、最后写 READY，再经控制通道 `intake.submit` 请求收录；**收录在这次调用里完成**并返回台账行（done / hold / error）。hold 由 Agent 在用户同意后 `gendesk confirm`，失败用 `gendesk retry`（0048 检查点只补缺失步骤）。应用未运行时 CLI 以 `open -g -a … --args --background` 后台启动。`validate` 经应用二进制 `validate-intake` 只读入口复用 Rust 解析/参数/归属/图片解码，不启动 AppState 或打开数据库。CLI 测试用假控制通道，`GENDESK_LAUNCH=0` 关掉自动启动。
 
-工单条目支持 `ref` 单图或 `refs` 有序多图（二选一，上限 16）。主商品仍是首图；Rust 将整组 ID 写入任务 `params_json.referenceImageIds` 本地字段并登记全部 `batch_refs`，调度器严格恢复整组附件顺序。单图 multipart 沿用 `image`，多图使用有序 `image[]`；图片不会因多附件拆成多任务。确认预览显示主图缩略图及全部参考文件名。CLI 以连接快照 `features: ["ordered-references"]` 判断运行应用是否支持多参考。
+工单条目支持 `ref` 单图或 `refs` 有序多图（二选一，上限 16）。主商品仍是首图；Rust 将整组 ID 写入任务 `params_json.referenceImageIds` 本地字段并登记全部 `batch_refs`，调度器严格恢复整组附件顺序。单图 multipart 沿用 `image`，多图使用有序 `image[]`；图片不会因多附件拆成多任务。CLI 只认协议 2，不再逐项检查能力位。
 
 - `src/lib/ipc/bindings.ts` 由 **tauri-specta 自动生成，禁手改**。改动命令/事件后须在
   `lib.rs` 的 `specta_builder()` 登记 → `cargo test --lib export_bindings` 重新生成 →
@@ -147,9 +152,8 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 消耗品），故下游必须先存快照（`accepted_works` 的 `prompt_code`/`group_name`/`item_name`/
 `uid`/`sku_code`/`style`/`purpose`），编号**不回收** ·
 **临时分组(is\_temp)**：导入 txt 产生，任一提示词首次验收通过则整组转正式 ·
-**临时上传(ephemeral)**：生成页上传的参考图，仍是 ref\_images 行但图库/选择器/去重基准三处
-都不含它（`list_ref_images(include_ephemeral)` 单点控制）· **图库分组(ref\_groups)**：与提示词
-组无关，历史列 `ref_images.group_id` 已废弃不读不写 · **用途(purpose)**：工单里**整单级**
+**临时上传(ephemeral)**：生成页上传的参考图，仍是 ref\_images 行但选择器与去重基准都不含它
+（`list_ref_images(include_ephemeral)` 单点控制）；工单收录的参考图不是临时的 · **用途(purpose)**：工单里**整单级**
 声明，跟着提示词落到 `prompts.purpose` → `accepted_works.purpose`（0045 起不再走
 `tag_bindings`），是筛选默认值**不是门禁**；库内写中文标签、跨程序写短码 `i2v`，互转只在
 `purpose::code_of` 与 `intake::normalize_purpose` 这一对里 · **号池**：编号递增发放回收优先，
@@ -160,9 +164,9 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 `trash_items.payload_json` 存整行快照，还原连 id 一起写回）· **伪进度**：生图 API 无真实进度。
 
 **v2v** — **clip**：一张验收图的**一次**视频尝试，七态与 `tasks.status` 同构，`UNIQUE(work_id)`
-故重跑是就地 `attempt+1` 不新增行 · **交接目录**：GenDesk 自动物化工单，skill 写回后 watcher
-收录移档；组目录名对同一组恒定（`g{group_id}`），且**只监听「已改写」**（连「待改写」一起监听
-会形成物化→收录→物化的自激循环）· **skill 边界**：只改写提示词，**不调 dreamina** ·
+故重跑是就地 `attempt+1` 不新增行 · **改写往返**：Agent `gendesk v2v pending` 取按组的条目
+（`W{work_id}` + 缩略图 + 可变部分），写好后 `gendesk v2v rewrite --file` 写回，`id` 原样回传 ·
+**skill 边界**：只改写提示词，**不调 dreamina** ·
 **幽灵单**：即梦给了 submit\_id 但 `queue_idx` 与 `credit_count` 双双缺席、从未计费——与超时
 **处置相反**（超时「已扣费 → 继续等待」，幽灵「没扣费 → 直接重跑」），结论由 Rust 下发
 （`clip_looks_phantom`），前端不得手抄判据 · **本地队列 vs 即梦队列**：两个位次**绝不混成一个
@@ -174,20 +178,8 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 `accepted_works.thumb_path`（清废纸篓会物理删 file\_paths）· **交付**：验收通过即**拷贝**（不移动）
 成片到 `成品/生成视频/产品/款式/需求/`，拷贝失败**不回滚验收**，故 `undelivered` 是合法状态兼侧栏徽章。
 
-**发布** — **SKU**：款式一级分类，下挂素材/标题/正文三池 · **素材包**：视频型=1 视频(+封面)，
-图集型=N 图(+封面)，**入库即 active**；「已用尽/冷却中」是台账派生态不落库 · **日内容套装**：
-某天某 SKU 选定的（素材包+标题\[+正文]），当天全平台全账号统一 · **任务单**：一天一张，
-草稿→已确认→已导出→回收中→已关闭 · **任务包**：xlsx(22 列) + 素材 + 说明 + 回执截图/ +
-**最后写的 READY.txt** · **回执**：执行器只写 xlsx 第 20–22 列，故**重导出会抹掉回执**（导出预检
-里有保护）· **查重窗口**：同素材包同平台最短复用间隔（默认 30 天），**按平台逐个剔除** ·
-**待认领**：收件箱关联不上 SKU 的内容，人工指认不丢弃 · **疑似已发**：超时无回执，
-**绝不自动重发** · **RelPath**：库内只存根目录内相对路径，导出是唯一绝对路径转换点 ·
-**五平台**：`douyin/xhs/kuaishou/shipinhao/bilibili`，映射单点在 `publish/platform.rs` ·
-时刻一律**按本地时区**解析（`and_utc()` 会把北京时间当 UTC）。
-
-**intake** — **工单(v2)**：一个目录 = 一次投单，`工单.json` + `prompts/{name}.txt` +
-`refs/` + **最后写的 READY.txt**（没有它一律不碰，skill 可能还在写）· 方向与 v2v **相反**
-（skill 出工单、GenDesk 收），两者共用 `publish::inbox::watcher::coalesce` ·
+**intake** — **工单**：一个目录 = 一次投单，`工单.json` + `prompts/{name}.txt` +
+`refs/` + **最后写的 READY.txt**（没有它 `intake.submit` 拒收，CLI 可能还没写完）·
 **正文里零元信息**：旧格式的组头键只在该组第一条正文之前生效，而正文是长叙事，
 「比例：3:4 的竖构图」这种开头会被当元信息吃掉且不报错——新格式把元信息全放进 JSON，
 这个风险从结构上消失 · **挂靠不猜**：每条必填 `ref` 或有序 `refs`（二选一，1～16 张），且必须真的存在 ·
@@ -196,16 +188,16 @@ skill 写工单.json → intake::plan（全量校验）→ ingest::apply
 一次都花钱 · **一份工单 = 一个 run**：参数下沉到 `tasks.params_json`（0045），不再决定切分；
 读取单点 `dispatcher::task_params`，任务级优先、批次级兜底 ·
 **job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账与空检查点同事务、在**动手之前**，阶段进度与对应写入同事务；恢复保留原行和身份 ·
-**阈值(默认 100 张)**：超了转 `hold` **什么都不导入** + 弹应用内可视化确认卡 ·
+**阈值(默认 100 张)**：超了转 `hold` **什么都不导入**，由 Agent 向用户说明后 `gendesk confirm` ·
 **归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
 静默改值正是「我明明写了 9:16 却不生效」的成因）· **写路径只有一条**：提示词走
 `commands::prompts::{build_preview_from_parsed, commit_preview}`，参考图走
 `commands::refs::ingest_one`，与手动导入同一套前缀分配/用途判定/缩略图口径 ·
 **失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
-会让人点重试拿到第二份提示词）· skill 装在用户级 `~/.claude/skills/`（仓库内
+会让人点重试拿到第二份提示词）· 投单 skill 装在用户级 `~/.claude/skills/`（仓库内
 `.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
 
-**作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。旧交付批协议停写，相关兼容数据保留；已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
+**作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 
 ## 高代价陷阱（改代码前必读）
 
@@ -297,8 +289,8 @@ exit(0)——区分方法是看日志有没有当次的 `logging initialized`（
 `pnpm check` 9 步（guardrails · Biome ci · tsc strict · vitest · vite build · cargo fmt ·
 clippy -D warnings · cargo test 含 bindings 同步 · cargo check），与
 `.github/workflows/check.yml` 互为镜像；`lefthook.yml` 是它的秒级子集，装了 pre-commit
-也仍需在提交前跑全门禁。CI 另有覆盖率闸门（engine / ids / importer / publish 纯逻辑
-≥ 85% 行，IO/glue 经 `--ignore-filename-regex` 排除）与每周 `cargo audit`。
+也仍需在提交前跑全门禁。CI 另有覆盖率闸门（纯逻辑 ≥ 85% 行，命令层/控制通道/外部进程封装经
+`--ignore-filename-regex` 排除）与每周 `cargo audit`。
 
 sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库的 `cargo test` 集成测试覆盖
 （比仅编译期检查更强），故未接入 `cargo sqlx prepare --check`。
@@ -318,7 +310,7 @@ sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库�
 
 参考物：`docs/prototype/*.dc.html`（像素基准）· `docs/prototype/Design-Tokens.md` ·
 `docs/V2-backlog.md`（含**交付前人工收尾清单**）· `docs/命令行生图接入.md` ·
-`docs/提示词skill标准产出规范.md`。`docs/收件箱收录格式规范.md` 仅描述冻结的发布文案旧链路，不是生图入口。
+`docs/提示词skill标准产出规范.md` · `docs/Poster图片接入.md`。
 
 **版本演进史不在本文件里**，去 `git log`（提交信息与代码注释保留了实测数据与取舍理由；
 早期 UX 条目编号可用 `git log --grep=E30b` 定位）。本文件只记**当前仍然成立的约束**。

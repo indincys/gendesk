@@ -8,14 +8,14 @@ import { toast } from "sonner";
 /**
  * 设置页「图生视频」区块。
  *
- * 三件事在这里定：**交接目录在哪**（skill 要把它写死）、**成片交付到哪**、
- * 与**默认生成参数**。参数留空即不发高级 flag，走即梦 CLI 自己的默认路径。
+ * 两件事在这里定：**成片交付到哪**与**默认生成参数**。提示词改写由 Agent 经
+ * `gendesk v2v pending / rewrite` 完成，没有交接目录。参数留空即不发高级 flag，走即梦 CLI 自己的默认路径。
  *
  * 注意「默认」二字：这里的参数只作用于新条目。已经在流水线里的条目要改参数，
  * 在工作台改（选中后底栏的参数条 / 右侧详情栏改单条）—— 三处作用域各自在自己的
  * 标签上说清楚，那是 v0.22.0 修的一处歧义。
  */
-export function V2vSection() {
+export function V2vSection({ id }: { id: string }) {
   const [s, setS] = useState<V2vSettings | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
@@ -70,35 +70,13 @@ export function V2vSection() {
   const picked = models.find((m) => m.modelVersion === s.modelVersion);
 
   return (
-    <section className="sec">
+    <section className="sec" id={id}>
       <div className="sechead">
         <span className="fw6 fs13">视频生成</span>
-        <span className="pcap">目录 · CLI · 默认参数</span>
+        <span className="pcap">成片目录 · 即梦 CLI · 默认参数</span>
       </div>
 
       <div className="fx ac gap4" style={{ marginBottom: 6 }}>
-        <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
-          交接目录
-        </span>
-        <DescriptionHint label="交接目录说明">
-          待改写工单写入 v2v/待改写；skill 将结果写回 v2v/已改写，GenDesk 会自动收录。
-        </DescriptionHint>
-      </div>
-      <div className="fx ac gap10">
-        <div className="pathwell f1">{s.handoffRoot}</div>
-        <button
-          type="button"
-          className="btn sm"
-          onClick={async () => {
-            const dir = await unwrap(commands.pickHandoffRoot()).catch(() => null);
-            if (dir) await save({ handoffRoot: dir });
-          }}
-        >
-          <FolderOpen className="ic12" />
-          更改目录
-        </button>
-      </div>
-      <div className="fx ac gap4 mt14" style={{ marginBottom: 6 }}>
         <span className="fs11 fw6 t3" style={{ letterSpacing: ".05em" }}>
           成片目录
         </span>

@@ -37,7 +37,7 @@ pub fn start_delivery(app: AppHandle) {
 #[tauri::command]
 #[specta::specta]
 pub async fn get_poster_settings(state: State<'_, AppState>) -> AppResult<PosterSettings> {
-    poster::load_settings(&state.db, &state.dirs.root).await
+    poster::load_settings(&state.db).await
 }
 
 #[tauri::command]
@@ -48,17 +48,13 @@ pub async fn update_poster_settings(
     settings: PosterSettings,
 ) -> AppResult<PosterSettings> {
     let _guard = state.review_lock.lock().await;
-    if !std::path::Path::new(&settings.library_root).is_absolute()
-        || !std::path::Path::new(&settings.executable).is_absolute()
-    {
-        return Err(AppError::InvalidInput(
-            "应用与永久图片目录必须使用绝对路径".into(),
-        ));
+    if !std::path::Path::new(&settings.executable).is_absolute() {
+        return Err(AppError::InvalidInput("Poster 应用必须使用绝对路径".into()));
     }
     crate::db::repo::settings::set_by_key(&state.db, "poster", &serde_json::to_string(&settings)?)
         .await?;
     emit(&app);
-    if settings.enabled {
+    if settings.auto_import {
         start_delivery(app);
     }
     Ok(settings)
@@ -70,33 +66,44 @@ pub async fn list_poster_batches(state: State<'_, AppState>) -> AppResult<Vec<Po
     poster::batches(&state.db).await
 }
 
+/// 失败批次的款式与可选商品（「指定商品」用）。
 #[tauri::command]
 #[specta::specta]
 pub async fn preview_poster_batch(
     state: State<'_, AppState>,
     batch_id: String,
 ) -> AppResult<PosterPreview> {
-    poster::preview(&state.db, &state.dirs.root, &batch_id).await
+    poster::preview(&state.db, &batch_id).await
 }
 
+/// 为匹配不上的款式指定商品：保存绑定、重新排队并立即续导。
 #[tauri::command]
 #[specta::specta]
-pub async fn decide_poster_batch(
+pub async fn bind_poster_batch(
     state: State<'_, AppState>,
     app: AppHandle,
     batch_id: String,
-    choices: Option<Vec<PosterChoice>>,
+    choices: Vec<PosterChoice>,
 ) -> AppResult<()> {
-    // None 是明确不导入；Some 必须完整指定本批全部款式。前端关闭弹窗不等于 Some。
-    if let Some(choices) = choices {
-        let _guard = state.review_lock.lock().await;
-        poster::confirm(&state.db, &state.dirs.root, &batch_id, &choices).await?;
-        emit(&app);
-        start_delivery(app);
-    } else {
-        poster::skip(&state.db, &state.dirs.root, &batch_id).await?;
-        emit(&app);
+    {
+        let _guard = state.poster_lock.lock().await;
+        poster::bind(&state.db, &batch_id, &choices).await?;
     }
+    emit(&app);
+    start_delivery(app);
+    Ok(())
+}
+
+/// 放弃导入一个失败批次。
+#[tauri::command]
+#[specta::specta]
+pub async fn skip_poster_batch(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    batch_id: String,
+) -> AppResult<()> {
+    poster::skip(&state.db, &batch_id).await?;
+    emit(&app);
     Ok(())
 }
 
@@ -124,17 +131,4 @@ pub async fn pick_poster_app(app: AppHandle) -> AppResult<Option<String>> {
         };
         path.to_string_lossy().into()
     }))
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pick_poster_library(app: AppHandle) -> AppResult<Option<String>> {
-    use tauri_plugin_dialog::DialogExt;
-    Ok(app
-        .dialog()
-        .file()
-        .set_title("选择 Poster 图片永久目录")
-        .blocking_pick_folder()
-        .and_then(|p| p.into_path().ok())
-        .map(|p| p.to_string_lossy().into()))
 }

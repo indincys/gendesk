@@ -27,12 +27,9 @@ export type {
   ImportResult,
   KeyHealth,
   PromptView,
-  RefGroupView,
-  RefImageDetail,
   RefImageView,
   RefImportProgress,
   RefMappingInput,
-  RefScanItem,
   Result,
   ReviewItemView,
   Settings,
@@ -44,37 +41,6 @@ export type {
   TrashItemView,
   UpdateApiKeyPatch,
   WorkView,
-  // 发布与资产管理模块
-  PublishSettings,
-  PublishSettingsPatch,
-  PlatformInfo,
-  ProductView,
-  ProductSkuView,
-  ProductInput,
-  ProductPatch,
-  ProductSkuInput,
-  ImageAssetView,
-  ImageImportReport,
-  CopyItemView,
-  CopyFilePreview,
-  TopicGroupView,
-  TopicGroupInput,
-  SheetConfigView,
-  SheetConfigInput,
-  SheetSummaryView,
-  SheetDetailView,
-  PostView,
-  PostImageView,
-  PublishTaskView,
-  Shortage,
-  ExportResult,
-  ReceiptImportResult,
-  CloseResult,
-  PublishBadgesEvent,
-  InboxIngestEvent,
-  SheetChangedEvent,
-  ExportProgressEvent,
-  // 视频生成（图生视频）
   ClipView,
   StageCounts,
   V2vSettings,
@@ -104,29 +70,18 @@ export type {
   AutofillCfg,
   AutofillStatus,
   AwayDigest,
-  HandoffStatus,
   V2vAction,
   V2vUndoEntry,
   SubmitSummary,
   SubmitPreview,
-  MaterializeSummary,
-  IngestSummary,
-  // 生图工单收件（Claude Code / Codex 投单）
-  IntakeSettings,
-  IntakeChanged,
-  IntakeProgress,
   LivePhotoStatus,
-  JobView,
-  JobPreview,
-  JobPreviewItem,
-  // 交付（与 `自动发布` 的契约）
-  DeliverySettings,
   PosterBatch,
   PosterSettings,
   PosterPreview,
   PosterChoice,
   PosterGroup,
   PosterProduct,
+  AgentCliInfo,
 } from "./bindings";
 
 export async function subscribeLivePhoto(handler: (error: string | null) => void) {
@@ -134,7 +89,7 @@ export async function subscribeLivePhoto(handler: (error: string | null) => void
   return events.livePhotoChanged.listen(({ payload }) => handler(payload.error));
 }
 
-/** Poster 交接状态变化；待确认弹窗与设置页共用同一份后端台账。 */
+/** Poster 自动导入台账变化（设置页状态卡用）。 */
 export async function subscribePoster(handler: () => void): Promise<() => void> {
   if (!isTauri()) return () => {};
   const un = await events.posterChanged.listen(handler);
@@ -193,7 +148,7 @@ export async function subscribeBackupProgress(
 }
 
 /**
- * 订阅参考图导入进度（生成页上传 / 图库批量上传共用）。
+ * 订阅参考图导入进度（生成页上传）。
  * 返回反订阅函数；非 Tauri 环境为 no-op。
  */
 export async function subscribeRefImportProgress(
@@ -205,63 +160,17 @@ export async function subscribeRefImportProgress(
 }
 
 /**
- * 订阅发布模块事件（徽章 / 收件箱收录 / 任务单变化）。
- * 返回反订阅函数；非 Tauri 环境为 no-op。
- */
-export async function subscribePublish(handlers: {
-  onBadges?: (e: import("./bindings").PublishBadgesEvent) => void;
-  onInboxIngest?: (e: import("./bindings").InboxIngestEvent) => void;
-  onSheetChanged?: (e: import("./bindings").SheetChangedEvent) => void;
-}): Promise<() => void> {
-  if (!isTauri()) return () => {};
-  const unlisteners = await Promise.all([
-    events.publishBadgesEvent.listen((e) => handlers.onBadges?.(e.payload)),
-    events.inboxIngestEvent.listen((e) => handlers.onInboxIngest?.(e.payload)),
-    events.sheetChangedEvent.listen((e) => handlers.onSheetChanged?.(e.payload)),
-  ]);
-  return () => {
-    for (const un of unlisteners) un();
-  };
-}
-
-/**
- * 订阅任务包导出进度（复制视频可达数百 MB，导出期间需要交代进度）。
- * 仅导出弹窗打开期间临时挂载。
- */
-export async function subscribeExportProgress(
-  handler: (e: import("./bindings").ExportProgressEvent) => void,
-): Promise<() => void> {
-  if (!isTauri()) return () => {};
-  const un = await events.exportProgressEvent.listen((e) => handler(e.payload));
-  return () => un();
-}
-
-/**
  * 订阅生图工单收件事件。
  *
- * 收录是**自动**发生的（skill 投单 → watcher 收录 → 建批开跑），用户没有按任何按钮，
- * 所以这条订阅挂在应用外壳上而不是设置页：一个批次凭空出现在任务页，
- * 和一份工单静默失败，都需要一句解释——而人当时未必正好停在设置页。
+ * 收录由 Agent 经 `gendesk submit` 触发，用户在应用里没有按任何按钮，
+ * 所以这条订阅挂在应用外壳上：一个批次凭空出现在任务页，
+ * 和一份工单静默失败，都需要一句解释。
  */
 export async function subscribeIntake(
   handler: (e: import("./bindings").IntakeChanged) => void,
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const un = await events.intakeChanged.listen((e) => handler(e.payload));
-  return () => un();
-}
-
-/**
- * 订阅工单收录进度（逐张参考图落盘）。
- *
- * 确认一份大工单要几十秒，这条事件是那段时间里唯一的动静 ——
- * 没有它，「看起来卡死了」的下一步永远是再点一次。
- */
-export async function subscribeIntakeProgress(
-  handler: (e: import("./bindings").IntakeProgress) => void,
-): Promise<() => void> {
-  if (!isTauri()) return () => {};
-  const un = await events.intakeProgress.listen((e) => handler(e.payload));
   return () => un();
 }
 
@@ -326,35 +235,6 @@ export async function subscribeFileDrop(handler: (paths: string[]) => void): Pro
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
   const un = await getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type === "drop") handler(event.payload.paths);
-  });
-  return () => un();
-}
-
-/** 拖放位置（物理像素，需除以 devicePixelRatio 才是 CSS 像素）。 */
-export interface DropPosition {
-  x: number;
-  y: number;
-}
-
-/**
- * 订阅带**位置**的文件拖放（F7 拖放直投）。
- *
- * Tauri 的原生拖放不经过 DOM，`dragover`/`drop` 那套 DOM 事件根本不会触发；
- * 想知道「用户把文件拖到了哪一行」，只能靠事件里的窗口坐标做命中测试。
- * 坐标是物理像素，调用方需自行换算（见 `AssetsPage` 的 `hitTestSku`）。
- */
-export async function subscribeFileDropWithPosition(handlers: {
-  onOver?: (pos: DropPosition) => void;
-  onLeave?: () => void;
-  onDrop?: (paths: string[], pos: DropPosition) => void;
-}): Promise<() => void> {
-  if (!isTauri()) return () => {};
-  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-  const un = await getCurrentWebview().onDragDropEvent((event) => {
-    const p = event.payload;
-    if (p.type === "over") handlers.onOver?.(p.position);
-    else if (p.type === "drop") handlers.onDrop?.(p.paths, p.position);
-    else handlers.onLeave?.();
   });
   return () => un();
 }

@@ -9,8 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
-use crate::publish::paths;
-
 pub mod repo;
 
 /// 打开（或创建）数据库并运行迁移。
@@ -30,79 +28,7 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
 
     backup_before_destructive_migration(&pool, db_path).await?;
     migrate(&pool).await?;
-    recover_interrupted_exports(&pool).await?;
     Ok(pool)
-}
-
-/// single-instance 保证启动恢复时没有另一份本应用仍在导出。token 会跨越数据库记账
-/// 与 READY 落盘之间的窗口：READY 已出现代表包可继续执行，只需释放 token；READY
-/// 尚未出现且回执为空，代表上次在发布包前崩溃，需要把 used 库存和 sheet 一并回滚。
-pub(crate) async fn recover_interrupted_exports(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let interrupted: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id,status,export_dir,export_token FROM task_sheets
-         WHERE export_token IS NOT NULL",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for (sheet_id, status, export_dir, token) in interrupted {
-        if status != "exported" {
-            sqlx::query("UPDATE task_sheets SET export_token=NULL WHERE id=?1 AND export_token=?2")
-                .bind(sheet_id)
-                .bind(&token)
-                .execute(pool)
-                .await?;
-            continue;
-        }
-
-        let package = export_dir.as_deref().map(Path::new);
-        let ready_exists = package.is_some_and(|path| path.join(paths::READY).is_file());
-        let receipt_started = package.is_some_and(|path| {
-            path.join(paths::RECEIPT_JSONL)
-                .metadata()
-                .is_ok_and(|metadata| metadata.len() > 0)
-        });
-        if ready_exists || receipt_started {
-            sqlx::query("UPDATE task_sheets SET export_token=NULL WHERE id=?1 AND export_token=?2")
-                .bind(sheet_id)
-                .bind(&token)
-                .execute(pool)
-                .await?;
-            continue;
-        }
-
-        let mut tx = pool.begin().await?;
-        let reverted = sqlx::query(
-            "UPDATE task_sheets
-             SET status='confirmed',export_dir=NULL,exported_at=NULL,export_token=NULL,updated_at=?3
-             WHERE id=?1 AND status='exported' AND export_token=?2",
-        )
-        .bind(sheet_id)
-        .bind(&token)
-        .bind(now_unix())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if reverted == 1 {
-            sqlx::query(
-                "UPDATE image_assets SET state='held',updated_at=?2
-                 WHERE state='used' AND post_id IN (SELECT id FROM posts WHERE sheet_id=?1)",
-            )
-            .bind(sheet_id)
-            .bind(now_unix())
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE text_items SET state='held'
-                 WHERE state='used' AND post_id IN (SELECT id FROM posts WHERE sheet_id=?1)",
-            )
-            .bind(sheet_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-    }
-    Ok(())
 }
 
 /// 0038 会删除旧发布模型。只要是从 0038 之前的存量库升级，就在同目录先用

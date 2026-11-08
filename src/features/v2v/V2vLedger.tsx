@@ -10,9 +10,9 @@ import {
   fmtDur,
   trailOf,
 } from "@/features/v2v/model";
-import type { ActivityEntry, HandoffStatus } from "@/lib/ipc";
+import type { ActivityEntry } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { FolderOpen, ScrollText, SlidersHorizontal } from "lucide-react";
+import { ScrollText, SlidersHorizontal } from "lucide-react";
 import { type CSSProperties, useMemo, useState } from "react";
 
 /**
@@ -35,8 +35,6 @@ export function V2vLedger({
   slice,
   filter,
   face,
-  handoff,
-  rewriteTotal,
   channelLive,
   activity,
   badGroup,
@@ -44,21 +42,11 @@ export function V2vLedger({
   onRewriteGroup,
   onLog,
   onParams,
-  onOpenHandoff,
 }: {
   row: Row | null;
   slice: SliceSummary;
   filter: Filter;
   face: FilterFace;
-  handoff: HandoffStatus | null;
-  /**
-   * **全流水线**的待改写条数（不受动作/通道筛选影响）。
-   *
-   * 交接工单是一次物化**全部**待改写条目，所以对账只能跟这个数比。拿当前这一屏的
-   * 条数去比，一选通道就会跳出「工单里 2 条、这一档 0 条」这种凭空的警报 ——
-   * 而这条警报存在的全部意义是「收了一半」，谎报一次它就再也没人信了。
-   */
-  rewriteTotal: number;
   /** 当前钉住那条通道上还没走完的总条数（含别的档）。没钉通道时无意义。 */
   channelLive: number;
   activity: ActivityEntry[];
@@ -68,7 +56,6 @@ export function V2vLedger({
   onRewriteGroup: (ids: number[]) => void;
   onLog: () => void;
   onParams: () => void;
-  onOpenHandoff: () => void;
 }) {
   return (
     <div className="vled">
@@ -94,13 +81,10 @@ export function V2vLedger({
           slice={slice}
           face={face}
           filter={filter}
-          handoff={handoff}
-          rewriteTotal={rewriteTotal}
           channelLive={channelLive}
           badGroup={badGroup}
           busy={busy}
           onRewriteGroup={onRewriteGroup}
-          onOpenHandoff={onOpenHandoff}
         />
 
         {row == null ? (
@@ -132,31 +116,20 @@ function SliceCard({
   slice,
   face,
   filter,
-  handoff,
-  rewriteTotal,
   channelLive,
   badGroup,
   busy,
   onRewriteGroup,
-  onOpenHandoff,
 }: {
   slice: SliceSummary;
   face: FilterFace;
   filter: Filter;
-  handoff: HandoffStatus | null;
-  rewriteTotal: number;
   channelLive: number;
   badGroup: { name: string; rejected: number; ids: number[] } | null;
   busy: boolean;
   onRewriteGroup: (ids: number[]) => void;
-  onOpenHandoff: () => void;
 }) {
   const ge = slice.unpriced > 0 ? "≥ " : "";
-  const err = handoff?.error ?? null;
-  const isRewrite = filter.action === "rewrite";
-  // 工单条数与待改写条数对不上，是「收了一半」唯一的可见症状 —— 在此之前没有任何
-  // 一处会说这件事，而它的后果是有几条永远不会被改写。
-  const mismatch = isRewrite && err == null && handoff != null && handoff.items !== rewriteTotal;
   // 构成条只答一个问题：**这一档分散在哪几条队上**。
   // 钉了通道之后它退化成一条纯色（就那一条队），那时整块不画 —— 一根单色条不回答
   // 任何问题，只是把下面真要读的东西往下推。
@@ -220,29 +193,6 @@ function SliceCard({
       {slice.unpriced > 0 && (
         <div className="fs10 t3">
           其中 {slice.unpriced} 条没实测过单价，未计入 —— 实际只会更高。
-        </div>
-      )}
-
-      {/* 交接对账 —— **只在对不上或写不出去时出现**。
-          从前这里常驻一句「工单已写到交接目录（2 组 · 2 条）· 上次收录 30 分钟前」外加
-          一个「打开交接目录」按钮。那句话在一切正常时不改变任何决定，而按钮在底坞里
-          原样有一个；两者合起来把这一档最要紧的那条例外（工单里 N 条、视频生成中 M 条
-          对不上，差出来的那几条永远不会被改写）挤成了同一段落里的一小截。
-          现在这一格空着就是「对得上」。 */}
-      {isRewrite && (err != null || mismatch) && (
-        <div className={cn("hoff", err && "er")}>
-          {err ? (
-            <>工单没能写出去：{err} —— 先确认交接目录还在、可写。</>
-          ) : (
-            <span className="wr2">
-              工单里 {handoff?.items} 条、流水线里 {rewriteTotal} 条缺词 ——
-              点「收录改写结果」对一次账。
-            </span>
-          )}
-          <button type="button" className="btn xs gho" onClick={onOpenHandoff}>
-            <FolderOpen className="ic12" />
-            打开交接目录
-          </button>
         </div>
       )}
 
@@ -420,7 +370,7 @@ function ClipLedger({
           {promptOpen ? "收起" : "展开"}
         </button>
       </div>
-      {promptOpen && <div className="vprompt">{c.videoPrompt ?? "（还没有，等 skill 写回）"}</div>}
+      {promptOpen && <div className="vprompt">{c.videoPrompt ?? "（还没有，等 Agent 写回）"}</div>}
 
       {c.errorMessage && (
         <>
@@ -454,6 +404,7 @@ const PHASE_LABEL: Record<string, string> = {
   poll: "轮询",
   media: "落盘",
   handoff: "交接",
+  rewrite: "改写",
 };
 
 /** unix 秒 → 本地 HH:mm:ss。日志的时间粒度是秒级。 */

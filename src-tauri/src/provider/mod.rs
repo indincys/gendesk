@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// `aspect_ratio` 受控取值（端点文档：gpt-image-2 系列经此参数控制输出比例，
-/// **仅保证比例**，实际像素由上游决定）。同 `purpose.rs` / `publish/platform.rs` 的
+/// **仅保证比例**，实际像素由上游决定）。同 `purpose.rs` 的
 /// 「受控取值单点」模式：命令边界据此校验，UI 只是它的镜子。
 pub const ASPECT_RATIOS: &[&str] = &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"];
 

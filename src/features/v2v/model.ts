@@ -31,7 +31,7 @@ export function isLive(stage: Stage): boolean {
  *
  * **阶段回答「它在哪」，动作回答「拿它怎么办」** —— 而后者才是这一页存在的理由。
  * 按阶段组织时，21 条待改写会同时显示「需要我 0」「待改写 21」「无待办」
- * 「等 skill 写回 · 交接已物化」四句互相矛盾的话：阶段名就写在每一条脸上，
+ * 「等改写写回」四句互相矛盾的话：阶段名就写在每一条脸上，
  * 是最不缺的信息；真正没人回答的是「所以我现在该干嘛」。
  */
 export type NextAction = "rewrite" | "submit" | "review" | "fix" | "queued" | "wait" | "done";
@@ -67,7 +67,7 @@ export const ACTION_META: Record<
     // 「缺词」= 缺的是视频提示词。它比「去改写」准：卡住的不是某个动作没做，
     // 而是这一条还没有词可用 —— 而写词的地方不在 GenDesk 里。
     label: "缺词",
-    note: "工单已物化，去 Claude Code / Codex 跑 v2v-rewrite",
+    note: "在 Agent 里改写：gendesk v2v pending → gendesk v2v rewrite",
     fg: "var(--acc2)",
     dot: "var(--sg-rewrite)",
   },
@@ -123,8 +123,8 @@ export const ACTION_ORDER: NextAction[] = [
 /**
  * 阻在**人**身上的四档 —— 「需要我」就是它们的并集。
  *
- * 待改写在里面，这是与旧口径最大的分歧：那一步虽然在 Claude Code 里做，但它**只可能**
- * 由人推动，GenDesk 这边已经把工单物化好、什么都不缺了。把它排除在「需要我」之外，
+ * 待改写在里面，这是与旧口径最大的分歧：那一步虽然在 Agent 里做，但它**只可能**
+ * 由人推动，GenDesk 这边待改写清单随时可取、什么都不缺了。把它排除在「需要我」之外，
  * 等于让全流水线最大的一处阻塞在界面上显示为 0。
  */
 export const MINE: NextAction[] = ["fix", "rewrite", "submit", "review"];
@@ -597,9 +597,9 @@ export function deriveRows(
       situation = "等你点确认提交 · 提交即扣费";
       situationTone = "acc";
     } else {
-      // 全流水线最大的一处阻塞。**点名工具**（可直接搜、可直接打字）并说明工单已经
-      // 备好，免得有人回头去找一个并不存在的「生成工单」按钮。
-      situation = "等你跑 v2v-rewrite · 工单已就绪";
+      // 全流水线最大的一处阻塞。**点名命令**（可直接搜、可直接打字），
+      // 免得有人回头去找一个并不存在的「生成工单」按钮。
+      situation = "等 Agent 改写 · gendesk v2v pending";
       situationTone = "acc";
     }
 
@@ -1089,10 +1089,9 @@ export function trailOf(row: Row): TrailStep[] {
       : {
           key: "rewrite",
           at: "—",
-          what: "等 skill 写回改写结果",
-          // 「去 Claude Code 跑 v2v-rewrite」不写在这儿：那句话在这一屏上已经由
-          // 摘要卡的副行说过一次，而底坞那两个按钮就是它的动作。同一条指令在
-          // 一屏里出现四遍，读到第二遍时人就不再读了。
+          what: "等 Agent 写回改写结果",
+          // 具体命令不写在这儿：那句话在这一屏上已经由摘要卡的副行说过一次。
+          // 同一条指令在一屏里出现四遍，读到第二遍时人就不再读了。
           sub: "",
           state: st === "rewrite" ? "now" : "soon",
           tone: st === "rewrite" ? "acc" : "dim",

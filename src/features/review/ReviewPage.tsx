@@ -3,12 +3,18 @@ import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { moveByRow, packGroups } from "@/features/_shared/justified";
 import { dayLabel, hhmm } from "@/features/_shared/timeline";
 import { assetSrc, bg } from "@/lib/img";
-import { type ReviewItemView, commands, unwrap } from "@/lib/ipc";
+import {
+  type ReviewItemView,
+  commands,
+  subscribeLivePhoto,
+  subscribePoster,
+  unwrap,
+} from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Check, Clock, Maximize2, Trash2, X } from "lucide-react";
+import { ArrowRight, Check, Clock, Maximize2, Trash2, X } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -43,20 +49,27 @@ const OTHER_MODES = [
   { id: "key", label: "按 Key" },
 ] as const;
 
+/** 组色板 gc0–gc4：相邻两组颜色不同，组头左轨与组内每张卡的色点同色。 */
+const TONES = 5;
+
 function ClusterHead({
   head,
-  busy,
+  tone,
+  pending,
   onAccept,
   onReject,
 }: {
   head: Extract<ReviewHead, { kind: "cluster" }>;
-  busy: boolean;
+  tone: number;
+  pending: ReadonlySet<number>;
   onAccept: (ids: number[]) => void;
   onReject: (ids: number[]) => void;
 }) {
   const count = head.ids.length;
+  const ready = head.ids.filter((id) => !pending.has(id));
+  const held = count - ready.length;
   return (
-    <div className="rclhead">
+    <div className={cn("rclhead", `gc${tone}`)}>
       <div className="rclcopy">
         <h2 className="rclname" title={head.name}>
           {head.name}
@@ -65,20 +78,21 @@ function ClusterHead({
           {head.detail}
         </span>
       </div>
-      <span className="rclcnt">{count} 张待验收</span>
+      <span className="rclcnt">
+        {count} 张待验收{held > 0 ? ` · ${held} 张待定` : ""}
+      </span>
       <button
         type="button"
         className="btn xs"
-        disabled={busy}
-        title={`通过「${head.name}」当前显示的 ${count} 张图片`}
-        onClick={() => onAccept(head.ids)}
+        disabled={ready.length === 0}
+        title={`通过「${head.name}」${held > 0 ? "除待定外的" : "当前显示的"} ${ready.length} 张图片 ⇧⏎`}
+        onClick={() => onAccept(ready)}
       >
-        通过本组
+        {held > 0 ? `通过其余 ${ready.length} 张` : "通过本组"}
       </button>
       <button
         type="button"
         className="btn xs gho"
-        disabled={busy}
         aria-label={`将「${head.name}」当前显示的 ${count} 张图片移入废纸篓`}
         title="本组移入废纸篓"
         onClick={() => onReject(head.ids)}
@@ -99,7 +113,7 @@ type ReviewCardProps = {
   selected: boolean;
   focused: boolean;
   pending: boolean;
-  busy: boolean;
+  tone: number;
   onCardClick: (idx: number, shift: boolean) => void;
   onAccept: (id: number) => void;
   onReject: (id: number) => void;
@@ -115,7 +129,7 @@ const ReviewCard = memo(function ReviewCard({
   selected,
   focused,
   pending,
-  busy,
+  tone,
   onCardClick,
   onAccept,
   onReject,
@@ -157,7 +171,6 @@ const ReviewCard = memo(function ReviewCard({
           type="button"
           className="hbtn"
           title="通过"
-          disabled={busy}
           onClick={(e) => {
             e.stopPropagation();
             onAccept(item.id);
@@ -169,7 +182,6 @@ const ReviewCard = memo(function ReviewCard({
           type="button"
           className="hbtn"
           title="移入废纸篓"
-          disabled={busy}
           onClick={(e) => {
             e.stopPropagation();
             onReject(item.id);
@@ -204,7 +216,8 @@ const ReviewCard = memo(function ReviewCard({
           <Maximize2 className="ic12" />
         </button>
       </div>
-      <div className="rmeta">
+      <div className={cn("rmeta", `gc${tone}`)}>
+        <i className="rtone" />
         <span className="rtitle">{name}</span>
       </div>
     </div>
@@ -227,8 +240,11 @@ export function ReviewPage() {
   const [zoom, setZoom] = useState(false);
   const [processed, setProcessed] = useState(0);
   const [busy, setBusy] = useState(false);
+  /** 已交给后端、还没回读到结果的图：先从界面拿掉，审稿人不必等拷贝完成。 */
+  const [hidden, setHidden] = useState<ReadonlySet<number>>(new Set());
   const [now] = useState(() => Math.floor(Date.now() / 1000));
-  const inFlight = useRef(false);
+  const queue = useRef<{ accept: number[]; reject: number[] }>({ accept: [], reject: [] });
+  const draining = useRef(false);
   const loadSequence = useRef(0);
   const parentRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
@@ -267,35 +283,64 @@ export function ReviewPage() {
     return () => observer.disconnect();
   }, []);
 
-  const process = useCallback(
-    async (ids: number[], action: "accept" | "reject") => {
-      if (ids.length === 0 || inFlight.current) return;
-      inFlight.current = true;
-      setBusy(true);
-      try {
-        if (action === "accept") {
-          const result = await unwrap(commands.acceptTasks(ids));
-          setProcessed((count) => count + result.accepted);
-          for (const name of result.promotedGroups) {
-            toast(`「${readableName(name) || "本组提示词"}」已写入文案库`);
+  // 通过/移废纸篓排队串行提交：处理中继续按键会并进下一次调用（一次调用 = 一个 Poster
+  // 批次），而不是被丢掉或逐张各发一次。失败的图在回读后自然回到列表里。
+  const drain = useRef<() => Promise<void>>(async () => {});
+  drain.current = async () => {
+    if (draining.current) return;
+    draining.current = true;
+    setBusy(true);
+    const sent: number[] = [];
+    try {
+      while (queue.current.accept.length || queue.current.reject.length) {
+        const { accept: passIds, reject: dropIds } = queue.current;
+        queue.current = { accept: [], reject: [] };
+        sent.push(...passIds, ...dropIds);
+        if (passIds.length) {
+          try {
+            const result = await unwrap(commands.acceptTasks(passIds));
+            setProcessed((count) => count + result.accepted);
+            toast.success(`已通过 ${result.accepted} 张`, { id: "review-accept" });
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "通过失败");
           }
-          toast.success(`已通过 ${result.accepted} 张`);
-        } else {
-          const count = await unwrap(commands.rejectTasks(ids));
-          setProcessed((total) => total + count);
-          toast(`${count} 张移入废纸篓`);
         }
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "验收操作失败");
-      } finally {
-        // 部分成功或状态已被其它入口改动时，按后端的实际待验收列表继续。
-        await load();
-        inFlight.current = false;
-        setBusy(false);
+        if (dropIds.length) {
+          try {
+            const count = await unwrap(commands.rejectTasks(dropIds));
+            setProcessed((total) => total + count);
+            toast(`${count} 张移入废纸篓`, { id: "review-reject" });
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "移入废纸篓失败");
+          }
+        }
       }
-    },
-    [load],
-  );
+      // 部分成功或状态已被其它入口改动时，按后端的实际待验收列表继续。
+      await load();
+    } finally {
+      setHidden((prev) => {
+        const next = new Set(prev);
+        for (const id of sent) next.delete(id);
+        return next;
+      });
+      draining.current = false;
+      setBusy(false);
+      if (queue.current.accept.length || queue.current.reject.length) void drain.current();
+    }
+  };
+
+  const process = useCallback((ids: number[], action: "accept" | "reject") => {
+    if (ids.length === 0) return;
+    queue.current[action].push(...ids);
+    setHidden((prev) => new Set([...prev, ...ids]));
+    setSel((prev) => {
+      if (!ids.some((id) => prev.has(id))) return prev;
+      const next = new Set(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+    void drain.current();
+  }, []);
   const accept = useCallback((ids: number[]) => void process(ids, "accept"), [process]);
   const reject = useCallback((ids: number[]) => void process(ids, "reject"), [process]);
 
@@ -317,14 +362,27 @@ export function ReviewPage() {
     });
   }, []);
 
-  const pendingCount = items?.filter((item) => pending.has(item.id)).length ?? 0;
+  const pendingCount =
+    items?.filter((item) => pending.has(item.id) && !hidden.has(item.id)).length ?? 0;
   const filtered = useMemo(
-    () => (onlyPending ? (items ?? []).filter((item) => pending.has(item.id)) : (items ?? [])),
-    [items, onlyPending, pending],
+    () =>
+      (items ?? []).filter(
+        (item) => !hidden.has(item.id) && (!onlyPending || pending.has(item.id)),
+      ),
+    [items, hidden, onlyPending, pending],
   );
   const visibleIds = useMemo(() => new Set(filtered.map((item) => item.id)), [filtered]);
   const selectedIds = useMemo(() => [...sel].filter((id) => visibleIds.has(id)), [sel, visibleIds]);
   const sections = useMemo(() => buildSections(filtered, sortMode, now), [filtered, sortMode, now]);
+  // 每张图所在的组：组色与「⇧⏎ 通过本组」都按它找。
+  const clusterOf = useMemo(() => {
+    const map = new Map<number, { tone: number; ids: number[] }>();
+    sections.forEach((section, index) => {
+      const entry = { tone: index % TONES, ids: section.items.map((item) => item.id) };
+      for (const id of entry.ids) map.set(id, entry);
+    });
+    return map;
+  }, [sections]);
   const { blocks, cardRow, flat } = useMemo(
     () => packGroups(sections, { width: measureW, perRow: cols, gap: GAP, ratioOf }),
     [sections, cols, measureW],
@@ -466,7 +524,11 @@ export function ReviewPage() {
           break;
         case "Enter":
           e.preventDefault();
-          if (!e.repeat) accept(!zoom && selectedIds.length ? selectedIds : [item.id]);
+          if (e.repeat) break;
+          if (e.shiftKey) {
+            const group = clusterOf.get(item.id)?.ids ?? [item.id];
+            accept(group.filter((id) => !pending.has(id)));
+          } else accept(!zoom && selectedIds.length ? selectedIds : [item.id]);
           break;
         case "Backspace":
           e.preventDefault();
@@ -491,6 +553,8 @@ export function ReviewPage() {
     blocks,
     cardRow,
     selectedIds,
+    clusterOf,
+    pending,
     accept,
     reject,
     toggleSel,
@@ -555,6 +619,8 @@ export function ReviewPage() {
               {items === null ? "正在加载" : `${items.length} 张待验收`}
             </span>
             {processed > 0 && <span className="pcap">本次已处理 {processed} 张</span>}
+            {busy && <span className="pcap">正在提交 {hidden.size} 张…</span>}
+            <AfterReviewHint />
           </div>
           <div className="f1" />
           {pendingCount > 0 || onlyPending ? (
@@ -619,20 +685,10 @@ export function ReviewPage() {
           <div className="rselection">
             <span className="fw6">已选 {selectedIds.length} 张</span>
             <div className="f1" />
-            <button
-              type="button"
-              className="btn xs"
-              disabled={busy}
-              onClick={() => accept(selectedIds)}
-            >
+            <button type="button" className="btn xs" onClick={() => accept(selectedIds)}>
               通过所选
             </button>
-            <button
-              type="button"
-              className="btn xs gho dng"
-              disabled={busy}
-              onClick={() => reject(selectedIds)}
-            >
+            <button type="button" className="btn xs gho dng" onClick={() => reject(selectedIds)}>
               移入废纸篓
             </button>
             <button type="button" className="btn xs gho" onClick={() => setSel(new Set())}>
@@ -693,7 +749,8 @@ export function ReviewPage() {
                       ) : (
                         <ClusterHead
                           head={block.head}
-                          busy={busy}
+                          tone={clusterOf.get(block.head.ids[0] ?? -1)?.tone ?? 0}
+                          pending={pending}
                           onAccept={accept}
                           onReject={reject}
                         />
@@ -712,7 +769,7 @@ export function ReviewPage() {
                             selected={sel.has(it.id)}
                             focused={it.id === focusId}
                             pending={pending.has(it.id)}
-                            busy={busy}
+                            tone={clusterOf.get(it.id)?.tone ?? 0}
                             onCardClick={onCardClick}
                             onAccept={onAccept}
                             onReject={onReject}
@@ -739,6 +796,9 @@ export function ReviewPage() {
             </span>
             <span>
               <kbd>⏎</kbd> 通过
+            </span>
+            <span>
+              <kbd>⇧⏎</kbd> 通过本组（跳过待定）
             </span>
             <span>
               <kbd>⌫</kbd> 移入废纸篓
@@ -886,7 +946,6 @@ export function ReviewPage() {
                     type="button"
                     className="btn xs gho dng"
                     title="移入废纸篓 ⌫"
-                    disabled={busy}
                     onClick={() => reject([zoomItem.id])}
                   >
                     移废纸篓
@@ -895,7 +954,6 @@ export function ReviewPage() {
                     type="button"
                     className="btn pri xs"
                     title="通过 ⏎"
-                    disabled={busy}
                     onClick={() => accept([zoomItem.id])}
                   >
                     通过
@@ -906,6 +964,51 @@ export function ReviewPage() {
           );
         })()}
     </PageScaffold>
+  );
+}
+
+/**
+ * 工具栏上的「通过之后会发生什么」：读设置页两个开关的实际状态，审稿时不必切页确认。
+ * 两项都关时不占位置。
+ */
+function AfterReviewHint() {
+  const [live, setLive] = useState(false);
+  const [poster, setPoster] = useState(false);
+
+  useEffect(() => {
+    const read = () => {
+      void unwrap(commands.getLivePhotoStatus())
+        .then((s) => setLive(s.supported && s.enabled))
+        .catch(() => {});
+      void unwrap(commands.getPosterSettings())
+        .then((s) => setPoster(!!s.autoImport))
+        .catch(() => {});
+    };
+    read();
+    const offLive = subscribeLivePhoto(read);
+    const offPoster = subscribePoster(read);
+    return () => {
+      void offLive.then((off) => off());
+      void offPoster.then((off) => off());
+    };
+  }, []);
+
+  if (!live && !poster) return null;
+  return (
+    <span className="rauto" title="在设置页「审稿后自动化」中开关">
+      通过后
+      {live && (
+        <>
+          <ArrowRight className="ic12" />
+          转实况图
+        </>
+      )}
+      {poster && (
+        <>
+          <ArrowRight className="ic12" />进 Poster
+        </>
+      )}
+    </span>
   );
 }
 

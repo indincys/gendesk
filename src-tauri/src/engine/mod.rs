@@ -450,7 +450,6 @@ mod tests {
             &pool,
             &ref_repo::NewRefImage {
                 name: "r".into(),
-                ref_group_id: None,
                 ephemeral: false,
                 file_path: "/r".into(),
                 thumb_path: "/t".into(),
@@ -549,7 +548,6 @@ mod tests {
             &pool,
             &ref_repo::NewRefImage {
                 name: "r".into(),
-                ref_group_id: None,
                 ephemeral: false,
                 file_path: "/r".into(),
                 thumb_path: "/t".into(),

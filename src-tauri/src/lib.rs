@@ -4,8 +4,8 @@
 //! IPC 契约由 tauri-specta 在此集中登记，自动导出到 `src/lib/ipc/bindings.ts`。
 
 mod commands;
+mod control;
 mod db;
-mod delivery;
 mod engine;
 mod error;
 mod files;
@@ -17,7 +17,6 @@ mod live_photo;
 mod logging;
 mod poster;
 mod provider;
-mod publish;
 mod purpose;
 mod secrets;
 mod shell;
@@ -73,19 +72,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::api_keys::test_api_key_saved,
             // refs 域
             commands::refs::import_ref_images,
-            commands::refs::scan_ref_imports,
             commands::refs::list_ref_images,
-            commands::refs::list_ref_groups,
-            commands::refs::create_ref_group,
-            commands::refs::rename_ref_group,
-            commands::refs::delete_ref_group,
-            commands::refs::set_ref_image_group,
-            commands::refs::set_ref_images_group,
-            commands::refs::set_ref_image_archived,
-            commands::refs::get_ref_image,
-            commands::refs::replace_ref_image_file,
-            commands::refs::trash_ref_image,
-            commands::refs::trash_ref_images,
             // prompts 域
             commands::prompts::list_prompt_groups,
             commands::prompts::list_purposes,
@@ -114,14 +101,16 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::review::list_pending_review,
             commands::review::accept_tasks,
             commands::review::reject_tasks,
+            commands::intake::get_agent_cli_info,
+            commands::intake::open_agent_root,
             commands::poster::get_poster_settings,
             commands::poster::update_poster_settings,
             commands::poster::list_poster_batches,
             commands::poster::preview_poster_batch,
-            commands::poster::decide_poster_batch,
+            commands::poster::bind_poster_batch,
+            commands::poster::skip_poster_batch,
             commands::poster::retry_poster_imports,
             commands::poster::pick_poster_app,
-            commands::poster::pick_poster_library,
             // works 域
             commands::works::list_works,
             commands::works::toggle_work_favorite,
@@ -131,26 +120,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::works::set_works_favorite,
             commands::works::trash_works,
             commands::works::export_works,
-            // intake 域（Claude Code / Codex 投单 → 自动建批）
-            commands::intake::get_intake_settings,
-            commands::intake::update_intake_settings,
-            commands::intake::intake_pending_dir,
-            commands::intake::list_intake_jobs,
-            commands::intake::scan_intake_now,
-            commands::intake::retry_intake_job,
-            commands::intake::preview_intake_job,
-            commands::intake::intake_ref_thumb,
-            commands::intake::confirm_intake_job,
-            commands::intake::open_intake_dir,
-            commands::intake::pick_intake_root,
-            commands::delivery::get_delivery_settings,
-            commands::delivery::update_delivery_settings,
-            commands::delivery::pick_delivery_root,
-            commands::delivery::open_delivery_dir,
             // v2v 域（视频生成）
             commands::v2v::get_v2v_settings,
             commands::v2v::update_v2v_settings,
-            commands::v2v::pick_handoff_root,
             commands::v2v::pick_clips_output_dir,
             commands::v2v::v2v_clips_dir,
             commands::v2v::pick_dreamina_bin,
@@ -164,7 +136,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::v2v_autofill_status,
             commands::v2v::v2v_away_digest,
             commands::v2v::v2v_mark_seen,
-            commands::v2v::v2v_handoff_status,
             commands::v2v::v2v_sessions,
             commands::v2v::v2v_effective_params,
             commands::v2v::v2v_activity,
@@ -172,9 +143,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::list_v2v_clips,
             commands::v2v::v2v_counts,
             commands::v2v::enqueue_works_v2v,
-            commands::v2v::materialize_v2v_handoff,
-            commands::v2v::ingest_v2v_rewrites,
-            commands::v2v::open_handoff_dir,
             commands::v2v::update_v2v_clip,
             commands::v2v::set_v2v_clip_params,
             commands::v2v::switch_v2v_channel,
@@ -205,67 +173,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::backup::data_dir_info,
             commands::backup::open_data_dir,
             commands::backup::export_backup,
-            // ── 发布与资产管理模块（P1 起）──────────────────────────
-            // publish_settings 域
-            commands::publish_settings::get_publish_settings,
-            commands::publish_settings::update_publish_settings,
-            commands::publish_settings::pick_publish_root,
-            commands::publish_settings::use_local_as_exec_root,
-            commands::publish_settings::publish_platforms,
-            // 商品与 SKU
-            commands::publish_products::list_products,
-            commands::publish_products::list_product_skus,
-            commands::publish_products::create_product,
-            commands::publish_products::update_product,
-            commands::publish_products::delete_product,
-            commands::publish_products::assign_skus_to_product,
-            commands::publish_products::create_product_sku,
-            commands::publish_products::update_product_sku,
-            commands::publish_products::set_prompt_group_sku,
-            commands::publish_products::pick_product_catalog_file,
-            commands::publish_products::import_product_catalog,
-            // 图片、文案、话题三库
-            commands::publish_library::list_image_assets,
-            commands::publish_library::pick_image_folder,
-            commands::publish_library::import_image_folder,
-            commands::publish_library::set_image_assets_sku,
-            commands::publish_library::delete_image_assets,
-            commands::publish_library::add_works_to_image_library,
-            commands::publish_library::list_copy_items,
-            commands::publish_library::add_copy_item,
-            commands::publish_library::update_copy_item,
-            commands::publish_library::set_copy_items_enabled,
-            commands::publish_library::delete_copy_items,
-            commands::publish_library::list_topic_groups,
-            commands::publish_library::save_topic_group,
-            commands::publish_library::set_topic_groups_enabled,
-            commands::publish_library::delete_topic_groups,
-            commands::publish_library::preview_copy_file,
-            commands::publish_library::pick_copy_file,
-            commands::publish_library::import_copy_file,
-            // 任务单配置、确认、导出与结算
-            commands::publish_sheets::list_sheet_configs,
-            commands::publish_sheets::save_sheet_config,
-            commands::publish_sheets::generate_sheets,
-            commands::publish_sheets::list_task_sheets,
-            commands::publish_sheets::get_publish_badges,
-            commands::publish_sheets::get_task_sheet,
-            commands::publish_sheets::update_post_text,
-            commands::publish_sheets::replace_post_copy,
-            commands::publish_sheets::update_post_topics,
-            commands::publish_sheets::replace_post_image,
-            commands::publish_sheets::reorder_post_images,
-            commands::publish_sheets::delete_post,
-            commands::publish_sheets::append_post,
-            commands::publish_sheets::regenerate_sheet,
-            commands::publish_sheets::confirm_sheet,
-            commands::publish_sheets::reopen_sheet,
-            commands::publish_sheets::cancel_sheet,
-            commands::publish_sheets::export_task_sheet,
-            commands::publish_sheets::recover_missing_export,
-            commands::publish_sheets::collect_sheet_receipts,
-            commands::publish_sheets::close_task_sheet,
-            commands::publish_sheets::open_task_sheet_dir,
         ])
         .events(collect_events![
             commands::poster::PosterChanged,
@@ -277,14 +184,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::updater::UpdateStateChanged,
             commands::backup::BackupProgress,
             commands::refs::RefImportProgress,
-            // 发布模块事件（P1 起）
-            publish::events::PublishBadgesEvent,
-            publish::events::InboxIngestEvent,
-            publish::events::SheetChangedEvent,
-            publish::events::ExportProgressEvent,
-            // 生图工单收件事件
+            // CLI 工单收录事件
             commands::intake::IntakeChanged,
-            commands::intake::IntakeProgress,
             // 视频流水线事件
             v2v::events::V2vChanged,
             v2v::events::V2vProgress,
@@ -305,10 +206,10 @@ fn ts_config() -> specta_typescript::Typescript {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = specta_builder();
-    let background_intake = is_background_intake(std::env::args().nth(1).as_deref());
+    let background = is_background_launch(std::env::args().nth(1).as_deref());
     let mut context = tauri::generate_context!();
     let mut window_state = tauri_plugin_window_state::Builder::default();
-    if background_intake {
+    if background {
         for window in &mut context.config_mut().app.windows {
             window.visible = false;
             window.focus = false;
@@ -331,7 +232,7 @@ pub fn run() {
         app_builder
     } else {
         app_builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if !is_background_intake(argv.get(1).map(String::as_str)) {
+            if !is_background_launch(argv.get(1).map(String::as_str)) {
                 shell::show_main_window(app);
             }
         }))
@@ -348,7 +249,7 @@ pub fn run() {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             #[cfg(target_os = "macos")]
-            if background_intake {
+            if background {
                 use tauri_plugin_window_state::{StateFlags, WindowExt};
                 // Tao activates the app before Ready, even when all windows start hidden.
                 app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
@@ -368,7 +269,7 @@ pub fn run() {
             if let Err(err) = setup_app(app) {
                 tracing::error!(error = %err, "应用初始化失败，退出");
                 eprintln!("[gendesk] 应用初始化失败: {err}");
-                if !background_intake {
+                if !background {
                     fatal_dialog(&err.to_string());
                 }
                 std::process::exit(1);
@@ -387,7 +288,7 @@ pub fn run() {
         .unwrap_or_else(|e| {
             // 启动失败无法进入日志系统，退回 stderr 并非零退出。
             eprintln!("[gendesk] 应用启动失败: {e}");
-            if !background_intake {
+            if !background {
                 fatal_dialog(&e.to_string());
             }
             std::process::exit(1);
@@ -395,7 +296,7 @@ pub fn run() {
         .run(move |_app, _event| {
             #[cfg(target_os = "macos")]
             match _event {
-                tauri::RunEvent::Ready if background_intake => {
+                tauri::RunEvent::Ready if background => {
                     // Restore the Dock entry after startup so users can open the window to review.
                     let _ = _app.set_activation_policy(tauri::ActivationPolicy::Regular);
                 }
@@ -405,8 +306,9 @@ pub fn run() {
         });
 }
 
-fn is_background_intake(arg: Option<&str>) -> bool {
-    cfg!(target_os = "macos") && arg == Some("--background-intake")
+/// CLI 在应用未运行时以 `--background` 启动：不弹窗、不抢焦点，审稿时再手动打开。
+fn is_background_launch(arg: Option<&str>) -> bool {
+    cfg!(target_os = "macos") && arg == Some("--background")
 }
 
 /// 启动失败时弹一个原生对话框，然后才退出。
@@ -522,7 +424,7 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 而它挡在窗口出现之前 —— 攒了半年废纸篓的机器上，表现就是双击图标之后
     // 长时间什么都不发生（同 v0.20.1 那个「dock 弹一下就没了」的手感来源）。
     // 它与启动没有任何依赖关系：清的是过期数据，晚几秒发生不影响任何人。
-    // 内部顺序（先 purge 再 retire）在函数里已经保证。照发布收件箱补扫的既有形制。
+    // 内部顺序（先 purge 再 retire）在函数里已经保证。
     {
         let pool = pool.clone();
         let (batch_days, trash_days) =
@@ -533,118 +435,33 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let dirs_for_v2v = dirs.clone();
-    let dirs_for_intake = dirs.clone();
-    // 引擎句柄要分给工单收件（建批后唤醒调度器），故先 Arc 起来再交给 AppState。
     let engine = Arc::new(engine);
-    let engine_for_intake = engine.clone();
-    // 视频流水线执行日志：轮询器 / 提交 / 交接监听共用同一份环形缓冲，
+    // 视频流水线执行日志：轮询器 / 提交 / CLI 改写交回共用同一份环形缓冲，
     // 命令层从 AppState 读它。在 manage 之前建好，好让后台任务拿到同一个句柄。
     let v2v_log = v2v::activity::Activity::new(app.handle().clone());
-    // 收件扫描互斥锁：**只此一把**，命令层与 watcher 共用（见 intake::ingest::scan）。
-    let intake_scan_lock = Arc::new(tokio::sync::Mutex::new(()));
     app.manage(state::AppState::new(
         pool.clone(),
         secrets,
         dirs,
         engine,
         v2v_log.clone(),
-        intake_scan_lock.clone(),
     ));
-    // 只重试已有明确同意记录的批次；待确认、跳过的批次永远不会自动导入。
+    // 只重试已登记、尚未完成的 Poster 交接批次。
     commands::poster::start_delivery(app.handle().clone());
     live_photo::start(app.handle().clone());
 
-    // 发布模块：启动收件箱监听 + 启动补跑收录（若已配置本机根目录）。
-    let publish_state = publish::PublishState::new(pool.clone(), app.handle().clone());
-    if let Ok(pset) = tauri::async_runtime::block_on(commands::publish_settings::load(&pool)) {
-        if !pset.root_local.is_empty() {
-            let root = std::path::PathBuf::from(&pset.root_local);
-            if let Err(err) = publish_state.restart(root.clone()) {
-                tracing::warn!(error = %err, "启动收件箱监听失败");
-            }
-            // 启动补跑：全量扫描收件箱（异步，不阻塞启动）。
-            let pool_bg = pool.clone();
-            let app_bg = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(err) = publish::inbox::ingest::rescan(&pool_bg, &root).await {
-                    tracing::warn!(error = %err, "启动补跑收录失败");
-                }
-                publish::inbox::watcher::emit_badges(&pool_bg, &app_bg).await;
-            });
-            // 应用内定时：启动补跑生成今日/明日草稿 + 每 5 分钟一轮。
-            publish::ticker::spawn(pool.clone(), app.handle().clone());
-        }
-    }
-    app.manage(publish_state);
-
-    // 生图工单收件：监听收件目录（skill 投单）+ 启动补跑一次。
-    //
-    // **启动补跑是这条链路的关键**：应用没开的时候投的单，磁盘上一直等着；
-    // 这一刻把它们收进来，「GenDesk 得开着才能投单」这个限制就不存在了。
-    if let Ok(iset) = tauri::async_runtime::block_on(commands::intake::load_settings(&pool)) {
-        // 隔离 WebView 验收不能覆盖正式 CLI 的发现文件。
-        if debug_data_dir_override().is_none() {
-            commands::intake::write_connection(&iset);
-        }
-        if iset.enabled {
-            let root = iset.root_path();
-            let ctx = intake::ingest::Ctx {
-                pool: pool.clone(),
-                dirs: dirs_for_intake,
-                engine: engine_for_intake,
-                progress: Arc::new(intake::ingest::NoProgress),
-                threshold: iset.task_threshold,
-                scan_lock: intake_scan_lock.clone(),
-            };
-            match intake::watcher::start(ctx.clone(), root.clone(), app.handle().clone()) {
-                Ok(w) => {
-                    let state = app.state::<state::AppState>();
-                    if let Ok(mut current) = state.intake_watcher.lock() {
-                        *current = Some(w);
-                    };
-                }
-                Err(err) => tracing::warn!(error = %err, "启动生图收件目录监听失败"),
-            }
-            let app_bg = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                commands::intake::scan_and_emit(&ctx, &root, &app_bg).await;
-            });
-        }
+    // Agent CLI 控制通道。隔离数据目录的调试实例不覆盖正式连接文件。
+    if let Err(err) = control::start(app.handle().clone(), debug_data_dir_override().is_none()) {
+        tracing::warn!(error = %err, "CLI 控制通道启动失败");
     }
 
-    // 视频流水线：监听交接目录（skill 写回改写结果）+ 后台轮询已提交条目。
-    //
-    // 启动即物化一次工单：上次退出后新验收的条目、或用户手动改过交接根，
-    // 都要在这一刻把磁盘上的工单对齐成库里的真相，否则 skill 会对着旧内容干活。
-    if let Ok(vset) = tauri::async_runtime::block_on(commands::v2v::load_settings(&pool)) {
-        let root = vset.root();
-        match v2v::watcher::start(
-            pool.clone(),
-            root.clone(),
-            app.handle().clone(),
-            v2v_log.clone(),
-        ) {
-            Ok(w) => {
-                app.manage(w);
-            }
-            Err(err) => tracing::warn!(error = %err, "启动交接目录监听失败"),
-        }
-        let pool_bg = pool.clone();
-        let app_bg = app.handle().clone();
-        tauri::async_runtime::spawn(async move {
-            // 先收录一次（应用没开时 skill 也可能写回了），再按最新队列物化。
-            if let Err(err) = v2v::handoff::ingest(&pool_bg, &root).await {
-                tracing::warn!(error = %err, "启动补跑收录改写结果失败");
-            }
-            commands::v2v::refresh_handoff(&pool_bg, &app_bg).await;
-        });
-        v2v::runner::spawn(
-            pool.clone(),
-            dirs_for_v2v,
-            app.handle().clone(),
-            v2v_log.clone(),
-        );
-    }
+    // 视频流水线：后台轮询已提交条目。
+    v2v::runner::spawn(
+        pool.clone(),
+        dirs_for_v2v,
+        app.handle().clone(),
+        v2v_log.clone(),
+    );
 
     // 外壳：关窗只隐藏 · 菜单栏托盘 · 自定义「退出」（理由见 `shell` 模块头）。
     //

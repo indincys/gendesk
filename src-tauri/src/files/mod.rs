@@ -13,6 +13,7 @@ use image::ImageReader;
 
 use crate::error::{AppError, AppResult};
 
+pub mod copy;
 pub mod decode;
 pub mod preview;
 

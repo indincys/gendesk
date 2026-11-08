@@ -27,6 +27,7 @@ const PHASE_LABEL: Record<string, string> = {
   poll: "轮询",
   media: "落盘",
   handoff: "交接",
+  rewrite: "改写",
 };
 
 export function V2vLogPanel({ onClose }: { onClose: () => void }) {

@@ -234,24 +234,16 @@ async testApiKeySaved(id: number) : Promise<Result<null, AppError>> {
  * `ephemeral = true` 为生成页的临时上传（不进长期图库，见 0019）。
  * 全程逐张推 `refs://import-progress`：一张坏图只算失败一张，不中断整批。
  */
-async importRefImages(paths: string[], groupId: number | null, ephemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
+async importRefImages(paths: string[], ephemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, groupId, ephemeral }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("scan_ref_imports", { paths }) };
+    return { status: "ok", data: await TAURI_INVOKE("import_ref_images", { paths, ephemeral }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * 列出未删除参考图（供参考图库/生成页选择）。
+ * 列出未删除参考图（供生成页选择）。
  * 
  * `include_ephemeral` = 要不要连生成页的临时上传（0019）一起返回。
  * 
@@ -263,120 +255,6 @@ async scanRefImports(paths: string[]) : Promise<Result<RefScanItem[], AppError>>
 async listRefImages(includeEphemeral: boolean) : Promise<Result<RefImageView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_ref_images", { includeEphemeral }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listRefGroups() : Promise<Result<RefGroupView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_ref_groups") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 新建图库分组。重名（NOCASE）直接返回既有那个，不报错——用户要的是「有这个组」，
- * 不是一句「名字被占了」。
- */
-async createRefGroup(name: string) : Promise<Result<RefGroupView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_ref_group", { name }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async renameRefGroup(id: number, name: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rename_ref_group", { id, name }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 删除图库分组。组内图片**不删**，只是回到未分组。
- */
-async deleteRefGroup(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_ref_group", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 调整参考图分组。
- */
-async setRefImageGroup(id: number, groupId: number | null) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_ref_image_group", { id, groupId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批量改分组（E30b）。gid=None 为未分组。
- */
-async setRefImagesGroup(ids: number[], groupId: number | null) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_ref_images_group", { ids, groupId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 归档 / 取消归档参考图（0016）。批次开跑后由 `engine::create_batch` 自动归档；
- * 此命令供参考图库手动恢复（或手动归档一张用不上的旧图）。
- */
-async setRefImageArchived(id: number, archived: boolean) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_ref_image_archived", { id, archived }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getRefImage(id: number) : Promise<Result<RefImageDetail, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_ref_image", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 更换参考图文件（保留 id 与关联）。
- */
-async replaceRefImageFile(id: number, path: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("replace_ref_image_file", { id, path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 删除参考图 → 进废纸篓。
- */
-async trashRefImage(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trash_ref_image", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 批量删除参考图 → 进废纸篓（E30b）。
- */
-async trashRefImages(ids: number[]) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trash_ref_images", { ids }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -653,15 +531,11 @@ async listPendingReview(batchId: number | null) : Promise<Result<ReviewItemView[
  * （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
  * 要么全部拷成功再记账，要么什么账都没记。
  * 
- * ## 交付即交出所有权（D3）
+ * ## 落点与后续自动化
  * 
- * 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.{EXT}`，
- * 整批拷完 → 写 `manifest.jsonl` → **最后**写 `READY.txt`。对方（`自动发布`）看见
- * READY 就会把整个目录搬走，此后 `accepted_works.image_path` 允许悬空 ——
- * UI 走已有的 `file_exists` 懒检测，救回路径是 `reexport_work`（从 `results/{task_id}`
- * 快照重出，**复用原 uid**）。
- * 
- * 旧落点 `outputs/{批次}/{分组}/` 已停止写入。
+ * 通过的图拷进 `成品/生成图片/<产品>/<款式>/<需求>/`（见 `library.rs`），作品身份写进
+ * 内部作品记录。开启实况图时入实况队列；开启 Poster 自动导入时登记进同一个 Poster
+ * 批次，验收结束即开始导入（两者都开时，Poster 等实况配对落盘再导）。
  */
 async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
     try {
@@ -677,6 +551,25 @@ async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
 async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reject_tasks", { taskIds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getAgentCliInfo() : Promise<Result<AgentCliInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_cli_info") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 在 Finder / 资源管理器里打开交接根。
+ */
+async openAgentRoot() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_agent_root") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -706,6 +599,9 @@ async listPosterBatches() : Promise<Result<PosterBatch[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 失败批次的款式与可选商品（「指定商品」用）。
+ */
 async previewPosterBatch(batchId: string) : Promise<Result<PosterPreview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("preview_poster_batch", { batchId }) };
@@ -714,9 +610,23 @@ async previewPosterBatch(batchId: string) : Promise<Result<PosterPreview, AppErr
     else return { status: "error", error: e  as any };
 }
 },
-async decidePosterBatch(batchId: string, choices: PosterChoice[] | null) : Promise<Result<null, AppError>> {
+/**
+ * 为匹配不上的款式指定商品：保存绑定、重新排队并立即续导。
+ */
+async bindPosterBatch(batchId: string, choices: PosterChoice[]) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("decide_poster_batch", { batchId, choices }) };
+    return { status: "ok", data: await TAURI_INVOKE("bind_poster_batch", { batchId, choices }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 放弃导入一个失败批次。
+ */
+async skipPosterBatch(batchId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("skip_poster_batch", { batchId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -733,14 +643,6 @@ async retryPosterImports() : Promise<Result<null, AppError>> {
 async pickPosterApp() : Promise<Result<string | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pick_poster_app") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickPosterLibrary() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_poster_library") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -830,165 +732,6 @@ async exportWorks(ids: number[], destDir: string) : Promise<Result<number, AppEr
     else return { status: "error", error: e  as any };
 }
 },
-async getIntakeSettings() : Promise<Result<IntakeSettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_intake_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateIntakeSettings(settings: IntakeSettings) : Promise<Result<IntakeSettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_intake_settings", { settings }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 收件目录的绝对路径（设置页直接显示「skill 该往这里投单」）。
- */
-async intakePendingDir() : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("intake_pending_dir") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listIntakeJobs(limit: number) : Promise<Result<JobView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_intake_jobs", { limit }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 手动扫一次（刚投完单不想等 watcher，或 watcher 没起来时的兜底）。
- */
-async scanIntakeNow() : Promise<Result<JobView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("scan_intake_now") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 重试：沿原台账和持久检查点恢复，只补未完成步骤，不重新导入已有身份。
- * 
- * 失败或中断的工单沿原身份恢复；另一轮已经完成时按幂等成功处理。
- */
-async retryIntakeJob(id: number) : Promise<Result<JobView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("retry_intake_job", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 预览一份待确认工单。**只读**：与真正收录走的是同一个 `intake::plan`，
- * 故这里看见的对应关系就是确认之后会发生的那一份，不存在两套解析各说各话。
- */
-async previewIntakeJob(id: number) : Promise<Result<JobPreview, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_intake_job", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 单张参考图的预览缩略图 → 缓存文件绝对路径（前端 `assetSrc` 读）。
- * 
- * 命中缓存就直接返回，**连解码预算都不碰**：重开确认卡、来回滚动都是零成本，
- * 这才是「反复打开不会把 CPU 叠上去」的真正保证——`spawn_blocking` 不可取消，
- * 想靠取消来收场是收不住的，只能让重复的活根本不发生。
- */
-async intakeRefThumb(id: number, path: string) : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("intake_ref_thumb", { id, path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 确认开跑一份超阈值的工单。
- * 
- * 做的事就两件：**在工单目录里写下 `确认.txt`**，然后删掉台账那行让它重新收录。
- * 之所以走文件而不是在库里加一个「已确认」标志位——`确认.txt` 是确认的**唯一表达**，
- * 你在 Claude Code 里 `touch` 一下和在这里点一下走的是同一段代码，
- * 不可能出现「一条路对、另一条路错」。
- */
-async confirmIntakeJob(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("confirm_intake_job", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 在系统文件管理器打开收件目录。
- */
-async openIntakeDir() : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_intake_dir") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 选交接根目录（与图生视频那个是同一个根，故此处复用它的选择器语义）。
- */
-async pickIntakeRoot() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_intake_root") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getDeliverySettings() : Promise<Result<DeliverySettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_delivery_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateDeliverySettings(settings: DeliverySettings) : Promise<Result<DeliverySettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_delivery_settings", { settings }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickDeliveryRoot() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_delivery_root") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 在系统文件管理器打开交付根。
- */
-async openDeliveryDir() : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_delivery_dir") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getV2vSettings() : Promise<Result<V2vSettings, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_v2v_settings") };
@@ -1000,14 +743,6 @@ async getV2vSettings() : Promise<Result<V2vSettings, AppError>> {
 async updateV2vSettings(settings: V2vSettings) : Promise<Result<V2vSettings, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_v2v_settings", { settings }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickHandoffRoot() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_handoff_root") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1159,14 +894,6 @@ async v2vMarkSeen() : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async v2vHandoffStatus() : Promise<Result<HandoffStatus, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("v2v_handoff_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * 列出即梦会话（用户口中的「通道」）。
  * 
@@ -1232,36 +959,6 @@ async v2vCounts() : Promise<Result<StageCounts, AppError>> {
 async enqueueWorksV2v(workIds: number[]) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("enqueue_works_v2v", { workIds }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 立刻重写工单（用户点「重新物化」，或想确认路径时）。
- */
-async materializeV2vHandoff() : Promise<Result<MaterializeSummary, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("materialize_v2v_handoff") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 手动收录改写结果（watcher 之外的兜底：用户等不及 2 秒防抖，或 watcher 没起来）。
- */
-async ingestV2vRewrites() : Promise<Result<IngestSummary, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ingest_v2v_rewrites") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openHandoffDir() : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_handoff_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1545,11 +1242,10 @@ async listTrash() : Promise<Result<TrashItemView[], AppError>> {
 /**
  * 从废纸篓还原回原位（误删撤回）。
  * 
- * 六类实体走两条路：
+ * 五类实体走两条路：
  * - **task / prompt / ref / clip** —— 行一直都在，删除只是把状态拨到了一边，
  * 还原就是把它拨回来（未通过 → 回待验收；提示词 → 回 active；参考图 → 清删除戳）。
- * - **work / image_asset** —— 删除即真删行，靠 `payload_json` 整行写回；图片素材
- * 恢复时一律回到 free，文件在废纸篓彻底清理前一直保留。
+ * - **work** —— 删除即真删行，靠 `payload_json` 整行写回。
  * 
  * 还原**不删** trash 行以外的任何东西，也不动文件：未通过的原图本来就还在盘上
  * （E02 决定的：reject 只是记账，物理删要等「彻底删除/清空」）。这正是它能还原的前提。
@@ -1639,474 +1335,6 @@ async exportBackup() : Promise<Result<string | null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-async getPublishSettings() : Promise<Result<PublishSettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_publish_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updatePublishSettings(patch: PublishSettingsPatch) : Promise<Result<PublishSettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_publish_settings", { patch }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 选择本机根目录（dialog）；返回所选路径，取消返回 None。
- */
-async pickPublishRoot() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_publish_root") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 拓扑 B「同本机」一键：把执行机根路径设为本机根路径。
- * 路径风格同步跟随本机——执行机就是本机，还留着 `windows` 会拼出 `\` 分隔的假路径。
- */
-async useLocalAsExecRoot() : Promise<Result<PublishSettings, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("use_local_as_exec_root") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 四平台 `{code, zh}`（前端矩阵/选择器单点数据源）。
- */
-async publishPlatforms() : Promise<Result<PlatformInfo[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("publish_platforms") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listProducts() : Promise<Result<ProductView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_products") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listProductSkus() : Promise<Result<ProductSkuView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_product_skus") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async createProduct(input: ProductInput) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_product", { input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateProduct(id: number, patch: ProductPatch) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_product", { id, patch }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteProduct(id: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_product", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async assignSkusToProduct(productId: number, skuIds: number[]) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("assign_skus_to_product", { productId, skuIds }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async createProductSku(input: ProductSkuInput) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_product_sku", { input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateProductSku(id: number, productId: number | null, tier: string, musicKeyword: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_product_sku", { id, productId, tier, musicKeyword }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setPromptGroupSku(groupId: number, skuId: number | null) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_prompt_group_sku", { groupId, skuId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickProductCatalogFile() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_product_catalog_file") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 导入列：所属商品编码、所属商品名称、SKU编码、SKU名称、层级、文件夹别名、音乐关键词。
- */
-async importProductCatalog(path: string) : Promise<Result<CatalogImportReport, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("import_product_catalog", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listImageAssets(productId: number | null, skuId: number | null, assetState: string | null) : Promise<Result<ImageAssetView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_image_assets", { productId, skuId, assetState }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickImageFolder() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_image_folder") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async importImageFolder(folder: string, fallbackSkuId: number | null) : Promise<Result<ImageImportReport, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("import_image_folder", { folder, fallbackSkuId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setImageAssetsSku(ids: number[], skuId: number) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_image_assets_sku", { ids, skuId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteImageAssets(ids: number[]) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_image_assets", { ids }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 把存量作品补录进某个 SKU 图片库。新作品优先走验收时自动入库，此命令只服务存量与改挂靠。
- */
-async addWorksToImageLibrary(skuId: number, workIds: number[]) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("add_works_to_image_library", { skuId, workIds }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listCopyItems(productId: number | null, kind: string) : Promise<Result<CopyItemView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_copy_items", { productId, kind }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async addCopyItem(productId: number, kind: string, text: string) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("add_copy_item", { productId, kind, text }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateCopyItem(id: number, text: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_copy_item", { id, text }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setCopyItemsEnabled(ids: number[], enabled: boolean) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_copy_items_enabled", { ids, enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteCopyItems(ids: number[]) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_copy_items", { ids }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listTopicGroups(productId: number | null) : Promise<Result<TopicGroupView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_topic_groups", { productId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveTopicGroup(id: number | null, input: TopicGroupInput) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_topic_group", { id, input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setTopicGroupsEnabled(ids: number[], enabled: boolean) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_topic_groups_enabled", { ids, enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteTopicGroups(ids: number[]) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_topic_groups", { ids }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async previewCopyFile(path: string) : Promise<Result<CopyFilePreview, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_copy_file", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pickCopyFile() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pick_copy_file") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async importCopyFile(productId: number, path: string) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("import_copy_file", { productId, path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listSheetConfigs() : Promise<Result<SheetConfigView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_sheet_configs") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveSheetConfig(id: number | null, input: SheetConfigInput) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_sheet_config", { id, input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async generateSheets(date: string) : Promise<Result<number[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_sheets", { date }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listTaskSheets() : Promise<Result<SheetSummaryView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_task_sheets") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getPublishBadges() : Promise<Result<PublishBadgesEvent, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_publish_badges") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getTaskSheet(id: number) : Promise<Result<SheetDetailView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_task_sheet", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updatePostText(postId: number, kind: string, text: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_post_text", { postId, kind, text }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async replacePostCopy(postId: number, kind: string, itemId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("replace_post_copy", { postId, kind, itemId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updatePostTopics(postId: number, topics: string[]) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_post_topics", { postId, topics }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async replacePostImage(postId: number, ord: number, assetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("replace_post_image", { postId, ord, assetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async reorderPostImages(postId: number, assetIds: number[]) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reorder_post_images", { postId, assetIds }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deletePost(postId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_post", { postId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async appendPost(sheetId: number) : Promise<Result<number, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("append_post", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async regenerateSheet(sheetId: number) : Promise<Result<number[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("regenerate_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async confirmSheet(sheetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("confirm_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async reopenSheet(sheetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reopen_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async cancelSheet(sheetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async exportTaskSheet(sheetId: number) : Promise<Result<ExportResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("export_task_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * 活动包在首份回执前被外部删除/损坏时，把 used 安全退回 held，允许重新导出。
- * READY 仍存在、导出仍占用、已有回执或任何任务已有终态时一律拒绝，避免干扰 RPA。
- */
-async recoverMissingExport(sheetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("recover_missing_export", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async collectSheetReceipts(sheetId: number) : Promise<Result<ReceiptImportResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("collect_sheet_receipts", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async closeTaskSheet(sheetId: number) : Promise<Result<CloseResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("close_task_sheet", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openTaskSheetDir(sheetId: number) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_task_sheet_dir", { sheetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
 }
 }
 
@@ -2116,16 +1344,11 @@ async openTaskSheetDir(sheetId: number) : Promise<Result<null, AppError>> {
 export const events = __makeEvents__<{
 backupProgress: BackupProgress,
 batchSummary: BatchSummary,
-exportProgressEvent: ExportProgressEvent,
-inboxIngestEvent: InboxIngestEvent,
 intakeChanged: IntakeChanged,
-intakeProgress: IntakeProgress,
 keyHealth: KeyHealth,
 livePhotoChanged: LivePhotoChanged,
 posterChanged: PosterChanged,
-publishBadgesEvent: PublishBadgesEvent,
 refImportProgress: RefImportProgress,
-sheetChangedEvent: SheetChangedEvent,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged,
@@ -2137,16 +1360,11 @@ v2vTick: V2vTick
 }>({
 backupProgress: "backup-progress",
 batchSummary: "batch-summary",
-exportProgressEvent: "export-progress-event",
-inboxIngestEvent: "inbox-ingest-event",
 intakeChanged: "intake-changed",
-intakeProgress: "intake-progress",
 keyHealth: "key-health",
 livePhotoChanged: "live-photo-changed",
 posterChanged: "poster-changed",
-publishBadgesEvent: "publish-badges-event",
 refImportProgress: "ref-import-progress",
-sheetChangedEvent: "sheet-changed-event",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
 updateStateChanged: "update-state-changed",
@@ -2195,7 +1413,7 @@ seq: number; at: number;
  */
 level: string; 
 /**
- * `cli` 调用 · `submit` 提交 · `poll` 轮询 · `media` 落盘 · `handoff` 交接目录。
+ * `cli` 调用 · `submit` 提交 · `poll` 轮询 · `media` 落盘 · `rewrite` 改写结果。
  */
 phase: string; clipId: number | null; 
 /**
@@ -2211,6 +1429,18 @@ export type AddApiKeyInput = { alias: string; key: string; baseUrl: string; mode
  * 每分钟请求上限（E18）；None/<=0 = 不限速。
  */
 rpmLimit: number | null }
+/**
+ * 设置页「Agent CLI」分区显示的连接信息。
+ */
+export type AgentCliInfo = { 
+/**
+ * 交接根（工单包、回执、连接文件都在这里）。
+ */
+root: string; 
+/**
+ * 控制通道是否在监听；false 时 CLI 连不上，需看日志。
+ */
+listening: boolean; protocol: number; features: string[]; taskThreshold: number }
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
  */
@@ -2393,7 +1623,6 @@ paramsJson: string }
  * 而「我选了 30 个，怎么只没了 22 个」如果没人解释，下一步就是再点一次。
  */
 export type BulkTaskResult = { affected: number; skipped: number }
-export type CatalogImportReport = { rows: number; productsCreated: number; skusCreated: number; skusUpdated: number }
 export type ChannelCreditView = { channelKey: string; label: string; spentTotal: number; spentPass: number; spentRej: number; spentPending: number; spentFailedAbandoned: number; events: number; reviewed: number; passed: number; passRate: number | null }
 /**
  * 一条即梦通道此刻的样子（0031）。
@@ -2590,9 +1819,6 @@ billed: boolean;
  * （大小写不统一、还有 `PartialSuccess` 这种），在前端拿字符串再判一遍必然分叉。
  */
 awaitingDownload: boolean; acceptedAt: number; updatedAt: number }
-export type CloseResult = { deletedFiles: number; deleteFailures: string[]; reportJson: string }
-export type CopyFilePreview = { productCode: string | null; kind: string; titles: number; bodies: number; topics: string[] }
-export type CopyItemView = { id: number; productId: number; productCode: string; productName: string; kind: string; text: string; source: string; enabled: boolean; state: string; postId: number | null; createdAt: number }
 export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
 /**
  * 账号与余额（`user_credit` 的完整回体）。
@@ -2610,14 +1836,6 @@ export type CreditTrendPoint = { bucket: string; spent: number }
  * 数据目录信息（E19：暴露落盘位置）。
  */
 export type DataDirInfo = { root: string; dbPath: string }
-/**
- * 交付设置（`settings` 表 key='delivery' 单行 JSON）。
- */
-export type DeliverySettings = { 
-/**
- * 交付根目录。`自动发布` 那一侧监听它。
- */
-root?: string }
 /**
  * 当前**实际生效**的生成参数（参数面板的唯一数据源）。
  * 
@@ -2656,11 +1874,6 @@ error: string | null }
  */
 export type ErrorType = "Timeout" | "RateLimited" | "ContentPolicy" | "Auth" | "Interrupted" | "Other"
 /**
- * `publish://export-progress`：任务包导出进度（复制视频可达数百 MB，UI 需要交代）。
- */
-export type ExportProgressEvent = { sheetId: number; done: number; total: number }
-export type ExportResult = { directory: string; taskCount: number }
-/**
  * 前端未捕获错误载荷。经 ErrorBoundary / window.onerror 采集后转发到此。
  */
 export type FrontendErrorPayload = { 
@@ -2691,39 +1904,7 @@ tags: string[];
 /**
  * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
  */
-archived: boolean; 
-/**
- * 发布域 SKU 绑定。
- */
-skuId: number | null; skuCode: string | null }
-/**
- * 交接目录的当前状态（「交接：42 条已物化 · 3 分钟前收录」）。
- * 
- * 待改写那一列是**唯一一段不在本机手里**的流程：工单写出去了没有、skill 写回来过没有，
- * 界面上原先一个字都没有 —— 于是「skill 到底跑没跑」只能靠去开文件夹看。
- */
-export type HandoffStatus = { 
-/**
- * 待改写工单根目录绝对路径。
- */
-pendingDir: string; 
-/**
- * 已物化的组数 / 条数。
- */
-groups: number; items: number; 
-/**
- * 缩略图缺失而写不进工单的条数（父图被清理过）。
- */
-skipped: number; 
-/**
- * 最近一次收录到改写结果的时刻；None = 从来没收到过。
- */
-lastIngestAt: number | null; 
-/**
- * 物化失败的原因（磁盘满 / 目录不可写）。有值时界面必须报出来，
- * 否则 skill 那边看到的是一个空目录，而这边显示一切正常。
- */
-error: string | null }
+archived: boolean }
 /**
  * 一个小时桶里的排队速度。
  */
@@ -2740,8 +1921,6 @@ positionsPerHour: number;
  * 参与投票的 clip 条数。1 条时这个数字信心很低，界面据此决定要不要画实线。
  */
 clips: number }
-export type ImageAssetView = { id: number; skuId: number; skuCode: string; skuName: string; productId: number | null; productName: string | null; path: string; thumb: string; source: string; state: string; postId: number | null; createdAt: number }
-export type ImageImportReport = { imported: number; unmatched: string[] }
 /**
  * 导入预览（parse 阶段产物，不落库）。
  */
@@ -2822,108 +2001,12 @@ promptIds: number[] }
  */
 export type ImportWarning = { line: number; message: string }
 /**
- * `publish://inbox-ingest`：单文件收录结果（前端 toast + 列表刷新）。
- */
-export type InboxIngestEvent = { fileName: string; state: string; productCode: string | null; titles: number; bodies: number; message: string }
-/**
- * 收录摘要。
- */
-export type IngestSummary = { applied: number; 
-/**
- * 认不出目标（缺 id / 编号对不上任何在队条目）的行数。
- */
-unmatched: number; 
-/**
- * 目标已越过待提交阶段（已提交/已出片）而被拒绝的行数。
- */
-stale: number }
-/**
- * `intake://changed` —— 一轮扫描处理掉了工单（跳过的不发）。
+ * `intake://changed` —— 有工单被收录、转待确认或失败。
  * 
- * 收录是自动发生的，用户没有按任何按钮，所以它**尤其**需要出声：
+ * 收录由 Agent 触发，用户没有按任何按钮，所以它**尤其**需要出声：
  * 一个批次凭空出现在任务页，和一份工单静默失败，都需要一句解释。
  */
 export type IntakeChanged = { jobs: JobView[] }
-/**
- * `intake://progress` —— 收录一份工单时的逐张进度。
- * 
- * 确认一份 120 张的工单要几十秒。没有这条事件，那几十秒里界面上什么都不会动，
- * 而「看起来卡死了」的下一步永远是再点一次——`RefImportProgress` 的注释里
- * 已经记着同一个故障了。
- */
-export type IntakeProgress = { jobId: string; 
-/**
- * 当前阶段。目前只有 `refs`（参考图落盘），留字段是为了以后加阶段不必改事件形状。
- */
-phase: string; done: number; total: number }
-/**
- * 收件设置（`settings` 表 key='intake' 单行 JSON）。
- */
-export type IntakeSettings = { 
-/**
- * 关掉后不再监听、不再自动收录（排查问题或暂时不想让它自己跑时用）。
- */
-enabled?: boolean; 
-/**
- * 交接根目录。skill 侧把它写死才能做到「什么都不用输入」，故默认值必须可预测。
- */
-root?: string; 
-/**
- * 自动开跑阈值：任务数（= 出图张数）超过它就转「待确认」。`0` = 不限。
- * 
- * 判定放在 Rust 而不是投单那一侧：投单的是另一个模型，它可以忘记检查、也可以
- * 被绕过；而「超过多少张就得问一句」是花钱的闸门，必须是机制而不是自觉。
- */
-taskThreshold?: number }
-/**
- * 一份待确认工单的完整对应关系（提示词组 ↔ 参考图 ↔ 参数）。
- * 
- * **存在的理由**：超阈值的工单是自动收录链路上唯一一处「停下来等人点头」的地方，
- * 而在此之前那句「XX 张，去设置页确认」并不足以让人做出判断 —— 真正要看的是
- * **哪条词配了哪张图、会叫什么名字**。配错的代价是整批图跑出来全是错的，且要到
- * 验收时才发现，那时钱已经花完了。所以这里给的是逐条的对应关系，而不是一个数字。
- */
-export type JobPreview = { id: number; jobId: string; dirName: string; 
-/**
- * 工单目录绝对路径（「在访达里打开」用）。
- */
-dir: string; 
-/**
- * 整单级受控用途（归一化后）；空串 = 没有用途。
- */
-purpose: string; items: JobPreviewItem[]; taskCount: number; 
-/**
- * 去重后的参考图张数（多个条目常共用一张原图）。
- */
-refCount: number; 
-/**
- * 当前阈值（前端说明「超过它才要确认」）。
- */
-threshold: number }
-export type JobPreviewItem = { 
-/**
- * 语义名 = 未来的图片名主干（还差一个验收时才发放的 UID）。
- */
-name: string; sku: string; style: string; 
-/**
- * 提示词正文全文（人要能逐条读，不只是数一个条数）。
- */
-prompt: string; refFileName: string; 
-/**
- * 工单目录内的参考图绝对路径。
- * 
- * **这里不带缩略图。** 缩略图由 [`intake_ref_thumb`] 按需单张生成——原来是在
- * 组装预览时把每张参考图都全分辨率解码一遍再塞成 base64，一份 120 张 26 MP
- * 相机图的工单于是要解 767 MB 的图、回包几 MB，而弹窗第一屏只看得见两条。
- * 
- * 顺带解决了 asset 协议的 scope 问题：工单目录在交接根下（默认 `~/GenDesk交接/`），
- * 够不着 `$APPDATA/**`；而按需生成的缩略图**缓存在 app data 里**，正好够得着。
- */
-refPath: string; 
-/**
- * 本条生效的参数快照与实际进 multipart 的字段。
- */
-paramsJson: string; wireJson: string }
 /**
  * 工单收录结果（事件与设置页列表共用）。
  */
@@ -2962,18 +2045,6 @@ export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
 /**
- * 物化结果摘要。
- */
-export type MaterializeSummary = { 
-/**
- * 工单根目录（待改写）绝对路径 —— 前端把它显示出来供用户复制给 skill。
- */
-pendingDir: string; groups: number; items: number; 
-/**
- * 缩略图缺失而无法写进工单的条目数（父图被清理掉了）。
- */
-skipped: number }
-/**
  * 受控模型清单（前端选择器渲染源）。
  */
 export type ModelInfo = { modelVersion: string; 
@@ -2998,13 +2069,11 @@ resPrices: ResPrice[];
 vip: boolean }
 export type Organization = { product: string; style: string; requirement: string; source: string }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
+export type PosterBatch = { id: string; createdAt: number; state: string; lastError: string; count: number; 
 /**
- * 平台标签信息（暴露给前端做矩阵/选择器渲染，避免前端重复中文映射）。
+ * 仍在等实况图配对的张数（>0 时批次排队但暂不导入）。
  */
-export type PlatformInfo = { code: string; zh: string }
-export type PostImageView = { assetId: number; skuId: number; skuCode: string; ord: number; path: string; thumb: string }
-export type PostView = { id: number; contentCode: string; seq: number; kind: string; titleId: number | null; bodyId: number | null; title: string; body: string; topics: string[]; edited: boolean; images: PostImageView[]; tasks: PublishTaskView[] }
-export type PosterBatch = { id: string; createdAt: number; state: string; lastError: string; count: number }
+waitingLive: number }
 export type PosterChanged = { at: number }
 export type PosterChoice = { key: string; productId: string }
 export type PosterGroup = { key: string; sku: string; style: string; count: number; productId: string | null; warning: string }
@@ -3012,9 +2081,9 @@ export type PosterPreview = { groups: PosterGroup[]; products: PosterProduct[] }
 export type PosterProduct = { id: string; name: string; isGeneric?: boolean }
 export type PosterSettings = { 
 /**
- * 只有主动开启才在审稿后询问；旧设置没有此字段时也保持关闭。
+ * 审稿通过后自动导入。新字段名：旧版 `enabled`（逐批询问）不会被当成同意自动导入。
  */
-enabled?: boolean; executable: string; libraryRoot: string }
+autoImport?: boolean; executable: string }
 /**
  * 确认卡上一条通道的分账。
  */
@@ -3039,11 +2108,6 @@ probeCeiling: number;
  * 本次进程里最近一次明确拒收时的在跑数；冷却后会重新探测，没撞过墙则为空。
  */
 observedLimit: number | null }
-export type ProductInput = { code: string; name: string; platforms: string[]; cartEnabled: boolean; douyinProductUrl: string; douyinShortTitle: string; note: string }
-export type ProductPatch = { name: string; platforms: string[]; cartEnabled: boolean; douyinProductUrl: string; douyinShortTitle: string; status: string; note: string }
-export type ProductSkuInput = { productId: number; code: string; name: string; tier: string; folderAlias: string; musicKeyword: string; note: string }
-export type ProductSkuView = { id: number; productId: number | null; code: string; name: string; tier: string; status: string; folderAlias: string; musicKeyword: string; freeImages: number }
-export type ProductView = { id: number; code: string; name: string; platforms: string[]; cartEnabled: boolean; douyinProductUrl: string; douyinShortTitle: string; status: string; note: string; titleFree: number; bodyFree: number; imageFree: number; skus: ProductSkuView[] }
 /**
  * 生产总览（E25 生成页顶部条）：今日生成/通过/请求。
  */
@@ -3064,40 +2128,6 @@ requestsToday: number }
  * 提示词视图（编号网格 / 详情）。
  */
 export type PromptView = { id: number; groupId: number; code: string; title: string | null; text: string; favorite: boolean; edited: boolean }
-/**
- * `publish://badges`：资产库待认领、发布计划待确认与待核对。
- */
-export type PublishBadgesEvent = { unclaimed: number; pendingSheets: number; pendingReconcile: number }
-/**
- * 发布与同步设置。
- */
-export type PublishSettings = { 
-/**
- * 本机根目录（空 = 未配置）。
- */
-rootLocal?: string; 
-/**
- * 执行机根目录（空 = 未配置；同机模式一键同本机）。
- */
-rootExec?: string; 
-/**
- * 执行机路径风格（windows|unix）。
- */
-pathStyle?: string; 
-/**
- * 每日生成时间（HH:MM）。
- */
-autogenTime?: string; 
-/**
- * 暂停排期（节假日）：ticker 不再自动生成草稿，但**超时扫描与对账照常**
- * ——回收闭环不能停，否则暂停期间已导出的单永远收不回来。
- */
-schedulePaused?: boolean }
-/**
- * 设置补丁（部分更新）。
- */
-export type PublishSettingsPatch = { rootLocal: string | null; rootExec: string | null; pathStyle: string | null; autogenTime: string | null; schedulePaused: boolean | null }
-export type PublishTaskView = { id: number; taskCode: string; platform: string; platformZh: string; scheduledAt: string; status: string; failKind: string | null; resultMsg: string | null }
 /**
  * 一个用途选项（前端选择器渲染源）。
  */
@@ -3202,34 +2232,17 @@ entries: QueueEntry[];
  * 采样覆盖的时间跨度（秒）。太短时界面要说明「数据还不够」而不是给结论。
  */
 spanSecs: number; samples: number }
-export type ReceiptImportResult = { applied: number; done: number; failed: number; pending: number }
-/**
- * 图库分组视图（0019）。
- */
-export type RefGroupView = { id: number; name: string; sortOrder: number; 
-/**
- * 组内图片数（不含临时上传与已删除）。
- */
-count: number }
-/**
- * 参考图详情（含使用统计）。
- */
-export type RefImageDetail = { id: number; name: string; groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; usedCount: number; worksCount: number }
-export type RefImageView = { id: number; name: string; 
-/**
- * 图库分组（0019 起为 `ref_groups.id`，与提示词组无关）。
- */
-groupId: number | null; filePath: string; thumbPath: string; width: number; height: number; 
+export type RefImageView = { id: number; name: string; filePath: string; thumbPath: string; width: number; height: number; 
 /**
  * 最近一次挂靠的提示词组（E32 挂靠记忆）；生成页据此预填挂靠。
  */
 lastGroupId: number | null; 
 /**
- * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起，库页仍可见可恢复。
+ * 已归档（0016）：批次开跑后自动置位，生成页选择器默认折起。
  */
 archived: boolean; 
 /**
- * 生成页临时上传（0019）：不进长期图库，图库页与「从参考图库选择」都不列它。
+ * 生成页临时上传（0019）：不参与内容去重，生成页之外不列出。
  */
 ephemeral: boolean }
 /**
@@ -3257,14 +2270,6 @@ phase: string;
  */
 failed: number }
 export type RefMappingInput = { refImageId: number; promptGroupId: number }
-/**
- * 导入前重复扫描（E30b）：按内容 hash 比对已有库 + 本次列表内，标注重复项。
- */
-export type RefScanItem = { path: string; name: string; duplicate: boolean; 
-/**
- * 与之重复的已有图名（库内）或本次靠前的文件名。
- */
-dupOf: string | null }
 /**
  * 某分辨率下的每秒单价（前端算「这一批预估多少额度」用）。
  */
@@ -3359,19 +2364,6 @@ onboarded?: boolean }
  */
 export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
 /**
- * `publish://sheet-changed`：任务单状态/行状态变化（P2/P3 工作台与看板刷新）。
- */
-export type SheetChangedEvent = { sheetId: number; date: string; status: string; 
-/**
- * 汇总计数（待执行/已发布/失败/疑似/已取消）。
- */
-pending: number; published: number; failed: number; suspect: number; canceled: number }
-export type SheetConfigInput = { productId: number; name: string; skuScope: number[]; platforms: string[]; postsPerDay: number; imagesPerPost: number; mixedCount: number; anchors: string[]; jitterMin: number; minGapMin: number; targetDay: string; enabled: boolean }
-export type SheetConfigView = { id: number; productId: number; productCode: string; productName: string; name: string; skuScope: number[]; platforms: string[]; postsPerDay: number; imagesPerPost: number; mixedCount: number; anchors: string[]; jitterMin: number; minGapMin: number; targetDay: string; enabled: boolean }
-export type SheetDetailView = { summary: SheetSummaryView; posts: PostView[] }
-export type SheetSummaryView = { id: number; date: string; productId: number; productCode: string; productName: string; title: string; status: string; postCount: number; shortages: Shortage[]; exportDir: string | null }
-export type Shortage = { kind: string; needed: number; available: number; detail: string }
-/**
  * 七态计数。看板列头、侧栏徽章、开屏提示都读它。
  */
 export type StageCounts = { rewrite: number; ready: number; run: number; rev: number; pass: number; rej: number; fail: number; 
@@ -3388,8 +2380,8 @@ phantom: number;
  * 外加藏在 `run` 里的幽灵疑单（见 [`Self::phantom`]）。
  * 
  * **待改写在里面**（v0.22.0 改的）。旧口径把它排除在外，理由是「那一步在
- * Claude Code 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk
- * 这边工单早已物化好、什么都不缺。排除它等于让全流水线最大的一处阻塞显示为 0，
+ * Agent 里做，催也没用」—— 但那恰恰说反了：它只可能由人推动，而 GenDesk
+ * 这边待改写清单随时可取、什么都不缺。排除它等于让全流水线最大的一处阻塞显示为 0，
  * 实测 21 条待改写时徽章与「需要我」都是 0，而那 21 条谁也不会自己动。
  * 
  * 仍**不含**已提交（机器在跑，人插不上手）与已定案的两态。
@@ -3514,8 +2506,6 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
 export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
-export type TopicGroupInput = { productId: number | null; scope: string; skuIds: number[]; tags: string[] }
-export type TopicGroupView = { id: number; productId: number | null; productName: string | null; scope: string; skuIds: number[]; tags: string[]; enabled: boolean; createdAt: number }
 export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
 /**
  * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
@@ -3632,10 +2622,6 @@ finished: number; error: string | null }
  */
 export type V2vSettings = { 
 /**
- * 交接根目录。skill 侧把它写死才能做到「什么都不用输入」，故默认值必须可预测。
- */
-handoffRoot?: string; 
-/**
  * 即梦 CLI 可执行（默认走 PATH 的 `dreamina`；可填绝对路径）。
  */
 bin?: string; 
@@ -3677,9 +2663,6 @@ autofill?: AutofillCfg;
  * （素材库、剪辑工程旁边），而不是应用数据目录深处 —— 那个位置人在 Finder 里
  * 根本找不到，等于交付了个寂寞。
  * 
- * 形制照 `handoff_root`（空串回落到默认）而**不是** `Settings::output_dir`：
- * 后者有字段、有选择器、有设置页 UI，却没有任何一个消费者读它 ——
- * 那是「选了目录却不生效」，正是这一版要根治的那类失信。
  */
 clipsOutputDir?: string }
 /**

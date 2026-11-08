@@ -3,15 +3,7 @@ import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
 import { assetSrc, bg } from "@/lib/img";
-import {
-  type GroupView,
-  type ProductSkuView,
-  type PurposeView,
-  type WorkView,
-  commands,
-  unwrap,
-} from "@/lib/ipc";
-import { tierVisual } from "@/lib/status";
+import { type GroupView, type PurposeView, type WorkView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
@@ -22,7 +14,6 @@ import {
   Download,
   FolderOpen,
   ImageIcon,
-  Layers,
   RefreshCw,
   Search,
   Star,
@@ -61,7 +52,6 @@ export function WorksPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [confirmBatchDel, setConfirmBatchDel] = useState(false);
-  const [assetPick, setAssetPick] = useState(false);
   const lastClicked = useRef<number | null>(null);
 
   // ── 筛选态 ───────────────────────────────────────────────────
@@ -311,16 +301,6 @@ export function WorksPage() {
             >
               <Star className="ic12" />
               收藏
-            </button>
-            <button
-              type="button"
-              className="btn sm gho"
-              disabled={sel.size === 0}
-              onClick={() => setAssetPick(true)}
-              title="把存量作品补录进图片素材库"
-            >
-              <Layers className="ic12" />
-              入图片库
             </button>
             <button
               type="button"
@@ -630,20 +610,6 @@ export function WorksPage() {
           onClose={() => setConfirmBatchDel(false)}
         />
       )}
-
-      {assetPick && (
-        <WorksToAssetModal
-          count={sel.size}
-          onClose={() => setAssetPick(false)}
-          onPick={async (skuId) => {
-            const count = await unwrap(commands.addWorksToImageLibrary(skuId, Array.from(sel)));
-            setAssetPick(false);
-            exitSelect();
-            if (count > 0) toast.success(`已补录 ${count} 张入图片素材库`);
-            else toast.error("未能入库（所选无有效图片）");
-          }}
-        />
-      )}
     </PageScaffold>
   );
 }
@@ -777,58 +743,6 @@ function GroupFilter({
         </div>
       )}
     </div>
-  );
-}
-
-/** 「入图片库」SKU 选择弹窗（存量作品补录）。 */
-function WorksToAssetModal({
-  count,
-  onClose,
-  onPick,
-}: {
-  count: number;
-  onClose: () => void;
-  onPick: (skuId: number) => void | Promise<void>;
-}) {
-  const [skus, setSkus] = useState<ProductSkuView[]>([]);
-  useEffect(() => {
-    void unwrap(commands.listProductSkus()).then(setSkus);
-  }, []);
-  return (
-    <Modal
-      title="入图片素材库 · 选择目标 SKU"
-      onClose={onClose}
-      headerExtra={<span className="chip">{count} 张</span>}
-      footer={
-        <>
-          <span className="fs11 t3">选中的输出图复制到目标 SKU（原作品保留）</span>
-          <div className="f1" />
-          <button type="button" className="btn sm" onClick={onClose}>
-            取消
-          </button>
-        </>
-      }
-    >
-      <div style={{ padding: 8 }}>
-        {skus
-          .filter((s) => s.productId !== null)
-          .map((s) => {
-            const t = tierVisual(s.tier);
-            return (
-              <div key={s.id} className="pickrow" onClick={() => void onPick(s.id)}>
-                <span className="pid">{s.code}</span>
-                <span className="fw5 fs12 f1 nowrap ohide">{s.name}</span>
-                <span className={cn("bdg", t.badgeClass)}>{t.label}</span>
-              </div>
-            );
-          })}
-        {skus.length === 0 && (
-          <div className="fs12 t3" style={{ padding: 12 }}>
-            尚无已挂商品的 SKU，请先在商品资料创建
-          </div>
-        )}
-      </div>
-    </Modal>
   );
 }
 

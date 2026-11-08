@@ -71,8 +71,9 @@ pub async fn check(plan: &Plan) -> AppResult<CheckedPlan> {
             "prompt":item.prompt_text,"params":item.params_json,"refs":hashes})
         })
         .collect();
+    // refGroup / ephemeral 已随参考图库下线；保留固定值，使旧检查点的内容身份不变。
     let bytes = serde_json::to_vec(&serde_json::json!({"items":items,"note":plan.note,
-        "purpose":plan.purpose,"skill":plan.skill,"refGroup":plan.ref_group,"ephemeral":plan.ephemeral}))?;
+        "purpose":plan.purpose,"skill":plan.skill,"refGroup":null,"ephemeral":false}))?;
     Ok(CheckedPlan {
         fingerprint: format!("{:x}", Sha256::digest(bytes)),
         references,

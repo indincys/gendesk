@@ -1,4 +1,4 @@
-//! 生图工单收件 —— Claude Code / Codex 侧 skill 投单，GenDesk 自动导入并开跑。
+//! 生图工单收件 —— Agent 用 `gendesk submit` 打包并提交，GenDesk 收录并开跑。
 //!
 //! ```text
 //! <交接根>/生图/收件/<工单目录>/
@@ -6,15 +6,15 @@
 //!     refs/王一博-正面.jpg
 //!     prompts/W-王一博-55-正面.txt   ← 文件名 = 未来的图片名主干；内容 = 纯正文
 //!     说明.md                       ← 可选，给人看的方向地图
-//!     READY.txt                     ← 最后写；没有它的目录一律跳过（skill 可能还在写）
+//!     READY.txt                     ← CLI 最后写；没有它的目录拒绝收录
 //! <交接根>/生图/_已收录/<工单目录>-<ts>/   ← 成功后移档，内含 结果.txt
 //! ```
 //!
-//! ## 为什么是文件而不是本地端口 / MCP 直连
+//! ## 文件包 + 控制通道
 //!
-//! 「业务真相只在 Rust」与「单写者事务」两条铁律直接排除了外部进程写库。而 HTTP
-//! 端口还有一个更实际的问题：**GenDesk 没开的时候投单会直接失败**。文件不会——
-//! 启动时补跑一次扫描，昨晚投的单今天照样进得来。
+//! 「业务真相只在 Rust」与「单写者事务」两条铁律排除了外部进程写库。CLI 先把正文与
+//! 参考图复制成一个自包含的工单目录（输入在提交后变化也不影响），再经 `control`
+//! 通道点名提交这一份；应用没开时 CLI 先在后台拉起它。没有目录监听，也没有扫描。
 //!
 //! ## 为什么从「提示词.txt + 组头键」换成「工单.json + 一条一文件」
 //!
@@ -48,7 +48,6 @@
 
 pub mod ingest;
 pub mod preflight;
-pub mod watcher;
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -57,7 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::GenParams;
 
-/// 交接根下的固定子目录名。skill 侧写死这几个名字，故它们是契约，不可改。
+/// 交接根下的固定子目录名。CLI 写死这几个名字，故它们是契约，不可改。
 pub const INTAKE: &str = "生图";
 pub const PENDING: &str = "收件";
 pub const CONSUMED: &str = "_已收录";
@@ -69,7 +68,7 @@ pub const PROMPTS: &str = "prompts";
 /// 参考图目录。`items[].ref` 是工单目录内的相对路径，习惯上落在这里。
 pub const REFS: &str = "refs";
 
-/// 回执文件：让 Claude Code / Codex 侧能回读结果，而不必猜后面发生了什么。
+/// 回执文件：让 Agent 侧能回读结果，而不必猜后面发生了什么。
 pub const ERROR_FILE: &str = "错误.txt";
 pub const HOLD_FILE: &str = "待确认.txt";
 pub const RESULT_FILE: &str = "结果.txt";
@@ -77,7 +76,7 @@ pub const RESULT_FILE: &str = "结果.txt";
 pub const RECEIPT_FILE: &str = "回执.json";
 
 /// 文件信箱的 JSON 发布：先写同目录临时文件再 rename，读者不会读到半份 JSON。
-/// 调用者负责串行写同一个目标；收录侧由 scan_lock 保证。
+/// 调用者负责串行写同一个目标；收录侧由收录锁保证。
 pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> crate::error::AppResult<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| crate::error::AppError::Internal(format!("JSON 序列化失败：{e}")))?;
@@ -94,7 +93,7 @@ pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> crate::error::A
 /// 一份带着 READY.txt、永远不会被处理、也没人知道为什么的工单，
 /// 正是 v0.16.0「操作信号全进了 tracing」那条教训的翻版。
 pub const DUPLICATE_FILE: &str = "重名未收录.txt";
-/// **确认的唯一表达**。设置页那个按钮做的事就是替你写下这个文件。
+/// **确认的唯一表达**。`gendesk confirm` 做的事就是替你写下这个文件。
 pub const CONFIRM_FILE: &str = "确认.txt";
 
 /// 本版认得的工单格式版本。
@@ -104,12 +103,12 @@ pub const CONFIRM_FILE: &str = "确认.txt";
 /// 错误结果**——而这条链路的每一次错误都直接花钱。
 pub const ORDER_VERSION: i64 = 1;
 
-/// 默认收件根 = 视频流水线那个交接根。
+/// 交接根：`<用户主目录>/GenDesk交接`，固定不可配。
 ///
-/// **刻意共用一个根**：用户只需要知道一个目录、只需要配一次；两个 agent 侧 skill
-/// 各写各的子目录，互不打扰。
+/// **故意不放在应用数据目录里**：那个路径随 bundle id 变化，而 CLI 要把连接文件的
+/// 位置写死才能做到「什么都不用输入」。主目录下的固定名字跨平台稳定、用户找得到。
 pub fn default_root() -> PathBuf {
-    crate::v2v::handoff::default_root()
+    crate::poster::home().join("GenDesk交接")
 }
 
 /// `<root>/生图/收件`
@@ -149,11 +148,6 @@ pub struct OrderSpec {
     /// 工单级默认参数；条目没写时用它。
     pub defaults: ParamsSpec,
     pub items: Vec<ItemSpec>,
-    /// 参考图入库分组名（图库目录，`ref_groups`）。缺省不分组。
-    #[serde(alias = "ref_group")]
-    pub ref_group: Option<String>,
-    /// 参考图是否只作本批附件（不进长期图库）。缺省 false。
-    pub ephemeral: Option<bool>,
 }
 
 /// 一个条目 = 一条提示词 = 一个任务 = 一张图 = 一个文件名主干。
@@ -223,8 +217,6 @@ pub struct Plan {
     pub purpose: String,
     pub skill: Option<String>,
     pub items: Vec<PlannedItem>,
-    pub ref_group: Option<String>,
-    pub ephemeral: bool,
 }
 
 /// 一个已校验、已配好图、已定好参数的条目。
@@ -235,8 +227,7 @@ pub struct PlannedItem {
     pub style: String,
     /// `prompts/{name}.txt` 的内容，**逐字符原样**（只裁掉首尾空白）。
     pub prompt_text: String,
-    /// 参考图绝对路径（已确认存在）。
-    pub ref_path: PathBuf,
+    /// 参考图绝对路径（已确认存在，有序；首图为主商品图）。
     pub ref_paths: Vec<PathBuf>,
     /// 本条生效的参数快照（与生成页 `buildParamsJson` 同形）。
     pub params_json: String,
@@ -376,7 +367,7 @@ pub fn build_params(p: &ParamsSpec) -> Result<(String, String), String> {
 /// 工单目录内的相对路径拼接。
 ///
 /// 工单是**外部输入**：绝对路径与 `..` 一律拒绝，否则一句 `"../../../.ssh/id_rsa"`
-/// 就能让我们把任意文件拷进图库（`publish::paths::RelPath` 出于同样理由剔 `..`）。
+/// 就能让我们把任意文件拷进图库。
 pub fn safe_join(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim();
     if rel.is_empty() {
@@ -528,7 +519,6 @@ fn plan_with_inputs(
             }
             ref_paths.push(path);
         }
-        let ref_path = ref_paths[0].clone();
         // 正文：一条一文件，文件名 = 条目名。
         let txt = dir.join(PROMPTS).join(format!("{name}.txt"));
         let prompt_text = match external {
@@ -565,7 +555,6 @@ fn plan_with_inputs(
             sku: sku.to_string(),
             style: style.to_string(),
             prompt_text,
-            ref_path,
             ref_paths,
             params_json,
             wire_json,
@@ -612,13 +601,6 @@ fn plan_with_inputs(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         items,
-        ref_group: spec
-            .ref_group
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        ephemeral: spec.ephemeral.unwrap_or(false),
     })
 }
 
@@ -746,7 +728,7 @@ mod tests {
         );
         assert_eq!(p.items[0].sku, "55");
         assert_eq!(p.items[0].style, "王一博");
-        assert!(p.items[0].ref_path.ends_with("正面.jpg"));
+        assert!(p.items[0].ref_paths[0].ends_with("正面.jpg"));
         assert_eq!(p.items[1].prompt_text, "侧面正文");
         // 条目级参数覆盖 defaults，且两个字段都要在。
         let a = GenParams::from_json(&p.items[0].params_json);

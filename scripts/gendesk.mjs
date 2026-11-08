@@ -1,57 +1,55 @@
 #!/usr/bin/env node
-// File-based client only. Imports, scheduling, keys and review stay inside GenDesk's Rust backend.
+// Agent CLI for GenDesk. Talks to the running app over its local control channel
+// (127.0.0.1 + per-launch token from ~/GenDesk交接/连接.json). Imports, scheduling,
+// keys and review stay inside GenDesk's Rust backend; this client only packages
+// orders and forwards commands.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 
 // This file is installed standalone. The installer and tests check the release version.
-const CLI_VERSION = "0.36.1";
+const CLI_VERSION = "0.37.0";
+const PROTOCOL = 2;
 const ORDER_VERSION = 1;
-const CLIENT_FEATURES = [
-  "ordered-references",
-  "generation-quality",
-  "content-organization",
-  "intake-preflight",
-  "resumable-intake",
-  "background-intake",
-];
 
-const HELP = `GenDesk CLI — 提示词文件 + 参考图路径 → 生图 → GenDesk 人工验收
+const HELP = `GenDesk CLI — Agent 经本机控制通道投单、查进度、写回视频改写
 
 gendesk --version
-gendesk doctor [--root <交接根>]
+gendesk doctor
 gendesk validate --manifest <任务清单.json>
-gendesk submit --manifest <任务清单.json> [--open] [--wait 30]
+gendesk submit --manifest <任务清单.json>
 gendesk submit --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source <来源>]
-               [--name <图片语义名>] [--ratio 3:4] [--format jpeg] [--quality high] [--open] [--wait 30]
-gendesk status <jobId> [--root <交接根>] [--wait 30]
+               [--name <图片语义名>] [--ratio 3:4] [--format jpeg] [--quality high]
+gendesk status <jobId>
+gendesk confirm <jobId>      超阈值待确认的工单，仅在用户明确同意后调用
+gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
+gendesk overview             任务各态数量与视频待办
+gendesk v2v pending          待改写的图生视频条目（含缩略图路径与改写说明）
+gendesk v2v rewrite --file <改写结果.json>
 
-通用：--root（或 GENDESK_ROOT）指定交接根；--job-id 指定去重键。
-单条参数：--name --sku --style --product --requirement --source --note --purpose i2v --skill --ephemeral
-          --ratio --size --format --quality（默认 high）
+单条参数：--name --sku --style --product --requirement --source --note --purpose i2v --skill
+          --ratio --size --format --quality（默认 high）--job-id
 每个正文文件视为一条提示词；多条用 --manifest 显式配对。
 清单中的 promptFile/ref/refs 相对清单文件所在目录解析，可用绝对路径和 ~/。
 多参考图用清单 refs（有序 1～16 张），与 ref 二选一；一项仍只生成一张图。
 organization 按产品/款式/需求持续归档，条目整对象覆盖顶层；无 SKU 的任务不虚构编号。
-不填 organization 时兼容旧 --sku <SKU> --style <款式>，二者须非空。
 批量清单示例：
 {"version":1,"organization":{"product":"陶瓷水杯","style":"奶油白款","requirement":"厨房场景图","source":"CLI"},
  "defaults":{"ratio":"3:4","format":"jpeg","quality":"high"},"items":[
   {"name":"水杯晨光桌面","promptFile":"正文.txt","refs":["商品.jpg","桌面.jpg"]}
 ]}
-validate 调用应用 Rust 只读完整预检（参数取值、实际图片解码与归属），不投单、不生图。
-需应用声明 intake-preflight；可用 GENDESK_APP_BIN 指定已知支持预检的应用可执行文件。
-doctor 分别报告 cliVersion、appVersion 和连接能力；连接快照不代表应用在线。
-macOS 的 --open 只在需要时后台启动 GenDesk，生成结果可稍后手动打开验收。
-所有结果/错误均为 JSON。--wait 只等待收录回执，不代表生图或验收完成。
-退出码：0 成功/已投递；2 输入错误；3 等待超时；4 待确认；5 收录失败；
-        6 重名未收录；7 未找到；8 收件已关闭。
+validate 调用应用二进制做只读完整预检（参数取值、实际图片解码与归属），不投单、不生图。
+submit 在 GenDesk 未运行时于后台启动它（macOS），收录完成才返回；生成与人工验收在应用内。
+改写结果文件：JSON 数组、{"lines":[…]} 或每行一个 JSON；每条 {"id":"W123","videoPrompt":"…"}。
+所有结果/错误均为 JSON。
+退出码：0 成功；2 输入错误；4 待确认；5 收录或应用处理失败；6 重名未收录；7 未找到；8 应用不可用。
 相同内容默认使用相同 jobId，防止重放计费；有意重跑请给新的 --job-id。`;
 
 class CliError extends Error {
@@ -61,8 +59,8 @@ class CliError extends Error {
   }
 }
 
-function check(condition, message) {
-  if (!condition) throw new CliError(message);
+function check(condition, message, code = 2) {
+  if (!condition) throw new CliError(message, code);
 }
 
 function filePath(value, base = process.cwd()) {
@@ -140,8 +138,8 @@ async function digestFile(file) {
 
 async function readableFile(value, base, label) {
   const file = filePath(requiredText(value, label), base);
-  const stat = await fs.stat(file);
-  check(stat.isFile() && stat.size > 0, `${label} 不是非空文件：${file}`);
+  const stat = await fs.stat(file).catch(() => null);
+  check(stat?.isFile() && stat.size > 0, `${label} 不是非空文件：${file}`);
   return file;
 }
 
@@ -157,30 +155,30 @@ function canonical(value) {
   return value;
 }
 
+const SINGLE_OPTIONS = [
+  "prompt",
+  "ref",
+  "name",
+  "sku",
+  "style",
+  "ratio",
+  "size",
+  "format",
+  "quality",
+  "note",
+  "purpose",
+  "skill",
+  "product",
+  "requirement",
+  "source",
+];
+
 async function prepare(opts) {
   let spec;
   let base = process.cwd();
-  const singleOptions = [
-    "prompt",
-    "ref",
-    "name",
-    "sku",
-    "style",
-    "ratio",
-    "size",
-    "format",
-    "quality",
-    "note",
-    "purpose",
-    "skill",
-    "ephemeral",
-    "product",
-    "requirement",
-    "source",
-  ];
   if (opts.manifest) {
     check(
-      !singleOptions.some((key) => opts[key] !== undefined),
+      !SINGLE_OPTIONS.some((key) => opts[key] !== undefined),
       "--manifest 不能与单条参数混用；请在清单中设置",
     );
     const manifest = filePath(opts.manifest);
@@ -203,7 +201,6 @@ async function prepare(opts) {
         : {}),
       purpose: opts.purpose,
       skill: opts.skill,
-      ephemeral: opts.ephemeral,
       defaults: Object.fromEntries(
         ["ratio", "size", "format", "quality"]
           .filter((k) => opts[k] !== undefined)
@@ -224,28 +221,13 @@ async function prepare(opts) {
   }
   knownKeys(
     spec,
-    [
-      "version",
-      "jobId",
-      "note",
-      "purpose",
-      "skill",
-      "defaults",
-      "items",
-      "refGroup",
-      "ephemeral",
-      "organization",
-    ],
+    ["version", "jobId", "note", "purpose", "skill", "defaults", "items", "organization"],
     "清单",
   );
   check(spec.version === undefined || spec.version === 1, "清单 version 只支持 1");
-  for (const key of ["jobId", "note", "purpose", "skill", "refGroup"]) {
+  for (const key of ["jobId", "note", "purpose", "skill"]) {
     if (spec[key] !== undefined) requiredText(spec[key], key);
   }
-  check(
-    spec.ephemeral === undefined || typeof spec.ephemeral === "boolean",
-    "ephemeral 必须是布尔值",
-  );
   function organization(value, label) {
     if (value === undefined) return undefined;
     knownKeys(value, ["product", "style", "requirement", "source"], label);
@@ -284,7 +266,12 @@ async function prepare(opts) {
     check(typeof sku === "string" && typeof style === "string", `${label}.sku/style 必须是字符串`);
     const promptFile = await readableFile(item.promptFile, base, `${label}.promptFile`);
     const bytes = await fs.readFile(promptFile);
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new CliError(`提示词不是 UTF-8：${promptFile}`);
+    }
     check(text.trim(), `提示词为空：${promptFile}`);
     check(
       !(item.ref !== undefined && item.refs !== undefined),
@@ -325,7 +312,7 @@ async function prepare(opts) {
     });
     files.push({ name, bytes });
   }
-  const order = { ...spec, version: 1, defaults, items };
+  const order = { ...spec, version: ORDER_VERSION, defaults, items };
   order.jobId = undefined;
   const hash = createHash("sha256")
     .update(
@@ -339,48 +326,121 @@ async function prepare(opts) {
   return { order, files, refs: [...distinctRefs.values()], hash };
 }
 
-async function connection(opts) {
-  const defaultRoot = path.join(os.homedir(), "GenDesk交接");
-  const discoveryPath = path.join(defaultRoot, "连接.json");
-  const discovery = await optionalJson(discoveryPath);
-  if (discovery)
-    check(
-      discovery.version === 1 && typeof discovery.root === "string",
-      `不支持的连接信息：${discoveryPath}`,
-    );
-  const override = opts.root ?? process.env.GENDESK_ROOT;
-  if (override !== undefined) requiredText(override, "交接根");
-  const root = filePath(override ?? discovery?.root ?? defaultRoot);
-  const matches = discovery && filePath(discovery.root) === root;
-  return {
-    root,
-    pendingDir: path.join(root, "生图", "收件"),
-    consumedDir: path.join(root, "生图", "_已收录"),
-    source: opts.root
-      ? "--root"
-      : process.env.GENDESK_ROOT
-        ? "GENDESK_ROOT"
-        : discovery
-          ? "连接.json"
-          : "default",
-    enabled: matches ? discovery.enabled : null,
-    taskThreshold: matches ? discovery.taskThreshold : null,
-    appVersion: matches ? discovery.appVersion : null,
-    features: matches && Array.isArray(discovery.features) ? discovery.features : [],
-    validatorPath: matches ? discovery.validatorPath : null,
-  };
+// ---------------------------------------------------------------- 连接
+
+const ROOT = path.join(os.homedir(), "GenDesk交接");
+const CONNECTION = path.join(ROOT, "连接.json");
+const pendingDir = (root) => path.join(root, "生图", "收件");
+const consumedDir = (root) => path.join(root, "生图", "_已收录");
+
+/** 读连接文件；不存在返回 null，格式或协议不对直接报错。 */
+async function readConnection() {
+  let conn;
+  try {
+    conn = await optionalJson(CONNECTION);
+  } catch (e) {
+    throw new CliError(`连接文件损坏：${CONNECTION}。重启 GenDesk 会重写它（${e.message}）`, 8);
+  }
+  if (!conn) return null;
+  check(
+    conn.protocol === PROTOCOL && Number.isInteger(conn.port) && typeof conn.token === "string",
+    `连接文件来自不兼容的 GenDesk（协议 ${conn.protocol ?? "旧版"}，本 CLI 需要 ${PROTOCOL}）。请更新并重启 GenDesk`,
+    8,
+  );
+  return conn;
 }
 
-async function nativePreflight(conn, prepared) {
-  const override = process.env.GENDESK_APP_BIN;
+/** 一次请求 = 一次连接：写一行 JSON，读到对端关闭为止。 */
+function rpc(conn, cmd, args = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: "127.0.0.1", port: conn.port });
+    let body = "";
+    socket.setEncoding("utf8");
+    // Large orders import every reference before replying; 10 minutes is generous.
+    socket.setTimeout(600000, () => socket.destroy(new CliError("GenDesk 响应超时", 8)));
+    socket.on("connect", () =>
+      socket.write(`${JSON.stringify({ token: conn.token, cmd, args })}\n`),
+    );
+    socket.on("data", (chunk) => {
+      body += chunk;
+    });
+    socket.on("error", (e) => reject(e instanceof CliError ? e : offline(e)));
+    socket.on("end", () => {
+      let reply;
+      try {
+        reply = JSON.parse(body);
+      } catch {
+        reject(new CliError("GenDesk 返回了无效响应", 8));
+        return;
+      }
+      if (reply.ok) resolve(reply.data);
+      else reject(new CliError(reply.error ?? "GenDesk 处理失败", 5));
+    });
+  });
+}
+
+function offline(error) {
+  const e = new CliError(`GenDesk 未运行或控制通道不可达（${error.code ?? error.message}）`, 8);
+  e.offline = true;
+  return e;
+}
+
+/** 应用包路径：GENDESK_APP > 连接文件里的可执行文件所在包 > /Applications/GenDesk.app。 */
+function appBundle(conn) {
+  if (process.env.GENDESK_APP) return filePath(process.env.GENDESK_APP);
+  if (typeof conn?.appPath === "string") {
+    const bundle = path.resolve(conn.appPath, "../../..");
+    if (path.extname(bundle) === ".app") return bundle;
+  }
+  return "/Applications/GenDesk.app";
+}
+
+/**
+ * 连上正在运行的应用；没在运行时（macOS）后台启动并等它写出新的连接文件。
+ * `GENDESK_LAUNCH=0` 关闭自动启动（测试与只读诊断用）。
+ */
+async function connect({ launch }) {
+  const conn = await readConnection();
+  if (conn) {
+    try {
+      return { conn, hello: await rpc(conn, "hello") };
+    } catch (e) {
+      if (!e.offline) throw e;
+    }
+  }
+  check(launch && process.env.GENDESK_LAUNCH !== "0", "GenDesk 未运行。请先打开 GenDesk 再重试", 8);
+  check(process.platform === "darwin", "GenDesk 未运行；自动后台启动仅支持 macOS", 8);
+  const bundle = appBundle(conn);
+  const started = spawnSync("/usr/bin/open", ["-g", "-a", bundle, "--args", "--background"], {
+    encoding: "utf8",
+  });
   check(
-    override || conn.features.includes("intake-preflight"),
-    "当前应用未声明 Rust 完整预检支持，请先更新并启动 GenDesk；不会降级成文件预检",
+    !started.error && started.status === 0,
+    `后台启动 GenDesk 失败（${bundle}）：${started.error?.message ?? started.stderr}`,
+    8,
   );
-  const binary = override ?? conn.validatorPath;
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    await delay(400);
+    const next = await readConnection().catch(() => null);
+    if (!next || (conn && next.token === conn.token)) continue;
+    try {
+      return { conn: next, hello: await rpc(next, "hello"), launched: true };
+    } catch (e) {
+      if (!e.offline) throw e;
+    }
+  }
+  throw new CliError("已后台启动 GenDesk，但 60 秒内没有连上控制通道；请打开应用查看", 8);
+}
+
+// ---------------------------------------------------------------- 预检
+
+async function nativePreflight(conn, prepared) {
+  const binary = process.env.GENDESK_APP_BIN ?? conn?.appPath;
   check(
     typeof binary === "string" && binary.trim(),
-    "没有 Rust 预检程序路径，请启动新版应用刷新连接信息",
+    "找不到 GenDesk 应用可执行文件做预检：请先启动一次 GenDesk，或用 GENDESK_APP_BIN 指定",
+    8,
   );
   const input = {
     version: 1,
@@ -396,188 +456,75 @@ async function nativePreflight(conn, prepared) {
     timeout: 300000,
     maxBuffer: 32 * 1024 * 1024,
   });
-  if (result.error) throw new CliError(`Rust 预检调用失败：${result.error.message}`);
+  if (result.error) throw new CliError(`预检调用失败：${result.error.message}`, 8);
   let report;
   try {
     report = JSON.parse(result.stdout);
   } catch {
-    throw new CliError(`Rust 预检返回无效 JSON：${result.stderr || result.stdout}`);
+    throw new CliError(`预检返回无效 JSON：${result.stderr || result.stdout}`);
   }
-  check(result.status === 0, report.message ?? "Rust 完整预检失败");
+  check(result.status === 0, report.message ?? "完整预检失败");
   check(
     report.protocolVersion === 1 &&
       report.validation === "full" &&
       report.taskCount === prepared.order.items.length,
-    "Rust 预检协议或任务数不匹配，未投递",
+    "预检协议或任务数不匹配，未投递",
   );
   return report;
 }
 
-async function directories(parent) {
-  try {
-    return (await fs.readdir(parent, { withFileTypes: true }))
-      .filter((e) => e.isDirectory() && !e.name.startsWith("_"))
-      .map((e) => path.join(parent, e.name));
-  } catch (e) {
-    if (e.code === "ENOENT") return [];
-    throw e;
-  }
-}
+// ---------------------------------------------------------------- 投单
 
-async function locate(conn, jobId) {
-  // Pending first: a new delivery with a reused ID can have a duplicate receipt.
-  for (const parent of [conn.pendingDir, conn.consumedDir]) {
-    for (const dir of (await directories(parent)).sort().reverse()) {
-      let order;
-      try {
-        order = await optionalJson(path.join(dir, "工单.json"));
-      } catch {
-        // Another harness may still be writing, or an unrelated order may be invalid.
-        // Neither should make every other job impossible to submit or query.
-        if (path.basename(dir) === jobId) return dir;
-        continue;
-      }
-      if ((order?.jobId ?? path.basename(dir)) === jobId) return dir;
-    }
-  }
-  return null;
-}
+const STATUS = { done: "ingested", running: "ingesting" };
 
-async function textIfExists(file) {
-  try {
-    return await fs.readFile(file, "utf8");
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw e;
-  }
-}
-
-async function status(conn, jobId) {
-  const dir = await locate(conn, jobId);
-  if (!dir) return { jobId, status: "not_found", root: conn.root };
-  const receipt = await optionalJson(path.join(dir, "回执.json"));
-  if (receipt) {
-    check(receipt.version === 1 && receipt.job?.jobId === jobId, `回执格式或 jobId 不匹配：${dir}`);
-    return {
-      jobId,
-      status: { done: "ingested", running: "ingesting" }[receipt.job.status] ?? receipt.job.status,
-      dir,
-      receipt: receipt.job,
-      next: "生成及人工验收状态请在 GenDesk 查看；本回执只表示工单收录状态",
-    };
-  }
-  // Text receipt fallback only. Older apps with the legacy order format still need updating.
-  for (const [file, state] of [
-    ["结果.txt", "ingested"],
-    ["错误.txt", "error"],
-    ["待确认.txt", "hold"],
-    ["重名未收录.txt", "duplicate"],
-  ]) {
-    const message = await textIfExists(path.join(dir, file));
-    if (message !== null)
-      return {
-        jobId,
-        status: state,
-        dir,
-        message,
-        receiptFormat: "legacy-text",
-        next: "生成及人工验收状态请在 GenDesk 查看",
-      };
-  }
-  if ((await textIfExists(path.join(dir, "READY.txt"))) === null) {
-    return {
-      jobId,
-      status: "staging",
-      dir,
-      message:
-        "尚无 READY，工单未发布。客户端可能仍在写入；若已退出，请先检查这份半成品，不要换 ID 重投",
-    };
-  }
+function jobResult(jobId, job, extra = {}) {
+  if (!job) return { jobId, status: "not_found", ...extra };
+  const status = STATUS[job.status] ?? job.status;
   return {
     jobId,
-    status: "queued",
-    dir,
-    message: "尚无收录回执；请确认 GenDesk 已启动、收件已开启且交接根一致",
+    status,
+    job,
+    ...extra,
+    next:
+      status === "hold"
+        ? `超过 ${job.taskCount ?? "阈值"} 张的单在等待确认：先向用户说明张数并取得同意，再运行 gendesk confirm ${jobId}`
+        : status === "error"
+          ? `收录失败：${job.message ?? ""}。修正后运行 gendesk retry ${jobId}`
+          : "已建批开跑；生成结果在 GenDesk 审图页人工验收",
   };
 }
 
-async function waitStatus(conn, jobId, seconds) {
-  const deadline = Date.now() + seconds * 1000;
-  for (;;) {
-    const result = await status(conn, jobId);
-    if (!["queued", "staging", "ingesting", "not_found"].includes(result.status) || seconds === 0)
-      return result;
-    if (Date.now() >= deadline) return { ...result, timedOut: true };
-    await delay(Math.min(500, Math.max(1, deadline - Date.now())));
-  }
+async function exists(file) {
+  return fs
+    .stat(file)
+    .then(() => true)
+    .catch(() => false);
 }
 
-function exitCode(result) {
-  if (result.timedOut) return 3;
-  return { staging: 2, hold: 4, error: 5, duplicate: 6, not_found: 7 }[result.status] ?? 0;
+/** 已收录的工单目录被移档成 `<jobId>-<ts>`；找出所有同 ID 的包核对内容指纹。 */
+async function packagesOf(root, jobId) {
+  const found = [];
+  const pending = path.join(pendingDir(root), jobId);
+  if (await exists(pending)) found.push(pending);
+  const entries = await fs.readdir(consumedDir(root)).catch(() => []);
+  for (const name of entries)
+    if (
+      name === jobId ||
+      (name.startsWith(`${jobId}-`) && /^\d+$/.test(name.slice(jobId.length + 1)))
+    )
+      found.push(path.join(consumedDir(root), name));
+  return found;
 }
 
-function startAppInBackground(conn) {
-  const running = spawnSync("/usr/bin/lsappinfo", ["find", "bundleID=com.gendesk.app"], {
-    encoding: "utf8",
-  });
-  check(
-    !running.error && running.status === 0,
-    `无法检查 GenDesk 是否在运行：${running.error?.message ?? running.stderr}`,
-  );
-  // An already running app watches the inbox. An open request could reopen its hidden window.
-  if (running.stdout.trim()) return;
-  check(
-    conn.features.includes("background-intake"),
-    "当前应用尚不支持后台启动，请更新 GenDesk；工单已投递",
-  );
-  const bundle = path.resolve(conn.validatorPath ?? "", "../../..");
-  check(path.extname(bundle) === ".app", "未找到支持后台启动的 GenDesk 应用包；工单已投递");
-  // Address the inbox so simultaneous launches deliver a file-open event, not Reopen.
-  const result = spawnSync(
-    "/usr/bin/open",
-    ["-g", "-a", bundle, conn.pendingDir, "--args", "--background-intake"],
-    { encoding: "utf8" },
-  );
-  if (result.error || result.status !== 0)
-    throw new CliError(`启动 GenDesk 失败：${result.error?.message ?? result.stderr}`);
+async function sameContent(dir, hash) {
+  const client = await optionalJson(path.join(dir, "客户端.json")).catch(() => null);
+  return client?.contentHash === hash;
 }
 
-async function submit(conn, prepared) {
-  if (conn.enabled === false) throw new CliError("GenDesk 收件已关闭，请在设置中开启后再提交", 8);
+async function writePackage(root, prepared) {
   const { order, files, refs, hash } = prepared;
-  if (order.items.some((item) => item.refs?.length > 1)) {
-    check(
-      conn.features.includes("ordered-references"),
-      "当前连接信息未声明双参考图支持，请先更新并启动 GenDesk，再投递此工单",
-    );
-  }
-  check(
-    conn.features.includes("generation-quality"),
-    "当前连接信息未声明 quality 支持，请先更新并启动 GenDesk，避免质量参数被旧应用忽略",
-  );
-  check(
-    conn.features.includes("resumable-intake"),
-    "当前应用未声明安全恢复支持，请先更新并启动 GenDesk；未投递工单",
-  );
-  if (order.organization || order.items.some((item) => item.organization)) {
-    check(
-      conn.features.includes("content-organization"),
-      "当前应用不支持产品、款式、需求归档，请先更新并启动 GenDesk",
-    );
-  }
-  const found = await locate(conn, order.jobId);
-  if (found) {
-    const client = await optionalJson(path.join(found, "客户端.json"));
-    check(
-      client?.contentHash === hash,
-      `jobId 已存在且内容不同或不是 CLI 工单：${order.jobId}。请核对，不会覆盖或重投`,
-    );
-    return { ...(await status(conn, order.jobId)), reused: true };
-  }
-  await nativePreflight(conn, prepared);
-  await fs.mkdir(conn.pendingDir, { recursive: true });
-  const dir = path.join(conn.pendingDir, order.jobId);
+  await fs.mkdir(pendingDir(root), { recursive: true });
+  const dir = path.join(pendingDir(root), order.jobId);
   try {
     // mkdir without recursive is the inter-process claim for this ID. Never overwrite it.
     await fs.mkdir(dir);
@@ -586,7 +533,7 @@ async function submit(conn, prepared) {
       throw new CliError(`同一 jobId 正在提交：${order.jobId}。请用 status 查询，不会覆盖`);
     throw e;
   }
-  // On failure leave the partial directory WITHOUT READY, so the app cannot ingest it.
+  // On failure the directory stays WITHOUT READY, so the app refuses to ingest it.
   await fs.mkdir(path.join(dir, "prompts"));
   await fs.mkdir(path.join(dir, "refs"));
   for (const ref of refs) {
@@ -608,48 +555,103 @@ async function submit(conn, prepared) {
     { flag: "wx" },
   );
   await fs.writeFile(path.join(dir, "READY.txt"), "ready\n", { flag: "wx" });
-  return {
-    jobId: order.jobId,
-    status: "queued",
-    dir,
-    taskCount: order.items.length,
-    refCount: refs.length,
-    reused: false,
-  };
+  return dir;
+}
+
+async function submit(prepared) {
+  const { conn, launched } = await connect({ launch: true });
+  const { order, hash } = prepared;
+  const meta = { taskCount: order.items.length, refCount: prepared.refs.length };
+  const packages = await packagesOf(conn.root, order.jobId);
+  for (const dir of packages)
+    check(
+      await sameContent(dir, hash),
+      `jobId 已存在且内容不同或不是 CLI 工单：${order.jobId}。请核对，不会覆盖或重投`,
+    );
+  const known = (await rpc(conn, "intake.status", { jobId: order.jobId })).job;
+  const pending = path.join(pendingDir(conn.root), order.jobId);
+  if (known && !(await exists(pending)))
+    return jobResult(order.jobId, known, { ...meta, reused: true });
+  if (await exists(pending)) {
+    check(
+      await exists(path.join(pending, "READY.txt")),
+      `收件目录里有同 ID 的未写完包：${pending}。先检查这份半成品，不要换 ID 重投`,
+    );
+  } else {
+    await nativePreflight(conn, prepared);
+    await writePackage(conn.root, prepared);
+  }
+  const reply = await rpc(conn, "intake.submit", { dir: order.jobId });
+  // null = the directory was already ingested by a concurrent call; read the ledger instead.
+  const job = reply.job ?? (await rpc(conn, "intake.status", { jobId: order.jobId })).job;
+  return jobResult(order.jobId, job, {
+    ...meta,
+    reused: packages.length > 0,
+    ...(launched ? { launched: true } : {}),
+  });
+}
+
+// ---------------------------------------------------------------- 视频改写
+
+async function rewriteLines(file) {
+  const text = await fs.readFile(filePath(file), "utf8").catch((e) => {
+    throw new CliError(`无法读取改写结果 ${file}：${e.message}`);
+  });
+  let lines;
+  try {
+    const value = JSON.parse(text);
+    lines = Array.isArray(value) ? value : value?.lines;
+  } catch {
+    try {
+      lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    } catch {
+      throw new CliError("改写结果不是 JSON 数组、{lines} 对象或 JSON Lines");
+    }
+  }
+  check(Array.isArray(lines) && lines.length > 0, "改写结果里没有任何条目");
+  for (const [index, line] of lines.entries()) {
+    object(line, `第 ${index + 1} 条改写`);
+    check(
+      line.id !== undefined || line.workId !== undefined || line.clipId !== undefined,
+      `第 ${index + 1} 条缺少 id（原样回传 pending 给的 W 编号）`,
+    );
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------- 入口
+
+const COMMANDS = {
+  doctor: { positionals: 0, options: [] },
+  validate: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
+  submit: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
+  status: { positionals: 1, options: [] },
+  confirm: { positionals: 1, options: [] },
+  retry: { positionals: 1, options: [] },
+  overview: { positionals: 0, options: [] },
+  v2v: { positionals: 1, options: ["file"] },
+};
+
+function exitCode(result) {
+  return { hold: 4, error: 5, duplicate: 6, not_found: 7 }[result.status] ?? 0;
 }
 
 async function main() {
   const { values: opts, positionals } = parseArgs({
     allowPositionals: true,
     options: Object.fromEntries([
-      ...[
-        "root",
-        "manifest",
-        "prompt",
-        "ref",
-        "name",
-        "sku",
-        "style",
-        "note",
-        "purpose",
-        "skill",
-        "ratio",
-        "size",
-        "format",
-        "quality",
-        "product",
-        "requirement",
-        "source",
-        "job-id",
-        "wait",
-      ].map((key) => [key, { type: "string" }]),
-      ...["help", "version", "open", "ephemeral"].map((key) => [key, { type: "boolean" }]),
+      ...["manifest", "job-id", "file", ...SINGLE_OPTIONS].map((key) => [key, { type: "string" }]),
+      ...["help", "version"].map((key) => [key, { type: "boolean" }]),
     ]),
   });
   if (opts.version) {
     check(!positionals.length && Object.keys(opts).length === 1, "--version 不能与其他参数混用");
     process.stdout.write(
-      `${JSON.stringify({ cliVersion: CLI_VERSION, orderVersion: ORDER_VERSION, clientFeatures: CLIENT_FEATURES }, null, 2)}\n`,
+      `${JSON.stringify({ cliVersion: CLI_VERSION, protocol: PROTOCOL, orderVersion: ORDER_VERSION }, null, 2)}\n`,
     );
     return;
   }
@@ -657,66 +659,42 @@ async function main() {
     process.stdout.write(`${HELP}\n`);
     return;
   }
-  const [command, jobId] = positionals;
-  check(
-    ["doctor", "validate", "submit", "status"].includes(command),
-    `未知命令：${command}；请运行 gendesk --help`,
-  );
-  check(
-    positionals.length === (command === "status" ? 2 : 1),
-    "命令位置参数不正确；请运行 gendesk --help",
-  );
-  const allowed =
-    command === "doctor"
-      ? ["root"]
-      : command === "status"
-        ? ["root", "wait"]
-        : [
-            "root",
-            "manifest",
-            "prompt",
-            "ref",
-            "name",
-            "sku",
-            "style",
-            "note",
-            "purpose",
-            "skill",
-            "ratio",
-            "size",
-            "format",
-            "quality",
-            "product",
-            "requirement",
-            "source",
-            "job-id",
-            "ephemeral",
-            ...(command === "submit" ? ["wait", "open"] : []),
-          ];
-  for (const key of Object.keys(opts)) check(allowed.includes(key), `${command} 不支持 --${key}`);
-  const seconds = Number(opts.wait ?? 0);
-  check(Number.isFinite(seconds) && seconds >= 0 && seconds <= 3600, "--wait 必须为 0～3600 秒");
-  const conn = await connection(opts);
+  const [command, ...rest] = positionals;
+  const spec = COMMANDS[command];
+  check(spec, `未知命令：${command}；请运行 gendesk --help`);
+  check(rest.length === spec.positionals, "命令位置参数不正确；请运行 gendesk --help");
+  for (const key of Object.keys(opts))
+    check(spec.options.includes(key), `${command} 不支持 --${key}`);
+
   let result;
-  if (command === "doctor") {
-    result = {
-      ...conn,
-      cliVersion: CLI_VERSION,
-      orderVersion: ORDER_VERSION,
-      clientFeatures: CLIENT_FEATURES,
-      status: "configured",
-      nodeVersion: process.version,
-      message:
-        conn.enabled === null
-          ? "旧版应用未提供连接信息；交接根需与 GenDesk 设置一致。无需电脑操作，可直接投文件工单"
-          : "连接信息是上次启动/保存设置的快照，不代表应用在线",
-      review: "生图结果进入 GenDesk 人工验收页",
-    };
-  } else if (command === "status") {
-    result = await waitStatus(conn, requiredText(jobId, "jobId"), seconds);
-  } else {
-    const prepared = await prepare(opts);
-    if (command === "validate") {
+  switch (command) {
+    case "doctor": {
+      const conn = await readConnection().catch((e) => ({ error: e.message }));
+      let app = null;
+      let message = "GenDesk 在线，可以投单";
+      if (conn && !conn.error) {
+        try {
+          app = await rpc(conn, "hello");
+        } catch (e) {
+          message = `${e.message}；submit 会在后台启动它`;
+        }
+      } else message = conn?.error ?? "还没有连接文件：GenDesk 从未启动过，submit 会在后台启动它";
+      result = {
+        status: app ? "online" : "offline",
+        cliVersion: CLI_VERSION,
+        protocol: PROTOCOL,
+        connection: CONNECTION,
+        root: app?.root ?? ROOT,
+        app,
+        nodeVersion: process.version,
+        message,
+        review: "生图结果进入 GenDesk 审图页人工验收",
+      };
+      break;
+    }
+    case "validate": {
+      const prepared = await prepare(opts);
+      const conn = await readConnection().catch(() => null);
       const preflight = await nativePreflight(conn, prepared);
       result = {
         status: "validated",
@@ -726,27 +704,40 @@ async function main() {
         refCount: prepared.refs.length,
         order: prepared.order,
         preflight,
-        message:
-          "Rust 完整预检通过（参数、归属、正文与实际图片解码）；未投递、未调用生图。收录时仍会重新核对输入",
+        message: "完整预检通过（参数、归属、正文与实际图片解码）；未投递、未调用生图",
       };
-    } else {
-      // Check platform before publishing any READY marker.
-      if (opts.open)
-        check(process.platform === "darwin", "--open 当前仅支持 macOS；请先启动 GenDesk，再提交");
-      result = await submit(conn, prepared);
-      if (opts.open && result.status === "queued") {
-        try {
-          startAppInBackground(conn);
-        } catch (e) {
-          result.openError = e.message;
-        }
+      break;
+    }
+    case "submit":
+      result = await submit(await prepare(opts));
+      break;
+    case "status":
+    case "confirm":
+    case "retry": {
+      const jobId = requiredText(rest[0], "jobId");
+      const { conn } = await connect({ launch: command !== "status" });
+      const reply = await rpc(conn, `intake.${command}`, { jobId });
+      result = jobResult(jobId, reply.job);
+      break;
+    }
+    case "overview": {
+      const { conn } = await connect({ launch: false });
+      result = { status: "ok", ...(await rpc(conn, "overview")) };
+      break;
+    }
+    case "v2v": {
+      const [sub] = rest;
+      check(sub === "pending" || sub === "rewrite", "v2v 只支持 pending / rewrite");
+      if (sub === "pending") {
+        check(opts.file === undefined, "v2v pending 不接受 --file");
+        const { conn } = await connect({ launch: true });
+        result = { status: "ok", ...(await rpc(conn, "v2v.pending")) };
+      } else {
+        const lines = await rewriteLines(requiredText(opts.file, "--file"));
+        const { conn } = await connect({ launch: true });
+        result = { status: "ok", ...(await rpc(conn, "v2v.rewrite", { lines })) };
       }
-      if (seconds > 0 && ["queued", "staging", "ingesting"].includes(result.status))
-        result = {
-          ...(await waitStatus(conn, prepared.order.jobId, seconds)),
-          reused: result.reused,
-          ...(result.openError ? { openError: result.openError } : {}),
-        };
+      break;
     }
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

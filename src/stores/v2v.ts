@@ -15,7 +15,6 @@ import {
   type AutofillStatus,
   type ClipView,
   type EffectiveParams,
-  type HandoffStatus,
   type ModelInfo,
   type QueueStats,
   type StageCounts,
@@ -69,7 +68,6 @@ interface V2vState {
   eff: EffectiveParams | null;
   queue: QueueStats | null;
   credit: V2vCreditReport | null;
-  handoff: HandoffStatus | null;
   autofill: AutofillStatus | null;
   tick: V2vTick | null;
   refresh: V2vRefresh | null;
@@ -105,7 +103,6 @@ interface V2vState {
   /** 进入工作台：取全量 + 订阅。返回清理函数。 */
   enter: () => Promise<() => void>;
   reload: () => Promise<void>;
-  reloadHandoff: () => Promise<void>;
   reloadEff: () => Promise<void>;
   /** 换流程档（侧栏）。**保留通道那一维** —— 交集的意义就在这里。 */
   setAction: (a: NextAction) => void;
@@ -138,7 +135,6 @@ export const useV2vStore = create<V2vState>((set, get) => ({
   eff: null,
   queue: null,
   credit: null,
-  handoff: null,
   autofill: null,
   tick: null,
   refresh: null,
@@ -194,15 +190,6 @@ export const useV2vStore = create<V2vState>((set, get) => ({
       .catch(() => {});
   },
 
-  // 不挂在每个 tick 上：`v2v_handoff_status` 会顺手重写工单，不是只读的。
-  reloadHandoff: async () => {
-    try {
-      set({ handoff: await unwrap(commands.v2vHandoffStatus()) });
-    } catch {
-      /* 交接目录读不到时横幅会自己说，不必在这里炸 */
-    }
-  },
-
   reloadEff: async () => {
     try {
       set({ eff: await unwrap(commands.v2vEffectiveParams()) });
@@ -218,7 +205,6 @@ export const useV2vStore = create<V2vState>((set, get) => ({
       .then((models) => set({ models }))
       .catch(() => set({ models: [] }));
     void s.reloadEff();
-    void s.reloadHandoff();
     // 余额要跑一次 CLI（秒级），与页面主体并行加载，拉不到就少显示一段。
     void unwrap(commands.v2vCreditReport("30d"))
       .then((credit) => set({ credit }))

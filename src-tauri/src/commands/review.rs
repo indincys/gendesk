@@ -9,8 +9,8 @@ use tauri::State;
 
 use crate::db::now_unix;
 use crate::db::repo::{
-    images as image_repo, names as name_repo, prompts as prompt_repo, tasks as task_repo,
-    trash as trash_repo, works as work_repo,
+    names as name_repo, prompts as prompt_repo, tasks as task_repo, trash as trash_repo,
+    works as work_repo,
 };
 use crate::error::AppResult;
 use crate::files;
@@ -29,16 +29,31 @@ struct AcceptPlan {
     src: String,
     out_path: PathBuf,
     live_photo_dir: Option<PathBuf>,
-    /// publish 图片素材库的落点（该子系统已停止投入，保留不再演进）。
-    asset: Option<(PathBuf, String, i64)>,
-    /// 交付批内的相对路径（写进 manifest 的那个 `file`）。
+    /// 成品目录内的相对路径（写进内部作品记录的那个 `file`）。
     rel_in_batch: String,
     /// 语义名（不含 UID）。
     item_name: String,
     /// 本次发放的 UID。
     uid: String,
-    /// 仅供审稿后的选择，不交给 Poster；拒绝导入后可清理。
+    /// Poster 自动导入开启时，本张作品登记进交接台账（就是成品路径，不另复制）。
     poster_path: Option<PathBuf>,
+}
+
+/// 内部作品记录（`<数据目录>/作品记录/<uid>.json`）：一张通过图的身份快照。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkRecord {
+    file: String,
+    name: String,
+    uid: String,
+    sku: String,
+    style: String,
+    purpose: String,
+    r#ref: String,
+    prompt: String,
+    job_id: String,
+    work_id: i64,
+    accepted_at: i64,
 }
 
 /// 待验收项视图。
@@ -204,7 +219,7 @@ struct AcceptRow {
     params_json: String,
     id: i64,
     batch_id: i64,
-    /// 批次名 = 投单名（一次工单 = 一个 run）。写进 manifest 的 `jobId`。
+    /// 批次名 = 投单名（一次工单 = 一个 run）。写进作品记录的 `jobId`。
     batch_note: Option<String>,
     ref_image_id: i64,
     prompt_id: i64,
@@ -218,9 +233,6 @@ struct AcceptRow {
     group_id: Option<i64>,
     is_temp: i64,
     group_name: String,
-    sku_id: Option<i64>,
-    /// publish 子系统的 SKU 编号（`skus.code`）。与下面的 `item_sku` 不是一回事。
-    sku_id_code: String,
     /// 0044 的条目级身份，来自提示词。空串 = 不知道（生成页手动建的批 / 历史数据）。
     item_name: String,
     item_sku: String,
@@ -235,7 +247,6 @@ const ACCEPT_SELECT: &str = "SELECT t.params_json, t.id, t.batch_id, b.note AS b
         p.title AS prompt_title,
         COALESCE(p.text,'') AS prompt_text, p.group_id,
         COALESCE(g.is_temp,0) AS is_temp, COALESCE(g.name,'') AS group_name,
-        g.sku_id, COALESCE(s.code,'') AS sku_id_code,
         COALESCE(p.item_name,'') AS item_name, COALESCE(p.sku_code,'') AS item_sku,
         COALESCE(p.style,'') AS item_style, COALESCE(p.purpose,'') AS item_purpose
     FROM tasks t
@@ -243,7 +254,6 @@ const ACCEPT_SELECT: &str = "SELECT t.params_json, t.id, t.batch_id, b.note AS b
     LEFT JOIN ref_images r ON r.id = t.ref_image_id
     LEFT JOIN prompts p ON p.id = t.prompt_id
     LEFT JOIN prompt_groups g ON g.id = p.group_id
-    LEFT JOIN skus s ON s.id = g.sku_id
     WHERE t.status = 'rev' AND t.id IN ";
 
 /// 一次取回本批全部待验收行（一条 IN 查询，不是 N 条 SELECT）。
@@ -277,15 +287,11 @@ async fn accept_rows(pool: &sqlx::SqlitePool, ids: &[i64]) -> AppResult<Vec<Acce
 /// （先整批拷完，任一张失败就整个报错、一行库都不写）反而更接近原子：
 /// 要么全部拷成功再记账，要么什么账都没记。
 ///
-/// ## 交付即交出所有权（D3）
+/// ## 落点与后续自动化
 ///
-/// 一次验收 = 一个交付批：`{交付根}/交付-YYMMDD-HHMM/{风格}-{SKU}/{语义名}-{uid}.{EXT}`，
-/// 整批拷完 → 写 `manifest.jsonl` → **最后**写 `READY.txt`。对方（`自动发布`）看见
-/// READY 就会把整个目录搬走，此后 `accepted_works.image_path` 允许悬空 ——
-/// UI 走已有的 `file_exists` 懒检测，救回路径是 `reexport_work`（从 `results/{task_id}`
-/// 快照重出，**复用原 uid**）。
-///
-/// 旧落点 `outputs/{批次}/{分组}/` 已停止写入。
+/// 通过的图拷进 `成品/生成图片/<产品>/<款式>/<需求>/`（见 `library.rs`），作品身份写进
+/// 内部作品记录。开启实况图时入实况队列；开启 Poster 自动导入时登记进同一个 Poster
+/// 批次，验收结束即开始导入（两者都开时，Poster 等实况配对落盘再导）。
 #[tauri::command]
 #[specta::specta]
 pub async fn accept_tasks(
@@ -298,11 +304,12 @@ pub async fn accept_tasks(
     let poster_enabled =
         crate::poster::begin_review(&state.db, &state.dirs.root, &poster_batch).await?;
     let result = accept_inner(&state, &app, &task_ids, &poster_batch, poster_enabled).await;
-    // 即使旧验收流程在后续收尾报错，已经提交的作品也要给用户一个明确的选择。
+    // 即使验收在后续收尾报错，已经提交的作品也照常进入 Poster 队列。
     if poster_enabled {
-        let finished = crate::poster::finish_acceptance(&state.db, &poster_batch).await;
+        let finished = crate::poster::finish_review(&state.db, &poster_batch).await;
         crate::commands::poster::emit(&app);
         finished?;
+        crate::commands::poster::start_delivery(app.clone());
     }
     result
 }
@@ -318,7 +325,7 @@ async fn accept_inner(
     let mut accepted = 0i64;
     let mut batches: Vec<i64> = Vec::new();
     let mut to_queue: Vec<i64> = Vec::new();
-    let mut manifest: Vec<crate::delivery::ManifestRow> = Vec::new();
+    let mut manifest: Vec<WorkRecord> = Vec::new();
     let at = now_unix();
     let date = files::date_yymmdd(at);
 
@@ -326,17 +333,11 @@ async fn accept_inner(
     let library_root = crate::library::root(&state.db).await?;
     let delivery_dir = library_root.join("成品").join("生成图片");
     let live_photo_enabled = crate::live_photo::enabled(&state.db).await?;
-    // 算出每张的落点（纯字符串活，留在这边），再一次性交给阻塞线程去拷。
-    let publish_root = if rows.iter().any(|row| row.sku_id.is_some()) {
-        Some(crate::commands::publish_settings::root_local(&state.db).await?)
-    } else {
-        None
-    };
 
     // ── 1. 发号。**整批一个事务**，排在拷贝之前 —— 文件名里有 UID。
     //
     // 台账只增不删（0044），发出去的号不回收：这一步之后若拷贝失败，留下的是几个
-    // 没有主人的号，那比"重复发号"便宜得多（重复的代价是 `自动发布` 那边两张图撞主键）。
+    // 没有主人的号，那比"重复发号"便宜得多（重复的代价是下游两张图撞同一个身份）。
     let mut issued: Vec<(i64, String, String)> = Vec::new(); // (task_id, item_name, uid)
     {
         let mut tx = state.db.begin().await?;
@@ -367,7 +368,7 @@ async fn accept_inner(
         else {
             continue;
         };
-        // 交付批内按 SKU 分子目录。键来自作品的快照列（style + sku_code），
+        // 目录按内容归属。键来自工单参数里的归属快照，
         // **不从文件名解析** —— 从中文文件名反推 SKU 是静默失败（分错目录不报错）。
         let organization = crate::library::Organization::from_params(&row.params_json)?
             .unwrap_or_else(|| {
@@ -384,7 +385,7 @@ async fn accept_inner(
         //
         // 这里**不再走 `dedupe_name`**：UID 是全局唯一的（`issued_names.uid` 上有唯一
         // 索引，撞了就重摇），所以撞名在结构上已经不可能。留着那个 `_2` 后缀反而有害
-        // —— 它会造出一个 manifest 里没有、下游也认不出来的名字。
+        // —— 它会造出一个作品记录里没有、下游也认不出来的名字。
         let filename = crate::library::filename(&item_name, &uid, at, &ext);
         let out_path = out_dir.join(&filename);
         let live_photo_dir = if live_photo_enabled {
@@ -410,18 +411,6 @@ async fn accept_inner(
             .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
             .to_string_lossy()
             .to_string();
-        let asset = match (row.sku_id, publish_root.as_ref()) {
-            (Some(sku_id), Some(root)) => {
-                let rel = crate::publish::paths::RelPath::from_parts([
-                    crate::publish::paths::IMAGE_LIBRARY,
-                    row.sku_id_code.as_str(),
-                    filename.as_str(),
-                ]);
-                let path = rel.to_local(root);
-                Some((path, rel.as_str().to_string(), sku_id))
-            }
-            _ => None,
-        };
         jobs.push(AcceptPlan {
             poster_identity: organization.poster_keys(&row.item_sku, &row.item_style),
             snapshot_path: PathBuf::from(&src)
@@ -439,7 +428,6 @@ async fn accept_inner(
             out_path: out_path.clone(),
             live_photo_dir,
             rel_in_batch,
-            asset,
             poster_path: poster_enabled.then_some(out_path),
             item_name,
             uid,
@@ -460,9 +448,6 @@ async fn accept_inner(
             if let Some(snapshot) = &j.snapshot_path {
                 pairs.push((PathBuf::from(&j.src), snapshot.clone()));
             }
-            if let Some((asset_dest, _, _)) = &j.asset {
-                pairs.push((PathBuf::from(&j.src), asset_dest.clone()));
-            }
             pairs
         })
         .collect::<Vec<_>>();
@@ -471,18 +456,17 @@ async fn accept_inner(
         .map(|(_, destination)| destination.clone())
         .collect::<Vec<_>>();
     // 拷贝失败必须上报：否则会记录 pass + works 指向不存在的输出文件（磁盘满/源丢失）。
-    let copied =
-        tokio::task::spawn_blocking(move || crate::publish::paths::copy_batch_new(&to_copy))
-            .await
-            .map_err(|e| crate::error::AppError::Io(format!("输出拷贝任务失败：{e}")))?;
+    let copied = tokio::task::spawn_blocking(move || crate::files::copy::copy_batch_new(&to_copy))
+        .await
+        .map_err(|e| crate::error::AppError::Io(format!("输出拷贝任务失败：{e}")))?;
     copied?;
-    let mut copied_guard = crate::publish::paths::CreatedFilesGuard::new(copied_paths);
+    let mut copied_guard = crate::files::copy::CreatedFilesGuard::new(copied_paths);
 
     for row in rows {
         let Some(plan) = jobs.iter().find(|j| j.task_id == row.id) else {
             continue;
         };
-        let (src, out_path, asset) = (&plan.src, &plan.out_path, &plan.asset);
+        let (src, out_path) = (&plan.src, &plan.out_path);
         let thumb = row.result_thumb_path.clone().unwrap_or_else(|| src.clone());
 
         // 事务：写作品 + 微调写回 + 临时组转正 + 状态迁移。
@@ -503,7 +487,6 @@ async fn accept_inner(
                 // 现读 JOIN 的话作品会在那一刻丢掉自己的身份。
                 prompt_code: row.prompt_code.clone(),
                 group_name: row.group_name.clone(),
-                sku_id: row.sku_id,
                 // 0044：交付身份一并存快照。SKU / 风格来自工单，隔天验收时提示词
                 // 很可能已经随批次退休 —— 到那时现读 JOIN 是读不到的。
                 item_name: plan.item_name.clone(),
@@ -518,22 +501,17 @@ async fn accept_inner(
         // 要么一起不成立，中间态会让台账指向一个不存在的作品 id。
         name_repo::attach_work(&mut tx, &plan.uid, work_id).await?;
         if let Some(poster_path) = &plan.poster_path {
-            sqlx::query(
-                "INSERT INTO poster_images(batch_id,work_id,uid,item_name,sku,style,image_path)
-            VALUES(?,?,?,?,?,?,?)",
+            crate::poster::track_image(
+                &mut tx,
+                poster_batch,
+                work_id,
+                &plan.uid,
+                &plan.item_name,
+                (&plan.poster_identity.0, &plan.poster_identity.1),
+                poster_path,
+                plan.live_photo_dir.is_some(),
             )
-            .bind(poster_batch)
-            .bind(work_id)
-            .bind(&plan.uid)
-            .bind(&plan.item_name)
-            .bind(&plan.poster_identity.0)
-            .bind(&plan.poster_identity.1)
-            .bind(poster_path.to_string_lossy().as_ref())
-            .execute(&mut *tx)
             .await?;
-        }
-        if let Some((_, rel, sku_id)) = asset.as_ref() {
-            image_repo::insert(&mut tx, *sku_id, rel, rel, "works", Some(work_id)).await?;
         }
         let claimed =
             sqlx::query("UPDATE tasks SET status='pass',updated_at=? WHERE id=? AND status='rev'")
@@ -564,12 +542,6 @@ async fn accept_inner(
             }
         }
         copied_guard.preserve(out_path);
-        if let Some(poster_path) = &plan.poster_path {
-            copied_guard.preserve(poster_path);
-        }
-        if let Some((asset_path, _, _)) = asset.as_ref() {
-            copied_guard.preserve(asset_path);
-        }
         if plan.live_photo_dir.is_some() {
             crate::live_photo::notify(state, app);
         }
@@ -595,7 +567,7 @@ async fn accept_inner(
             to_queue.push(work_id);
         }
 
-        manifest.push(crate::delivery::ManifestRow {
+        manifest.push(WorkRecord {
             file: plan.rel_in_batch.clone(),
             name: plan.item_name.clone(),
             uid: plan.uid.clone(),
@@ -627,10 +599,10 @@ async fn accept_inner(
         }
     }
 
-    // 入队 + 物化工单。**放在验收循环之后**：一批验收只重写一次工单，而不是每张一次。
+    // 入队待改写。**放在验收循环之后**：一批验收只推一次看板变化，而不是每张一次。
     let queued_v2v = crate::commands::v2v::enqueue_works(&state.db, &to_queue).await?;
     if queued_v2v > 0 {
-        crate::commands::v2v::refresh_handoff(&state.db, app).await;
+        crate::commands::v2v::emit_changed(&state.db, app, None).await;
     }
 
     for b in &batches {

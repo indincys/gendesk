@@ -45,3 +45,6 @@ lcov.info
 # cargo-mutants output
 src-tauri/mutants.out/
 src-tauri/mutants.out.old/
+
+# 构建时由 build.rs 编出的 sidecar
+src-tauri/binaries/

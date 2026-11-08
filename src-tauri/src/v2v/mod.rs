@@ -1,11 +1,11 @@
 //! 图生视频（image-to-video）流水线。
 //!
 //! 「验收通过的图 → 改写成即梦提示词 → 提交 → 轮询 → 出片 → 人工验收 → 交付」，
-//! 全程状态在库内（`v2v_clips`，v0.15.0）。Claude Code / Codex 侧的 skill 只做一件事：
-//! 读交接工单、把生图提示词改写成图生视频提示词、写回去。
+//! 全程状态在库内（`v2v_clips`，v0.15.0）。Agent 只做一件事：用 `gendesk v2v pending`
+//! 取待改写条目、把生图提示词改写成图生视频提示词、用 `gendesk v2v rewrite` 交回。
 //!
-//! 子模块各管一段：`handoff`（交接目录工单往返）· `runner`（提交/轮询/落盘）·
-//! `dreamina`（CLI 封装）· `autofill`（常驻非 VIP 队列）· `watcher`（监听改写结果）·
+//! 子模块各管一段：`rewrite`（待改写队列与改写交回）· `runner`（提交/轮询/落盘）·
+//! `dreamina`（CLI 封装）· `autofill`（常驻非 VIP 队列）·
 //! `activity`（执行日志）· `queue_trend`（排队位次 → 排队速度）· `events`。
 //!
 //! ## 这里只剩两个纯函数，它们是「改写提示怎么写」的全部
@@ -13,16 +13,15 @@
 //! v0.13.0 那套一次性导出包（manifest/ledger/PackItem/write_pack）已随 v0.22.0 删除：
 //! 真相在库里，包被移走就失忆的那份台账早在 v0.15.0 就取消了，而写包那条路径此后
 //! 一直没有任何调用方。剩下的 [`common_affixes`] / [`variable_part`] 仍在用 ——
-//! `handoff::materialize` 靠它们把组内逐字相同的产品保真模板从改写提示里剥掉。
+//! `rewrite::pending` 靠它们把组内逐字相同的产品保真模板从改写提示里剥掉。
 
 pub mod activity;
 pub mod autofill;
 pub mod dreamina;
 pub mod events;
-pub mod handoff;
 pub mod queue_trend;
+pub mod rewrite;
 pub mod runner;
-pub mod watcher;
 
 /// 组内公共前后缀长度（按 **char** 计，不是字节——按字节切会把中文切碎）。
 ///

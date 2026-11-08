@@ -18,7 +18,7 @@ import { cn, promptLabel, sortGroupsByPinyin } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
-import { Check, ChevronDown, FileUp, Play, Plus, Upload, X } from "lucide-react";
+import { Check, ChevronDown, FileUp, Play, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -70,7 +70,6 @@ export function GeneratePage() {
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
   // E31：开始生成确认卡（null = 未打开）。
   const [confirm, setConfirm] = useState<null | { avgSec: number | null }>(null);
-  const [modal, setModal] = useState<null | "refs">(null);
   const [starting, setStarting] = useState(false);
   // E14：生成页 txt 导入改走预览确认（取消不落库、不产生临时分组）。
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
@@ -185,19 +184,18 @@ export function GeneratePage() {
     }
   };
 
-  // 生成页上传 = **临时上传**（ephemeral，0019）：只作本批附件，不进长期参考图库。
-  // 参考图库是长期资产库，有它自己的批量上传入口；随手拖一张来跑一次的图不该长住那里。
+  // 生成页上传 = **临时上传**（ephemeral，0019）：只作本批附件，不参与去重基准。
   const importImages = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0) return;
       try {
-        const added = await runImport(paths, null, true);
+        const added = await runImport(paths, true);
         if (added.length === 0) return;
         const skipped = paths.length - added.length;
         toast(
           skipped > 0
             ? `已上传 ${added.length} 张（${skipped} 张读取失败已跳过）· 本批临时使用`
-            : `已上传 ${added.length} 张 · 本批临时使用，不进参考图库`,
+            : `已上传 ${added.length} 张 · 本批临时使用`,
         );
         await load();
         setSelRefIds((cur) => [...new Set([...cur, ...added.map((r) => r.id)])]);
@@ -428,7 +426,6 @@ export function GeneratePage() {
                       <i className="gdot" style={{ background: "var(--gc)" }} />
                       <span className="fw6 fs13 nowrap ohide">{g.name}</span>
                       <span className="chip">{g.prefix}</span>
-                      {g.skuCode && <span className="bdg b-green">SKU {g.skuCode}</span>}
                       {g.isTemp && <span className="bdg b-amber">临时</span>}
                       <div className="f1" />
                       <span className="grcnt">{nref > 0 ? `× ${nref} 图` : "未挂靠"}</span>
@@ -490,18 +487,12 @@ export function GeneratePage() {
               <Upload className="ic12" />
               上传
             </button>
-            <button type="button" className="btn sm" onClick={() => setModal("refs")}>
-              <Plus className="ic12" />
-              从参考图库选择
-            </button>
           </div>
           <div className="colsc">
             {selRefs.length === 0 ? (
               <div className="empt">
                 <div className="fs13 fw5 t2">尚未选择参考图</div>
-                <div className="fs12 t3 mt4">
-                  从参考图库选择，或上传新图；每张参考图将挂靠一个提示词组
-                </div>
+                <div className="fs12 t3 mt4">上传参考图；每张参考图将挂靠一个提示词组</div>
               </div>
             ) : (
               <div className="rgrid4">
@@ -891,18 +882,6 @@ export function GeneratePage() {
         </Modal>
       )}
 
-      {modal === "refs" && (
-        <PickRefs
-          // 临时上传只属于本批，不该出现在「从参考图库选择」里（0019）。
-          refs={refs.filter((r) => !r.ephemeral)}
-          selected={selRefIds}
-          onClose={() => setModal(null)}
-          onConfirm={(ids) => {
-            setSelRefIds(ids);
-            setModal(null);
-          }}
-        />
-      )}
       {viewer && (
         <PromptViewer
           prompts={promptsByGroup[viewer.gid]}
@@ -1058,97 +1037,6 @@ function Seg({
   );
 }
 
-function PickRefs({
-  refs,
-  selected,
-  onClose,
-  onConfirm,
-}: {
-  refs: RefImageView[];
-  selected: number[];
-  onClose: () => void;
-  onConfirm: (ids: number[]) => void;
-}) {
-  const [sel, setSel] = useState<number[]>(selected);
-  // 归档（0016）：跑过批次的图默认折起，已选中的永远可见。
-  const [showArchived, setShowArchived] = useState(false);
-  const toggle = (id: number) =>
-    setSel((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
-  // 同 PickGroups：取 initial selected，取消勾选不应让卡片当场消失。
-  const [pinned] = useState(() => new Set(selected));
-  const hidden = refs.filter((r) => r.archived && !pinned.has(r.id));
-  const hiddenIds = new Set(hidden.map((r) => r.id));
-  const visible = showArchived ? refs : refs.filter((r) => !hiddenIds.has(r.id));
-  return (
-    <Modal
-      title="从参考图库选择"
-      width="w640"
-      onClose={onClose}
-      headerExtra={
-        hidden.length > 0 ? (
-          <button
-            type="button"
-            className={cn("btn sm gho", showArchived && "on")}
-            onClick={() => setShowArchived((v) => !v)}
-          >
-            {showArchived ? "隐藏已归档" : `显示已归档 · ${hidden.length}`}
-          </button>
-        ) : undefined
-      }
-      footer={
-        <>
-          <span className="fs11 t3">选中的参考图会进入已选区</span>
-          <div className="f1" />
-          <button type="button" className="btn" onClick={onClose}>
-            取消
-          </button>
-          <button type="button" className="btn pri" onClick={() => onConfirm(sel)}>
-            添加所选
-          </button>
-        </>
-      }
-    >
-      <div className="grid" style={{ gridTemplateColumns: "repeat(5,1fr)", gap: 10 }}>
-        {visible.map((r) => {
-          const src = assetSrc(r.thumbPath);
-          return (
-            <div
-              key={r.id}
-              className={cn("rcard", sel.includes(r.id) && "sel", r.archived && "arch")}
-              onClick={() => toggle(r.id)}
-            >
-              <div
-                className={cn("rcimg", !src && "ph")}
-                style={
-                  src
-                    ? {
-                        backgroundImage: `url(${src})`,
-                        backgroundSize: "cover",
-                        backgroundPosition: "center",
-                      }
-                    : undefined
-                }
-              />
-              <span className={cn("rck", sel.includes(r.id) && "on")}>
-                <Check className="ic12" />
-              </span>
-              <div className="fs10 mono t2 mt4 nowrap ohide tc">{r.name}</div>
-            </div>
-          );
-        })}
-      </div>
-      {visible.length === 0 && (
-        <div className="fs12 t3">
-          {refs.length === 0
-            ? "参考图库为空，请先上传参考图"
-            : "全部参考图都已归档 —— 上传新图，或点右上「显示已归档」取回"}
-        </div>
-      )}
-    </Modal>
-  );
-}
-
-/** 提示词原文弹窗：编号徽标 + 正文 + 组内上一条/下一条导航。 */
 function PromptViewer({
   prompts,
   group,

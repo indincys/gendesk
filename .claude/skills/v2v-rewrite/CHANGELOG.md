@@ -2,10 +2,18 @@
 
 每改一次改写规范，在这里记一条：改了什么、为什么。版本号写在 `SKILL.md` 顶部。
 
-次版本（1.1 → 1.2）= 改写规范变化；主版本（1.x → 2.0）= 交接目录或 `rewrite.jsonl`
-格式变化，那种改动要和 `src-tauri/src/v2v/handoff.rs` 一起改。
+次版本（2.0 → 2.1）= 改写规范变化；主版本 = `gendesk v2v` 读写格式变化，那种改动要和
+`src-tauri/src/v2v/rewrite.rs` 一起改。
 
 ---
+
+## 2.0 — 2026-11-09
+
+**交接目录下线，改用 CLI。**
+
+GenDesk 不再物化 `v2v/待改写`、不再监听 `v2v/已改写`。读队列用 `gendesk v2v pending`，
+写回用 `gendesk v2v rewrite --file`；回写条目格式（`id` + `videoPrompt` 及可选参数）不变。
+改写规范本身没有变化。
 
 ## 1.1 — 2026-07-29
 

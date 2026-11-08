@@ -30,7 +30,7 @@ export function Onboarding() {
         unwrap(commands.listApiKeys()).catch(() => []),
         unwrap(commands.listPromptGroups()).catch(() => []),
         // 不含临时上传：在生成页随手拖一张试跑，不等于「参考图库里有素材」。
-        unwrap(commands.listRefImages(false)).catch(() => []),
+        unwrap(commands.listRefImages(true)).catch(() => []),
         // 批次跑完就退出历史（v0.21.0），故「跑过第一批没有」不能再靠批次列表回答。
         // 任务同样会随批次消失，但作品不会 —— 出过一张图就算跑过。
         unwrap(
@@ -57,15 +57,15 @@ export function Onboarding() {
         {
           key: "prompts",
           label: "导入提示词",
-          hint: "在生成页导入 .txt，或让 skill 投一份工单进来",
+          hint: "在生成页导入 .txt，或让 Agent 用 gendesk submit 投一份工单",
           route: "generate",
           done: groups.some((g) => g.count > 0),
         },
         {
           key: "refs",
           label: "上传参考图",
-          hint: "在参考图库上传要生成的素材图",
-          route: "refs",
+          hint: "在生成页上传要生成的素材图",
+          route: "generate",
           done: refs.length > 0,
         },
         {

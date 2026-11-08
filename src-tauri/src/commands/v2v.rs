@@ -1,6 +1,6 @@
 //! 视频流水线域命令（图生视频）。
 //!
-//! 边界：**GenDesk 全程持有流水线状态**，Claude Code / Codex 侧的 skill 只做一件事——
+//! 边界：**GenDesk 全程持有流水线状态**，Agent 侧只做一件事——
 //! 把生图提示词改写成图生视频提示词。提交/轮询/下载/重试/验收都在这里，因为它们不是
 //! 智能任务，而 GenDesk 已经有状态机、崩溃恢复和 UI。
 
@@ -18,7 +18,6 @@ use crate::v2v::activity::ActivityEntry;
 use crate::v2v::autofill::AutofillCfg;
 use crate::v2v::dreamina::{self, CreditInfo, GenOpts, ModelInfo, SessionInfo};
 use crate::v2v::events::{StageCounts, V2vChanged};
-use crate::v2v::handoff::{self, IngestSummary, MaterializeSummary};
 use crate::v2v::runner::{self, SubmitSummary};
 
 const KEY: &str = "v2v";
@@ -27,9 +26,6 @@ const KEY: &str = "v2v";
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct V2vSettings {
-    /// 交接根目录。skill 侧把它写死才能做到「什么都不用输入」，故默认值必须可预测。
-    #[serde(default = "d_root")]
-    pub handoff_root: String,
     /// 即梦 CLI 可执行（默认走 PATH 的 `dreamina`；可填绝对路径）。
     #[serde(default = "d_bin")]
     pub bin: String,
@@ -69,16 +65,10 @@ pub struct V2vSettings {
     /// （素材库、剪辑工程旁边），而不是应用数据目录深处 —— 那个位置人在 Finder 里
     /// 根本找不到，等于交付了个寂寞。
     ///
-    /// 形制照 `handoff_root`（空串回落到默认）而**不是** `Settings::output_dir`：
-    /// 后者有字段、有选择器、有设置页 UI，却没有任何一个消费者读它 ——
-    /// 那是「选了目录却不生效」，正是这一版要根治的那类失信。
     #[serde(default)]
     pub clips_output_dir: String,
 }
 
-fn d_root() -> String {
-    handoff::default_root().to_string_lossy().to_string()
-}
 fn d_bin() -> String {
     dreamina::DEFAULT_BIN.to_string()
 }
@@ -92,7 +82,6 @@ fn d_true() -> bool {
 impl Default for V2vSettings {
     fn default() -> Self {
         Self {
-            handoff_root: d_root(),
             bin: d_bin(),
             model_version: d_model(),
             duration: None,
@@ -131,13 +120,6 @@ impl V2vSettings {
     pub fn concurrency_policy(&self) -> runner::ConcurrencyPolicy {
         runner::ConcurrencyPolicy::automatic()
     }
-    pub fn root(&self) -> std::path::PathBuf {
-        if self.handoff_root.trim().is_empty() {
-            handoff::default_root()
-        } else {
-            std::path::PathBuf::from(self.handoff_root.trim())
-        }
-    }
 }
 
 /// 读设置（缺失/损坏都回默认值，绝不让整页打不开）。
@@ -167,21 +149,7 @@ pub async fn update_v2v_settings(
     let json = serde_json::to_string(&settings)
         .map_err(|e| AppError::Internal(format!("设置序列化失败：{e}")))?;
     settings_repo::set_by_key(&state.db, KEY, &json).await?;
-    // 交接根可能被改到别处 → 立刻在新位置重建工单，否则 skill 会对着旧目录干活。
-    let _ = handoff::materialize(&state.db, &settings.root()).await;
     load_settings(&state.db).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pick_handoff_root(app: AppHandle) -> AppResult<Option<String>> {
-    use tauri_plugin_dialog::DialogExt;
-    Ok(app
-        .dialog()
-        .file()
-        .blocking_pick_folder()
-        .and_then(|p| p.into_path().ok())
-        .map(|p| p.to_string_lossy().to_string()))
 }
 
 /// 选成片交付目录。
@@ -845,56 +813,6 @@ pub async fn v2v_mark_seen(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
-/// 交接目录的当前状态（「交接：42 条已物化 · 3 分钟前收录」）。
-///
-/// 待改写那一列是**唯一一段不在本机手里**的流程：工单写出去了没有、skill 写回来过没有，
-/// 界面上原先一个字都没有 —— 于是「skill 到底跑没跑」只能靠去开文件夹看。
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct HandoffStatus {
-    /// 待改写工单根目录绝对路径。
-    pub pending_dir: String,
-    /// 已物化的组数 / 条数。
-    pub groups: i64,
-    pub items: i64,
-    /// 缩略图缺失而写不进工单的条数（父图被清理过）。
-    pub skipped: i64,
-    /// 最近一次收录到改写结果的时刻；None = 从来没收到过。
-    pub last_ingest_at: Option<i64>,
-    /// 物化失败的原因（磁盘满 / 目录不可写）。有值时界面必须报出来，
-    /// 否则 skill 那边看到的是一个空目录，而这边显示一切正常。
-    pub error: Option<String>,
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn v2v_handoff_status(state: State<'_, AppState>) -> AppResult<HandoffStatus> {
-    let s = load_settings(&state.db).await?;
-    let root = s.root();
-    let mut out = HandoffStatus {
-        pending_dir: root
-            .join(handoff::V2V)
-            .join(handoff::PENDING)
-            .to_string_lossy()
-            .to_string(),
-        groups: 0,
-        items: 0,
-        skipped: 0,
-        last_ingest_at: repo::last_rewrote_at(&state.db).await?,
-        error: None,
-    };
-    match handoff::materialize(&state.db, &root).await {
-        Ok(m) => {
-            out.pending_dir = m.pending_dir;
-            out.groups = m.groups;
-            out.items = m.items;
-            out.skipped = m.skipped;
-        }
-        Err(e) => out.error = Some(format!("{e}")),
-    }
-    Ok(out)
-}
-
 /// 执行日志快照（打开日志面板时取一次，之后靠 `v2v://activity` 事件增量追加）。
 #[tauri::command]
 #[specta::specta]
@@ -1171,7 +1089,7 @@ pub async fn enqueue_works_v2v(
     work_ids: Vec<i64>,
 ) -> AppResult<i64> {
     let n = enqueue_works(&state.db, &work_ids).await?;
-    refresh_handoff(&state.db, &app).await;
+    emit_changed(&state.db, &app, None).await;
     Ok(n)
 }
 
@@ -1228,20 +1146,24 @@ pub async fn enqueue_works(pool: &SqlitePool, work_ids: &[i64]) -> AppResult<i64
     Ok(added)
 }
 
-/// 队列变化后重写磁盘工单并推事件。
-///
-/// 这是「验收通过后不需要点导出」成立的关键：物化由状态变化触发，而不是由按钮触发。
-/// 失败只记日志不打断调用方——验收本身已经成功了，工单没写出去下一次还会重写。
-pub async fn refresh_handoff(pool: &SqlitePool, app: &AppHandle) {
-    match load_settings(pool).await {
-        Ok(s) => {
-            if let Err(e) = handoff::materialize(pool, &s.root()).await {
-                tracing::warn!(error = %e, "物化改写工单失败");
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "读图生视频设置失败"),
-    }
-    emit_changed(pool, app, None).await;
+/// Agent 经 CLI 交回改写结果：应用 → 记执行日志 → 推看板变化。
+pub async fn apply_rewrites(
+    state: &AppState,
+    app: &AppHandle,
+    lines: &[crate::v2v::rewrite::RewriteLine],
+) -> AppResult<crate::v2v::rewrite::IngestSummary> {
+    let sum = crate::v2v::rewrite::apply(&state.db, lines).await?;
+    state.v2v_log.info(
+        "rewrite",
+        None,
+        format!(
+            "Agent 交回改写：应用 {} · 认不出 {} · 已越过待提交 {}",
+            sum.applied, sum.unmatched, sum.stale
+        ),
+        None,
+    );
+    emit_changed(&state.db, app, None).await;
+    Ok(sum)
 }
 
 /// 推 `v2v://changed`。
@@ -1263,53 +1185,6 @@ pub async fn refresh_tray_badge(pool: &SqlitePool, app: &AppHandle) {
         Ok(counts) => crate::shell::set_badge(app, counts.actionable),
         Err(e) => tracing::warn!(error = %e, "启动时计算托盘待办数失败"),
     }
-}
-
-/// 立刻重写工单（用户点「重新物化」，或想确认路径时）。
-#[tauri::command]
-#[specta::specta]
-pub async fn materialize_v2v_handoff(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<MaterializeSummary> {
-    let s = load_settings(&state.db).await?;
-    let sum = handoff::materialize(&state.db, &s.root()).await?;
-    emit_changed(&state.db, &app, None).await;
-    Ok(sum)
-}
-
-/// 手动收录改写结果（watcher 之外的兜底：用户等不及 2 秒防抖，或 watcher 没起来）。
-#[tauri::command]
-#[specta::specta]
-pub async fn ingest_v2v_rewrites(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<IngestSummary> {
-    let s = load_settings(&state.db).await?;
-    let sum = handoff::ingest(&state.db, &s.root()).await?;
-    state.v2v_log.info(
-        "handoff",
-        None,
-        format!(
-            "手动收录：应用 {} · 认不出 {} · 已越过待提交 {}",
-            sum.applied, sum.unmatched, sum.stale
-        ),
-        Some(s.root().to_string_lossy().to_string()),
-    );
-    refresh_handoff(&state.db, &app).await;
-    Ok(sum)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn open_handoff_dir(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    use tauri_plugin_opener::OpenerExt;
-    let s = load_settings(&state.db).await?;
-    let dir = s.root().join(handoff::V2V).join(handoff::PENDING);
-    std::fs::create_dir_all(&dir)?;
-    app.opener()
-        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
-        .map_err(|e| AppError::Io(format!("打开交接目录失败：{e}")))
 }
 
 /// 人工编辑待提交条目的视频提示词与参数。
@@ -1347,7 +1222,7 @@ pub async fn update_v2v_clip(
     .await?;
     // 手写完提示词即离开待改写队列 → 必须重写工单，否则下一次物化又把它写进去，
     // skill 会把人写的那份覆盖掉。
-    refresh_handoff(&state.db, &app).await;
+    emit_changed(&state.db, &app, None).await;
     Ok(ok)
 }
 
@@ -2101,7 +1976,7 @@ pub async fn undo_v2v(
         trash_repo::delete_rows(&mut tx, &trash_ids).await?;
         tx.commit().await?;
     }
-    refresh_handoff(&state.db, &app).await;
+    emit_changed(&state.db, &app, None).await;
     Ok(n)
 }
 
@@ -2473,7 +2348,7 @@ async fn apply_queue_action(
             None,
         );
     }
-    refresh_handoff(&state.db, app).await;
+    emit_changed(&state.db, app, None).await;
     let verb = match action {
         QueueAction::Recover => "已恢复",
         QueueAction::Rewrite => "已退回改写",
@@ -2534,7 +2409,7 @@ pub async fn remove_v2v_clips(
 ) -> AppResult<i64> {
     ack_covers_billed(&repo::get_many(&state.db, &ids).await?, &ack_paid)?;
     let n = repo::remove(&state.db, &ids).await?;
-    refresh_handoff(&state.db, &app).await;
+    emit_changed(&state.db, &app, None).await;
     Ok(n)
 }
 
@@ -2847,17 +2722,6 @@ mod tests {
         assert!(dreamina::normalize_opts(&s.defaults()).is_ok());
         assert_eq!(s.bin, "dreamina");
         assert!(s.poll_enabled);
-        assert!(s.root().ends_with("GenDesk交接"), "{:?}", s.root());
-    }
-
-    // 交接根为空串时回落到默认位置，不能拼出一个相对路径乱写文件。
-    #[test]
-    fn blank_handoff_root_falls_back_to_default() {
-        let s = V2vSettings {
-            handoff_root: "   ".into(),
-            ..Default::default()
-        };
-        assert_eq!(s.root(), handoff::default_root());
     }
 
     #[test]
@@ -2882,7 +2746,10 @@ mod tests {
         let partial: V2vSettings = serde_json::from_str(r#"{"bin":"/opt/dreamina"}"#).unwrap();
         assert_eq!(partial.bin, "/opt/dreamina");
         assert!(partial.poll_enabled, "缺失的布尔项须回落到默认 true");
-        assert!(!partial.handoff_root.is_empty(), "缺失的交接根须回落默认值");
+        // 旧版保存的交接根字段直接忽略。
+        let legacy: V2vSettings =
+            serde_json::from_str(r#"{"handoffRoot":"/tmp/x","bin":"dreamina"}"#).unwrap();
+        assert_eq!(legacy.bin, "dreamina");
     }
 
     // 旧版本保存过人工并发数；升级后它们只能被兼容读取，不能继续暗中限制任何通道。

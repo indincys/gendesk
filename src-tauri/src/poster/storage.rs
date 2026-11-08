@@ -19,7 +19,8 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
-/// 仅在用户确认之后调用。每批永久目录固定，重试复用原文件，任何内容冲突都不覆盖。
+/// 生成导入请求。成品与实况配对直接引用原位置；作品记录已不在的旧图才复制进每批固定的
+/// 永久目录，重试复用原文件，任何内容冲突都不覆盖。
 pub fn prepare(
     root: &str,
     batch: &str,
@@ -51,6 +52,10 @@ pub fn prepare(
             .filter(|id| !id.is_empty())
             .ok_or_else(|| AppError::InvalidInput("有图片尚未指定 Poster 商品".into()))?;
         let product_name = image.product_name.as_deref().unwrap_or(product_id);
+        if let (Some(jpg), Some(mov)) = (&image.live_image, &image.live_video) {
+            items.push(live_item(image, product_id, jpg, mov)?);
+            continue;
+        }
         let bytes = std::fs::read(&image.image_path)?;
         // 只交图片；图片扩展名与实际文件头都要符合。
         image::image_dimensions(&image.image_path)
@@ -93,6 +98,7 @@ pub fn prepare(
             sha256: hash,
             byte_size: bytes.len() as u64,
             source: "ai".into(),
+            live_video: None,
         });
     }
     if items.is_empty() {
@@ -103,5 +109,31 @@ pub fn prepare(
         source_id,
         batch_id: batch.into(),
         items,
+    })
+}
+
+/// 实况配对：JPG 作为图片本体，MOV 作为配对视频，都引用 `成品/实况照片/` 里的原文件。
+fn live_item(
+    image: &Image,
+    product_id: &str,
+    jpg: &str,
+    mov: &str,
+) -> AppResult<client::ImageItem> {
+    image::image_dimensions(jpg)
+        .map_err(|e| AppError::InvalidInput(format!("实况静态图无法读取：{e}")))?;
+    let still = std::fs::read(jpg)?;
+    let video = std::fs::read(mov)?;
+    Ok(client::ImageItem {
+        external_id: image.uid.clone(),
+        product_id: product_id.into(),
+        path: jpg.into(),
+        sha256: format!("{:x}", Sha256::digest(&still)),
+        byte_size: still.len() as u64,
+        source: "ai".into(),
+        live_video: Some(client::LiveVideo {
+            path: mov.into(),
+            sha256: format!("{:x}", Sha256::digest(&video)),
+            byte_size: video.len() as u64,
+        }),
     })
 }

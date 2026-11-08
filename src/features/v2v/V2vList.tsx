@@ -191,7 +191,7 @@ function ClipRow({
         ? fmtDur(r.waitSecs)
         : null;
 
-  // 「缺词」这一档里每一行的 `situation` 都是同一句「等你跑 v2v-rewrite · 工单已就绪」
+  // 「缺词」这一档里每一行的 `situation` 都是同一句「等 Agent 改写」
   // —— 那句话在这一屏上已经由摘要卡说过，逐行再抄 40 遍不带任何一行独有的信息。
   // 换成组名：派工单时真正要认的就是「这是哪一组的词」。
   const sub = r.action === "rewrite" ? c.groupName || "未分组" : r.situation;

@@ -1,4 +1,7 @@
-//! 将已验收原图交给本机实况图工具，逐张运行并成对归档。
+//! 验收通过的图交给随包的实况图助手，逐张转换并成对归档到 `成品/实况照片/`。
+//!
+//! 队列在库内（0049），应用重启后接着转。开启「自动导入 Poster」时，对应作品的
+//! Poster 批次会等配对落盘再带着视频一起导入（见 `poster::attach_live_pair`）。
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -130,7 +133,7 @@ fn has_pair(paths: &[PathBuf; 2]) -> bool {
 }
 
 fn publish_pair(staged: [PathBuf; 2], published: [PathBuf; 2]) -> AppResult<()> {
-    let mut created = crate::publish::paths::CreatedFilesGuard::new([]);
+    let mut created = crate::files::copy::CreatedFilesGuard::new([]);
     for (source, target) in staged.into_iter().zip(published) {
         match std::fs::hard_link(&source, &target) {
             Ok(()) => created.track(target),
@@ -151,59 +154,35 @@ fn publish_pair(staged: [PathBuf; 2], published: [PathBuf; 2]) -> AppResult<()> 
     Ok(())
 }
 
+/// 随包的实况图助手（`live-photo/gendesk-live.swift` 编出的 sidecar）与它的轨迹库/原声。
 struct Tool {
-    python: PathBuf,
-    script: PathBuf,
-    path: std::ffi::OsString,
+    binary: PathBuf,
+    resources: PathBuf,
 }
+
+/// 启动时按应用位置解析一次：sidecar 与主程序同目录，资源在 `Resources/live-photo`。
+static TOOL_PATHS: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
 
 impl Tool {
     fn local() -> AppResult<Self> {
         if !cfg!(target_os = "macos") {
-            return Err(AppError::InvalidInput("本机实况图工具仅支持 macOS".into()));
+            return Err(AppError::InvalidInput("实况图仅支持 macOS".into()));
         }
-        let dir = crate::poster::home()
-            .join("Workspace/产品/明星日历_2027/图文带货创作/制作工具/实况图工具");
-        let python = dir.join(".venv/bin/python");
-        let script = dir.join("make_live.py");
-        for path in [&python, &script] {
-            if !path.is_file() {
-                return Err(AppError::InvalidInput(format!(
-                    "找不到实况图工具文件 {}",
-                    path.display()
-                )));
-            }
+        let (binary, resources) = TOOL_PATHS
+            .get()
+            .cloned()
+            .ok_or_else(|| AppError::Internal("实况图助手尚未初始化".into()))?;
+        if !binary.is_file() || !resources.join("motion").is_dir() {
+            return Err(AppError::InvalidInput(format!(
+                "安装包里缺少实况图助手 {}，请重新安装 GenDesk",
+                binary.display()
+            )));
         }
-
-        // Finder 启动时的 PATH 通常不含 Homebrew，脚本靠 PATH 调用 ffmpeg。
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let dirs: Vec<_> = std::env::split_paths(&inherited)
-            .filter(|path| path.is_absolute())
-            .chain(
-                [
-                    "/opt/homebrew/bin",
-                    "/usr/local/bin",
-                    "/opt/local/bin",
-                    "/usr/bin",
-                    "/bin",
-                ]
-                .map(PathBuf::from),
-            )
-            .collect();
-        if !dirs.iter().any(|dir| dir.join("ffmpeg").is_file()) {
-            return Err(AppError::InvalidInput(
-                "找不到实况图工具所需的 ffmpeg".into(),
-            ));
-        }
-        let path = std::env::join_paths(dirs).map_err(|e| AppError::Io(e.to_string()))?;
-        Ok(Self {
-            python,
-            script,
-            path,
-        })
+        Ok(Self { binary, resources })
     }
 
-    async fn convert(&self, image: &Path, out: &Path) -> AppResult<()> {
+    /// 转一张，返回成品配对 `[JPG, MOV]`。中断后重入只补完同一对，不重做。
+    async fn convert(&self, image: &Path, out: &Path) -> AppResult<[PathBuf; 2]> {
         let stem = image
             .file_stem()
             .ok_or_else(|| AppError::InvalidInput("原图缺少文件名".into()))?;
@@ -214,12 +193,12 @@ impl Tool {
         let staged = pair_paths(&ready, stem);
         // 隐藏目录整体转为待发布。若退出时只链接了一半，重启时补上同一套配对。
         if has_pair(&staged) {
-            publish_pair(staged, published)?;
+            publish_pair(staged, published.clone())?;
             std::fs::remove_dir_all(ready)?;
-            return Ok(());
+            return Ok(published);
         }
         if has_pair(&published) {
-            return Ok(());
+            return Ok(published);
         }
         if let Some(conflict) = published
             .iter()
@@ -242,11 +221,11 @@ impl Tool {
             .tempdir_in(out)?;
         let output = tokio::time::timeout(
             Duration::from_secs(600),
-            Command::new(&self.python)
-                .arg(&self.script)
+            Command::new(&self.binary)
+                .arg("--resources")
+                .arg(&self.resources)
                 .arg(staging.path())
                 .arg(image)
-                .env("PATH", &self.path)
                 .kill_on_drop(true)
                 .output(),
         )
@@ -255,21 +234,21 @@ impl Tool {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
-            tracing::warn!(image = %image.display(), %stderr, "实况图脚本退出失败");
+            tracing::warn!(image = %image.display(), %stderr, "实况图助手退出失败");
             return Err(AppError::Io(match detail {
                 Some(line) => line.chars().take(300).collect(),
-                None => format!("实况图脚本退出 {}", output.status),
+                None => format!("实况图助手退出 {}", output.status),
             }));
         }
         if !has_pair(&pair_paths(staging.path(), stem)) {
             return Err(AppError::Io(
-                "实况图脚本没有生成完整的 JPG 与 MOV 配对".into(),
+                "实况图助手没有生成完整的 JPG 与 MOV 配对".into(),
             ));
         }
         std::fs::rename(staging.path(), &ready)?;
-        publish_pair(staged, published)?;
+        publish_pair(staged, published.clone())?;
         std::fs::remove_dir_all(ready)?;
-        Ok(())
+        Ok(published)
     }
 }
 
@@ -406,6 +385,16 @@ pub fn start(app: AppHandle) {
     if !cfg!(target_os = "macos") {
         return;
     }
+    let binary = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("gendesk-live")))
+        .unwrap_or_default();
+    let resources = app
+        .path()
+        .resource_dir()
+        .map(|dir| dir.join("live-photo"))
+        .unwrap_or_default();
+    let _ = TOOL_PATHS.set((binary, resources));
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         loop {
@@ -428,11 +417,19 @@ async fn drain(pool: &SqlitePool, app: &AppHandle) -> AppResult<()> {
         }
         .await;
         let error = match result {
-            Ok(()) => {
+            Ok([jpg, mov]) => {
+                // 配对结果与出队同一事务：Poster 那边要么看到完整配对，要么仍看到待转换。
+                let mut tx = pool.begin().await?;
+                let waiting =
+                    crate::poster::attach_live_pair(&mut tx, &job.image_path, &jpg, &mov).await?;
                 sqlx::query("DELETE FROM live_photo_jobs WHERE id = ?")
                     .bind(job.id)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
+                if waiting {
+                    crate::commands::poster::start_delivery(app.clone());
+                }
                 None
             }
             Err(error) => {
@@ -443,6 +440,8 @@ async fn drain(pool: &SqlitePool, app: &AppHandle) -> AppResult<()> {
                     .bind(job.id)
                     .execute(pool)
                     .await?;
+                // 等这张实况图的 Poster 批次据此转为失败并写明原因。
+                crate::commands::poster::start_delivery(app.clone());
                 Some(message)
             }
         };
@@ -518,24 +517,26 @@ mod tests {
         let image = tmp.path().join("验收 原图.jpg");
         let out = tmp.path().join("实况照片");
         let tool = Tool {
-            python: "/bin/sh".into(),
-            script: script.clone(),
-            path: "/usr/bin:/bin".into(),
+            binary: script.clone(),
+            resources: tmp.path().join("资源"),
         };
         std::fs::write(&image, b"original").unwrap();
-        let script_start = r#"name="${2##*/}"
+        // 与助手同一参数形状：--resources <目录> <输出目录> <原图>
+        let script_start = r#"#!/bin/sh
+name="${4##*/}"
 stem="${name%.*}"
-printf jpeg > "$1/$stem.JPG"
+printf jpeg > "$3/$stem.JPG"
 "#;
-        std::fs::write(&script, script_start).unwrap();
+        let write_script = |body: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&script, body).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_script(script_start);
         assert!(tool.convert(&image, &out).await.is_err());
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
 
-        std::fs::write(
-            &script,
-            format!("{script_start}printf video > \"$1/$stem.MOV\"\n"),
-        )
-        .unwrap();
+        write_script(&format!("{script_start}printf video > \"$3/$stem.MOV\"\n"));
         tool.convert(&image, &out).await.unwrap();
         // 两次独立转换直接写进同一批次目录。
         let second = tmp.path().join("第二张.png");
@@ -561,9 +562,8 @@ printf jpeg > "$1/$stem.JPG"
         std::fs::write(ready.join("原图.JPG"), b"jpeg").unwrap();
         std::fs::write(ready.join("原图.MOV"), b"video").unwrap();
         let tool = Tool {
-            python: "missing".into(),
-            script: "missing".into(),
-            path: "/usr/bin".into(),
+            binary: "missing".into(),
+            resources: "missing".into(),
         };
 
         std::fs::write(out.join("原图.MOV"), b"collision").unwrap();

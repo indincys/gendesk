@@ -168,10 +168,9 @@ pub async fn stage_counts(pool: &SqlitePool) -> Result<Vec<(String, i64)>, sqlx:
 /// 写入组内公共前后缀剥离结果（工单物化时按组批量算一次）。
 /// 落可变部分（物化工单时顺手算出来的）。
 ///
-/// **值没变就一个字都不写**。工单物化是自动的：队列一变就重写一遍，而 `updated_at`
-/// 是业务变更时间，看板照它显示「几分钟前」—— 每次物化都刷一遍，等于让整块看板
+/// **值没变就一个字都不写**。`v2v pending` 每次都会重算它，而 `updated_at`
+/// 是业务变更时间，看板照它显示「几分钟前」—— 每次读取都刷一遍，等于让整块看板
 /// 永远显示「刚刚」（同 `mark_polled` 那条注释里的理由）。
-/// 这也是「`v2v_handoff_status` 可以随处调用」的前提：它会顺手重写工单。
 pub async fn set_variable_part(
     pool: &SqlitePool,
     id: i64,
@@ -1668,17 +1667,6 @@ pub async fn restore(pool: &SqlitePool, s: &ClipSnapshot, now: i64) -> Result<bo
     Ok(res.rows_affected() > 0)
 }
 
-/// 最近一次收录改写结果的时刻（交接状态那句「N 分钟前收录」）。
-///
-/// 不另存一个「上次收录时间」设置项：`rewrote_at` 的最大值**就是**这件事，
-/// 而多一处真相来源就多一处会与库里对不上的地方。
-pub async fn last_rewrote_at(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
-    let (t,): (Option<i64>,) = sqlx::query_as("SELECT MAX(rewrote_at) FROM v2v_clips")
-        .fetch_one(pool)
-        .await?;
-    Ok(t)
-}
-
 /// 「你离开的这段时间」发生了什么（开屏横幅）。
 #[derive(Debug, Clone, Default, FromRow)]
 pub struct AwayRow {
@@ -2261,25 +2249,6 @@ mod tests {
         assert_eq!(later.failed, 1);
         assert_eq!(later.credits, 0);
         assert_ne!(a, b);
-    }
-
-    // 「N 分钟前收录」直接取 rewrote_at 的最大值，不另存一份「上次收录时间」。
-    #[tokio::test]
-    async fn last_rewrote_at_tracks_the_newest_ingest() {
-        let (pool, _d) = test_pool().await;
-        assert!(
-            last_rewrote_at(&pool).await.unwrap().is_none(),
-            "从没收录过"
-        );
-        seed_work(&pool, 1).await;
-        enqueue_one(&pool, 1).await;
-        let id = list_by_stages(&pool, &["rewrite"]).await.unwrap()[0].id;
-        let mut tx = pool.begin().await.unwrap();
-        apply_rewrite(&mut tx, id, "p", None, None, None, 1234)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        assert_eq!(last_rewrote_at(&pool).await.unwrap(), Some(1234));
     }
 
     // 入队幂等：连点验收/重复验收不得产生同一张图的多条重影，

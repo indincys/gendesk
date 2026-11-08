@@ -1,11 +1,16 @@
-//! GenDesk 负责审稿后的选择、款式适配、永久图片与持久化交接；Poster 只收图片。
+//! 审稿通过的图自动导入 Poster 对应款式（设置里手动开启，默认关闭）。
+//!
+//! GenDesk 负责款式适配、交接台账（0046/0050）与安全重试；Poster 只收图片。开启后验收
+//! 不再询问：每次验收建一个批次，自动按已保存的绑定或 20 款明星名匹配商品；匹配不上的
+//! 款式让批次停在「失败」并写明原因，用户在设置里指定一次商品后自动续导。同时开启实况图
+//! 时，批次等配对落盘后带着视频一起导入。
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{rand_core::RngCore, OsRng};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 use crate::db::{now_unix, repo::settings};
 use crate::error::{AppError, AppResult};
@@ -18,11 +23,10 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PosterSettings {
-    /// 只有主动开启才在审稿后询问；旧设置没有此字段时也保持关闭。
+    /// 审稿通过后自动导入。新字段名：旧版 `enabled`（逐批询问）不会被当成同意自动导入。
     #[serde(default)]
-    pub enabled: bool,
+    pub auto_import: bool,
     pub executable: String,
-    pub library_root: String,
 }
 
 pub fn home() -> PathBuf {
@@ -38,17 +42,20 @@ pub fn new_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub async fn load_settings(pool: &SqlitePool, data_root: &Path) -> AppResult<PosterSettings> {
-    let stored = settings::get_by_key(pool, "poster").await?;
-    match stored {
+pub async fn load_settings(pool: &SqlitePool) -> AppResult<PosterSettings> {
+    match settings::get_by_key(pool, "poster").await? {
         Some(json) => serde_json::from_str(&json)
             .map_err(|e| AppError::InvalidInput(format!("Poster 设置无法读取：{e}"))),
         None => Ok(PosterSettings {
-            enabled: false,
+            auto_import: false,
             executable: client::discover_executable().to_string_lossy().into(),
-            library_root: data_root.join("Poster图片库").to_string_lossy().into(),
         }),
     }
+}
+
+/// 作品记录被删除后仍要导入时，原图副本落在这里（新作品直接引用成品，不复制）。
+pub fn fallback_root(data_root: &Path) -> PathBuf {
+    data_root.join("Poster图片库")
 }
 
 pub async fn initialize(pool: &SqlitePool) -> AppResult<()> {
@@ -60,47 +67,97 @@ pub async fn initialize(pool: &SqlitePool) -> AppResult<()> {
         )
         .await?;
     }
-    // 接受过程中中断：已有作品仍要问用户；绝不据此推断「已同意导入」。
-    sqlx::query("UPDATE poster_batches SET state='awaiting' WHERE state='preparing'")
+    // 验收过程中中断：已提交的作品在开启自动导入时就已同意进入 Poster。
+    sqlx::query("UPDATE poster_batches SET state='queued' WHERE state='preparing'")
         .execute(pool)
         .await?;
     Ok(())
 }
 
-pub async fn begin_acceptance(pool: &SqlitePool, id: &str) -> AppResult<()> {
-    sqlx::query("INSERT INTO poster_batches(id,created_at,state) VALUES(?,?,'preparing')")
-        .bind(id)
-        .bind(now_unix())
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// 在审稿开始时确定本批是否参与接入；关闭时不建台账、不留待确认副本。
+/// 验收开始时建批（仅自动导入开启时）。返回是否参与导入。
 pub async fn begin_review(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<bool> {
-    let enabled = load_settings(pool, data_root).await?.enabled;
-    if enabled {
-        begin_acceptance(pool, id).await?;
+    if !load_settings(pool).await?.auto_import {
+        return Ok(false);
     }
-    Ok(enabled)
+    sqlx::query(
+        "INSERT INTO poster_batches(id,created_at,state,library_root) VALUES(?,?,'preparing',?)",
+    )
+    .bind(id)
+    .bind(now_unix())
+    .bind(fallback_root(data_root).to_string_lossy().as_ref())
+    .execute(pool)
+    .await?;
+    Ok(true)
 }
 
-async fn require_enabled(pool: &SqlitePool, data_root: &Path) -> AppResult<PosterSettings> {
-    let settings = load_settings(pool, data_root).await?;
-    if !settings.enabled {
-        return Err(AppError::InvalidInput(
-            "请先在设置中开启「审稿后询问导入 Poster」".into(),
-        ));
-    }
-    Ok(settings)
-}
-
-pub async fn finish_acceptance(pool: &SqlitePool, id: &str) -> AppResult<()> {
-    sqlx::query("UPDATE poster_batches SET state='awaiting' WHERE id=? AND state='preparing'")
+/// 验收结束：有图就排队，没有图（全部失败或无结果图）就删掉空批次。
+pub async fn finish_review(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poster_images WHERE batch_id=?")
         .bind(id)
-        .execute(pool)
+        .fetch_one(&mut *tx)
         .await?;
+    if count == 0 {
+        sqlx::query("DELETE FROM poster_batches WHERE id=? AND state='preparing'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query("UPDATE poster_batches SET state='queued' WHERE id=? AND state='preparing'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
+}
+
+/// 验收事务内登记一张作品。`wants_live` = 同时开启了实况图，要等配对。
+#[allow(clippy::too_many_arguments)]
+pub async fn track_image(
+    tx: &mut Transaction<'_, Sqlite>,
+    batch: &str,
+    work_id: i64,
+    uid: &str,
+    item_name: &str,
+    (sku, style): (&str, &str),
+    image_path: &Path,
+    wants_live: bool,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO poster_images(batch_id,work_id,uid,item_name,sku,style,image_path,wants_live)
+        VALUES(?,?,?,?,?,?,?,?)",
+    )
+    .bind(batch)
+    .bind(work_id)
+    .bind(uid)
+    .bind(item_name)
+    .bind(sku)
+    .bind(style)
+    .bind(image_path.to_string_lossy().as_ref())
+    .bind(wants_live)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// 实况配对落盘：写回等待它的 Poster 条目。返回是否有批次在等（调用方据此触发导入）。
+pub async fn attach_live_pair(
+    tx: &mut Transaction<'_, Sqlite>,
+    image_path: &str,
+    jpg: &Path,
+    mov: &Path,
+) -> AppResult<bool> {
+    let updated = sqlx::query(
+        "UPDATE poster_images SET live_image=?,live_video=?
+        WHERE image_path=? AND wants_live=1 AND live_image IS NULL",
+    )
+    .bind(jpg.to_string_lossy().as_ref())
+    .bind(mov.to_string_lossy().as_ref())
+    .bind(image_path)
+    .execute(&mut **tx)
+    .await?;
+    Ok(updated.rows_affected() > 0)
 }
 
 #[derive(Debug, Clone, Serialize, Type, FromRow)]
@@ -111,14 +168,18 @@ pub struct PosterBatch {
     pub state: String,
     pub last_error: String,
     pub count: i64,
+    /// 仍在等实况图配对的张数（>0 时批次排队但暂不导入）。
+    pub waiting_live: i64,
 }
 
 pub async fn batches(pool: &SqlitePool) -> AppResult<Vec<PosterBatch>> {
     Ok(sqlx::query_as(
-        "SELECT b.id,b.created_at,b.state,b.last_error,COUNT(i.work_id) AS count
+        "SELECT b.id,b.created_at,b.state,b.last_error,COUNT(i.work_id) AS count,
+            SUM(i.wants_live=1 AND i.live_image IS NULL) AS waiting_live
         FROM poster_batches b JOIN poster_images i ON i.batch_id=b.id
-        GROUP BY b.id ORDER BY CASE b.state WHEN 'awaiting' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
-        b.created_at DESC,b.rowid DESC LIMIT 100",
+        WHERE b.state<>'skipped'
+        GROUP BY b.id ORDER BY CASE b.state WHEN 'failed' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+        b.created_at DESC,b.rowid DESC LIMIT 50",
     )
     .fetch_all(pool)
     .await?)
@@ -134,24 +195,20 @@ pub struct Image {
     pub image_path: String,
     pub product_id: Option<String>,
     pub product_name: Option<String>,
+    pub wants_live: bool,
+    pub live_image: Option<String>,
+    pub live_video: Option<String>,
 }
 
 async fn images(pool: &SqlitePool, batch: &str) -> AppResult<Vec<Image>> {
     Ok(sqlx::query_as(
-        "SELECT i.uid,i.item_name,i.sku,i.style,i.image_path,i.product_id,i.product_name, w.image_path AS canonical_path
+        "SELECT i.uid,i.item_name,i.sku,i.style,i.image_path,i.product_id,i.product_name,
+            i.wants_live,i.live_image,i.live_video, w.image_path AS canonical_path
         FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=? ORDER BY i.work_id",
     )
     .bind(batch)
     .fetch_all(pool)
     .await?)
-}
-
-#[cfg(test)]
-pub fn pending_path(data_root: &Path, batch: &str, uid: &str, ext: &str) -> PathBuf {
-    data_root
-        .join("Poster待确认")
-        .join(batch)
-        .join(format!("{uid}.{ext}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,53 +355,32 @@ fn groups(
     result
 }
 
-pub async fn preview(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<PosterPreview> {
-    let settings = require_enabled(pool, data_root).await?;
+/// 设置页「指定商品」用：本批各款式与可选商品。
+pub async fn preview(pool: &SqlitePool, id: &str) -> AppResult<PosterPreview> {
+    let settings = load_settings(pool).await?;
     let products = client::products(Path::new(&settings.executable)).await?;
     let groups = groups(&images(pool, id).await?, &products, &bindings(pool).await?);
     Ok(PosterPreview { groups, products })
 }
 
-pub async fn confirm(
+/// 校验并保存款式 → 商品绑定，写回本批条目。`choices` 必须覆盖 `groups` 的每一组。
+async fn apply_bindings(
     pool: &SqlitePool,
-    data_root: &Path,
     id: &str,
-    choices: &[PosterChoice],
+    preview: &PosterPreview,
+    choices: &HashMap<&str, &str>,
 ) -> AppResult<()> {
-    let settings = require_enabled(pool, data_root).await?;
-    let root = Path::new(&settings.library_root);
-    if !root.is_absolute() {
-        return Err(AppError::InvalidInput(
-            "Poster 图片永久目录必须是绝对路径".into(),
-        ));
-    }
-    let preview = preview(pool, data_root, id).await?;
-    let selected = choices
-        .iter()
-        .map(|c| (c.key.as_str(), c.product_id.as_str()))
-        .collect::<HashMap<_, _>>();
-    if preview.groups.is_empty()
-        || selected.len() != choices.len()
-        || selected.len() != preview.groups.len()
-    {
-        return Err(AppError::InvalidInput(
-            "请给本批每个款式指定唯一的 Poster 商品".into(),
-        ));
-    }
     let mut saved = bindings(pool).await?;
     let mut targets = Vec::new();
     for group in &preview.groups {
         identity(&group.sku, &group.style).map_err(|e| AppError::InvalidInput(e.into()))?;
-        let chosen = selected
-            .get(group.key.as_str())
-            .copied()
-            .unwrap_or_default();
+        let chosen = choices.get(group.key.as_str()).copied().unwrap_or_default();
         let product = preview
             .products
             .iter()
             .find(|p| p.id == chosen)
             .ok_or_else(|| AppError::InvalidInput("请选择仍有效的 Poster 商品".into()))?;
-        // 有明确明星身份时，首次绑定不可选成另一位已知明星；已确认的 ID 可随商品改名保留。
+        // 有明确明星身份时，不可选成另一位已知明星；已确认的 ID 可随商品改名保留。
         if let Ok(Some(artist)) = identity(&group.sku, &group.style) {
             if ARTISTS.iter().any(|(other, _)| {
                 *other != artist && product.name == format!("{other}日历（2027）")
@@ -364,11 +400,6 @@ pub async fn confirm(
         targets.push((group, product));
     }
     let mut tx = pool.begin().await?;
-    let updated = sqlx::query("UPDATE poster_batches SET state='queued',library_root=?,last_error='' WHERE id=? AND state='awaiting'")
-        .bind(&settings.library_root).bind(id).execute(&mut *tx).await?;
-    if updated.rows_affected() != 1 {
-        return Err(AppError::InvalidInput("本批已处理，请刷新后查看".into()));
-    }
     for (group, product) in targets {
         sqlx::query("UPDATE poster_images SET product_id=?,product_name=? WHERE batch_id=? AND sku=? AND style=?")
             .bind(&product.id).bind(&product.name).bind(id).bind(&group.sku).bind(&group.style).execute(&mut *tx).await?;
@@ -379,39 +410,53 @@ pub async fn confirm(
     Ok(())
 }
 
-pub async fn skip(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
+/// 用户为失败批次指定商品：保存绑定并重新排队（之后同款式自动沿用）。
+pub async fn bind(pool: &SqlitePool, id: &str, choices: &[PosterChoice]) -> AppResult<()> {
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM poster_batches WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    if !matches!(state.as_deref(), Some("failed" | "queued")) {
+        return Err(AppError::InvalidInput("本批已处理，请刷新后查看".into()));
+    }
+    let preview = preview(pool, id).await?;
+    let mut selected = preview
+        .groups
+        .iter()
+        .filter_map(|g| g.product_id.as_deref().map(|p| (g.key.as_str(), p)))
+        .collect::<HashMap<_, _>>();
+    selected.extend(
+        choices
+            .iter()
+            .map(|c| (c.key.as_str(), c.product_id.as_str())),
+    );
+    apply_bindings(pool, id, &preview, &selected).await?;
+    sqlx::query("UPDATE poster_batches SET state='queued',last_error='' WHERE id=? AND state IN ('failed','queued')")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 放弃导入一个失败批次（图片仍在成品目录，只是不进 Poster）。
+pub async fn skip(pool: &SqlitePool, id: &str) -> AppResult<()> {
     let updated =
-        sqlx::query("UPDATE poster_batches SET state='skipped' WHERE id=? AND state='awaiting'")
+        sqlx::query("UPDATE poster_batches SET state='skipped' WHERE id=? AND state='failed'")
             .bind(id)
             .execute(pool)
             .await?;
     if updated.rows_affected() != 1 {
-        return Err(AppError::InvalidInput(
-            "本批已处理，不能取消已确认的导入".into(),
-        ));
+        return Err(AppError::InvalidInput("只有失败的批次可以放弃导入".into()));
     }
-    cleanup_pending(data_root, id).await;
     Ok(())
 }
 
-async fn cleanup_pending(data_root: &Path, id: &str) {
-    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return;
-    }
-    let path = data_root.join("Poster待确认").join(id);
-    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, path=%path.display(), "清理 Poster 待确认副本失败");
-        }
-    }
-}
-
-/// 仅处理已确认的 queued/failed。调用方持共用互斥锁；启动恢复只重试一轮，无后台轮询。
+/// 处理排队与失败批次。调用方持共用互斥锁；关闭自动导入时原样保留，打开后续导。
 pub async fn deliver_pending(pool: &SqlitePool, data_root: &Path) -> AppResult<()> {
     let pending: Vec<String> = sqlx::query_scalar("SELECT id FROM poster_batches WHERE state IN ('queued','failed') ORDER BY created_at,rowid")
         .fetch_all(pool).await?;
     for id in pending {
-        if !load_settings(pool, data_root).await?.enabled {
+        if !load_settings(pool).await?.auto_import {
             break;
         }
         if let Err(error) = deliver_one(pool, data_root, &id).await {
@@ -423,7 +468,69 @@ pub async fn deliver_pending(pool: &SqlitePool, data_root: &Path) -> AppResult<(
     Ok(())
 }
 
+/// 本批是否还在等实况图。转换失败的那张把批次转为失败并写明原因。
+async fn waiting_for_live(pool: &SqlitePool, items: &[Image]) -> AppResult<bool> {
+    let mut waiting = false;
+    for item in items
+        .iter()
+        .filter(|i| i.wants_live && i.live_image.is_none())
+    {
+        let job: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT error FROM live_photo_jobs WHERE image_path=?")
+                .bind(&item.image_path)
+                .fetch_optional(pool)
+                .await?;
+        match job {
+            Some((Some(error),)) => {
+                return Err(AppError::InvalidInput(format!(
+                    "「{}」实况图转换失败：{error}。在设置里重试实况图后会自动导入",
+                    item.item_name
+                )))
+            }
+            Some((None,)) => waiting = true,
+            // 队列里已没有它（例如被手动清掉）：退回只导静态图，不让整批永远卡住。
+            None => tracing::warn!(image=%item.image_path, "实况图队列缺少条目，改为导入静态图"),
+        }
+    }
+    Ok(waiting)
+}
+
+/// 自动匹配商品：已有绑定优先，其次 20 款明星名唯一匹配。匹配不上就报出款式名。
+async fn resolve_products(pool: &SqlitePool, executable: &Path, id: &str) -> AppResult<()> {
+    let products = client::products(executable).await?;
+    let preview = PosterPreview {
+        groups: groups(&images(pool, id).await?, &products, &bindings(pool).await?),
+        products,
+    };
+    let missing = preview
+        .groups
+        .iter()
+        .filter(|g| g.product_id.is_none())
+        .map(|g| {
+            format!(
+                "「{}」{}",
+                if g.style.is_empty() { &g.sku } else { &g.style },
+                g.warning
+            )
+        })
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AppError::InvalidInput(format!(
+            "未匹配到 Poster 商品：{}。在设置里为本批指定商品后自动续导",
+            missing.join("；")
+        )));
+    }
+    let choices = preview
+        .groups
+        .iter()
+        .filter_map(|g| g.product_id.as_deref().map(|p| (g.key.as_str(), p)))
+        .collect::<HashMap<_, _>>();
+    apply_bindings(pool, id, &preview, &choices).await
+}
+
 async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
+    let settings = load_settings(pool).await?;
+    let executable = Path::new(&settings.executable);
     let (root, request_json): (String, Option<String>) =
         sqlx::query_as("SELECT library_root,request_json FROM poster_batches WHERE id=?")
             .bind(id)
@@ -432,16 +539,30 @@ async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult
     let request: client::Request = if let Some(json) = request_json {
         serde_json::from_str(&json)?
     } else {
+        if waiting_for_live(pool, &images(pool, id).await?).await? {
+            sqlx::query("UPDATE poster_batches SET state='queued',last_error='' WHERE id=?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            return Ok(());
+        }
+        resolve_products(pool, executable, id).await?;
         let items = images(pool, id).await?;
         let source_json = settings::get_by_key(pool, "posterSource")
             .await?
             .ok_or_else(|| AppError::Internal("Poster 来源标识未初始化".into()))?;
         let source_id: String = serde_json::from_str(&source_json)?;
         let batch = id.to_string();
+        let root = if root.is_empty() {
+            fallback_root(data_root).to_string_lossy().into_owned()
+        } else {
+            root
+        };
         let request =
             tokio::task::spawn_blocking(move || storage::prepare(&root, &batch, source_id, &items))
                 .await
                 .map_err(|e| AppError::Io(e.to_string()))??;
+        // 请求一经生成就冻结：之后的重试复用同一批路径与哈希，不会因设置变化而改道。
         sqlx::query("UPDATE poster_batches SET request_json=? WHERE id=?")
             .bind(serde_json::to_string(&request)?)
             .bind(id)
@@ -455,16 +576,11 @@ async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult
     tokio::task::spawn_blocking(move || storage::atomic_write(&manifest_path, &bytes))
         .await
         .map_err(|e| AppError::Io(e.to_string()))??;
-    let settings = load_settings(pool, data_root).await?;
-    if !settings.enabled {
-        return Ok(());
-    }
-    let receipt = client::import(Path::new(&settings.executable), &manifest, &request).await?;
+    let receipt = client::import(executable, &manifest, &request).await?;
     sqlx::query("UPDATE poster_batches SET state='done',last_error='',receipt_json=? WHERE id=?")
         .bind(serde_json::to_string(&receipt)?)
         .bind(id)
         .execute(pool)
         .await?;
-    cleanup_pending(data_root, id).await;
     Ok(())
 }

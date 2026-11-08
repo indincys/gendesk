@@ -1,45 +1,40 @@
 ---
 name: v2v-rewrite
-description: Use when GenDesk has queued accepted first-frame images for image-to-video, i.e. the user says 改写待改写队列 / 跑一下视频改写 / v2v rewrite, or asks to turn GenDesk 生图提示词 into 图生视频提示词. Reads GenDesk's handoff work order and writes back rewritten Dreamina video prompts. Does NOT submit to Dreamina.
+description: Use when GenDesk has queued accepted first-frame images for image-to-video, i.e. the user says 改写待改写队列 / 跑一下视频改写 / v2v rewrite, or asks to turn GenDesk 生图提示词 into 图生视频提示词. Reads the queue with `gendesk v2v pending` and writes rewritten Dreamina video prompts back with `gendesk v2v rewrite`. Does NOT submit to Dreamina.
 ---
 
 # GenDesk 图生视频 · 提示词改写
 
-> **v1.1**（2026-07-29）。改了规范就升版，并在同目录 `CHANGELOG.md` 记一条。
+> **v2.0**（2026-11-09）。改了规范就升版，并在同目录 `CHANGELOG.md` 记一条。
 
-你唯一的任务：把 GenDesk 验收通过的**生图**提示词，改写成**图生视频**提示词，写回交接目录。
+你唯一的任务：把 GenDesk 验收通过的**生图**提示词，改写成**图生视频**提示词，经 CLI 写回 GenDesk。
 
 **不要调 `dreamina`。** 提交、轮询、下载、重试、验收全部在 GenDesk 里，它有状态机、
 崩溃恢复和看板。你在这条链上负责的是唯一机器替代不了的那一步。
 
 ## 零输入起步
 
-固定路径（GenDesk 设置页「图生视频 · 交接目录」可改，默认就是这个）：
+只用两条命令（本机命令 `~/.local/bin/gendesk`；GenDesk 没开时它会在后台启动应用）：
 
-```
-~/GenDesk交接/v2v/待改写/index.jsonl      ← 从这里起步，一行一个待改写的组
-~/GenDesk交接/v2v/待改写/<组>/manifest.jsonl
-~/GenDesk交接/v2v/待改写/<组>/thumbs/W123.jpg
-~/GenDesk交接/v2v/待改写/<组>/READY.txt    ← 只处理有它的组目录
-~/GenDesk交接/v2v/已改写/<组>/rewrite.jsonl ← 你写这里
+```bash
+gendesk v2v pending                              # 读队列：按提示词组给出条目与缩略图路径
+gendesk v2v rewrite --file <_草稿里的改写结果.json>  # 写回
 ```
 
 流程：
 
-1. 读 `待改写/index.jsonl`。为空 → 告诉用户队列是空的，结束。
-2. **逐组处理**，一组一个 `rewrite.jsonl`。不要跨组混改 —— 同组分镜最后要剪进同一条成片，
-   运镜语言与时长必须统一，跨组混着改风格会飘。
-3. 每组：`head -n 1` 起逐行读 `manifest.jsonl`（JSONL，可 grep、可分片，不必整包读进上下文），
-   看 `thumbs/` 里对应的缩略图，写出视频提示词。
-4. 写 `已改写/<同名组目录>/rewrite.jsonl`。GenDesk 监听该目录，2 秒防抖后自动收录，
-   条目进「待提交」列。
+1. 跑 `gendesk v2v pending`。`groups` 为空 → 告诉用户队列是空的，结束。`skipped` > 0 表示有条目
+   缩略图丢失无法交给你，如实转告。
+2. **逐组处理**。不要跨组混改 —— 同组分镜最后要剪进同一条成片，运镜语言与时长必须统一，
+   跨组混着改风格会飘。每组的 `guide` 是本组改写说明，先读。
+3. 每条：看 `thumb` 指向的缩略图，写出视频提示词。
+4. 把结果写进当前项目 `_草稿/` 下的一个 JSON 文件，跑 `gendesk v2v rewrite --file <文件>`。
+   返回即已收录，条目进「待提交」列。
 5. 告诉用户：改了几组几条，去 GenDesk 视频流水线页的「待提交」列过目并提交。
-
-组目录名对同一组是**恒定**的，写回时用与工单侧完全一样的目录名。
 
 ## 回写格式
 
-一行一条 JSON：
+文件是 JSON 数组、`{"lines": [...]}` 或每行一个 JSON，每条：
 
 ```json
 {"id":"W123","videoPrompt":"首帧自然延续：…"}
@@ -48,10 +43,10 @@ description: Use when GenDesk has queued accepted first-frame images for image-t
 可选字段 `modelVersion` / `duration` / `videoResolution` —— 只在你对**这一条**有具体判断时给
 （比如动势大给 8 秒）。GenDesk 会尊重它，优先于设置里的全局默认值。不确定就别给。
 
-**`id` 必须原样回传** manifest 里那个 `W…`。不要按文件名匹配：GenDesk 的输出文件名里编号
+**`id` 必须原样回传** pending 里那个 `W…`。不要按文件名匹配：GenDesk 的输出文件名里编号
 已去连字符，`BR140010` 反推不出是 `BR14-0010` 还是 `BR1-40010`，文件名本来就不可逆。
 
-## manifest 字段怎么用
+## pending 字段怎么用
 
 - `thumb` —— **先看图**。提示词描述的是意图，图才是即梦真正会拿到的首帧。
 - `variablePart` —— 剥掉组内公共前后缀后的可变部分（场景 / 构图 / 动势）。这是改写的主要素材。
@@ -179,6 +174,6 @@ description: Use when GenDesk has queued accepted first-frame images for image-t
 ## 不要做的事
 
 - 不要调 `dreamina`（任何子命令）。
-- 不要写 `rewrite.jsonl` 以外的文件，不要改 `manifest.jsonl`，不要动 `待改写/` 下的任何东西。
+- 不要往 `~/GenDesk交接` 写文件，也不要读写 GenDesk 的数据库；进出只经 `gendesk v2v`。
 - 不要跳过看图。只读文字改出来的提示词经常和实际首帧对不上。
-- 一条也别漏：manifest 有几行，`rewrite.jsonl` 就该有几行。漏掉的那条会一直卡在「待改写」列。
+- 一条也别漏：pending 有几条，写回就该有几条。漏掉的那条会一直卡在「待改写」列。

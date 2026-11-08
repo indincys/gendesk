@@ -1,7 +1,7 @@
 import { Tooltip } from "@/components/ui/Tooltip";
 import { type Row, removalRisk } from "@/features/v2v/model";
 import { cn } from "@/lib/utils";
-import { FolderOpen, RefreshCw, Send, Trash2 } from "lucide-react";
+import { RefreshCw, Send, Trash2 } from "lucide-react";
 
 export interface DockHandlers {
   onSubmit: (ids: number[]) => void;
@@ -11,8 +11,6 @@ export interface DockHandlers {
   onResume: (ids: number[]) => void;
   onUnqueue: (ids: number[]) => void;
   onEnterReview: (ids: number[]) => void;
-  onIngest: () => void;
-  onOpenHandoff: () => void;
   onPollNow: () => void;
   onSwitchChannel: (ids: number[]) => void;
   onEditParams: (ids: number[]) => void;
@@ -170,16 +168,9 @@ export function V2vDock({
         </Tooltip>
       )}
       {hasRewrite && (
-        <>
-          <button type="button" className="btn sm pri" disabled={busy} onClick={h.onIngest}>
-            <RefreshCw className="ic12" />
-            收录改写
-          </button>
-          <button type="button" className="btn sm gho" onClick={h.onOpenHandoff}>
-            <FolderOpen className="ic12" />
-            交接目录
-          </button>
-        </>
+        <Tooltip content="在 Agent 里运行 gendesk v2v pending 取待改写清单，改写后用 gendesk v2v rewrite 写回">
+          <span className="fs11 t3">待改写由 Agent 经 CLI 写回</span>
+        </Tooltip>
       )}
       {hasWait && (
         <button type="button" className="btn sm gho" disabled={busy} onClick={h.onPollNow}>

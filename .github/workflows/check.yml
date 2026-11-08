@@ -71,9 +71,10 @@ jobs:
       - name: 覆盖率闸门（纯逻辑 ≥ 85%）
         working-directory: src-tauri
         # IO/glue（命令层、控制通道、外部进程封装）由 tempdir + 生命周期集成测试覆盖，不计行闸门。
+        # 带上 intake_preflight：CLI 端到端测试要调真正的应用二进制，cargo 只在有集成测试时才产出它。
         run: |
           cargo install cargo-llvm-cov --locked
-          cargo llvm-cov --lib \
+          cargo llvm-cov --lib --test intake_preflight \
             --ignore-filename-regex '(commands/|lib\.rs|main\.rs|logging\.rs|state\.rs|secrets\.rs|provider/|db/mod\.rs|db/repo/|control\.rs|live_photo\.rs|poster/client\.rs)' \
             --fail-under-lines 85
       - name: cargo check

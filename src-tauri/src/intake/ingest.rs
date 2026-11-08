@@ -1030,7 +1030,10 @@ mod tests {
         )
         .unwrap();
         let cli = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/gendesk.mjs");
-        // cargo test also builds the actual app binary for tests/intake_preflight.rs.
+        // CLI 预检要调真正的应用二进制（target/<profile>/gendesk）。cargo 只在同一次构建里有
+        // 集成测试时才产出它：整套 `cargo test` 会有；单跑 `--lib` 须加 `--test intake_preflight`
+        // （`--bins` 只编 bin 的单测壳，不产出它；CI 覆盖率闸门即按此跑）。
+        // 缺了就在这里说清楚，别让 CLI 报一个看不出原因的 ENOENT。
         let app_bin = std::env::current_exe()
             .unwrap()
             .parent()
@@ -1038,6 +1041,11 @@ mod tests {
             .parent()
             .unwrap()
             .join(format!("gendesk{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            app_bin.exists(),
+            "缺少应用二进制 {}：单跑 lib 测试时请加 --test intake_preflight",
+            app_bin.display()
+        );
         let root = home.path().join("GenDesk交接");
         std::fs::create_dir_all(&root).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -162,14 +162,45 @@ pub struct ItemSpec {
     pub sku: String,
     /// 风格 / 人物，如 `王一博`。交付时按它 + sku 分子目录。
     pub style: String,
-    /// 参考图：工单目录内的相对路径，如 `refs/王一博-正面.jpg`。**每条必填**。
+    /// 参考图：工单目录内的相对路径（如 `refs/王一博-正面.jpg`），或参考图库引用
+    /// （`{"category":"正面图"}` / `{"libraryId":12}`）。**每条必填**。
     #[serde(rename = "ref", alias = "image", alias = "refImage")]
-    pub ref_path: String,
+    pub ref_path: Option<RefInput>,
     /// 有序多参考图；与 ref 二选一。第一张仍是任务的主商品图。
-    pub refs: Vec<String>,
+    pub refs: Vec<RefInput>,
     /// 条目级参数（覆盖 `defaults`）。
     #[serde(flatten)]
     pub params: ParamsSpec,
+}
+
+/// 条目里的一张参考图：包内文件路径，或参考图库引用（0051）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub enum RefInput {
+    Path(String),
+    Library(crate::ref_library::LibraryRef),
+}
+
+impl TryFrom<serde_json::Value> for RefInput {
+    type Error = String;
+    fn try_from(value: serde_json::Value) -> Result<Self, String> {
+        match value {
+            serde_json::Value::String(path) => Ok(RefInput::Path(path)),
+            serde_json::Value::Object(_) => serde_json::from_value(value)
+                .map(RefInput::Library)
+                .map_err(|e| format!("参考图库引用只认 category/style/product 或 libraryId：{e}")),
+            other => Err(format!("参考图要写路径字符串或图库引用对象，收到：{other}")),
+        }
+    }
+}
+
+/// 条目内一个参考图位置，按 Image 1、Image 2 的顺序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefSlot {
+    /// 包内文件（绝对路径，已确认存在）。
+    File(PathBuf),
+    /// 收录时从参考图库抽取或点名的一张。
+    Library(crate::ref_library::LibrarySlot),
 }
 
 /// 生成参数：比例 / 尺寸 / 输出格式 / 质量，加上恒定的 `n=1`。
@@ -227,8 +258,10 @@ pub struct PlannedItem {
     pub style: String,
     /// `prompts/{name}.txt` 的内容，**逐字符原样**（只裁掉首尾空白）。
     pub prompt_text: String,
-    /// 参考图绝对路径（已确认存在，有序；首图为主商品图）。
+    /// 包内参考图绝对路径（已确认存在，按出现顺序）。不含参考图库引用。
     pub ref_paths: Vec<PathBuf>,
+    /// 全部参考图位置（有序；首位为主商品图），含参考图库引用。
+    pub slots: Vec<RefSlot>,
     /// 本条生效的参数快照（与生成页 `buildParamsJson` 同形）。
     pub params_json: String,
     /// 实际会进 multipart 的字段。
@@ -251,6 +284,18 @@ impl Plan {
             for path in &it.ref_paths {
                 if !out.contains(path) {
                     out.push(path.clone());
+                }
+            }
+        }
+        out
+    }
+    /// 要从参考图库取图的位置：(条目下标, 位置下标, 引用)。
+    pub fn library_slots(&self) -> Vec<(usize, usize, &crate::ref_library::LibrarySlot)> {
+        let mut out = Vec::new();
+        for (i, it) in self.items.iter().enumerate() {
+            for (s, slot) in it.slots.iter().enumerate() {
+                if let RefSlot::Library(spec) = slot {
+                    out.push((i, s, spec));
                 }
             }
         }
@@ -480,16 +525,26 @@ fn plan_with_inputs(
                  缺了就只能靠猜——而从中文名反推 SKU 是静默失败（分错目录不报错）。"
             ));
         }
+        let organization = it
+            .organization
+            .as_ref()
+            .or(spec.organization.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::library::Organization::legacy(sku, style, spec.note.as_deref().unwrap_or(""))
+            });
         // 挂靠不猜：每条必填、且必须真的存在。
-        if !it.ref_path.trim().is_empty() && !it.refs.is_empty() {
+        let blank = |r: &RefInput| matches!(r, RefInput::Path(p) if p.trim().is_empty());
+        let has_single = it.ref_path.as_ref().is_some_and(|r| !blank(r));
+        if has_single && !it.refs.is_empty() {
             return Err(format!("items[{i}]「{name}」的 ref 与 refs 只能填写一种"));
         }
         let raw_refs = if it.refs.is_empty() {
-            vec![it.ref_path.clone()]
+            it.ref_path.iter().cloned().collect::<Vec<_>>()
         } else {
             it.refs.clone()
         };
-        if raw_refs.iter().any(|r| r.trim().is_empty()) {
+        if raw_refs.is_empty() || raw_refs.iter().any(blank) {
             return Err(format!(
                 "items[{i}]「{name}」没写 ref/refs：每个条目都必须点名参考图"
             ));
@@ -498,7 +553,27 @@ fn plan_with_inputs(
             return Err(format!("items[{i}]「{name}」最多支持 16 张参考图"));
         }
         let mut ref_paths = Vec::new();
-        for raw in &raw_refs {
+        let mut slots = Vec::new();
+        for input in &raw_refs {
+            let raw = match input {
+                RefInput::Path(raw) => raw,
+                RefInput::Library(lib) => {
+                    let default_style = if organization.style.is_empty() {
+                        style
+                    } else {
+                        organization.style.as_str()
+                    };
+                    let slot = lib
+                        .resolve(default_style, &organization.product)
+                        .map_err(|e| format!("items[{i}]「{name}」：{e}"))?;
+                    if slot.library_id.is_some() && slots.contains(&RefSlot::Library(slot.clone()))
+                    {
+                        return Err(format!("items[{i}]「{name}」重复引用同一张图"));
+                    }
+                    slots.push(RefSlot::Library(slot));
+                    continue;
+                }
+            };
             let packaged_path = safe_join(dir, raw)?;
             let path = match external {
                 Some(input) => input
@@ -517,6 +592,7 @@ fn plan_with_inputs(
             if ref_paths.contains(&path) {
                 return Err(format!("items[{i}]「{name}」重复引用同一张图"));
             }
+            slots.push(RefSlot::File(path.clone()));
             ref_paths.push(path);
         }
         // 正文：一条一文件，文件名 = 条目名。
@@ -537,14 +613,6 @@ fn plan_with_inputs(
         }
         let (mut params_json, wire_json) = build_params(&it.params.overlay(&spec.defaults))
             .map_err(|e| format!("items[{i}]「{name}」的参数有问题：{e}"))?;
-        let organization = it
-            .organization
-            .as_ref()
-            .or(spec.organization.as_ref())
-            .cloned()
-            .unwrap_or_else(|| {
-                crate::library::Organization::legacy(sku, style, spec.note.as_deref().unwrap_or(""))
-            });
         organization.validate().map_err(|e| e.to_string())?;
         let mut params: serde_json::Value =
             serde_json::from_str(&params_json).map_err(|e| e.to_string())?;
@@ -556,6 +624,7 @@ fn plan_with_inputs(
             style: style.to_string(),
             prompt_text,
             ref_paths,
+            slots,
             params_json,
             wire_json,
         });
@@ -684,6 +753,42 @@ mod tests {
         {"name":"W-王一博-55-侧面","sku":"55","style":"王一博","ref":"refs/侧面.jpg",
          "ratio":"3:4","size":"1088x1440"}
       ]}"#;
+
+    #[test]
+    fn library_references_take_the_item_style_and_reject_unknown_fields() {
+        let order = |refs: &str| {
+            format!(
+                r#"{{"version":1,"organization":{{"product":"","style":"王一博","requirement":"场景","source":"t"}},"items":[{{"name":"A","refs":{refs}}}]}}"#
+            )
+        };
+        let d = make_dir(
+            &order(r#"[{"category":"正面图"},"refs/a.jpg"]"#),
+            &[("A", "正文")],
+            &["a.jpg"],
+        );
+        let p = plan(d.path(), "lib").unwrap();
+        assert_eq!(p.items[0].ref_paths.len(), 1);
+        assert!(
+            matches!(&p.items[0].slots[0], RefSlot::Library(s) if s.style == "王一博" && s.category == "正面图")
+        );
+        assert!(matches!(&p.items[0].slots[1], RefSlot::File(_)));
+        assert_eq!(p.library_slots().len(), 1);
+
+        let bad = make_dir(&order(r#"[{"categroy":"正面图"}]"#), &[("A", "正文")], &[]);
+        assert!(plan(bad.path(), "x").unwrap_err().contains("category"));
+        let twice = make_dir(
+            &order(r#"[{"libraryId":3},{"libraryId":3}]"#),
+            &[("A", "正文")],
+            &[],
+        );
+        assert!(plan(twice.path(), "x").unwrap_err().contains("重复"));
+        let empty = make_dir(
+            r#"{"version":1,"items":[{"name":"A","sku":"5","style":"","ref":{"category":"正面图"}}]}"#,
+            &[("A", "正文")],
+            &[],
+        );
+        assert!(plan(empty.path(), "x").is_err());
+    }
 
     #[test]
     fn explicit_ownership_survives_parameter_snapshot_without_becoming_remote_fields() {

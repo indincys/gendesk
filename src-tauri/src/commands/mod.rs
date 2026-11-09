@@ -10,6 +10,7 @@ pub mod intake;
 pub mod misc;
 pub mod poster;
 pub mod prompts;
+pub mod ref_library;
 pub mod refs;
 pub mod review;
 pub mod settings;

@@ -5490,3 +5490,114 @@ a:hover {
     opacity: 0;
   }
 }
+
+/* ==================== 参考图库（0051） ====================
+ * 左栏款式、右侧分类筛选 + 图片网格。卡片固定方形缩略，状态徽章说明能不能被抽到。 */
+.rlwb {
+  display: flex;
+  overflow: hidden;
+}
+.rlside {
+  width: 220px;
+  flex: none;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rlhint {
+  padding: 10px 8px;
+  line-height: 1.7;
+}
+.rlstyle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--t1);
+}
+.rlstyle:hover {
+  background: var(--inset);
+}
+.rlstyle.on {
+  background: var(--accbg);
+}
+.rledit {
+  opacity: 0;
+}
+.rlstyle:hover .rledit,
+.rlstyle.on .rledit {
+  opacity: 1;
+}
+.rlmain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rlnum {
+  width: 64px;
+}
+.rlbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accbg);
+  flex: none;
+}
+.rlgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+  padding: 16px 18px 40px;
+}
+.rlcard {
+  cursor: pointer;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.rlimg {
+  aspect-ratio: 1;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--sub);
+  transition: box-shadow 0.15s;
+}
+.rlimg .thumbimg {
+  height: 100%;
+  object-fit: contain;
+}
+.rlcard:hover .rlimg {
+  box-shadow: var(--sh2);
+}
+.rlcard.sel .rlimg {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--acc);
+}
+.rlcard.off .rlimg {
+  opacity: 0.45;
+}
+.rlmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rlform {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: center;
+  gap: 10px 12px;
+}
+.rlcats {
+  display: grid;
+  grid-template-columns: 1fr 90px 50px 56px;
+  align-items: center;
+  gap: 8px 10px;
+}

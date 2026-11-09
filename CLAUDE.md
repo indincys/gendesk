@@ -65,10 +65,11 @@ cd src-tauri && cargo test --lib refs_insert_list -- --exact --nocapture
 | `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                          |
 | `engine/`    | 任务引擎：`dispatcher`(单循环 + per-Key Semaphore) · `status`(7 态机) · `classify`(错误六类) · `progress`(伪进度) · `recovery` · `events`(EventSink 抽象，故引擎可脱离 Tauri 测试)。 |
 | `provider/`  | 生图 Provider 抽象；唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`(元数据/C2PA 剥离)。                                                                      |
-| `control.rs` | Agent CLI 控制通道（协议 2）：`hello` · `intake.submit/confirm/retry/status` · `overview` · `v2v.pending/rewrite`。外部唯一入口。 |
+| `control.rs` | Agent CLI 控制通道（协议 2）：`hello` · `intake.submit/confirm/retry/status` · `overview` · `v2v.pending/rewrite` · `library.*`（参考图库）。外部唯一入口。 |
 | `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `rewrite`(待改写队列与写回) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。 |
 | `intake/`    | 工单收录：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `preflight`(只读预检，供 `validate-intake`) · `ingest`(收录 + 去重 + 移档 + 检查点恢复)。 |
 | `library.rs` | 作品目录规则（产品/款式/需求）；`library/maintenance` 是显式离线整理命令。 |
+| `ref_library.rs` | 参考图库（0051）：款式 × 分类存图、按分类冷却的随机抽图（`choose`）、收录时抽图记账（`draw_for_job`）。 |
 | `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
 | `live_photo.rs` | 实况图队列：调用内置 `gendesk-live`，配对完成回填 Poster 批次。 |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
@@ -196,6 +197,8 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 **失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
 会让人点重试拿到第二份提示词）· 投单 skill 装在用户级 `~/.claude/skills/`（仓库内
 `.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
+
+**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。
 
 **作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 

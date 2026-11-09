@@ -228,7 +228,7 @@ fn short_name(path: &str) -> String {
         .to_string()
 }
 
-fn emit_progress(
+pub(crate) fn emit_progress(
     app: &tauri::AppHandle,
     done: i64,
     total: i64,

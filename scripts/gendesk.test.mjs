@@ -17,7 +17,7 @@ const png = await fs.readFile(new URL("../src-tauri/icons/32x32.png", import.met
  * GenDesk control channel. Real Rust ingestion is covered by cargo tests; this file
  * checks the client's packaging, protocol and exit codes.
  */
-async function fixture(t, { online = true, hold = false } = {}) {
+async function fixture(t, { online = true, hold = false, features = ["reference-library"] } = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gendesk-cli-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const root = path.join(home, "GenDesk交接");
@@ -58,7 +58,7 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
   const pending = path.join(root, "生图", "收件");
   const consumed = path.join(root, "生图", "_已收录");
   const handlers = {
-    hello: () => ({ protocol: 2, root, taskThreshold: 100 }),
+    hello: () => ({ protocol: 2, root, taskThreshold: 100, features }),
     "intake.status": ({ jobId }) => ({ job: jobs.get(jobId) ?? null }),
     "intake.submit": async ({ dir }) => {
       const order = JSON.parse(await fs.readFile(path.join(pending, dir, "工单.json"), "utf8"));
@@ -71,12 +71,78 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
         message: "",
       };
       jobs.set(order.jobId, job);
+      const libraryRefs = order.items.flatMap((item) =>
+        (item.refs ?? [item.ref])
+          .map((ref, slot) => ({ item: item.name, slot: slot + 1, ref }))
+          .filter((x) => typeof x.ref === "object"),
+      );
       if (!hold) {
         await fs.mkdir(consumed, { recursive: true });
         await fs.rename(path.join(pending, dir), path.join(consumed, `${dir}-1700000000`));
       }
-      return { job };
+      if (hold || !libraryRefs.length) return { job };
+      return {
+        job,
+        libraryPicks: libraryRefs.map((x, i) => ({
+          itemName: x.item,
+          slot: x.slot,
+          fallback: false,
+          image: {
+            id: 100 + i,
+            style: "王一博",
+            category: x.ref.category,
+            name: "图",
+            filePath: "/库/图.png",
+          },
+        })),
+      };
     },
+    "library.check": ({ slots }) => ({
+      slots: slots.map((s) => ({
+        reference: `图库 ${s.style}/${s.category}`,
+        ok: s.category !== "礼盒图",
+        poolSize: s.category === "礼盒图" ? 0 : 5,
+        freshCount: 3,
+        message: s.category === "礼盒图" ? "没有启用的图片" : "5 张候选",
+      })),
+    }),
+    "library.import": ({ paths }) => ({
+      imported: paths.map((p, i) => ({
+        id: i + 1,
+        style: "王一博",
+        category: "正面图",
+        name: path.basename(p),
+        filePath: p,
+        thumbPath: p,
+        enabled: true,
+        useCount: 0,
+      })),
+      restored: [],
+      duplicates: [],
+      failed: [],
+    }),
+    "library.pick": ({ count, markUsed }) => ({
+      style: "王一博",
+      category: "正面图",
+      poolSize: 4,
+      freshCount: 4,
+      markedUsed: markUsed,
+      message: "全部来自冷却期外的图",
+      picks: Array.from({ length: count }, (_, i) => ({
+        tier: "fresh",
+        image: {
+          id: i + 1,
+          style: "王一博",
+          category: "正面图",
+          name: "图",
+          filePath: "/库/图.png",
+          thumbPath: "/t",
+          enabled: true,
+          useCount: 0,
+        },
+      })),
+    }),
+    "library.update": ({ ids }) => ({ changed: ids.length }),
     "intake.confirm": ({ jobId }) => {
       const job = { ...jobs.get(jobId), status: "done" };
       jobs.set(jobId, job);
@@ -339,7 +405,8 @@ test("the canonical documentation manifest is accepted by the current CLI", asyn
       const prompt = path.join(f.input, item.promptFile);
       await fs.mkdir(path.dirname(prompt), { recursive: true });
       await fs.writeFile(prompt, "Image 1 为产品，Image 2 为环境。保留产品结构。\n");
-      for (const input of item.refs ?? [item.ref]) {
+      // Library references ({"category": …}) have no local file to prepare.
+      for (const input of (item.refs ?? [item.ref]).filter((r) => typeof r === "string")) {
         const image = path.join(f.input, input);
         await fs.mkdir(path.dirname(image), { recursive: true });
         await fs.writeFile(image, Buffer.concat([png, Buffer.from(input)]));
@@ -426,4 +493,137 @@ test("installer refuses mismatched release versions and preserves the previous c
   });
   assert.equal(await fs.readFile(installed, "utf8"), "previous CLI");
   assert.deepEqual(await fs.readdir(binDir), ["gendesk"]);
+});
+
+test("manifest library references pass through, are checked by validate and echoed by submit", async (t) => {
+  const f = await fixture(t);
+  const manifest = path.join(f.input, "图库清单.json");
+  const spec = {
+    version: 1,
+    organization: { product: "", style: "王一博", requirement: "场景图", source: "CLI" },
+    items: [
+      {
+        name: "场景一",
+        promptFile: "桌面场景.txt",
+        refs: [{ category: "正面图" }, "商品实拍.png", { libraryId: 7 }],
+      },
+    ],
+  };
+  await fs.writeFile(manifest, JSON.stringify(spec));
+  // The validate-intake double reports no librarySlots, so only the structure is checked here.
+  const validated = await f.run("validate", "--manifest", manifest);
+  assert.equal(validated.code, 0, validated.data.message);
+  const submitted = await f.run("submit", "--manifest", manifest);
+  assert.equal(submitted.code, 0, submitted.data.message);
+  assert.deepEqual(
+    submitted.data.libraryPicks.map((p) => [p.item, p.slot, p.imageId]),
+    [
+      ["场景一", 1, 100],
+      ["场景一", 3, 101],
+    ],
+  );
+  const [archived] = await fs.readdir(f.consumed);
+  const order = JSON.parse(await fs.readFile(path.join(f.consumed, archived, "工单.json"), "utf8"));
+  assert.deepEqual(order.items[0].refs[0], { category: "正面图" });
+  assert.match(order.items[0].refs[1], /^refs\/[a-f0-9]{64}\.png$/);
+  assert.deepEqual(order.items[0].refs[2], { libraryId: 7 });
+  // Same manifest, same jobId: no second draw.
+  const again = await f.run("submit", "--manifest", manifest);
+  assert.equal(again.data.jobId, submitted.data.jobId);
+  assert.equal(again.data.reused, true);
+
+  for (const bad of [
+    [{ categroy: "正面图" }],
+    [{ libraryId: 7, category: "正面图" }],
+    [{ libraryId: 7 }, { libraryId: 7 }],
+    [{ libraryId: 0 }],
+  ]) {
+    spec.items[0].refs = bad;
+    await fs.writeFile(manifest, JSON.stringify(spec));
+    assert.equal((await f.run("validate", "--manifest", manifest)).code, 2, JSON.stringify(bad));
+  }
+});
+
+test("validate fails when the running app reports an empty library category", async (t) => {
+  const f = await fixture(t);
+  await fs.writeFile(
+    f.mock,
+    `#!/usr/bin/env node
+import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({status:"validated",validation:"full",protocolVersion:1,
+  taskCount:input.order.items.length,refCount:0,
+  librarySlots:[{item:"甲",slot:1,reference:"图库 王一博/礼盒图",spec:{style:"王一博",product:"",category:"礼盒图"}}]}));
+`,
+  );
+  const manifest = path.join(f.input, "礼盒清单.json");
+  await fs.writeFile(
+    manifest,
+    JSON.stringify({
+      version: 1,
+      organization: { product: "", style: "王一博", requirement: "礼盒", source: "CLI" },
+      items: [{ name: "甲", promptFile: "桌面场景.txt", ref: { category: "礼盒图" } }],
+    }),
+  );
+  const result = await f.run("validate", "--manifest", manifest);
+  assert.equal(result.code, 2);
+  assert.match(result.data.message, /礼盒图/);
+  assert.ok(commands(f).includes("library.check"));
+});
+
+test("library commands forward to the app and refuse an app without the feature", async (t) => {
+  const f = await fixture(t);
+  const folder = path.join(f.input, "王一博正面");
+  await fs.mkdir(folder);
+  await fs.writeFile(path.join(folder, "b.png"), png);
+  await fs.writeFile(path.join(folder, "a.jpg"), png);
+  await fs.writeFile(path.join(folder, "说明.txt"), "不是图片");
+  const imported = await f.run(
+    "library",
+    "import",
+    "--style",
+    "王一博",
+    "--category",
+    "正面图",
+    "--dir",
+    folder,
+  );
+  assert.equal(imported.code, 0, imported.data.message);
+  assert.equal(imported.data.imported, 2);
+  const importCall = f.calls.find((c) => c.cmd === "library.import");
+  assert.deepEqual(
+    importCall.args.paths.map((p) => path.basename(p)),
+    ["a.jpg", "b.png"],
+  );
+  assert.equal(importCall.args.style, "王一博");
+
+  const picked = await f.run(
+    "library",
+    "pick",
+    "--style",
+    "王一博",
+    "--category",
+    "正面图",
+    "--count",
+    "3",
+  );
+  assert.equal(picked.code, 0);
+  assert.equal(picked.data.picks.length, 3);
+  assert.equal(picked.data.markedUsed, false);
+  const updated = await f.run("library", "update", "--id", "3", "--id", "4", "--disable");
+  assert.deepEqual(f.calls.at(-1).args, { ids: [3, 4], enabled: false });
+  assert.equal(updated.data.changed, 2);
+  assert.equal((await f.run("library", "update", "--id", "3")).code, 2);
+  assert.equal(
+    (await f.run("library", "pick", "--style", "王一博", "--category", "正面图", "--count", "0"))
+      .code,
+    2,
+  );
+  assert.equal((await f.run("library", "overview", "--dir", folder)).code, 2);
+  assert.equal((await f.run("library", "nope")).code, 2);
+
+  const old = await fixture(t, { features: [] });
+  const refused = await old.run("library", "overview");
+  assert.equal(refused.code, 8);
+  assert.match(refused.data.message, /reference-library/);
 });

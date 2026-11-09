@@ -34,6 +34,20 @@ gendesk overview             任务各态数量与视频待办
 gendesk v2v pending          待改写的图生视频条目（含缩略图路径与改写说明）
 gendesk v2v rewrite --file <改写结果.json>
 
+参考图库（按款式、分类长期保存参考图，工单随机抽图并跳过冷却期内用过的图）：
+gendesk library overview                         款式、分类、各类张数与可用张数
+gendesk library images --style <款式> [--category <分类>] [--include-removed]
+gendesk library import --style <款式> --category <分类> [--dir <文件夹>] [图片…]
+gendesk library pick --style <款式> --category <分类> [--count 3] [--mark-used]
+gendesk library add-style --name <款式> [--product <产品>]
+gendesk library add-category --name <分类> [--cooldown 7]
+gendesk library set-category --name <分类> [--cooldown 0] [--rename <新名>]
+gendesk library update --id 12 [--id 13] [--category <分类>] [--enable|--disable] [--remove|--restore]
+gendesk library mark-used --id 12 [--id 13]     在 GenDesk 以外用过这些图时手动记一次
+gendesk library usage --job-id <jobId> | --id 12
+款式写 --product 区分同名款式。清单 ref/refs 可写图库引用，收录时由应用抽图并记账：
+  {"category":"正面图"}（款式取条目 organization.style）· {"category":"礼盒图","style":"王一博"} · {"libraryId":12}
+
 单条参数：--name --sku --style --product --requirement --source --note --purpose i2v --skill
           --ratio --size --format --quality（默认 high）--job-id
 每个正文文件视为一条提示词；多条用 --manifest 显式配对。
@@ -153,6 +167,26 @@ function canonical(value) {
     );
   }
   return value;
+}
+
+/** 清单里的参考图库引用：点名 libraryId，或按 category（可加 style/product）随机抽。 */
+function libraryRef(value, label) {
+  knownKeys(value, ["libraryId", "category", "style", "product"], `${label} 图库引用`);
+  if (value.libraryId !== undefined) {
+    check(
+      Number.isInteger(value.libraryId) && value.libraryId > 0,
+      `${label}.libraryId 必须是正整数`,
+    );
+    check(
+      Object.keys(value).length === 1,
+      `${label} 写了 libraryId 就不要再写 category/style/product`,
+    );
+    return { libraryId: value.libraryId };
+  }
+  const out = { category: requiredText(value.category, `${label}.category`) };
+  for (const key of ["style", "product"])
+    if (value[key] !== undefined) out[key] = requiredText(value[key], `${label}.${key}`);
+  return out;
 }
 
 const SINGLE_OPTIONS = [
@@ -284,6 +318,15 @@ async function prepare(opts) {
     );
     const orderedRefs = [];
     for (const input of inputs) {
+      if (input && typeof input === "object" && !Array.isArray(input)) {
+        orderedRefs.push(libraryRef(input, `${label}.refs`));
+        check(
+          input.libraryId === undefined ||
+            orderedRefs.filter((r) => r.libraryId === input.libraryId).length === 1,
+          `${label} 重复引用同一张图`,
+        );
+        continue;
+      }
       const source = await fs.realpath(await readableFile(input, base, `${label}.refs`));
       if (!refs.has(source)) {
         const hash = await digestFile(source);
@@ -323,7 +366,10 @@ async function prepare(opts) {
   order.jobId = safeName(opts["job-id"] ?? spec.jobId ?? `cli-${hash.slice(0, 32)}`, "jobId");
   check(!order.jobId.startsWith("_"), "jobId 不能以下划线开头（GenDesk 会跳过内部目录）");
   const distinctRefs = new Map([...refs.values()].map((ref) => [ref.relative, ref]));
-  return { order, files, refs: [...distinctRefs.values()], hash };
+  const librarySlots = items
+    .flatMap((item) => item.refs ?? [item.ref])
+    .filter((ref) => typeof ref === "object").length;
+  return { order, files, refs: [...distinctRefs.values()], hash, librarySlots };
 }
 
 // ---------------------------------------------------------------- 连接
@@ -477,6 +523,23 @@ async function nativePreflight(conn, prepared) {
 
 const STATUS = { done: "ingested", running: "ingesting" };
 
+/** 应用回执里的图库抽图结果，压成 Agent 好读的形状。 */
+function libraryPicks(reply) {
+  if (!Array.isArray(reply?.libraryPicks)) return {};
+  return {
+    libraryPicks: reply.libraryPicks.map((p) => ({
+      item: p.itemName,
+      slot: p.slot,
+      imageId: p.image.id,
+      style: p.image.style,
+      category: p.image.category,
+      name: p.image.name,
+      filePath: p.image.filePath,
+      fallback: p.fallback,
+    })),
+  };
+}
+
 function jobResult(jobId, job, extra = {}) {
   if (!job) return { jobId, status: "not_found", ...extra };
   const status = STATUS[job.status] ?? job.status;
@@ -558,8 +621,16 @@ async function writePackage(root, prepared) {
   return dir;
 }
 
+function requireFeature(hello, feature) {
+  check(
+    Array.isArray(hello?.features) && hello.features.includes(feature),
+    `当前运行的 GenDesk 不支持 ${feature}（参考图库）。请更新并重启 GenDesk`,
+    8,
+  );
+}
+
 async function submit(prepared) {
-  const { conn, launched } = await connect({ launch: true });
+  const { conn, hello, launched } = await connect({ launch: true });
   const { order, hash } = prepared;
   const meta = { taskCount: order.items.length, refCount: prepared.refs.length };
   const packages = await packagesOf(conn.root, order.jobId);
@@ -568,10 +639,12 @@ async function submit(prepared) {
       await sameContent(dir, hash),
       `jobId 已存在且内容不同或不是 CLI 工单：${order.jobId}。请核对，不会覆盖或重投`,
     );
-  const known = (await rpc(conn, "intake.status", { jobId: order.jobId })).job;
+  if (prepared.librarySlots > 0) requireFeature(hello, "reference-library");
+  const knownReply = await rpc(conn, "intake.status", { jobId: order.jobId });
+  const known = knownReply.job;
   const pending = path.join(pendingDir(conn.root), order.jobId);
   if (known && !(await exists(pending)))
-    return jobResult(order.jobId, known, { ...meta, reused: true });
+    return jobResult(order.jobId, known, { ...meta, reused: true, ...libraryPicks(knownReply) });
   if (await exists(pending)) {
     check(
       await exists(path.join(pending, "READY.txt")),
@@ -583,12 +656,233 @@ async function submit(prepared) {
   }
   const reply = await rpc(conn, "intake.submit", { dir: order.jobId });
   // null = the directory was already ingested by a concurrent call; read the ledger instead.
-  const job = reply.job ?? (await rpc(conn, "intake.status", { jobId: order.jobId })).job;
-  return jobResult(order.jobId, job, {
+  const final = reply.job ? reply : await rpc(conn, "intake.status", { jobId: order.jobId });
+  return jobResult(order.jobId, final.job, {
     ...meta,
     reused: packages.length > 0,
     ...(launched ? { launched: true } : {}),
+    ...libraryPicks(final),
   });
+}
+
+// ---------------------------------------------------------------- 参考图库
+
+/** validate 时核对图库引用能否抽到图；应用没开就只做结构检查，不启动它。 */
+async function checkLibrary(conn, slots) {
+  if (!slots.length) return null;
+  let hello;
+  try {
+    hello = conn ? await rpc(conn, "hello") : null;
+  } catch (e) {
+    if (!e.offline) throw e;
+  }
+  if (!hello)
+    return {
+      checked: false,
+      slots: slots.length,
+      message: "GenDesk 未运行，图库引用只做了写法检查；submit 时由应用核对并抽图",
+    };
+  requireFeature(hello, "reference-library");
+  const reply = await rpc(conn, "library.check", { slots: slots.map((s) => s.spec) });
+  const checks = slots.map((slot, i) => ({ item: slot.item, slot: slot.slot, ...reply.slots[i] }));
+  const bad = checks.filter((c) => !c.ok);
+  check(
+    !bad.length,
+    `参考图库引用抽不到图：${bad.map((c) => `${c.item} 第${c.slot}张 ${c.reference}：${c.message}`).join("；")}`,
+  );
+  return { checked: true, slots: checks };
+}
+
+async function imageFiles(opts, positional) {
+  const files = positional.map((value) => filePath(value));
+  if (opts.dir !== undefined) {
+    const dir = filePath(requiredText(opts.dir, "--dir"));
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((e) => {
+      throw new CliError(`无法读取文件夹 ${dir}：${e.message}`);
+    });
+    files.push(
+      ...entries
+        .filter(
+          (e) => e.isFile() && /\.(jpe?g|png|webp|bmp)$/i.test(e.name) && !e.name.startsWith("."),
+        )
+        .map((e) => path.join(dir, e.name))
+        .sort((a, b) => a.localeCompare(b, "zh-Hans-CN", { numeric: true })),
+    );
+  }
+  check(files.length > 0, "没有要导入的图片：在命令后列出图片，或用 --dir 指定文件夹");
+  for (const file of files) {
+    const stat = await fs.stat(file).catch(() => null);
+    check(stat?.isFile() && stat.size > 0, `不是非空文件：${file}`);
+  }
+  return files;
+}
+
+function imageIds(opts) {
+  const ids = (opts.id ?? []).map((value) => Number(value));
+  check(ids.length > 0, "用 --id 给图片编号，可重复");
+  for (const id of ids) check(Number.isInteger(id) && id > 0, `图片编号不对：${id}`);
+  return ids;
+}
+
+/** 图库图片压成 Agent 好读的形状。 */
+function brief(image) {
+  return {
+    id: image.id,
+    style: image.style,
+    ...(image.product ? { product: image.product } : {}),
+    category: image.category,
+    name: image.name,
+    filePath: image.filePath,
+    thumbPath: image.thumbPath,
+    enabled: image.enabled,
+    ...(image.removed ? { removed: true } : {}),
+    useCount: image.useCount,
+    lastUsedAt: image.lastUsedAt ? new Date(image.lastUsedAt * 1000).toISOString() : null,
+    coolingUntil: image.coolingUntil ? new Date(image.coolingUntil * 1000).toISOString() : null,
+  };
+}
+
+const LIBRARY_OPTIONS = {
+  overview: [],
+  images: ["style", "product", "category", "include-removed"],
+  import: ["style", "product", "category", "dir"],
+  pick: ["style", "product", "category", "count", "mark-used"],
+  "add-style": ["name", "product", "note"],
+  "add-category": ["name", "cooldown"],
+  "set-category": ["name", "cooldown", "rename"],
+  update: ["id", "category", "enable", "disable", "remove", "restore", "note"],
+  "mark-used": ["id"],
+  usage: ["job-id", "id"],
+};
+
+function cooldown(value) {
+  if (value === undefined) return undefined;
+  const days = Number(value);
+  check(Number.isInteger(days) && days >= 0 && days <= 365, "--cooldown 要是 0～365 的整数天");
+  return days;
+}
+
+async function library(sub, positional, opts) {
+  check(sub in LIBRARY_OPTIONS, `library 只支持 ${Object.keys(LIBRARY_OPTIONS).join(" / ")}`);
+  for (const key of Object.keys(opts))
+    check(LIBRARY_OPTIONS[sub].includes(key), `library ${sub} 不支持 --${key}`);
+  check(sub === "import" || positional.length === 0, `library ${sub} 不接受位置参数`);
+  const { conn, hello } = await connect({ launch: true });
+  requireFeature(hello, "reference-library");
+  const call = (cmd, args = {}) => rpc(conn, `library.${cmd}`, args);
+  const where = { style: opts.style, product: opts.product, category: opts.category };
+  switch (sub) {
+    case "overview": {
+      const data = await call("overview");
+      const names = new Map(data.categories.map((c) => [c.id, c.name]));
+      return {
+        status: "ok",
+        categories: data.categories.map((c) => ({
+          name: c.name,
+          cooldownDays: c.cooldownDays,
+          images: c.imageCount,
+        })),
+        styles: data.styles.map((s) => ({
+          name: s.name,
+          ...(s.product ? { product: s.product } : {}),
+          images: s.total,
+          available: s.available,
+          byCategory: Object.fromEntries(
+            s.byCategory.map((c) => [
+              names.get(c.categoryId),
+              { total: c.total, available: c.available },
+            ]),
+          ),
+        })),
+      };
+    }
+    case "images": {
+      const data = await call("images", {
+        ...where,
+        includeRemoved: opts["include-removed"] === true,
+      });
+      return { status: "ok", count: data.images.length, images: data.images.map(brief) };
+    }
+    case "import": {
+      requiredText(opts.style, "--style");
+      requiredText(opts.category, "--category");
+      const paths = await imageFiles(opts, positional);
+      const report = await call("import", { ...where, paths });
+      return {
+        status: report.failed.length ? "partial" : "ok",
+        imported: report.imported.length,
+        restored: report.restored.length,
+        duplicates: report.duplicates,
+        failed: report.failed,
+        images: [...report.imported, ...report.restored].map(brief),
+      };
+    }
+    case "pick": {
+      requiredText(opts.style, "--style");
+      requiredText(opts.category, "--category");
+      const count = opts.count === undefined ? 1 : Number(opts.count);
+      check(Number.isInteger(count) && count > 0 && count <= 64, "--count 要是 1～64 的整数");
+      const data = await call("pick", { ...where, count, markUsed: opts["mark-used"] === true });
+      return {
+        status: "ok",
+        style: data.style,
+        category: data.category,
+        poolSize: data.poolSize,
+        freshCount: data.freshCount,
+        markedUsed: data.markedUsed,
+        message: data.markedUsed
+          ? data.message
+          : `${data.message}；仅预览，未记为使用。要在清单里用这几张，写 {"libraryId": 编号}，收录时记账`,
+        picks: data.picks.map((p) => ({ tier: p.tier, ...brief(p.image) })),
+      };
+    }
+    case "add-style":
+      return {
+        status: "ok",
+        ...(await call("style.add", {
+          name: requiredText(opts.name, "--name"),
+          product: opts.product ?? "",
+          note: opts.note ?? "",
+        })),
+      };
+    case "add-category":
+    case "set-category": {
+      const args = {
+        name: requiredText(opts.name, "--name"),
+        cooldownDays: cooldown(opts.cooldown),
+      };
+      if (opts.rename !== undefined) args.rename = requiredText(opts.rename, "--rename");
+      return {
+        status: "ok",
+        ...(await call(sub === "add-category" ? "category.add" : "category.set", args)),
+      };
+    }
+    case "update": {
+      check(!(opts.enable && opts.disable), "--enable 与 --disable 只能选一个");
+      check(!(opts.remove && opts.restore), "--remove 与 --restore 只能选一个");
+      const args = { ids: imageIds(opts) };
+      if (opts.category !== undefined) args.category = requiredText(opts.category, "--category");
+      if (opts.enable || opts.disable) args.enabled = opts.enable === true;
+      if (opts.remove || opts.restore) args.removed = opts.remove === true;
+      if (opts.note !== undefined) args.note = opts.note;
+      check(
+        Object.keys(args).length > 1,
+        "没有要改的内容：--category / --enable / --disable / --remove / --restore / --note",
+      );
+      return { status: "ok", ...(await call("update", args)) };
+    }
+    case "mark-used":
+      return { status: "ok", ...(await call("mark-used", { ids: imageIds(opts) })) };
+    case "usage": {
+      if (opts["job-id"] !== undefined) {
+        check(opts.id === undefined, "--job-id 与 --id 只能选一个");
+        const data = await call("usage", { jobId: requiredText(opts["job-id"], "--job-id") });
+        return { status: "ok", ...libraryPicks({ libraryPicks: data.picks }) };
+      }
+      const [id] = imageIds(opts);
+      return { status: "ok", ...(await call("usage", { id })) };
+    }
+  }
 }
 
 // ---------------------------------------------------------------- 视频改写
@@ -625,6 +919,27 @@ async function rewriteLines(file) {
 
 // ---------------------------------------------------------------- 入口
 
+/** library 子命令用到的全部选项（具体子命令能用哪些见 LIBRARY_OPTIONS）。 */
+const LIBRARY_FLAGS = {
+  style: { type: "string" },
+  product: { type: "string" },
+  category: { type: "string" },
+  dir: { type: "string" },
+  count: { type: "string" },
+  name: { type: "string" },
+  note: { type: "string" },
+  cooldown: { type: "string" },
+  rename: { type: "string" },
+  id: { type: "string", multiple: true },
+  "job-id": { type: "string" },
+  "mark-used": { type: "boolean" },
+  "include-removed": { type: "boolean" },
+  enable: { type: "boolean" },
+  disable: { type: "boolean" },
+  remove: { type: "boolean" },
+  restore: { type: "boolean" },
+};
+
 const COMMANDS = {
   doctor: { positionals: 0, options: [] },
   validate: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
@@ -634,6 +949,7 @@ const COMMANDS = {
   retry: { positionals: 1, options: [] },
   overview: { positionals: 0, options: [] },
   v2v: { positionals: 1, options: ["file"] },
+  library: { positionals: -1, options: Object.keys(LIBRARY_FLAGS) },
 };
 
 function exitCode(result) {
@@ -645,6 +961,7 @@ async function main() {
     allowPositionals: true,
     options: Object.fromEntries([
       ...["manifest", "job-id", "file", ...SINGLE_OPTIONS].map((key) => [key, { type: "string" }]),
+      ...Object.entries(LIBRARY_FLAGS),
       ...["help", "version"].map((key) => [key, { type: "boolean" }]),
     ]),
   });
@@ -662,7 +979,10 @@ async function main() {
   const [command, ...rest] = positionals;
   const spec = COMMANDS[command];
   check(spec, `未知命令：${command}；请运行 gendesk --help`);
-  check(rest.length === spec.positionals, "命令位置参数不正确；请运行 gendesk --help");
+  check(
+    spec.positionals < 0 ? rest.length >= 1 : rest.length === spec.positionals,
+    "命令位置参数不正确；请运行 gendesk --help",
+  );
   for (const key of Object.keys(opts))
     check(spec.options.includes(key), `${command} 不支持 --${key}`);
 
@@ -696,15 +1016,19 @@ async function main() {
       const prepared = await prepare(opts);
       const conn = await readConnection().catch(() => null);
       const preflight = await nativePreflight(conn, prepared);
+      const library = await checkLibrary(conn, preflight.librarySlots ?? []);
       result = {
         status: "validated",
         validation: "full",
         jobId: prepared.order.jobId,
         taskCount: prepared.order.items.length,
         refCount: prepared.refs.length,
+        ...(library ? { library } : {}),
         order: prepared.order,
         preflight,
-        message: "完整预检通过（参数、归属、正文与实际图片解码）；未投递、未调用生图",
+        message: library?.checked
+          ? "完整预检通过（参数、归属、正文、实际图片解码与参考图库候选）；未投递、未调用生图，图库在 submit 收录时才抽图"
+          : "完整预检通过（参数、归属、正文与实际图片解码）；未投递、未调用生图",
       };
       break;
     }
@@ -717,7 +1041,7 @@ async function main() {
       const jobId = requiredText(rest[0], "jobId");
       const { conn } = await connect({ launch: command !== "status" });
       const reply = await rpc(conn, `intake.${command}`, { jobId });
-      result = jobResult(jobId, reply.job);
+      result = jobResult(jobId, reply.job, libraryPicks(reply));
       break;
     }
     case "overview": {
@@ -725,6 +1049,9 @@ async function main() {
       result = { status: "ok", ...(await rpc(conn, "overview")) };
       break;
     }
+    case "library":
+      result = await library(rest[0], rest.slice(1), opts);
+      break;
     case "v2v": {
       const [sub] = rest;
       check(sub === "pending" || sub === "rewrite", "v2v 只支持 pending / rewrite");

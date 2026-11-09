@@ -9,5 +9,6 @@
 - 新任务用 organization 声明产品、款式、固定需求和来源；条目整对象覆盖顶层。无 SKU 不编造编号。同一需求续做不以运行批次改名。
 - 一条 UTF-8 正文、一组有序 ref 或 refs、一个任务、一张图。多参考图不拼接触表，不丢环境参考；附件顺序与 Image 1、Image 2 一致。默认 quality=high，比例/尺寸写参数，不只写正文。
 - 先生成显式配对清单并 gendesk validate --manifest <清单>；只有已授权生图时才 gendesk submit --manifest <清单>。只写提示词不投单。submit 返回时已收录完毕：hold 先向用户说明张数并取得同意再 gendesk confirm；error 读原因后 gendesk retry（按检查点只补未完成部分）；状态不明用原 jobId 查 status，不换 ID 重投。
+- 参考图库：款式 → 分类长期存图，`gendesk library …` 管理；清单 ref/refs 写 `{"category":"正面图"}` 由应用在收录时随机抽图，冷却期内用过的图优先跳过（见规范第 8 节）。
 - 图生视频改写：gendesk v2v pending 取条目，写好后 gendesk v2v rewrite --file <结果>；不调用 dreamina。
 - CLI 校验用 pnpm test:cli；提交前全门禁 pnpm check。

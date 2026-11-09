@@ -1,4 +1,5 @@
 import { GeneratePage } from "@/features/generate/GeneratePage";
+import { RefLibraryPage } from "@/features/refs/RefLibraryPage";
 import { ReviewPage } from "@/features/review/ReviewPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { TasksPage } from "@/features/tasks/TasksPage";
@@ -16,6 +17,7 @@ export type RouteKey =
   | "v2v"
   | "clips"
   | "library"
+  | "refs"
   | "trash"
   | "settings";
 
@@ -84,6 +86,14 @@ export const ROUTES: readonly RouteDef[] = [
     shortcut: 4,
     group: "asset",
     component: WorksPage,
+  },
+  // 参考图库按款式、分类保存工单抽图用的参考图（0051）。原参考图库页的 ⌘6 不复用。
+  {
+    key: "refs",
+    label: "参考图库",
+    shortcut: null,
+    group: "asset",
+    component: RefLibraryPage,
   },
   // ⌘5（原提示词库）、⌘6（原参考图库）、⌘9、⌘0（原素材库与任务单）已随页面移除。
   // **空着不复用、不把后面的数字往前挪**：重排会把每个人的肌肉记忆一次性作废。

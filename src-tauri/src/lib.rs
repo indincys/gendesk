@@ -18,6 +18,7 @@ mod logging;
 mod poster;
 mod provider;
 mod purpose;
+mod ref_library;
 mod secrets;
 mod shell;
 mod state;
@@ -73,6 +74,18 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // refs 域
             commands::refs::import_ref_images,
             commands::refs::list_ref_images,
+            // 参考图库（0051）
+            commands::ref_library::library_overview,
+            commands::ref_library::list_library_images,
+            commands::ref_library::save_library_style,
+            commands::ref_library::delete_library_style,
+            commands::ref_library::save_library_category,
+            commands::ref_library::delete_library_category,
+            commands::ref_library::import_library_images,
+            commands::ref_library::update_library_images,
+            commands::ref_library::pick_library_images,
+            commands::ref_library::mark_library_used,
+            commands::ref_library::library_image_usage,
             // prompts 域
             commands::prompts::list_prompt_groups,
             commands::prompts::list_purposes,

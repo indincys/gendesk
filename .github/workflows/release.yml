@@ -1,6 +1,8 @@
 name: release
 
-# 推送 tag v* 触发：双端构建 + minisign 签名 + 上传产物与 latest.json（执行计划 4.3）。
+# 推送 tag v* 触发：只打 Windows 包。Mac 包由本机 `pnpm release <版本>` 同时打包上传
+# （scripts/release.mjs）。两端各写自己的 updater-<平台>.json，再拼成 latest.json
+# （scripts/updater-manifest.mjs），所以可以并行，不会互相覆盖。
 on:
   push:
     tags:
@@ -11,17 +13,8 @@ jobs:
     permissions:
       contents: write
     strategy:
-      # fail-fast: false → 一端失败不取消另一端（各自产物仍会上传，便于单端 rerun）。
-      fail-fast: false
-      # max-parallel: 1 → 串行构建。两端并行时会各自「读取现有 release 的 latest.json →
-      # 合并本端平台 → 覆盖上传」，并发下互相覆盖会产出只含单端平台的半成品 latest.json
-      # （v0.2.2 首次发布即因此只含 windows，macOS 更新链断裂）。串行后第二端必然读到
-      # 第一端已写好的 latest.json 再合并，平台条目不会丢。代价：发版墙钟时间约翻倍，可接受。
-      max-parallel: 1
       matrix:
         include:
-          - platform: macos-latest # Apple Silicon 专用（不再构建 Intel/universal）
-            args: "--target aarch64-apple-darwin"
           - platform: windows-latest # x64 NSIS per-user（Windows 10/11）
             args: ""
     runs-on: ${{ matrix.platform }}
@@ -35,8 +28,6 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -44,55 +35,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # T4：自签名根默认不受信任（CSSMERR_TP_NOT_TRUSTED），tauri 打包器用
-      # `security find-identity -v -p codesigning`（只列受信任的有效身份）解析签名身份，
-      # 未信任则报 "failed to resolve signing identity"。故这里全手动配置签名钥匙串：
-      # 建库→导入 .p12→放行 codesign→设默认+搜索列表→把公钥证书加为 admin 域 trustRoot
-      # 代码签名根（全局生效使身份 -v 有效）。tauri-action 只带 APPLE_SIGNING_IDENTITY，
-      # 从默认钥匙串解析身份（故下方不再给它传 APPLE_CERTIFICATE，避免它另建库覆盖搜索列表）。
-      - name: 配置 macOS 自签名签名钥匙串
-        if: matrix.platform == 'macos-latest'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          KEYCHAIN_PASSWORD: actions-tmp
-        run: |
-          set -euo pipefail
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "未配置签名 Secret，跳过（按现状不签名）"; exit 0
-          fi
-          P12="$RUNNER_TEMP/gendesk-cert.p12"
-          PEM="$RUNNER_TEMP/gendesk-cert.pem"
-          KC="$RUNNER_TEMP/gendesk-sign.keychain-db"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$P12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
-          security set-keychain-settings -lut 21600 "$KC"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
-          security import "$P12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KC"
-          security list-keychains -d user -s "$KC" login.keychain
-          security default-keychain -s "$KC"
-          security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$KC" > "$PEM"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
-            -k /Library/Keychains/System.keychain "$PEM"
-          rm -f "$P12" "$PEM"
-          echo "有效代码签名身份："
-          security find-identity -v -p codesigning "$KC" | grep -F "$APPLE_SIGNING_IDENTITY"
-
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # minisign 私钥与密码存于仓库 Secrets（私钥丢失 = 更新链断裂，另做离线备份）。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # T4：macOS 自签名代码签名（同一张证书 → 代码签名 leaf 指纹稳定 → DR 稳定 →
-          # keychain「始终允许」一次永久生效，根治更新后反复弹窗）。签名钥匙串由上一步全手动
-          # 配置（含信任），这里只传身份名，tauri-action 从默认钥匙串解析；故不传 APPLE_CERTIFICATE
-          # （避免它另建库覆盖搜索列表）。不设 APPLE_ID/PASSWORD/TEAM_ID → 只签名不公证。
-          # 未配置 Secret 时上一步跳过、此处身份名为空 → 行为同现状不签名，不阻塞构建。
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "GenDesk ${{ github.ref_name }}"
@@ -101,40 +49,33 @@ jobs:
           # 草稿会导致 releases/latest/download/latest.json 404，自动更新链断裂。
           releaseDraft: false
           prerelease: false
+          # latest.json 由下一步按平台拼装；tauri-action 自己的「读-改-写」会和本机那端互相覆盖。
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
-  # 发布后自检更新链：latest.json 必须含全部目标平台，且每个平台的更新产物可下载（HTTP 200）。
-  # 目的：把「半成品发布」（如 latest.json 缺 darwin）在 CI 层暴露成红叉，而不是等用户在
-  # 客户端点检查更新才发现更新不到。任一平台缺失或产物 404 → 本 job 失败，提示 rerun。
-  verify-updater:
-    needs: publish
-    if: always() # 即使某端构建失败也要跑：正是这种情况最需要暴露 latest.json 不完整
-    runs-on: ubuntu-latest
-    steps:
-      - name: 校验 latest.json 平台完整且产物可下载
+      - name: 把 Windows 包写进 latest.json
+        shell: bash
         env:
-          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          url="https://github.com/${REPO}/releases/download/${TAG}/latest.json"
-          echo "拉取 $url"
-          json=$(curl -fsSL "$url")
-          echo "$json"
-          ver=$(echo "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
-          expected="${TAG#v}"
-          if [ "$ver" != "$expected" ]; then
-            echo "✗ latest.json version=$ver 与 tag=$expected 不一致"; exit 1
-          fi
-          for p in darwin-aarch64 windows-x86_64; do
-            u=$(echo "$json" | python3 -c "import sys,json;d=json.load(sys.stdin)['platforms'];print(d['$p']['url'] if '$p' in d else '')")
-            if [ -z "$u" ]; then
-              echo "✗ latest.json 缺少平台 $p（更新链对该平台断裂，请 rerun 失败的构建）"; exit 1
-            fi
-            code=$(curl -sSL -o /dev/null -w '%{http_code}' "$u")
-            echo "  $p -> $u [$code]"
-            if [ "$code" != "200" ]; then
-              echo "✗ $p 更新产物不可下载（HTTP $code）"; exit 1
-            fi
-          done
-          echo "✓ latest.json 平台完整（darwin-aarch64/windows-x86_64），更新产物均可下载"
+          sig=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe.sig | head -1)
+          asset=$(basename "${sig%.sig}")
+          node scripts/updater-manifest.mjs add --tag "$TAG" --platform windows --asset "$asset" --sig-file "$sig"
+
+  # 发布后自检更新链：latest.json 必须含两个平台，且每个平台的更新包可下载。
+  # Mac 那端在本机打包，可能比这里晚完成，所以最多等 40 分钟。任一平台缺失 → 红叉。
+  verify-updater:
+    needs: publish
+    if: always() # 即使 Windows 构建失败也要跑：正是这种情况最需要暴露 latest.json 不完整
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 校验 latest.json 平台完整且更新包可下载
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/updater-manifest.mjs verify --tag "${{ github.ref_name }}" --wait 40

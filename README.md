@@ -39,10 +39,22 @@ gendesk v2v pending
 
 ## 发布（M4）
 
-发版 = 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`（及 `Cargo.lock`）与
-`scripts/gendesk.mjs` 的版本号 → 合入 main → 打 tag `vX.Y.Z` 并推送，其余由
-`.github/workflows/release.yml` 自动完成（双端构建、minisign 签名、上传产物与 `latest.json`，
-最后 `verify-updater` 校验两端平台齐全且可下载）。
+发版只要一条命令（在 main、工作区干净、与 origin/main 一致）：
+
+```bash
+pnpm release 0.39.0
+```
+
+`scripts/release.mjs` 会：
+- 改好 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`（及 `Cargo.lock`）、`scripts/gendesk.mjs` 的版本号并提交。
+- 推送 main 和 tag `v0.39.0`。GitHub 的 `.github/workflows/release.yml` 随即开始打 **Windows** 包。
+- 同时在本机打 **Mac** 包（Apple 芯片），签名后上传到同一个 Release。完成后 Mac 电脑就能收到更新，通常几分钟。
+- 两端各写自己的 `updater-<平台>.json`，再拼成 `latest.json`（`scripts/updater-manifest.mjs`），并行也不会互相覆盖。Windows 那端完成后自动补进去。最后 `verify-updater` 会等两个平台都齐、更新包能下载。
+- 更新本机 `gendesk` 命令。
+
+先想看 Mac 包能不能打成：`pnpm release 0.39.0 --dry-run`，只在本机打包，不改版本、不推送。
+中途失败修好后用同一个版本号重跑，会从打包那一步继续。
+本机要有更新签名私钥 `~/.tauri/gendesk-signing.key` 和钥匙串里的代码签名证书「GenDesk Self-Signed」。
 
 带新迁移的版本：启动时自动把旧库快照到数据目录 `database-backups/` 再升级；升级失败的弹窗可直接「检查更新」装修复版。
 迁移只做加法时旧版本仍能打开升级后的库，破坏性迁移须抬高 `reader_floor`（规则见 CLAUDE.md「启动升级保护」）。

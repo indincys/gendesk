@@ -314,7 +314,7 @@ sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库�
 
 - **快速迭代，不走 PR**：一个任务一个分支，`pnpm check` 全绿后直接在本地合入 main
   （`git switch main && git merge --no-ff <分支>`）并推送，然后删分支。main 不设保护。
-  要发版再按 README 打 tag。
+  发版用 `pnpm release <X.Y.Z>`（Mac 本机打包，Windows 在 GitHub 并行打包，见 README）。
 - **审查按需**：引擎、数据层、迁移这类改动，合入前建议另开**全新上下文**会话跑 `/code-review`
   （同一上下文自审会继承同样盲点）；其余改动不强制。
 - **测试完整性规则**：**禁止**为让 CI 变绿而修改/删除/放宽既有测试断言。确需改动（例如某条

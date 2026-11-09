@@ -58,7 +58,7 @@ pub async fn organize(
             "请先完成或暂停在途任务，并退出 GenDesk 后整理".into(),
         ));
     }
-    let backup = data_root.join("database-backups").join(format!(
+    let backup = crate::db::backup_dir(database).join(format!(
         "{}_内容整理.db",
         chrono::Local::now().format("%Y-%m-%d_%H%M%S%f")
     ));

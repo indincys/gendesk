@@ -29,6 +29,7 @@ export type {
   LibraryCategoryView,
   LibraryImagePatch,
   LibraryImageView,
+  LibraryLimits,
   LibraryOverview,
   LibraryPickResult,
   LibraryStyleView,

@@ -44,6 +44,9 @@ gendesk v2v pending
 `.github/workflows/release.yml` 自动完成（双端构建、minisign 签名、上传产物与 `latest.json`，
 最后 `verify-updater` 校验两端平台齐全且可下载）。
 
+带新迁移的版本：启动时自动把旧库快照到数据目录 `database-backups/` 再升级；升级失败的弹窗可直接「检查更新」装修复版。
+迁移只做加法时旧版本仍能打开升级后的库，破坏性迁移须抬高 `reader_floor`（规则见 CLAUDE.md「启动升级保护」）。
+
 应用内更新：应用启动 20 秒后与每 6 小时自动检查 `latest.json`，有新版就后台下载，标题栏与
 设置 › 通用 › 更新出现「重启安装」；有生图任务在跑时先确认再重启。
 

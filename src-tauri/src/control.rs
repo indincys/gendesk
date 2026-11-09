@@ -330,7 +330,14 @@ async fn library_command(
             let name = arg(args, "name")?;
             let cooldown = args.get("cooldownDays").and_then(Value::as_i64);
             let id = if cmd.ends_with(".add") {
-                lib::save_category(db, None, name, cooldown.unwrap_or(7), None).await?
+                lib::save_category(
+                    db,
+                    None,
+                    name,
+                    cooldown.unwrap_or(lib::DEFAULT_COOLDOWN_DAYS),
+                    None,
+                )
+                .await?
             } else {
                 let found = lib::find_category(db, name).await?;
                 let rename = opt_text(args, "rename");

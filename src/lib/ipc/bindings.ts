@@ -2185,11 +2185,16 @@ restored: LibraryImageView[];
  * 本款式里已经有的同一张图，未重复入库。
  */
 duplicates: LibraryImportIssue[]; failed: LibraryImportIssue[] }
+export type LibraryLimits = { maxPick: number; maxCooldownDays: number; defaultCooldownDays: number }
 export type LibraryOverview = { styles: LibraryStyleView[]; categories: LibraryCategoryView[]; 
 /**
  * 统计所用的「此刻」（unix 秒），界面据此算剩余冷却。
  */
-now: number }
+now: number; 
+/**
+ * 取值范围，界面输入框照此限制，不自己抄数字。
+ */
+limits: LibraryLimits }
 /**
  * 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用；repeat = 同单重复。
  */

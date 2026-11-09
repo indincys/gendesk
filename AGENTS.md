@@ -1,6 +1,6 @@
 # GenDesk
 
-修改代码前阅读 [CLAUDE.md](CLAUDE.md)，遵守 Rust 业务边界、单写者、类型化 IPC 和测试约束。
+修改代码前阅读 [CLAUDE.md](CLAUDE.md)，遵守 Rust 业务边界、单写者、类型化 IPC 和测试约束。一个任务一个分支，`pnpm check` 全绿后直接合入 main 并推送，不走 PR。新迁移默认只做加法，破坏性改动要抬高 `reader_floor`（见 CLAUDE.md「启动升级保护」）。
 
 ## 外部 Agent 生图
 

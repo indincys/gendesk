@@ -284,7 +284,7 @@ pub fn run() {
                 tracing::error!(error = %err, "应用初始化失败，退出");
                 eprintln!("[gendesk] 应用初始化失败: {err}");
                 if !background {
-                    fatal_dialog(&err.to_string());
+                    startup_rescue(app.handle(), &err.to_string());
                 }
                 std::process::exit(1);
             }
@@ -350,6 +350,69 @@ fn fatal_dialog(message: &str) {
         .show();
 }
 
+/// 初始化失败时的对话框：除了「退出」，还能就地「检查更新」。
+///
+/// 应用靠应用内更新分发到多台电脑，而升级脚本有问题的那一版**恰恰进不了主界面**，
+/// 标题栏的更新按钮够不着。这里绕过前端直接问更新源：有修复版就下载安装并重启，
+/// 没有就把结果补在说明后面，人可以过一会儿再点。
+fn startup_rescue(app: &tauri::AppHandle, message: &str) {
+    const CHECK: &str = "检查更新";
+    let mut text = message.to_string();
+    loop {
+        let choice = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("GenDesk 无法启动")
+            .set_description(&text)
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                CHECK.into(),
+                "退出".into(),
+            ))
+            .show();
+        let wants_check = match choice {
+            rfd::MessageDialogResult::Custom(label) => label == CHECK,
+            rfd::MessageDialogResult::Ok | rfd::MessageDialogResult::Yes => true,
+            _ => false,
+        };
+        if !wants_check {
+            return;
+        }
+        let note = match tauri::async_runtime::block_on(commands::updater::rescue_check(app)) {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                let confirm = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Info)
+                    .set_title("发现新版本")
+                    .set_description(format!(
+                        "可以更新到 v{version}。下载安装完成后会自动重启，期间请不要关闭。"
+                    ))
+                    .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                        "下载并安装".into(),
+                        "取消".into(),
+                    ))
+                    .show();
+                let go = matches!(
+                    confirm,
+                    rfd::MessageDialogResult::Ok | rfd::MessageDialogResult::Yes
+                ) || confirm == rfd::MessageDialogResult::Custom("下载并安装".into());
+                if !go {
+                    continue;
+                }
+                match tauri::async_runtime::block_on(commands::updater::rescue_install(update)) {
+                    Ok(()) => app.restart(),
+                    Err(err) => format!("更新到 v{version} 没有成功：{err}"),
+                }
+            }
+            Ok(None) => format!(
+                "暂时没有比 v{} 更新的版本。修复版发布后再点「{CHECK}」。",
+                env!("CARGO_PKG_VERSION")
+            ),
+            Err(err) => err.to_string(),
+        };
+        tracing::warn!(%note, "启动失败后的更新检查");
+        text = format!("{message}\n\n—— {note}");
+    }
+}
+
 /// 调试构建允许把数据根钉到隔离目录，供桌面 WebView 验收使用。
 ///
 /// 发布构建忽略该变量，避免一个外部环境变量把真实用户数据悄悄切到别处。开发验收则
@@ -386,12 +449,8 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let guard = logging::init(&dirs.logs());
     app.manage(guard);
 
-    // 迁移失败的原文（sqlx 的 `VersionMissing` 等）不指向任何可执行的动作，而它恰恰
-    // 是这条路径上最常见、也最难自查的失败。翻译成人话再上抛，见 `db::explain_connect_error`。
-    let pool = match tauri::async_runtime::block_on(db::connect(&dirs.db())) {
-        Ok(pool) => pool,
-        Err(err) => return Err(db::explain_connect_error(&err).into()),
-    };
+    // 升级前备份、兼容下限与失败说明都在 `db::upgrade`；错误文本就是给人看的完整说明。
+    let pool = tauri::async_runtime::block_on(db::connect(&dirs.db()))?;
     tauri::async_runtime::block_on(poster::initialize(&pool))?;
 
     // 密钥存本地加密文件（见 secrets.rs 模块头安全水位）。旧版把 Key 放系统钥匙串，

@@ -6,6 +6,7 @@ import {
   type LibraryCategoryView,
   type LibraryImagePatch,
   type LibraryImageView,
+  type LibraryLimits,
   type LibraryOverview,
   type LibraryStyleView,
   commands,
@@ -94,6 +95,7 @@ export function RefLibraryPage() {
 
   const style = overview?.styles.find((s) => s.id === styleId) ?? null;
   const categories = overview?.categories ?? [];
+  const limits = overview?.limits ?? null;
   const category = categories.find((c) => c.id === categoryId) ?? null;
   const countOf = (cid: number) => style?.byCategory.find((c) => c.categoryId === cid);
   const selected = useMemo(() => images.filter((i) => sel.has(i.id)), [images, sel]);
@@ -264,10 +266,12 @@ export function RefLibraryPage() {
                 className="inp sm rlnum"
                 type="number"
                 min={1}
-                max={64}
+                max={limits?.maxPick}
                 value={pickCount}
                 onChange={(e) =>
-                  setPickCount(Math.max(1, Math.min(64, Number(e.target.value) || 1)))
+                  setPickCount(
+                    Math.max(1, Math.min(limits?.maxPick ?? 1, Number(e.target.value) || 1)),
+                  )
                 }
               />
               <button
@@ -414,9 +418,10 @@ export function RefLibraryPage() {
           }}
         />
       )}
-      {catsOpen && (
+      {catsOpen && limits && (
         <CategoriesModal
           categories={categories}
+          limits={limits}
           onClose={() => setCatsOpen(false)}
           onChanged={refresh}
         />
@@ -548,10 +553,12 @@ interface CatDraft {
 
 function CategoriesModal({
   categories,
+  limits,
   onClose,
   onChanged,
 }: {
   categories: LibraryCategoryView[];
+  limits: LibraryLimits;
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -607,7 +614,10 @@ function CategoriesModal({
             type="button"
             className="btn sm gho"
             onClick={() =>
-              setRows((r) => [...r, { id: null, name: "", cooldownDays: 7, imageCount: 0 }])
+              setRows((r) => [
+                ...r,
+                { id: null, name: "", cooldownDays: limits.defaultCooldownDays, imageCount: 0 },
+              ])
             }
           >
             <Plus className="ic12" />
@@ -636,6 +646,7 @@ function CategoriesModal({
           <CatRow
             key={r.id ?? `new-${i}`}
             row={r}
+            maxCooldown={limits.maxCooldownDays}
             onEdit={(p) => edit(i, p)}
             onRemove={() => remove(r)}
           />
@@ -647,10 +658,12 @@ function CategoriesModal({
 
 function CatRow({
   row,
+  maxCooldown,
   onEdit,
   onRemove,
 }: {
   row: CatDraft;
+  maxCooldown: number;
   onEdit: (p: Partial<CatDraft>) => void;
   onRemove: () => void;
 }) {
@@ -666,11 +679,14 @@ function CatRow({
         className="inp sm rlnum"
         type="number"
         min={0}
-        max={365}
+        max={maxCooldown}
         value={row.cooldownDays}
         onChange={(e) =>
           onEdit({
-            cooldownDays: Math.max(0, Math.min(365, Math.round(Number(e.target.value) || 0))),
+            cooldownDays: Math.max(
+              0,
+              Math.min(maxCooldown, Math.round(Number(e.target.value) || 0)),
+            ),
           })
         }
       />

@@ -32,6 +32,10 @@ use crate::files::DataDirs;
 const DAY: i64 = 86_400;
 /// 单次随机抽取上限（预览用）。
 pub const MAX_PICK: usize = 64;
+/// 新分类不指定时的冷却天数；与 0051 的列默认值一致（测试守着）。
+pub const DEFAULT_COOLDOWN_DAYS: i64 = 7;
+/// 冷却天数上限；与 0051 的 CHECK 一致（测试守着）。
+pub const MAX_COOLDOWN_DAYS: i64 = 365;
 
 // ───────────────────────────── 视图 ─────────────────────────────
 
@@ -76,6 +80,26 @@ pub struct LibraryOverview {
     pub categories: Vec<LibraryCategoryView>,
     /// 统计所用的「此刻」（unix 秒），界面据此算剩余冷却。
     pub now: i64,
+    /// 取值范围，界面输入框照此限制，不自己抄数字。
+    pub limits: LibraryLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryLimits {
+    pub max_pick: u32,
+    pub max_cooldown_days: i64,
+    pub default_cooldown_days: i64,
+}
+
+impl LibraryLimits {
+    pub fn current() -> Self {
+        Self {
+            max_pick: MAX_PICK as u32,
+            max_cooldown_days: MAX_COOLDOWN_DAYS,
+            default_cooldown_days: DEFAULT_COOLDOWN_DAYS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -421,6 +445,7 @@ pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview>
         styles,
         categories,
         now,
+        limits: LibraryLimits::current(),
     })
 }
 
@@ -573,11 +598,11 @@ pub async fn delete_style(pool: &SqlitePool, id: i64) -> AppResult<()> {
 }
 
 pub fn check_cooldown(days: i64) -> AppResult<i64> {
-    if (0..=365).contains(&days) {
+    if (0..=MAX_COOLDOWN_DAYS).contains(&days) {
         Ok(days)
     } else {
         Err(AppError::InvalidInput(format!(
-            "冷却天数要在 0～365 之间：{days}"
+            "冷却天数要在 0～{MAX_COOLDOWN_DAYS} 之间：{days}"
         )))
     }
 }
@@ -1300,6 +1325,34 @@ mod tests {
             category,
             report.imported.iter().map(|v| v.id).collect(),
         )
+    }
+
+    /// Rust 里的默认值与上限要和 0051 的列定义一致，界面和 CLI 都从这里取。
+    #[tokio::test]
+    async fn cooldown_constants_match_the_schema() {
+        let (pool, _dir) = test_pool().await;
+        sqlx::query("INSERT INTO ref_library_categories(name, created_at) VALUES('默认值', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let days: i64 = sqlx::query_scalar(
+            "SELECT cooldown_days FROM ref_library_categories WHERE name='默认值'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(days, DEFAULT_COOLDOWN_DAYS);
+        for (days, ok) in [(MAX_COOLDOWN_DAYS, true), (MAX_COOLDOWN_DAYS + 1, false)] {
+            let inserted = sqlx::query(
+                "INSERT INTO ref_library_categories(name, cooldown_days, created_at) VALUES(?, ?, 0)",
+            )
+            .bind(format!("上限{days}"))
+            .bind(days)
+            .execute(&pool)
+            .await;
+            assert_eq!(inserted.is_ok(), ok, "{days}");
+            assert_eq!(check_cooldown(days).is_ok(), ok, "{days}");
+        }
     }
 
     #[tokio::test]

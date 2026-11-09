@@ -117,7 +117,7 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 
 ## IPC 约定
 
-外部 Agent 只用 `scripts/gendesk.mjs`（安装为 `~/.local/bin/gendesk`），不直接读写 SQLite 或交接目录。完整外部契约只维护在 `docs/命令行生图接入.md`；CLI / 应用 0.37.0，控制协议 2，工单 version=1。CLI 打包工单到 `~/GenDesk交接/生图/收件/<jobId>/`、最后写 READY，再经控制通道 `intake.submit` 请求收录；**收录在这次调用里完成**并返回台账行（done / hold / error）。hold 由 Agent 在用户同意后 `gendesk confirm`，失败用 `gendesk retry`（0048 检查点只补缺失步骤）。应用未运行时 CLI 以 `open -g -a … --args --background` 后台启动。`validate` 经应用二进制 `validate-intake` 只读入口复用 Rust 解析/参数/归属/图片解码，不启动 AppState 或打开数据库。CLI 测试用假控制通道，`GENDESK_LAUNCH=0` 关掉自动启动。
+外部 Agent 只用 `scripts/gendesk.mjs`（安装为 `~/.local/bin/gendesk`），不直接读写 SQLite 或交接目录。完整外部契约只维护在 `docs/命令行生图接入.md`；CLI / 应用 0.38.0，控制协议 2，工单 version=1。CLI 打包工单到 `~/GenDesk交接/生图/收件/<jobId>/`、最后写 READY，再经控制通道 `intake.submit` 请求收录；**收录在这次调用里完成**并返回台账行（done / hold / error）。hold 由 Agent 在用户同意后 `gendesk confirm`，失败用 `gendesk retry`（0048 检查点只补缺失步骤）。应用未运行时 CLI 以 `open -g -a … --args --background` 后台启动。`validate` 经应用二进制 `validate-intake` 只读入口复用 Rust 解析/参数/归属/图片解码，不启动 AppState 或打开数据库。CLI 测试用假控制通道，`GENDESK_LAUNCH=0` 关掉自动启动。
 
 工单条目支持 `ref` 单图或 `refs` 有序多图（二选一，上限 16）。主商品仍是首图；Rust 将整组 ID 写入任务 `params_json.referenceImageIds` 本地字段并登记全部 `batch_refs`，调度器严格恢复整组附件顺序。单图 multipart 沿用 `image`，多图使用有序 `image[]`；图片不会因多附件拆成多任务。CLI 只认协议 2，不再逐项检查能力位。
 

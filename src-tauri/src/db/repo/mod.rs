@@ -4,6 +4,7 @@ pub mod api_keys;
 pub mod intake;
 pub mod names;
 pub mod prompts;
+pub mod ref_library;
 pub mod refs;
 pub mod settings;
 pub mod tasks;

@@ -152,3 +152,21 @@ pub async fn install_update(
         .map_err(|e| AppError::Internal(format!("安装更新失败：{e}")))?;
     app.restart();
 }
+
+/// 启动失败时的自救检查：此时没有窗口和前端，不走 [`PendingUpdate`] 与事件，
+/// 直接问更新源有没有新版本。
+pub async fn rescue_check(app: &AppHandle) -> AppResult<Option<Update>> {
+    app.updater()
+        .map_err(|e| AppError::Internal(format!("更新器初始化失败：{e}")))?
+        .check()
+        .await
+        .map_err(|e| AppError::Internal(format!("检查更新失败：{e}")))
+}
+
+/// 下载并安装自救检查找到的版本；成功后由调用方重启。
+pub async fn rescue_install(update: Update) -> AppResult<()> {
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| AppError::Internal(format!("下载或安装更新失败：{e}")))
+}

@@ -15,6 +15,7 @@ description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，
 
 - 每张图一份非空 UTF-8 纯正文 TXT，清单逐项填写 name、promptFile、ref 或有序 refs。参数与附件路径放 JSON，正文说明 Image 1、Image 2 的角色；多参考图不展开任务、不拼接触表。
 - 新任务填写 organization 的产品、款式、固定需求、来源。条目整对象覆盖顶层；非商品任务无需 SKU，sku/style 只在已有商品映射需要时填写真实值。需求名不能用 jobId 或本次运行日期代替。
+- 参考图已在 GenDesk 参考图库时，ref/refs 写分类引用（如 `{"category":"正面图"}`）由应用收录时随机抽图并跳过近期用过的图，不必导出本地文件；写法见规范「参考图库」一节，返回的 libraryPicks 告诉你抽到了哪张。
 - 提示词、人读说明、清单写入当前项目约定的 _草稿；源参考图保持原位。实际附件须有可访问的本地路径，不能拿 URL、对话图片标记或虚构路径代替。
 - gendesk --version 查看 CLI，gendesk doctor 查看应用是否在线；离线不要紧，submit 会在后台启动应用。
 - 执行 gendesk validate --manifest <清单路径>。它调用应用的 Rust 只读完整预检，校验参数、归属与实际图片解码；不写库、不投递、不生图。

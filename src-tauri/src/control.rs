@@ -30,6 +30,7 @@ pub const FEATURES: &[&str] = &[
     "resumable-intake",
     "background-launch",
     "v2v-rewrite",
+    "reference-library",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。
@@ -180,13 +181,25 @@ async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Value> {
             "root": crate::intake::default_root(),
             "taskThreshold": intake::TASK_THRESHOLD,
         })),
-        "intake.submit" => Ok(json!({ "job": intake::submit(app, arg(&args, "dir")?).await? })),
-        "intake.confirm" => Ok(json!({ "job": intake::confirm(app, arg(&args, "jobId")?).await? })),
-        "intake.retry" => Ok(json!({ "job": intake::retry(app, arg(&args, "jobId")?).await? })),
+        "intake.submit" => {
+            let job = intake::submit(app, arg(&args, "dir")?).await?;
+            with_picks(&state, json!({ "job": job })).await
+        }
+        "intake.confirm" => {
+            let job = intake::confirm(app, arg(&args, "jobId")?).await?;
+            with_picks(&state, json!({ "job": job })).await
+        }
+        "intake.retry" => {
+            let job = intake::retry(app, arg(&args, "jobId")?).await?;
+            with_picks(&state, json!({ "job": job })).await
+        }
         "intake.status" => {
             let job =
                 crate::db::repo::intake::get_by_job_id(&state.db, arg(&args, "jobId")?).await?;
-            Ok(json!({ "job": job }))
+            with_picks(&state, json!({ "job": job })).await
+        }
+        library if library.starts_with("library.") => {
+            library_command(app, &state, library, &args).await
         }
         "overview" => overview(&state).await,
         "v2v.pending" => Ok(serde_json::to_value(
@@ -201,6 +214,221 @@ async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Value> {
             }
             let sum = crate::commands::v2v::apply_rewrites(&state, app, &lines).await?;
             Ok(serde_json::to_value(sum)?)
+        }
+        other => Err(AppError::InvalidInput(format!("未知命令：{other}"))),
+    }
+}
+
+/// 工单回执附上参考图库抽到的图（没有图库引用的单不加这个字段）。
+async fn with_picks(state: &AppState, mut reply: Value) -> AppResult<Value> {
+    let job_id = reply
+        .pointer("/job/jobId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(job_id) = job_id {
+        let picks = crate::ref_library::picks_for_job(&state.db, &job_id).await?;
+        if !picks.is_empty() {
+            reply["libraryPicks"] = serde_json::to_value(picks)?;
+        }
+    }
+    Ok(reply)
+}
+
+fn opt_text<'a>(args: &'a Value, key: &str) -> &'a str {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+}
+
+fn ids(args: &Value) -> AppResult<Vec<i64>> {
+    let list = args
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::InvalidInput("缺少参数 ids".into()))?;
+    list.iter()
+        .map(|v| {
+            v.as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| AppError::InvalidInput(format!("图片编号不对：{v}")))
+        })
+        .collect()
+}
+
+/// 参考图库的 CLI 命令。名字在这里解析成编号，规则全在 `ref_library`。
+async fn library_command(
+    app: &AppHandle,
+    state: &AppState,
+    cmd: &str,
+    args: &Value,
+) -> AppResult<Value> {
+    use crate::ref_library as lib;
+    let db = &state.db;
+    let now = crate::db::now_unix();
+    let style = |required: bool| async move {
+        let name = opt_text(args, "style");
+        if name.is_empty() {
+            return if required {
+                Err(AppError::InvalidInput("缺少参数 style".into()))
+            } else {
+                Ok(None)
+            };
+        }
+        lib::find_style(db, name, opt_text(args, "product"))
+            .await
+            .map(Some)
+    };
+    let category = |required: bool| async move {
+        let name = opt_text(args, "category");
+        if name.is_empty() {
+            return if required {
+                Err(AppError::InvalidInput("缺少参数 category".into()))
+            } else {
+                Ok(None)
+            };
+        }
+        lib::find_category(db, name).await.map(Some)
+    };
+    let required = |v: Option<i64>, key: &str| {
+        v.ok_or_else(|| AppError::InvalidInput(format!("缺少参数 {key}")))
+    };
+    match cmd {
+        "library.overview" => Ok(serde_json::to_value(lib::overview(db, now).await?)?),
+        "library.images" => {
+            let style_id = style(false).await?.map(|s| s.id);
+            let category_id = category(false).await?.map(|c| c.id);
+            let include = args
+                .get("includeRemoved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let images = lib::list_images(db, style_id, category_id, include, now).await?;
+            Ok(json!({ "images": images }))
+        }
+        "library.style.add" => {
+            let id = lib::save_style(
+                db,
+                None,
+                arg(args, "name")?,
+                opt_text(args, "product"),
+                opt_text(args, "note"),
+            )
+            .await?;
+            Ok(json!({ "id": id }))
+        }
+        "library.style.rename" => {
+            let found = style(true).await?;
+            let found = found.ok_or_else(|| AppError::InvalidInput("缺少参数 style".into()))?;
+            let product = args
+                .get("newProduct")
+                .and_then(Value::as_str)
+                .unwrap_or(&found.product);
+            let id = lib::save_style(db, Some(found.id), arg(args, "name")?, product, &found.note)
+                .await?;
+            Ok(json!({ "id": id }))
+        }
+        "library.category.add" | "library.category.set" => {
+            let name = arg(args, "name")?;
+            let cooldown = args.get("cooldownDays").and_then(Value::as_i64);
+            let id = if cmd.ends_with(".add") {
+                lib::save_category(
+                    db,
+                    None,
+                    name,
+                    cooldown.unwrap_or(lib::DEFAULT_COOLDOWN_DAYS),
+                    None,
+                )
+                .await?
+            } else {
+                let found = lib::find_category(db, name).await?;
+                let rename = opt_text(args, "rename");
+                lib::save_category(
+                    db,
+                    Some(found.id),
+                    if rename.is_empty() { name } else { rename },
+                    cooldown.unwrap_or(found.cooldown_days),
+                    None,
+                )
+                .await?
+            };
+            Ok(json!({ "id": id }))
+        }
+        "library.import" => {
+            let style_id = required(style(true).await?.map(|s| s.id), "style")?;
+            let category_id = required(category(true).await?.map(|c| c.id), "category")?;
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                return Err(AppError::InvalidInput("没有要导入的图片".into()));
+            }
+            let emitter = app.clone();
+            let progress = move |done: i64, total: i64, name: &str, failed: i64| {
+                crate::commands::refs::emit_progress(
+                    &emitter, done, total, name, "running", failed,
+                );
+            };
+            let report =
+                lib::import_files(db, &state.dirs, style_id, category_id, &paths, &progress)
+                    .await?;
+            crate::commands::refs::emit_progress(
+                app,
+                paths.len() as i64,
+                paths.len() as i64,
+                "",
+                "done",
+                report.failed.len() as i64,
+            );
+            Ok(serde_json::to_value(report)?)
+        }
+        "library.pick" => {
+            let style_id = required(style(true).await?.map(|s| s.id), "style")?;
+            let category_id = required(category(true).await?.map(|c| c.id), "category")?;
+            let count = args.get("count").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let mark = args
+                .get("markUsed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let result = lib::pick(
+                db,
+                style_id,
+                category_id,
+                count,
+                mark,
+                now,
+                &mut lib::os_rng,
+            )
+            .await?;
+            Ok(serde_json::to_value(result)?)
+        }
+        "library.update" => {
+            let category_id = category(false).await?.map(|c| c.id);
+            let patch = lib::LibraryImagePatch {
+                category_id,
+                enabled: args.get("enabled").and_then(Value::as_bool),
+                note: args.get("note").and_then(Value::as_str).map(str::to_string),
+                removed: args.get("removed").and_then(Value::as_bool),
+            };
+            Ok(json!({ "changed": lib::update_images(db, &ids(args)?, &patch).await? }))
+        }
+        "library.mark-used" => Ok(json!({ "marked": lib::mark_used(db, &ids(args)?, now).await? })),
+        "library.check" => {
+            let slots: Vec<lib::LibrarySlot> =
+                serde_json::from_value(args.get("slots").cloned().unwrap_or(Value::Null))
+                    .map_err(|e| AppError::InvalidInput(format!("图库引用格式不对：{e}")))?;
+            Ok(json!({ "slots": lib::check_slots(db, &slots).await? }))
+        }
+        "library.usage" => {
+            if let Some(id) = args.get("id").and_then(Value::as_i64) {
+                return Ok(json!({ "usage": lib::usage_of_image(db, id).await? }));
+            }
+            Ok(json!({ "picks": lib::picks_for_job(db, arg(args, "jobId")?).await? }))
         }
         other => Err(AppError::InvalidInput(format!("未知命令：{other}"))),
     }

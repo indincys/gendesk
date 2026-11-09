@@ -65,10 +65,11 @@ cd src-tauri && cargo test --lib refs_insert_list -- --exact --nocapture
 | `db/`        | `migrations/` forward-only + `repo/` 薄 SQL 封装。**业务规则不在 repo**。                                                                                          |
 | `engine/`    | 任务引擎：`dispatcher`(单循环 + per-Key Semaphore) · `status`(7 态机) · `classify`(错误六类) · `progress`(伪进度) · `recovery` · `events`(EventSink 抽象，故引擎可脱离 Tauri 测试)。 |
 | `provider/`  | 生图 Provider 抽象；唯一实现 `openai`（`POST {base}/images/edits`）+ `sanitize`(元数据/C2PA 剥离)。                                                                      |
-| `control.rs` | Agent CLI 控制通道（协议 2）：`hello` · `intake.submit/confirm/retry/status` · `overview` · `v2v.pending/rewrite`。外部唯一入口。 |
+| `control.rs` | Agent CLI 控制通道（协议 2）：`hello` · `intake.submit/confirm/retry/status` · `overview` · `v2v.pending/rewrite` · `library.*`（参考图库）。外部唯一入口。 |
 | `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `rewrite`(待改写队列与写回) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。 |
 | `intake/`    | 工单收录：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `preflight`(只读预检，供 `validate-intake`) · `ingest`(收录 + 去重 + 移档 + 检查点恢复)。 |
 | `library.rs` | 作品目录规则（产品/款式/需求）；`library/maintenance` 是显式离线整理命令。 |
+| `ref_library.rs` | 参考图库（0051）：款式 × 分类存图、按分类冷却的随机抽图（`choose`）、收录时抽图记账（`draw_for_job`）。 |
 | `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
 | `live_photo.rs` | 实况图队列：调用内置 `gendesk-live`，配对完成回填 Poster 批次。 |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
@@ -134,8 +135,8 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 - **非测试代码禁 `unwrap` / `expect` / `panic`**（Cargo `[lints.clippy]` deny），
   另有 `unsafe_code = "forbid"`。测试内须以带说明注释的 `#[allow(...)]` 局部放开。
 - 前端错误经 `reportFrontendError` → `log_frontend_error` 汇入 tracing；guardrails 禁 `console.log`。
-- **打包应用没有终端**：启动期致命错误必须弹原生对话框（`fatal_dialog`，用 rfd），
-  否则表现只是「双击图标 dock 弹一下就没了」。
+- **打包应用没有终端**：启动期致命错误必须弹原生对话框（rfd；初始化失败走带「检查更新」的
+  `startup_rescue`，窗口都建不起来时走 `fatal_dialog`），否则表现只是「双击图标 dock 弹一下就没了」。
 - **7 态 → 5 视觉组**：`q`=灰 · `run`+`retry`=蓝(spinner) · `fail`=红 · `rev`(待验收)=琥珀 ·
   `pass`=绿 / `rej`=灰。（枚举与 0001 的 CHECK 都是 7 个，早期文档里的「八态」是笔误。）
 
@@ -196,6 +197,8 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 **失败回执必须写明已导入到哪一步**（这串动作没有一步能整体回滚，谎称「没有导入任何东西」
 会让人点重试拿到第二份提示词）· 投单 skill 装在用户级 `~/.claude/skills/`（仓库内
 `.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
+
+**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。
 
 **作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 
@@ -270,19 +273,28 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 前 149 条作品记录回滚掉而文件已在成品目录里；现在的顺序（先整批拷完、任一张失败就一行库都
 不写）反而更接近原子。
 
-**迁移** — 本次收敛新增 0044（命名与发号台账）与 0045（参数下沉 + 用途载体）。
-`src-tauri/migrations/` **forward-only，发布后不可改**（`db/repo/mod.rs` 里「重放
+**迁移** — `src-tauri/migrations/` **forward-only，发布后不可改**（`db/repo/mod.rs` 里「重放
 0019 搬运语句」那条测试正建立在这个前提上）。废弃列一律**保留不读不写**。默认留在事务内，
 只有必须 `PRAGMA foreign_keys=OFF` 的表重建才用 `-- no-transaction`。改动建议先在**真实库副本**
 上跑 `foreign_key_check` + `integrity_check`。`tag_bindings` 是无外键的多态表，删分组时必须手动
 清（分组 id 被复用时旧绑定会把用途安到无关的组头上）。
 
-**dev 与打包应用共用同一个 `app_data_dir`**，而 `sqlx::migrate!` 在**编译期**内嵌迁移。所以
-`pnpm tauri dev` 跑在新 main 上会把库迁到最新版，装在 `/Applications` 的旧包**从此再也开不
-起来**（`VersionMissing`，这是保护不是故障）。排查看 `latest_embedded_migration()` 而非
-`CARGO_PKG_VERSION`。**另一条通往同样症状的路径**：single-instance 插件在已有实例时静默
-exit(0)——区分方法是看日志有没有当次的 `logging initialized`（单实例踢出发生在日志初始化之前，
-一个字都不留；迁移失败则必留一条 ERROR）。
+**启动升级保护（`db/upgrade.rs`，0052）** — 应用靠应用内更新分发到多台电脑，`db::connect` 是唯一入口：
+有待应用迁移时先 `VACUUM INTO` 快照到 `database-backups/`（`YYYY-MM-DD_HHMMSS_升级前_迁移A到B.db`，
+滚动留 5 份；备份失败就不升级）→ 逐条迁移（各自事务，失败的那条整体撤销）。库里有本应用不认识的迁移
+（旧版本打开新库）时看 `schema_meta.reader_floor`：不高于本应用内嵌的最新迁移就忽略那些迁移照常打开，
+否则拒绝。**迁移默认只做加法**（新表、带默认值的新列、新索引）；删表、删列、改名、重建表或改变已有列
+含义的迁移必须在同一文件里 `UPDATE schema_meta SET value = MAX(value, <本迁移号>) WHERE key='reader_floor'`，
+`breaking_migrations_raise_the_reader_floor` 测试会拦下认得出的结构性破坏，语义变化要自己判断。
+启动失败的对话框（`lib.rs::startup_rescue`）带「检查更新」：绕过前端直接查更新源、下载安装并重启，
+所以升级脚本有问题的那一版也能靠下一个修复版自救。0.37.0 及更早的版本没有这套判断，打开 0052 之后的库
+仍会拒绝。
+
+**dev 与打包应用共用同一个 `app_data_dir`**，而 `sqlx::migrate!` 在**编译期**内嵌迁移。`pnpm tauri dev`
+会把真实库迁到最新版；要不动真实库，调试构建设 `GENDESK_DATA_DIR=<绝对路径>`。排查看日志里「数据库已就绪」
+那行的 `embedded`（即 `latest_embedded_migration()`）而非 `CARGO_PKG_VERSION`。**另一条通往「dock 弹一下
+就没了」的路径**：single-instance 插件在已有实例时静默 exit(0)——区分方法是看日志有没有当次的
+`logging initialized`（单实例踢出发生在日志初始化之前，一个字都不留；迁移失败则必留一条 ERROR）。
 
 ## 门禁与协作
 
@@ -300,12 +312,13 @@ sqlx 用运行时校验查询（`query`/`query_as`），SQL 由针对临时库�
 `features/trash/model.ts` · `styles/classnames.test.ts`）——
 业务真相在 Rust，测试也在 Rust，别为了补前端覆盖率去测 UI 壳。
 
-- **实现与审查分离**：实现完成后由**全新上下文**会话执行 `/code-review`（引擎/数据层用 high）。
-  同一上下文自审会继承同样盲点。发现项修复后才 merge。
+- **快速迭代，不走 PR**：一个任务一个分支，`pnpm check` 全绿后直接在本地合入 main
+  （`git switch main && git merge --no-ff <分支>`）并推送，然后删分支。main 不设保护。
+  要发版再按 README 打 tag。
+- **审查按需**：引擎、数据层、迁移这类改动，合入前建议另开**全新上下文**会话跑 `/code-review`
+  （同一上下文自审会继承同样盲点）；其余改动不强制。
 - **测试完整性规则**：**禁止**为让 CI 变绿而修改/删除/放宽既有测试断言。确需改动（例如某条
-  断言的前提被实测推翻）须在测试注释与 PR 描述里写明理由。
-- 一个任务 = 一个分支 = 实现 + 测试 + 门禁全绿 + 审查通过 = 一次 merge。main 受保护，
-  即使单人开发也走 PR。
+  断言的前提被实测推翻）须在测试注释与提交信息里写明理由。
 - 发版流程与更新签名密钥见 README.md。
 
 参考物：`docs/prototype/*.dc.html`（像素基准）· `docs/prototype/Design-Tokens.md` ·

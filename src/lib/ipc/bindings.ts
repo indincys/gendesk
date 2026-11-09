@@ -260,6 +260,97 @@ async listRefImages(includeEphemeral: boolean) : Promise<Result<RefImageView[], 
     else return { status: "error", error: e  as any };
 }
 },
+async libraryOverview() : Promise<Result<LibraryOverview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("library_overview") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listLibraryImages(styleId: number | null, categoryId: number | null, includeRemoved: boolean) : Promise<Result<LibraryImageView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_library_images", { styleId, categoryId, includeRemoved }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveLibraryStyle(id: number | null, name: string, product: string, note: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_library_style", { id, name, product, note }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteLibraryStyle(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_library_style", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveLibraryCategory(id: number | null, name: string, cooldownDays: number, sortOrder: number | null) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_library_category", { id, name, cooldownDays, sortOrder }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteLibraryCategory(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_library_category", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 导入本地图片到某款式某分类；逐张推 `refs://import-progress`（与生成页上传同一事件）。
+ */
+async importLibraryImages(styleId: number, categoryId: number, paths: string[]) : Promise<Result<LibraryImportReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_library_images", { styleId, categoryId, paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateLibraryImages(ids: number[], patch: LibraryImagePatch) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_library_images", { ids, patch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pickLibraryImages(styleId: number, categoryId: number, count: number, markUsed: boolean) : Promise<Result<LibraryPickResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_library_images", { styleId, categoryId, count, markUsed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async markLibraryUsed(ids: number[]) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("mark_library_used", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async libraryImageUsage(id: number) : Promise<Result<LibraryUsageView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("library_image_usage", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 列出全部提示词分组（含 active 提示词数 + 标签）。
  */
@@ -2053,6 +2144,76 @@ export type KeyHealth = { keyId: number; state: KeyState; usedConcurrency: numbe
  * Key 健康状态。
  */
 export type KeyState = "ok" | "limited" | "auth_failed" | "disabled"
+export type LibraryCategoryCount = { categoryId: number; total: number; enabled: number; 
+/**
+ * 启用且此刻不在冷却期的张数。
+ */
+available: number }
+export type LibraryCategoryView = { id: number; name: string; 
+/**
+ * 冷却天数；0 = 不冷却。
+ */
+cooldownDays: number; sortOrder: number; 
+/**
+ * 全部款式下这一类未移出的图片数。
+ */
+imageCount: number }
+/**
+ * 批量修改图片：改分类、启停、备注、移出或放回。
+ */
+export type LibraryImagePatch = { categoryId: number | null; enabled: boolean | null; note: string | null; 
+/**
+ * true = 移出图库（保留文件，不再参与抽取）；false = 放回。
+ */
+removed: boolean | null }
+export type LibraryImageView = { id: number; styleId: number; style: string; product: string; categoryId: number; category: string; name: string; filePath: string; thumbPath: string; width: number; height: number; note: string; enabled: boolean; removed: boolean; lastUsedAt: number | null; useCount: number; 
+/**
+ * 冷却到什么时候（unix 秒）；不在冷却期为空。
+ */
+coolingUntil: number | null; createdAt: number }
+export type LibraryImportIssue = { path: string; message: string; 
+/**
+ * 重复时指向库里已有的那张。
+ */
+imageId: number | null }
+export type LibraryImportReport = { imported: LibraryImageView[]; 
+/**
+ * 之前移出、这次重新导入而放回的图。
+ */
+restored: LibraryImageView[]; 
+/**
+ * 本款式里已经有的同一张图，未重复入库。
+ */
+duplicates: LibraryImportIssue[]; failed: LibraryImportIssue[] }
+export type LibraryLimits = { maxPick: number; maxCooldownDays: number; defaultCooldownDays: number }
+export type LibraryOverview = { styles: LibraryStyleView[]; categories: LibraryCategoryView[]; 
+/**
+ * 统计所用的「此刻」（unix 秒），界面据此算剩余冷却。
+ */
+now: number; 
+/**
+ * 取值范围，界面输入框照此限制，不自己抄数字。
+ */
+limits: LibraryLimits }
+/**
+ * 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用；repeat = 同单重复。
+ */
+export type LibraryPick = { tier: string; image: LibraryImageView }
+export type LibraryPickResult = { style: string; category: string; requested: number; 
+/**
+ * 启用且未移出的候选总数。
+ */
+poolSize: number; 
+/**
+ * 其中此刻可用（不在冷却期）的张数。
+ */
+freshCount: number; picks: LibraryPick[]; 
+/**
+ * 是否已记为使用。
+ */
+markedUsed: boolean; message: string }
+export type LibraryStyleView = { id: number; name: string; product: string; note: string; total: number; available: number; byCategory: LibraryCategoryCount[] }
+export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean }
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
 /**

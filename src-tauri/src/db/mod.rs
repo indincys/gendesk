@@ -3,16 +3,19 @@
 //! 连接参数：WAL · synchronous=NORMAL · busy_timeout=5s · foreign_keys=ON。
 //! 单写者原则在 M2 调度器落实；本层提供池与各域 repo。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
 pub mod repo;
+pub mod upgrade;
 
-/// 打开（或创建）数据库并运行迁移。
-pub async fn connect(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
+pub use upgrade::{backup_dir, ConnectError};
+
+/// 打开（或创建）数据库，并在升级保护下运行迁移（见 [`upgrade`]）。
+pub async fn connect(db_path: &Path) -> Result<SqlitePool, ConnectError> {
     let opts = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
@@ -24,57 +27,17 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(opts)
-        .await?;
+        .await
+        .map_err(ConnectError::Open)?;
 
-    backup_before_destructive_migration(&pool, db_path).await?;
-    migrate(&pool).await?;
+    upgrade::upgrade(&pool, db_path, sqlx::migrate!("./migrations")).await?;
+    tracing::info!(embedded = latest_embedded_migration(), "数据库已就绪");
     Ok(pool)
 }
 
-/// 0038 会删除旧发布模型。只要是从 0038 之前的存量库升级，就在同目录先用
-/// SQLite `VACUUM INTO` 生成一致性快照；备份失败会阻断迁移，绝不带病 DROP。
-async fn backup_before_destructive_migration(
-    pool: &SqlitePool,
-    db_path: &Path,
-) -> Result<Option<PathBuf>, sqlx::Error> {
-    let has_migrations: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
-    )
-    .fetch_one(pool)
-    .await?;
-    if has_migrations == 0 {
-        return Ok(None);
-    }
-    let version: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1")
-            .fetch_one(pool)
-            .await?;
-    if version == 0 || version >= 38 {
-        return Ok(None);
-    }
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let stem = db_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("gendesk");
-    let backup = db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!("{stem}.pre-0038-{stamp}.db"));
-    sqlx::query("VACUUM INTO ?1")
-        .bind(backup.to_string_lossy().to_string())
-        .execute(pool)
-        .await?;
-    tracing::info!(path=%backup.display(), from_version=version, "已在破坏性迁移前生成数据库备份");
-    Ok(Some(backup))
-}
-
-/// 运行内置迁移（forward-only）。
+/// 直接运行内置迁移，不做版本判断与备份。只给测试重放单条迁移用；启动走 [`connect`]。
+#[cfg(test)]
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
-    // Forward-only 文件必须连续保留，真实库会拒绝缺少任一已应用版本的二进制。
     sqlx::migrate!("./migrations").run(pool).await
 }
 
@@ -89,37 +52,6 @@ pub fn latest_embedded_migration() -> i64 {
         .map(|m| m.version)
         .max()
         .unwrap_or(0)
-}
-
-/// 把 [`connect`] 的失败翻译成一句能照着做的话。
-///
-/// 迁移是 forward-only 且编译期内嵌，故**旧版本的二进制打开被新版本迁移过的库**时，
-/// sqlx 会报 `VersionMissing` 并拒绝继续。这是保护而非故障：旧代码不认识新 schema，
-/// 让它跑下去才会真损坏数据。
-///
-/// 但 sqlx 的原文（"migration N was previously applied but is missing in the resolved
-/// migrations"）不指向任何可执行的动作，而这条错误恰恰只出现在最难自查的场景里 ——
-/// 用户看到的全部现象是 **dock 图标弹一下就没了**。翻译在这里做，是因为只有这一层
-/// 同时知道「库里到第几版」和「我内嵌到第几版」。
-pub fn explain_connect_error(err: &sqlx::Error) -> String {
-    let sqlx::Error::Migrate(migrate_err) = err else {
-        return err.to_string();
-    };
-    match migrate_err.as_ref() {
-        sqlx::migrate::MigrateError::VersionMissing(applied) => format!(
-            "数据库是更新版本的 GenDesk 建立的，当前这个版本读不了它。\n\n\
-             库里已应用到迁移 {applied}，而本应用（v{}）内置的迁移只到 {}。\n\n\
-             请把 GenDesk 更新到最新版本再打开。用旧版本继续运行会损坏数据，因此已停止启动。",
-            env!("CARGO_PKG_VERSION"),
-            latest_embedded_migration(),
-        ),
-        sqlx::migrate::MigrateError::VersionMismatch(version) => format!(
-            "数据库里迁移 {version} 的内容与本应用内置的对不上（校验和不一致）。\n\n\
-             通常是同一版本号的迁移文件被改过 —— 迁移发布后不可修改。\n\
-             请确认使用的是正式发布版本；若这是开发构建，需要重置数据库。"
-        ),
-        other => other.to_string(),
-    }
 }
 
 /// 当前 Unix 秒（数据库时间戳统一使用）。
@@ -163,10 +95,21 @@ mod tests {
         .unwrap();
     }
 
-    /// 旧二进制打开新库必须**被拒绝**，且拒绝理由要能照着做。
+    async fn raise_reader_floor(pool: &SqlitePool, floor: i64) {
+        sqlx::query("UPDATE schema_meta SET value=? WHERE key='reader_floor'")
+            .bind(floor)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// 旧二进制打开被**破坏性升级**过的新库必须被拒绝，且拒绝理由要能照着做。
     ///
     /// 这条测试守的是一次真实事故：装好的 v0.18.0（内嵌迁移到 0024）打开被
     /// `pnpm tauri dev` 迁到 0026 的库，sqlx 拒绝 → 干净退出 → 用户只看见 dock 弹一下。
+    ///
+    /// 0052 起较新的库按 `reader_floor` 放行（见下一条测试），所以这里在伪造未来迁移的
+    /// 同时把下限抬到它，重现「旧代码读不懂」的那种库；断言本身未放宽。
     #[tokio::test]
     async fn opening_a_newer_db_is_refused_with_actionable_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -174,12 +117,13 @@ mod tests {
 
         let pool = connect(&path).await.unwrap();
         stamp_future_migration(&pool, 9999).await;
+        raise_reader_floor(&pool, 9999).await;
         pool.close().await;
 
         let err = connect(&path)
             .await
-            .expect_err("库里有本应用不认识的迁移时必须拒绝启动，而不是继续跑");
-        let msg = explain_connect_error(&err);
+            .expect_err("库要求的下限高于本应用时必须拒绝启动，而不是继续跑");
+        let msg = err.to_string();
 
         // 两个数字都要在：库到了哪一版、我只认到哪一版。
         assert!(msg.contains("9999"), "未指出库里的版本：{msg}");
@@ -195,6 +139,100 @@ mod tests {
         );
     }
 
+    /// 更新版本只做了加法时，旧版本照常打开，之后新版本再打开也不受影响。
+    #[tokio::test]
+    async fn an_additive_newer_db_opens_in_an_older_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let pool = connect(&path).await.unwrap();
+        stamp_future_migration(&pool, 9999).await;
+        pool.close().await;
+
+        let pool = connect(&path)
+            .await
+            .expect("下限没有超过本应用时应以兼容模式打开");
+        let applied: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied, 9999, "不认识的迁移记录必须原样保留");
+        assert!(
+            !backup_dir(&path).exists(),
+            "没有待应用的迁移，不该产生备份"
+        );
+    }
+
+    /// 存量库升级前必须留一份一致性快照；新库不备份。
+    #[tokio::test]
+    async fn upgrading_an_existing_db_keeps_a_consistent_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gendesk.db");
+
+        let pool = connect(&path).await.unwrap();
+        assert!(!backup_dir(&path).exists(), "新库不该备份");
+        sqlx::query(
+            "CREATE TABLE marker(value TEXT NOT NULL); INSERT INTO marker VALUES('must survive')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 退回「最新一条迁移还没跑」的样子（0052 本身幂等，可安全重放）。
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=?")
+            .bind(latest_embedded_migration())
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = connect(&path).await.unwrap();
+        let snapshots: Vec<_> = std::fs::read_dir(backup_dir(&path))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(snapshots.len(), 1, "{snapshots:?}");
+        let backup = SqlitePool::connect(&format!("sqlite:{}", snapshots[0].display()))
+            .await
+            .unwrap();
+        let marker: String = sqlx::query_scalar("SELECT value FROM marker")
+            .fetch_one(&backup)
+            .await
+            .unwrap();
+        assert_eq!(marker, "must survive");
+        let applied: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied, latest_embedded_migration());
+    }
+
+    /// 迁移失败要停在失败前的状态，并把备份位置告诉人。
+    #[tokio::test]
+    async fn a_failing_migration_rolls_back_and_names_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gendesk.db");
+        let pool = connect(&path).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=?")
+            .bind(latest_embedded_migration())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // 让最新一条迁移撞上一个占了名字的视图，必然失败。
+        sqlx::query(
+            "DROP TABLE schema_meta; CREATE VIEW schema_meta AS SELECT 1 AS key, 1 AS value",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let err = connect(&path).await.expect_err("迁移必须失败");
+        let msg = err.to_string();
+        assert!(msg.contains("检查更新"), "{msg}");
+        assert!(msg.contains("升级前的完整备份"), "{msg}");
+        assert!(matches!(err, ConnectError::Migrate { backup: Some(ref p), .. } if p.is_file()));
+    }
+
     /// 内嵌版本号必须跟着 `migrations/` 走，而不是某个写死的数字。
     #[tokio::test]
     async fn latest_embedded_migration_tracks_the_migrations_dir() {
@@ -204,43 +242,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied, latest_embedded_migration());
-    }
-
-    #[tokio::test]
-    async fn destructive_migration_is_preceded_by_consistent_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.db");
-        let opts = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .unwrap();
-        sqlx::query(
-            "CREATE TABLE _sqlx_migrations(version INTEGER,success INTEGER);
-             CREATE TABLE legacy_marker(value TEXT NOT NULL);
-             INSERT INTO _sqlx_migrations VALUES(37,1);
-             INSERT INTO legacy_marker VALUES('must survive')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let backup = backup_before_destructive_migration(&pool, &path)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(backup.is_file());
-        let backup_pool = SqlitePool::connect(&format!("sqlite:{}", backup.display()))
-            .await
-            .unwrap();
-        let marker: String = sqlx::query_scalar("SELECT value FROM legacy_marker")
-            .fetch_one(&backup_pool)
-            .await
-            .unwrap();
-        assert_eq!(marker, "must survive");
     }
 
     #[tokio::test]
@@ -328,10 +329,12 @@ mod tests {
         pool.close().await;
     }
 
-    /// 与迁移无关的错误原样透出，不被这层翻译吞掉。
+    /// 与迁移无关的错误原样透出，不被这层翻译吞掉（翻译从 `explain_connect_error`
+    /// 挪进了 `ConnectError` 的 Display，打开失败只加一句前缀）。
     #[test]
     fn non_migration_errors_pass_through() {
         let err = sqlx::Error::RowNotFound;
-        assert_eq!(explain_connect_error(&err), err.to_string());
+        let text = err.to_string();
+        assert!(ConnectError::Open(err).to_string().contains(&text));
     }
 }

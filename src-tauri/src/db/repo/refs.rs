@@ -60,7 +60,10 @@ pub async fn insert<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
 
 pub async fn list_active(pool: &SqlitePool) -> Result<Vec<RefImageRow>, sqlx::Error> {
     sqlx::query_as::<_, RefImageRow>(
-        "SELECT * FROM ref_images WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC",
+        // 参考图库（0051）的图片由图库页管理，不进生成页选择器。
+        "SELECT * FROM ref_images WHERE deleted_at IS NULL
+           AND id NOT IN (SELECT ref_image_id FROM ref_library_images)
+         ORDER BY created_at DESC, id DESC",
     )
     .fetch_all(pool)
     .await

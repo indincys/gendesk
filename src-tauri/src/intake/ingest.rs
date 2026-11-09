@@ -409,6 +409,9 @@ struct Checkpoint {
     prompt_ids: Vec<i64>,
     group_ids: Vec<i64>,
     refs: Vec<(PathBuf, i64)>,
+    /// 参考图库抽图结果（0051）。空 = 还没抽或本单没有图库引用；抽过就原样沿用。
+    #[serde(default)]
+    library: Vec<crate::ref_library::SlotPick>,
     applied: Applied,
 }
 
@@ -441,7 +444,9 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     let checked = super::preflight::check(plan).await?;
     if !checkpoint.fingerprint.is_empty()
         && checkpoint.fingerprint != checked.fingerprint
-        && (!checkpoint.prompt_ids.is_empty() || !checkpoint.refs.is_empty())
+        && (!checkpoint.prompt_ids.is_empty()
+            || !checkpoint.refs.is_empty()
+            || !checkpoint.library.is_empty())
     {
         return Err(AppError::InvalidInput("工单内容或参考图已改变，不能复用已导入检查点；请还原原内容后重试，或先核对原工单再另行授权新单".into()));
     }
@@ -476,6 +481,53 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     let mut tx = ctx.pool.begin().await?;
     checkpoint.save(&mut tx, plan, row_id, false).await?;
     tx.commit().await?;
+
+    // ── 参考图库：在导入任何内容之前抽图。抽中即记账，与检查点同事务；
+    //    无图可抽就整单失败，此时什么都没导入、也没记账。重试沿用检查点里的结果。
+    let library_slots = plan.library_slots();
+    if !library_slots.is_empty() && checkpoint.library.is_empty() {
+        let requests: Vec<_> = library_slots
+            .iter()
+            .map(|(item, slot, spec)| crate::ref_library::SlotRequest {
+                item: *item,
+                slot: *slot,
+                item_name: &plan.items[*item].name,
+                spec,
+            })
+            .collect();
+        let mut tx = ctx.pool.begin().await?;
+        checkpoint.library = crate::ref_library::draw_for_job(
+            &mut tx,
+            &ctx.pool,
+            &plan.job_id,
+            &requests,
+            crate::db::now_unix(),
+            &mut crate::ref_library::os_rng,
+        )
+        .await?;
+        checkpoint.save(&mut tx, plan, row_id, false).await?;
+        tx.commit().await?;
+    }
+    if checkpoint.library.len() != library_slots.len()
+        || checkpoint
+            .library
+            .iter()
+            .zip(&library_slots)
+            .any(|(pick, (item, slot, _))| pick.item != *item || pick.slot != *slot)
+    {
+        return Err(AppError::InvalidInput(
+            "参考图库抽图检查点与工单不一致，已停止重试".into(),
+        ));
+    }
+    for pick in &checkpoint.library {
+        let existing = refs_repo::get(&ctx.pool, pick.ref_image_id).await?;
+        if !existing.is_some_and(|r| r.deleted_at.is_none() && Path::new(&r.file_path).is_file()) {
+            return Err(AppError::InvalidInput(format!(
+                "抽到的图库图片 #{} 文件缺失，不能继续",
+                pick.image_id
+            )));
+        }
+    }
 
     // ── 提示词：一单一组，一条条目 = 一条提示词。走的是手动导入那条落库路径
     //    （`build_preview_from_parsed` → `commit_preview`），故前缀分配、号池、
@@ -608,17 +660,23 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     //    「落库数不一致就整单失败」在守着的东西。
     let mut specs = Vec::with_capacity(plan.items.len());
     for (it, prompt_id) in plan.items.iter().zip(checkpoint.prompt_ids.iter().copied()) {
+        let item_index = specs.len();
         let ids: Vec<i64> = it
-            .ref_paths
+            .slots
             .iter()
-            .map(|path| {
-                ref_ids
-                    .iter()
-                    .find(|(p, _)| p == path)
-                    .map(|(_, id)| *id)
-                    .ok_or_else(|| {
-                        AppError::Internal(format!("条目「{}」的参考图没能入库", it.name))
-                    })
+            .enumerate()
+            .map(|(slot_index, slot)| {
+                match slot {
+                    super::RefSlot::File(path) => {
+                        ref_ids.iter().find(|(p, _)| p == path).map(|(_, id)| *id)
+                    }
+                    super::RefSlot::Library(_) => checkpoint
+                        .library
+                        .iter()
+                        .find(|p| p.item == item_index && p.slot == slot_index)
+                        .map(|p| p.ref_image_id),
+                }
+                .ok_or_else(|| AppError::Internal(format!("条目「{}」的参考图没能入库", it.name)))
             })
             .collect::<AppResult<_>>()?;
         let ref_image_id = ids[0];
@@ -940,6 +998,135 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    /// 参考图库：款式「王一博」正面图 3 张、45度角 2 张。返回 (正面图库编号, 45度编号)。
+    async fn seed_library(pool: &SqlitePool, data: &Path) -> (Vec<i64>, Vec<i64>) {
+        use crate::ref_library as lib;
+        let style = lib::save_style(pool, None, "王一博", "", "").await.unwrap();
+        let src = data.join("library-src");
+        std::fs::create_dir_all(&src).unwrap();
+        let dirs = DataDirs::new(data);
+        let mut out = Vec::new();
+        for (category, n, seed) in [("正面图", 3u8, 10u8), ("45度角", 2, 50)] {
+            let category = lib::find_category(pool, category).await.unwrap().id;
+            let mut paths = Vec::new();
+            for k in 0..n {
+                use std::io::Cursor;
+                let img = image::RgbImage::from_pixel(2, 2, image::Rgb([seed + k, 1, 2]));
+                let mut buf = Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgb8(img)
+                    .write_to(&mut buf, image::ImageFormat::Png)
+                    .unwrap();
+                let p = src.join(format!("{seed}-{k}.png"));
+                std::fs::write(&p, buf.into_inner()).unwrap();
+                paths.push(p.to_string_lossy().to_string());
+            }
+            let report = lib::import_files(pool, &dirs, style, category, &paths, &|_, _, _, _| {})
+                .await
+                .unwrap();
+            out.push(report.imported.iter().map(|v| v.id).collect());
+        }
+        let second = out.pop().unwrap();
+        (out.pop().unwrap(), second)
+    }
+
+    #[tokio::test]
+    async fn library_references_are_drawn_once_and_reuse_the_library_files() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 100);
+        let (front, angle) = seed_library(&pool, data.path()).await;
+        let dir = make_job(
+            home.path(),
+            "library-job",
+            r#","organization":{"product":"","style":"王一博","requirement":"场景图","source":"测试"}"#,
+            &[("甲", "正文一", "a.png", ""), ("乙", "正文二", "a.png", "")],
+        );
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("工单.json")).unwrap()).unwrap();
+        spec["items"][0].as_object_mut().unwrap().remove("ref");
+        spec["items"][0]["refs"] =
+            serde_json::json!([{"category": "正面图"}, {"category": "45度角"}, "refs/a.png"]);
+        spec["items"][1].as_object_mut().unwrap().remove("ref");
+        spec["items"][1]["refs"] = serde_json::json!([{"category": "正面图"}]);
+        std::fs::write(dir.join("工单.json"), spec.to_string()).unwrap();
+        let ref_rows_before = count(&pool, "ref_images").await;
+
+        // 建批那一步失败：抽图已记账，重试沿用检查点里的结果，不再抽第二次。
+        sqlx::query("CREATE TRIGGER fail_batch BEFORE INSERT ON batches BEGIN SELECT RAISE(FAIL, 'injected'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "error");
+        let first = crate::ref_library::picks_for_job(&pool, "library-job")
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 3);
+        sqlx::query("DROP TRIGGER fail_batch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = retry(&ctx, home.path(), "library-job")
+            .await
+            .unwrap()
+            .unwrap();
+        let jobs = [job];
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
+        assert_eq!(jobs[0].task_count, 2);
+        // 图库图片直接复用原 ref_images 行，只有包内的 a.png 新入库。
+        assert_eq!(count(&pool, "ref_images").await, ref_rows_before + 1);
+        let picks = crate::ref_library::picks_for_job(&pool, "library-job")
+            .await
+            .unwrap();
+        assert_eq!(picks.len(), 3);
+        assert_eq!((picks[0].item_name.as_str(), picks[0].slot), ("甲", 1));
+        assert!(front.contains(&picks[0].image.id) && angle.contains(&picks[1].image.id));
+        // 同一单两条都要正面图：可用图足够时不重复。
+        assert_ne!(picks[0].image.id, picks[2].image.id);
+        assert!(picks.iter().all(|p| !p.fallback));
+        let ids = |v: &[crate::ref_library::JobLibraryPick]| {
+            v.iter().map(|p| p.image.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&picks), ids(&first));
+
+        let (primary, raw): (i64, String) =
+            sqlx::query_as("SELECT ref_image_id, params_json FROM tasks ORDER BY id LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let order = engine::reference_ids(&raw, primary).unwrap();
+        assert_eq!(order.len(), 3);
+        let library_ref: i64 =
+            sqlx::query_scalar("SELECT ref_image_id FROM ref_library_images WHERE id = ?1")
+                .bind(picks[0].image.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(order[0], library_ref);
+        assert_eq!(count(&pool, "ref_library_usage").await, 3);
+    }
+
+    #[tokio::test]
+    async fn a_library_reference_without_images_fails_before_importing_anything() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx_for(&pool, data.path(), 100);
+        seed_library(&pool, data.path()).await;
+        let dir = make_job(home.path(), "empty-category", "", &simple("甲"));
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("工单.json")).unwrap()).unwrap();
+        spec["items"][0]["ref"] = serde_json::json!({"category": "礼盒图"});
+        std::fs::write(dir.join("工单.json"), spec.to_string()).unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "error");
+        assert!(jobs[0].message.contains("礼盒图"), "{}", jobs[0].message);
+        for table in ["prompts", "tasks", "batches", "ref_library_usage"] {
+            assert_eq!(count(&pool, table).await, 0, "{table}");
+        }
     }
 
     #[tokio::test]

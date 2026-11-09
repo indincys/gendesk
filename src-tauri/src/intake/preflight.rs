@@ -57,14 +57,16 @@ pub async fn check(plan: &Plan) -> AppResult<CheckedPlan> {
         .items
         .iter()
         .map(|item| {
-            let hashes: Vec<_> = item
-                .ref_paths
+            // 只有包内文件时与旧版逐字节相同，旧检查点的内容身份不变。
+            let hashes: Vec<Option<String>> = item
+                .slots
                 .iter()
-                .map(|path| {
-                    references
+                .map(|slot| match slot {
+                    super::RefSlot::File(path) => references
                         .iter()
                         .find(|reference| &reference.source == path)
-                        .map(|r| r.sha256.as_str())
+                        .map(|r| r.sha256.clone()),
+                    super::RefSlot::Library(spec) => Some(spec.fingerprint()),
                 })
                 .collect();
             serde_json::json!({"name":item.name,"sku":item.sku,"style":item.style,
@@ -93,6 +95,9 @@ pub async fn external(input: ExternalInput) -> AppResult<serde_json::Value> {
         "appVersion":env!("CARGO_PKG_VERSION"),"taskCount":plan.task_count(),
         "refCount":checked.references.len(),"fingerprint":checked.fingerprint,
         "references":checked.references,
+        "librarySlots":plan.library_slots().into_iter().map(|(item, slot, spec)| serde_json::json!({
+            "item": plan.items[item].name, "slot": slot + 1, "reference": spec.describe(), "spec": spec,
+        })).collect::<Vec<_>>(),
         "items":plan.items.iter().map(|item| serde_json::json!({"name":item.name,
             "paramsJson":item.params_json,"wireJson":item.wire_json})).collect::<Vec<_>>() }),
     )

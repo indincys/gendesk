@@ -2,10 +2,10 @@ import { ROUTES, ROUTE_BY_SHORTCUT } from "@/routes";
 import { describe, expect, it } from "vitest";
 
 describe("routes 注册表", () => {
-  it("8 个页面，数字快捷键无重复", () => {
-    // 发布、商品资料、图文任务单、文案库、参考图库、图片素材库已整页移除；
-    // 视频两页没有数字快捷键，只能从侧栏进。
-    expect(ROUTES).toHaveLength(8);
+  it("9 个页面，数字快捷键无重复", () => {
+    // 发布、商品资料、图文任务单、文案库、旧参考图库、图片素材库已整页移除；
+    // 视频两页与新参考图库没有数字快捷键，只能从侧栏进。
+    expect(ROUTES).toHaveLength(9);
     const digits = ROUTES.map((r) => r.shortcut)
       .filter((s): s is number => s !== null)
       .sort((a, b) => a - b);
@@ -32,6 +32,7 @@ describe("routes 注册表", () => {
     expect(ROUTES.find((r) => r.key === "v2v")?.shortcut).toBeNull();
     expect(Object.values(ROUTE_BY_SHORTCUT)).not.toContain("clips");
     expect(ROUTES.find((r) => r.key === "clips")?.shortcut).toBeNull();
+    expect(ROUTES.find((r) => r.key === "refs")?.shortcut).toBeNull();
   });
 
   it("路由键唯一", () => {

@@ -9,7 +9,7 @@ description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，
 
 ## 接入规范
 
-投单前读取 [命令行生图接入](/Users/indincys/Workspace/软件开发/GenDesk/代码/docs/命令行生图接入.md)，这是唯一完整字段契约，适用 CLI / 应用 0.37.0、控制协议 2、清单 version=1。skill 写作交付边界见 [提示词标准产出](/Users/indincys/Workspace/软件开发/GenDesk/代码/docs/提示词skill标准产出规范.md)。不要从旧包、历史示例或文件名推断归属和格式，也不要把字段表复制进其他 skill。
+投单前读取 [命令行生图接入](/Users/indincys/Workspace/软件开发/GenDesk/代码/docs/命令行生图接入.md)，这是唯一完整字段契约，适用 CLI / 应用 0.38.0、控制协议 2、清单 version=1。skill 写作交付边界见 [提示词标准产出](/Users/indincys/Workspace/软件开发/GenDesk/代码/docs/提示词skill标准产出规范.md)。不要从旧包、历史示例或文件名推断归属和格式，也不要把字段表复制进其他 skill。
 
 ## 准备与预检
 

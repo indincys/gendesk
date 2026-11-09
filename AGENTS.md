@@ -4,7 +4,7 @@
 
 ## 外部 Agent 生图
 
-- 完整接入契约只维护在 [命令行生图接入](docs/命令行生图接入.md)，适用 CLI / 应用 0.37.0、控制协议 2、清单 version=1；字段、示例、参数与恢复以此为准。提示词 skill 交付边界见 [标准产出](docs/提示词skill标准产出规范.md)。不要从历史文档复制旧规则。
+- 完整接入契约只维护在 [命令行生图接入](docs/命令行生图接入.md)，适用 CLI / 应用 0.38.0、控制协议 2、清单 version=1；字段、示例、参数与恢复以此为准。提示词 skill 交付边界见 [标准产出](docs/提示词skill标准产出规范.md)。不要从历史文档复制旧规则。
 - Agent 只用 gendesk 命令，不写交接目录、不读写 SQLite、无需 computer use。先 gendesk --version / doctor；macOS/Unix 更新本机命令用 pnpm install:cli，应用升级不等于 CLI 已同步。
 - 新任务用 organization 声明产品、款式、固定需求和来源；条目整对象覆盖顶层。无 SKU 不编造编号。同一需求续做不以运行批次改名。
 - 一条 UTF-8 正文、一组有序 ref 或 refs、一个任务、一张图。多参考图不拼接触表，不丢环境参考；附件顺序与 Image 1、Image 2 一致。默认 quality=high，比例/尺寸写参数，不只写正文。

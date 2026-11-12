@@ -1563,9 +1563,6 @@ a:hover {
   border-left-color: var(--rd-line);
   color: var(--rd-t1);
 }
-.rdet.dark .rdside .ptext {
-  color: var(--rd-t1);
-}
 .rdet.dark .rdside .pid {
   color: var(--rd-t2);
   border-color: var(--rd-line);
@@ -1616,6 +1613,17 @@ a:hover {
   border-radius: 7px;
   border: 1px solid var(--rd-line);
   flex: none;
+}
+.rdreference {
+  margin-inline: 0;
+  margin-bottom: 0;
+}
+.rdrefimg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 9px;
+  border: 1px solid var(--rd-line);
 }
 .ptext {
   font-size: 12.5px;

@@ -607,6 +607,14 @@ async listPendingReview(batchId: number | null) : Promise<Result<ReviewItemView[
     else return { status: "error", error: e  as any };
 }
 },
+async listReviewReferences(taskId: number) : Promise<Result<ReviewReferenceView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_review_references", { taskId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 通过所选：输出原图 + 写作品快照 + 微调写回(R8) + 临时组转正(R7)。
  * 
@@ -2511,6 +2519,7 @@ createdAt: number;
  * 写出这条词的 skill（0032）。None = 手工导入 / 历史数据 / 工单没声明。
  */
 skill: string | null; refId: number; itemName: string; groupId: number | null; organization: Organization | null }
+export type ReviewReferenceView = { position: number; imagePath: string }
 /**
  * 即梦会话（`--session` 的可选值）。
  */

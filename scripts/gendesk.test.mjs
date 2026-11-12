@@ -17,7 +17,10 @@ const png = await fs.readFile(new URL("../src-tauri/icons/32x32.png", import.met
  * GenDesk control channel. Real Rust ingestion is covered by cargo tests; this file
  * checks the client's packaging, protocol and exit codes.
  */
-async function fixture(t, { online = true, hold = false, features = ["reference-library"] } = {}) {
+async function fixture(
+  t,
+  { online = true, hold = false, features = ["reference-library", "poster-link"] } = {},
+) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gendesk-cli-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const root = path.join(home, "GenDesk交接");
@@ -193,6 +196,48 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
     overview: () => ({ tasks: { queued: 1, running: 0, review: 2, failed: 0 }, paused: false }),
     "v2v.pending": () => ({ groups: [], skipped: 0 }),
     "v2v.rewrite": ({ lines }) => ({ applied: lines.length }),
+    "poster.resolve": ({ style }) => ({
+      autoImport: true,
+      targets: [
+        style === "檀健次款"
+          ? {
+              product: "2027明星日历",
+              style,
+              targetId: "tan",
+              targetName: "檀健次日历（2027）",
+              warning: "",
+            }
+          : {
+              product: "2027明星日历",
+              style,
+              targetId: null,
+              targetName: null,
+              warning: "尚未绑定款式",
+            },
+      ],
+    }),
+    "poster.bind": ({ product, style, target }) => ({
+      autoImport: true,
+      target: { product, style, targetId: "x", targetName: target, warning: "" },
+    }),
+    "poster.backfill": ({ apply }) => ({
+      applied: apply,
+      autoImport: true,
+      groups: [
+        {
+          product: "2027明星日历",
+          style: "檀健次款",
+          targetId: "tan",
+          targetName: "檀健次日历（2027）",
+          warning: "",
+          count: 3,
+          missingFiles: 0,
+          batches: apply ? 1 : 0,
+        },
+      ],
+      images: apply ? 3 : 0,
+      batches: apply ? 1 : 0,
+    }),
   };
   const token = "test-token";
   let port = 1;
@@ -787,4 +832,61 @@ test("manifest library references can ask for several distinct images with count
     await fs.writeFile(manifest, JSON.stringify(spec));
     assert.equal((await f.run("validate", "--manifest", manifest)).code, 2, JSON.stringify(bad));
   }
+});
+
+test("poster commands resolve, bind and backfill through the app", async (t) => {
+  const f = await fixture(t);
+  const known = await f.run(
+    "poster",
+    "resolve",
+    "--product",
+    "2027明星日历",
+    "--style",
+    "檀健次款",
+  );
+  assert.equal(known.code, 0, known.data.message);
+  assert.equal(known.data.targetName, "檀健次日历（2027）");
+  const unknown = await f.run(
+    "poster",
+    "resolve",
+    "--product",
+    "2027明星日历",
+    "--style",
+    "谢霆锋演唱会款",
+  );
+  assert.equal(unknown.code, 4);
+  assert.match(unknown.data.next, /gendesk poster bind/);
+
+  const bound = await f.run(
+    "poster",
+    "bind",
+    "--product",
+    "2027明星日历",
+    "--style",
+    "谢霆锋演唱会款",
+    "--target",
+    "谢霆锋日历（2027）",
+  );
+  assert.equal(bound.code, 0, bound.data.message);
+  assert.deepEqual(f.calls.at(-1).args, {
+    product: "2027明星日历",
+    style: "谢霆锋演唱会款",
+    target: "谢霆锋日历（2027）",
+  });
+  assert.equal((await f.run("poster", "bind", "--style", "谢霆锋演唱会款")).code, 2);
+
+  const dry = await f.run("poster", "backfill");
+  assert.equal(dry.code, 0);
+  assert.equal(dry.data.applied, false);
+  assert.deepEqual(f.calls.at(-1).args, { product: "", style: "", apply: false });
+  const applied = await f.run("poster", "backfill", "--style", "檀健次款", "--apply");
+  assert.equal(applied.data.images, 3);
+  assert.equal(f.calls.at(-1).args.apply, true);
+  assert.equal((await f.run("poster", "backfill", "--target", "x")).code, 2);
+  assert.equal((await f.run("poster", "nope")).code, 2);
+
+  const old = await fixture(t, { features: ["reference-library"] });
+  const refused = await old.run("poster", "resolve", "--style", "檀健次款");
+  assert.equal(refused.code, 8);
+  assert.match(refused.data.message, /poster-link/);
 });

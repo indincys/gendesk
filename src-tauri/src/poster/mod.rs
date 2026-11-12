@@ -4,6 +4,9 @@
 //! 不再询问：每次验收建一个批次，自动按已保存的绑定或 20 款明星名匹配商品；匹配不上的
 //! 款式让批次停在「失败」并写明原因，用户在设置里指定一次商品后自动续导。同时开启实况图
 //! 时，批次等配对落盘后带着视频一起导入。
+//!
+//! 同一套匹配也用在投单前（`unresolved`，对不上就让工单待确认、不生图）、CLI 绑定
+//! （`bind_style`）与历史成品补导（`backfill`）。
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +18,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use crate::db::{now_unix, repo::settings};
 use crate::error::{AppError, AppResult};
 
+pub mod backfill;
 pub mod client;
 pub(crate) mod storage;
 #[cfg(test)]
@@ -274,6 +278,19 @@ fn group_key(sku: &str, style: &str) -> String {
     format!("{}:{sku}{style}", sku.len())
 }
 
+/// 作品目录与参考图库统一使用的日历产品名。只有这些产品下才按款式名识别明星，
+/// 其他产品的款式名不参与归属（「王一博」可能只是某个杯子的款式名）。
+const CALENDAR_PRODUCTS: &[&str] = &["2027明星日历", "明星日历2027"];
+
+/// 款式名对应的明星：正好是「檀健次」或参考图库写法「檀健次款」。不取前缀，
+/// 「谢霆锋演唱会款」这类变体款式要用户绑定一次。
+fn style_artist(style: &str) -> Option<&'static str> {
+    ARTISTS
+        .iter()
+        .find(|(artist, _)| style == *artist || style.strip_suffix('款') == Some(*artist))
+        .map(|(artist, _)| *artist)
+}
+
 fn identity(sku: &str, style: &str) -> Result<Option<&'static str>, &'static str> {
     let from_sku = ARTISTS
         .iter()
@@ -283,14 +300,14 @@ fn identity(sku: &str, style: &str) -> Result<Option<&'static str>, &'static str
                 || sku == format!("calendar-2027-{code}")
         })
         .map(|(artist, _)| *artist);
-    let from_style = ARTISTS
-        .iter()
-        .find(|(artist, _)| *artist == style)
-        .map(|(artist, _)| *artist);
+    let from_style = style_artist(style);
     if from_sku.is_some() && from_style.is_some() && from_sku != from_style {
         return Err("SKU 与明星标记互相矛盾，请先修正款式信息");
     }
-    Ok(from_sku)
+    if from_sku.is_some() {
+        return Ok(from_sku);
+    }
+    Ok(from_style.filter(|_| CALENDAR_PRODUCTS.contains(&sku)))
 }
 
 async fn bindings(pool: &SqlitePool) -> AppResult<Vec<Binding>> {
@@ -298,6 +315,43 @@ async fn bindings(pool: &SqlitePool) -> AppResult<Vec<Binding>> {
         .await?
         .unwrap_or_else(|| "[]".into());
     Ok(serde_json::from_str(&json)?)
+}
+
+/// 一个 `(sku, style)` 解析到的 Poster 商品；`None` 时附带原因。
+fn resolve<'a>(
+    sku: &str,
+    style: &str,
+    products: &'a [client::PosterProduct],
+    bindings: &[Binding],
+) -> (Option<&'a client::PosterProduct>, String) {
+    let identity = identity(sku, style);
+    let bound = bindings.iter().find(|b| b.sku == sku && b.style == style);
+    let product = if identity.is_err() {
+        None
+    } else if let Some(binding) = bound {
+        // 已绑定的目标被删除时不按名称偷偷接到另一条新商品。
+        products.iter().find(|p| p.id == binding.product_id)
+    } else if let Ok(Some(artist)) = identity {
+        let name = format!("{artist}日历（2027）");
+        let matching = products
+            .iter()
+            .filter(|p| p.name == name)
+            .collect::<Vec<_>>();
+        if matching.len() == 1 {
+            matching.first().copied()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let warning = match identity {
+        Err(error) => error.into(),
+        _ if product.is_none() && bound.is_some() => "原绑定商品已不可用，请重新核对目标".into(),
+        _ if product.is_none() => "尚未绑定款式，请核对后选择对应商品".into(),
+        _ => String::new(),
+    };
+    (product, warning)
 }
 
 fn groups(
@@ -312,37 +366,7 @@ fn groups(
             existing.count += 1;
             continue;
         }
-        let identity = identity(&image.sku, &image.style);
-        let bound = bindings
-            .iter()
-            .find(|b| b.sku == image.sku && b.style == image.style);
-        let product = if identity.is_err() {
-            None
-        } else if let Some(binding) = bound {
-            // 已绑定的目标被删除时不按名称偷偷接到另一条新商品。
-            products.iter().find(|p| p.id == binding.product_id)
-        } else if let Ok(Some(artist)) = identity {
-            let name = format!("{artist}日历（2027）");
-            let matching = products
-                .iter()
-                .filter(|p| p.name == name)
-                .collect::<Vec<_>>();
-            if matching.len() == 1 {
-                matching.first().copied()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let warning = match identity {
-            Err(error) => error.into(),
-            _ if product.is_none() && bound.is_some() => {
-                "原绑定商品已不可用，请重新核对目标".into()
-            }
-            _ if product.is_none() => "尚未绑定款式，请核对后选择对应商品".into(),
-            _ => String::new(),
-        };
+        let (product, warning) = resolve(&image.sku, &image.style, products, bindings);
         result.push(PosterGroup {
             key,
             sku: image.sku.clone(),
@@ -353,6 +377,146 @@ fn groups(
         });
     }
     result
+}
+
+/// 对不上商品时给人看的款式标签：有产品写「产品 / 款式」，否则只写有的那一个。
+fn label(sku: &str, style: &str) -> String {
+    match (sku.is_empty(), style.is_empty()) {
+        (false, false) => format!("{sku} / {style}"),
+        (true, _) => style.into(),
+        (false, true) => sku.into(),
+    }
+}
+
+/// 一个款式解析到哪个 Poster 商品（CLI `poster resolve`、投单检查与补导共用）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCheck {
+    pub product: String,
+    pub style: String,
+    pub target_id: Option<String>,
+    pub target_name: Option<String>,
+    pub warning: String,
+}
+
+fn check_with(
+    keys: &[(String, String)],
+    products: &[client::PosterProduct],
+    bindings: &[Binding],
+) -> Vec<TargetCheck> {
+    let mut out: Vec<TargetCheck> = Vec::new();
+    for (sku, style) in keys {
+        if out.iter().any(|c| &c.product == sku && &c.style == style) {
+            continue;
+        }
+        let (product, warning) = resolve(sku, style, products, bindings);
+        out.push(TargetCheck {
+            product: sku.clone(),
+            style: style.clone(),
+            target_id: product.map(|p| p.id.clone()),
+            target_name: product.map(|p| p.name.clone()),
+            warning,
+        });
+    }
+    out
+}
+
+/// 读 Poster 商品目录，逐个款式给出归属。
+pub async fn check_targets(
+    pool: &SqlitePool,
+    keys: &[(String, String)],
+) -> AppResult<Vec<TargetCheck>> {
+    let settings = load_settings(pool).await?;
+    let products = client::products(Path::new(&settings.executable)).await?;
+    Ok(check_with(keys, &products, &bindings(pool).await?))
+}
+
+/// 投单前检查：开启自动导入时，返回审稿通过后进不了 Poster 的款式说明；
+/// 未开启或全部能对上时返回空。读不到 Poster 商品时返回错误，由调用方决定是否放行。
+pub async fn unresolved(pool: &SqlitePool, keys: &[(String, String)]) -> AppResult<Vec<String>> {
+    if keys.is_empty() || !load_settings(pool).await?.auto_import {
+        return Ok(Vec::new());
+    }
+    Ok(check_targets(pool, keys)
+        .await?
+        .into_iter()
+        .filter(|c| c.target_id.is_none())
+        .map(|c| format!("「{}」{}", label(&c.product, &c.style), c.warning))
+        .collect())
+}
+
+/// 有明确明星身份时，不可选成另一位已知明星的商品。
+fn guard_choice(sku: &str, style: &str, product: &client::PosterProduct) -> AppResult<()> {
+    let identity = identity(sku, style).map_err(|e| AppError::InvalidInput(e.into()))?;
+    if let Some(artist) = identity {
+        if ARTISTS
+            .iter()
+            .any(|(other, _)| *other != artist && product.name == format!("{other}日历（2027）"))
+        {
+            return Err(AppError::InvalidInput(format!(
+                "{artist} 的图片不能归入「{}」",
+                product.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn upsert_binding(saved: &mut Vec<Binding>, sku: &str, style: &str, product_id: &str) {
+    saved.retain(|b| !(b.sku == sku && b.style == style));
+    saved.push(Binding {
+        sku: sku.into(),
+        style: style.into(),
+        product_id: product_id.into(),
+    });
+}
+
+/// CLI `poster bind`：为一个款式指定 Poster 商品（按商品 ID 或完整名称），之后同款自动导入。
+/// 停在「需处理」的同款批次由调用方随后唤醒的后台导入一并续上。
+pub async fn bind_style(
+    pool: &SqlitePool,
+    sku: &str,
+    style: &str,
+    target: &str,
+) -> AppResult<TargetCheck> {
+    if sku.trim().is_empty() && style.trim().is_empty() {
+        return Err(AppError::InvalidInput("产品与款式不能都为空".into()));
+    }
+    let settings = load_settings(pool).await?;
+    let products = client::products(Path::new(&settings.executable)).await?;
+    let by_id = products.iter().find(|p| p.id == target);
+    let product = match by_id {
+        Some(p) => p,
+        None => {
+            let named = products
+                .iter()
+                .filter(|p| p.name == target)
+                .collect::<Vec<_>>();
+            match named.as_slice() {
+                [only] => *only,
+                [] => {
+                    return Err(AppError::InvalidInput(format!(
+                        "Poster 里没有商品「{target}」，可用：{}",
+                        products
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )))
+                }
+                _ => {
+                    return Err(AppError::InvalidInput(format!(
+                        "Poster 里有多个「{target}」，请改用商品 ID"
+                    )))
+                }
+            }
+        }
+    };
+    guard_choice(sku, style, product)?;
+    let mut saved = bindings(pool).await?;
+    upsert_binding(&mut saved, sku, style, &product.id);
+    settings::set_by_key(pool, "posterBindings", &serde_json::to_string(&saved)?).await?;
+    Ok(check_with(&[(sku.into(), style.into())], &products, &saved).remove(0))
 }
 
 /// 设置页「指定商品」用：本批各款式与可选商品。
@@ -380,23 +544,8 @@ async fn apply_bindings(
             .iter()
             .find(|p| p.id == chosen)
             .ok_or_else(|| AppError::InvalidInput("请选择仍有效的 Poster 商品".into()))?;
-        // 有明确明星身份时，不可选成另一位已知明星；已确认的 ID 可随商品改名保留。
-        if let Ok(Some(artist)) = identity(&group.sku, &group.style) {
-            if ARTISTS.iter().any(|(other, _)| {
-                *other != artist && product.name == format!("{other}日历（2027）")
-            }) {
-                return Err(AppError::InvalidInput(format!(
-                    "{artist} 的图片不能归入「{}」",
-                    product.name
-                )));
-            }
-        }
-        saved.retain(|b| !(b.sku == group.sku && b.style == group.style));
-        saved.push(Binding {
-            sku: group.sku.clone(),
-            style: group.style.clone(),
-            product_id: product.id.clone(),
-        });
+        guard_choice(&group.sku, &group.style, product)?;
+        upsert_binding(&mut saved, &group.sku, &group.style, &product.id);
         targets.push((group, product));
     }
     let mut tx = pool.begin().await?;
@@ -506,13 +655,7 @@ async fn resolve_products(pool: &SqlitePool, executable: &Path, id: &str) -> App
         .groups
         .iter()
         .filter(|g| g.product_id.is_none())
-        .map(|g| {
-            format!(
-                "「{}」{}",
-                if g.style.is_empty() { &g.sku } else { &g.style },
-                g.warning
-            )
-        })
+        .map(|g| format!("「{}」{}", label(&g.sku, &g.style), g.warning))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         return Err(AppError::InvalidInput(format!(

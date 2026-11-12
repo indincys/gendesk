@@ -31,6 +31,7 @@ pub const FEATURES: &[&str] = &[
     "background-launch",
     "v2v-rewrite",
     "reference-library",
+    "poster-link",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。
@@ -161,6 +162,79 @@ fn failure(error: String) -> Response {
     }
 }
 
+/// 可空的文本参数：缺省或空串都当空串（「产品 / 款式」可以只有一个）。
+fn text(args: &Value, key: &str) -> String {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Poster 衔接：查归属、绑定款式、补导历史成品。都不生图、不花钱。
+async fn poster_command(
+    app: &AppHandle,
+    state: &AppState,
+    cmd: &str,
+    args: &Value,
+) -> AppResult<Value> {
+    use crate::poster;
+    let auto_import = poster::load_settings(&state.db).await?.auto_import;
+    match cmd {
+        "poster.resolve" => {
+            let keys = args
+                .get("keys")
+                .and_then(Value::as_array)
+                .map(|keys| {
+                    keys.iter()
+                        .map(|k| (text(k, "product"), text(k, "style")))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec![(text(args, "product"), text(args, "style"))]);
+            if keys.iter().all(|(p, s)| p.is_empty() && s.is_empty()) {
+                return Err(AppError::InvalidInput("缺少产品或款式".into()));
+            }
+            let targets = poster::check_targets(&state.db, &keys).await?;
+            Ok(json!({ "autoImport": auto_import, "targets": targets }))
+        }
+        "poster.bind" => {
+            let target = {
+                let _guard = state.poster_lock.lock().await;
+                poster::bind_style(
+                    &state.db,
+                    &text(args, "product"),
+                    &text(args, "style"),
+                    arg(args, "target")?,
+                )
+                .await?
+            };
+            // 停在「需处理」的同款批次随之续导。
+            crate::commands::poster::emit(app);
+            crate::commands::poster::start_delivery(app.clone());
+            Ok(json!({ "autoImport": auto_import, "target": target }))
+        }
+        "poster.backfill" => {
+            let filter = poster::backfill::Filter {
+                product: Some(text(args, "product")).filter(|s| !s.is_empty()),
+                style: Some(text(args, "style")).filter(|s| !s.is_empty()),
+            };
+            let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
+            let report = {
+                // 与验收互斥：验收正在登记的作品不会被补导再登记一次。
+                let _review = state.review_lock.lock().await;
+                let _guard = state.poster_lock.lock().await;
+                poster::backfill::backfill(&state.db, &state.dirs.root, &filter, apply).await?
+            };
+            if report.batches > 0 {
+                crate::commands::poster::emit(app);
+                crate::commands::poster::start_delivery(app.clone());
+            }
+            Ok(serde_json::to_value(report)?)
+        }
+        other => Err(AppError::InvalidInput(format!("未知命令：{other}"))),
+    }
+}
+
 fn arg<'a>(args: &'a Value, key: &str) -> AppResult<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -219,6 +293,7 @@ async fn dispatch_inner(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Va
         library if library.starts_with("library.") => {
             library_command(app, &state, library, &args).await
         }
+        poster if poster.starts_with("poster.") => poster_command(app, &state, poster, &args).await,
         "overview" => overview(&state).await,
         "v2v.pending" => Ok(serde_json::to_value(
             crate::v2v::rewrite::pending(&state.db).await?,

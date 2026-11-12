@@ -39,14 +39,21 @@ gendesk library overview                         款式、分类、各类张数�
 gendesk library images --style <款式> [--category <分类>] [--include-removed]
 gendesk library import --style <款式> --category <分类> [--dir <文件夹>] [图片…]
 gendesk library pick --style <款式> --category <分类> [--count 3] [--mark-used]
+gendesk library pack --style <款式> --slot 正面图:2 --slot 45度角:2 [--slot 礼盒图] [--export <目录>] [--mark-used]
+gendesk library pack --spec <素材包.json> [--export <目录>] [--mark-used]
+                     抽一个素材包：包内不重复，每类先用冷却期外的图，不够自动降级（如 7→5→3→2→1 天）；
+                     --export 拷出摆正后的图并写「素材包.json」给外部（导出即记为使用）；不导出默认只预览
 gendesk library add-style --name <款式> [--product <产品>]
 gendesk library add-category --name <分类> [--cooldown 7]
 gendesk library set-category --name <分类> [--cooldown 0] [--rename <新名>]
 gendesk library update --id 12 [--id 13] [--category <分类>] [--enable|--disable] [--remove|--restore]
 gendesk library mark-used --id 12 [--id 13]     在 GenDesk 以外用过这些图时手动记一次
 gendesk library usage --job-id <jobId> | --id 12
+gendesk library fix-orientation [--dry-run]     按 EXIF 方向重做已导入参考图的缩略图、上传副本与尺寸
 款式写 --product 区分同名款式。清单 ref/refs 可写图库引用，收录时由应用抽图并记账：
   {"category":"正面图"}（款式取条目 organization.style）· {"category":"礼盒图","style":"王一博"} · {"libraryId":12}
+  {"category":"正面图","count":2} 展开成连续两张不重复的正面图。素材包.json：
+  {"style":"檀健次款","product":"2027明星日历","slots":[{"category":"正面图","count":2},{"category":"礼盒图"}]}
 
 单条参数：--name --sku --style --product --requirement --source --note --purpose i2v --skill
           --ratio --size --format --quality（默认 high）--job-id
@@ -319,7 +326,15 @@ async function prepare(opts) {
     const orderedRefs = [];
     for (const input of inputs) {
       if (input && typeof input === "object" && !Array.isArray(input)) {
-        orderedRefs.push(libraryRef(input, `${label}.refs`));
+        const { count = 1, ...one } = input;
+        check(
+          Number.isInteger(count) && count >= 1 && count <= 16,
+          `${label}.refs 图库引用的 count 要是 1～16 的整数`,
+        );
+        check(count === 1 || one.libraryId === undefined, `${label} 点名 libraryId 时不能写 count`);
+        const ref = libraryRef(one, `${label}.refs`);
+        for (let k = 0; k < count; k += 1) orderedRefs.push({ ...ref });
+        check(orderedRefs.length <= 16, `${label}.refs 展开后超过 16 张`);
         check(
           input.libraryId === undefined ||
             orderedRefs.filter((r) => r.libraryId === input.libraryId).length === 1,
@@ -747,12 +762,14 @@ const LIBRARY_OPTIONS = {
   images: ["style", "product", "category", "include-removed"],
   import: ["style", "product", "category", "dir"],
   pick: ["style", "product", "category", "count", "mark-used"],
+  pack: ["style", "product", "slot", "spec", "export", "mark-used"],
   "add-style": ["name", "product", "note"],
   "add-category": ["name", "cooldown"],
   "set-category": ["name", "cooldown", "rename"],
   update: ["id", "category", "enable", "disable", "remove", "restore", "note"],
   "mark-used": ["id"],
   usage: ["job-id", "id"],
+  "fix-orientation": ["dry-run"],
 };
 
 function cooldown(value) {
@@ -836,6 +853,74 @@ async function library(sub, positional, opts) {
         picks: data.picks.map((p) => ({ tier: p.tier, ...brief(p.image) })),
       };
     }
+    case "pack": {
+      let spec;
+      if (opts.spec !== undefined) {
+        check(
+          opts.slot === undefined && opts.style === undefined && opts.product === undefined,
+          "--spec 与 --style/--product/--slot 只能选一种",
+        );
+        const file = filePath(opts.spec);
+        try {
+          spec = JSON.parse(await fs.readFile(file, "utf8"));
+        } catch (e) {
+          throw new CliError(`无法读取素材包 ${file}：${e.message}`);
+        }
+        object(spec, "素材包");
+        knownKeys(spec, ["style", "product", "slots"], "素材包");
+      } else {
+        check(opts.slot?.length, "用 --slot 分类:张数 列出要抽的分类，或用 --spec 给素材包文件");
+        spec = {
+          style: requiredText(opts.style, "--style"),
+          product: opts.product ?? "",
+          slots: opts.slot.map((raw) => {
+            const m = /^(.+?)(?:[:：](\d+))?$/.exec(raw.trim());
+            check(m, `--slot 写成 分类:张数，如 正面图:2：${raw}`);
+            return { category: m[1].trim(), count: m[2] === undefined ? 1 : Number(m[2]) };
+          }),
+        };
+      }
+      check(Array.isArray(spec.slots) && spec.slots.length > 0, "素材包 slots 至少一项");
+      spec.slots.forEach((slot, n) => {
+        object(slot, `素材包 slots[${n}]`);
+        knownKeys(slot, ["category", "count", "style", "product"], `素材包 slots[${n}]`);
+        requiredText(slot.category, `素材包 slots[${n}].category`);
+        check(
+          slot.count === undefined || (Number.isInteger(slot.count) && slot.count >= 1),
+          `素材包 slots[${n}].count 要是 ≥1 的整数`,
+        );
+      });
+      const exportDir = opts.export === undefined ? undefined : filePath(opts.export);
+      const data = await call("pack", {
+        style: spec.style ?? "",
+        product: spec.product ?? "",
+        slots: spec.slots,
+        markUsed: opts["mark-used"] === true,
+        ...(exportDir ? { exportDir } : {}),
+      });
+      const refs = data.picks.map((p) => ({ libraryId: p.image.id }));
+      return {
+        status: "ok",
+        packId: data.packId,
+        markedUsed: data.markedUsed,
+        notes: data.notes,
+        ...(data.exportDir ? { exportDir: data.exportDir, manifest: data.manifestPath } : {}),
+        message: data.exportDir
+          ? "已导出并记为使用；外部用导出目录里的文件，投回 GenDesk 时当普通参考图文件，不要改写成 libraryId"
+          : data.markedUsed
+            ? `已记为使用（台账 jobId=${data.packId}）；不要再把这些 libraryId 写进工单，否则重复记账`
+            : "仅预览，未记为使用。要在 GenDesk 跑这一包，把 refs 原样写进工单条目，收录时记账",
+        ...(data.markedUsed ? {} : { refs }),
+        picks: data.picks.map((p) => ({
+          slot: p.slot,
+          tier: p.tier,
+          cooldownDays: p.cooldownDays,
+          configuredCooldownDays: p.configuredCooldownDays,
+          ...(p.exportedFile ? { file: p.exportedFile } : {}),
+          ...brief(p.image),
+        })),
+      };
+    }
     case "add-style":
       return {
         status: "ok",
@@ -873,6 +958,26 @@ async function library(sub, positional, opts) {
     }
     case "mark-used":
       return { status: "ok", ...(await call("mark-used", { ids: imageIds(opts) })) };
+    case "fix-orientation": {
+      const report = await call("fix-orientation", { dryRun: opts["dry-run"] === true });
+      return {
+        status: report.failed.length ? "partial" : "ok",
+        dryRun: report.dryRun,
+        scanned: report.scanned,
+        needsFix: report.needsFix,
+        repaired: report.repaired,
+        alreadyUpright: report.alreadyUpright,
+        missing: report.missing,
+        failed: report.failed,
+        fixes: report.fixes.map((f) => ({
+          refImageId: f.refImageId,
+          name: f.name,
+          stored: f.stored.join("x"),
+          display: f.display.join("x"),
+          ...(f.inUse ? { inUse: true } : {}),
+        })),
+      };
+    }
     case "usage": {
       if (opts["job-id"] !== undefined) {
         check(opts.id === undefined, "--job-id 与 --id 只能选一个");
@@ -934,6 +1039,10 @@ const LIBRARY_FLAGS = {
   "job-id": { type: "string" },
   "mark-used": { type: "boolean" },
   "include-removed": { type: "boolean" },
+  "dry-run": { type: "boolean" },
+  slot: { type: "string", multiple: true },
+  spec: { type: "string" },
+  export: { type: "string" },
   enable: { type: "boolean" },
   disable: { type: "boolean" },
   remove: { type: "boolean" },

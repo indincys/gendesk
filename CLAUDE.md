@@ -69,7 +69,7 @@ cd src-tauri && cargo test --lib refs_insert_list -- --exact --nocapture
 | `v2v/`       | 图生视频（状态全在库内）：`dreamina`(即梦 CLI 封装) · `rewrite`(待改写队列与写回) · `runner`(提交/轮询/幽灵判定) · `autofill`(常驻待发队列) · `activity`(执行日志)。 |
 | `intake/`    | 工单收录：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `preflight`(只读预检，供 `validate-intake`) · `ingest`(收录 + 去重 + 移档 + 检查点恢复)。 |
 | `library.rs` | 作品目录规则（产品/款式/需求）；`library/maintenance` 是显式离线整理命令。 |
-| `ref_library.rs` | 参考图库（0051）：款式 × 分类存图、按分类冷却的随机抽图（`choose`）、收录时抽图记账（`draw_for_job`）。 |
+| `ref_library.rs` | 参考图库（0051/0053）：款式 × 分类存图、按分类冷却并沿 `COOLDOWN_LADDER` 降级的随机抽图（`choose_detailed`）、收录时抽图记账（`draw_for_job`）、素材包抽取与导出（`draw_pack`）。 |
 | `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
 | `live_photo.rs` | 实况图队列：调用内置 `gendesk-live`，配对完成回填 Poster 批次。 |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
@@ -198,7 +198,7 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 会让人点重试拿到第二份提示词）· 投单 skill 装在用户级 `~/.claude/skills/`（仓库内
 `.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
 
-**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。
+**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。冷却不够时按阶梯降级（0053 起台账记实际冷却天数），原文件丢失的图自动屏蔽。素材包导出即记账（台账 job_id = packId），导出的是上传副本口径的文件。
 
 **作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 
@@ -268,6 +268,8 @@ VIP 同规格**贵 5.5 倍**（8 vs 44
 改一处必须改另一处。
 **③ 容器宽度只能取 `contentRect.width`**（ResizeObserver），不能拿 `clientWidth` 兜底
 —— 后者含左右内边距，每行会宽出一个 padding，最后一张被挤出边界。
+
+**EXIF 方向（2026-11 实测）** — 手机竖拍照片的像素是横存的（iPhone 8064×6048 + Orientation=6），`image` 与 `jpeg-decoder` 只给原始像素。摆正只在 `files::decode::decode_scaled` 一处做，尺寸统一取 `display_dimensions`（已交换宽高）；带方向的参考图**必须**另出摆正的上传副本（`InspectedImage::needs_upload_copy`），因为副本不带 EXIF、而上游不保证认原文件的 EXIF——修复前横躺的副本被直接发去生图。原文件不改（`content_hash` 口径依赖它）。存量用 `gendesk library fix-orientation` 显式补，预览缓存靠 `PREVIEW_REVISION` 换键。
 
 **事务粒度** — `accept_tasks` 明确**不做单事务**（与直觉相反）：拷贝无法回滚，第 150 张失败会把
 前 149 条作品记录回滚掉而文件已在成品目录里；现在的顺序（先整批拷完、任一张失败就一行库都

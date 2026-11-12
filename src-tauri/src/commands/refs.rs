@@ -117,9 +117,9 @@ pub(crate) fn ingest_one(
         .to_lowercase();
 
     let inspected = files::decode::inspect_image(&src, permit)?;
+    let needs_copy = inspected.needs_upload_copy();
     let bytes = inspected.bytes;
     let (w, h) = (inspected.width, inspected.height);
-    let oversize = inspected.oversize;
     let img = inspected.image;
     let file_size = bytes.len() as i64;
     let content_hash = Some(files::content_hash_bytes(&bytes));
@@ -129,7 +129,8 @@ pub(crate) fn ingest_one(
     let thumb = unique_path(thumbs_dir, &stem, "jpg");
     files::write_thumbnail_from(&img, &thumb)?;
 
-    let upload_path = if oversize {
+    // 原文件原样保存（含 EXIF，hash 口径不变）；发给上游的是摆正后的副本。
+    let upload_path = if needs_copy {
         let upload_dest = unique_path(refs_dir, &format!("{stem}_up"), "jpg");
         match files::write_upload_copy_from(&img, &upload_dest) {
             Ok(()) => Some(upload_dest.to_string_lossy().to_string()),
@@ -276,4 +277,294 @@ pub async fn list_ref_images(
             ephemeral: r.ephemeral,
         })
         .collect())
+}
+
+// ───────────────────────────── 存量方向修复 ─────────────────────────────
+
+/// 一张图的修复结果（只列需要摆正的那些）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientationFix {
+    pub ref_image_id: i64,
+    pub name: String,
+    /// 修复前库里记的尺寸。
+    pub stored: (i64, i64),
+    /// 按 EXIF 方向摆正后的显示尺寸。
+    pub display: (u32, u32),
+    /// 有排队或在跑的任务挂着它：旧上传副本先留着，避免正要上传的那条打不开文件。
+    pub in_use: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientationRepairReport {
+    pub dry_run: bool,
+    pub scanned: i64,
+    /// 带非默认方向、本次需要（或已经）摆正的张数。
+    pub needs_fix: i64,
+    pub repaired: i64,
+    /// 已经是摆正口径（之前修过或新版导入），跳过。
+    pub already_upright: i64,
+    pub missing: Vec<String>,
+    pub failed: Vec<String>,
+    pub fixes: Vec<OrientationFix>,
+}
+
+/// 把缩略图、上传副本与 `width/height` 重做成按 EXIF 摆正的口径。
+///
+/// 原文件不动（`content_hash` 依赖它的字节，去重口径不能变）；新缩略图与上传副本换新文件名
+/// 写入后再改库，界面按路径缓存的旧缩略图因此不会残留。旧文件在改库之后删除，
+/// 有排队/在跑任务挂着的那张保留旧上传副本（调度器每次派发重新读路径，排队的会用新副本）。
+///
+/// 只在显式命令里跑（`gendesk library fix-orientation`），应用启动不做任何补扫。
+pub(crate) async fn repair_orientation(
+    pool: &sqlx::SqlitePool,
+    dry_run: bool,
+) -> AppResult<OrientationRepairReport> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: i64,
+        name: String,
+        file_path: String,
+        thumb_path: String,
+        upload_path: Option<String>,
+        width: i64,
+        height: i64,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, name, file_path, thumb_path, upload_path, width, height
+           FROM ref_images WHERE deleted_at IS NULL ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut report = OrientationRepairReport {
+        dry_run,
+        scanned: rows.len() as i64,
+        needs_fix: 0,
+        repaired: 0,
+        already_upright: 0,
+        missing: Vec::new(),
+        failed: Vec::new(),
+        fixes: Vec::new(),
+    };
+    for row in rows {
+        let src = PathBuf::from(&row.file_path);
+        if !src.is_file() {
+            report.missing.push(row.file_path);
+            continue;
+        }
+        let probe = src.clone();
+        let header = tokio::task::spawn_blocking(move || -> AppResult<_> {
+            let bytes = std::fs::read(&probe)?;
+            files::decode::display_dimensions(&bytes)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let (dw, dh, orientation) = match header {
+            Ok(v) => v,
+            Err(e) => {
+                report.failed.push(format!("{}：{e}", row.file_path));
+                continue;
+            }
+        };
+        if orientation == image::metadata::Orientation::NoTransforms {
+            continue;
+        }
+        report.needs_fix += 1;
+        // 交换宽高的方向：库里尺寸已是显示尺寸且有上传副本，就是修过的。
+        // 180°/镜像不改尺寸、判不出来，重做一遍结果相同。
+        if files::decode::swaps_axes(orientation)
+            && (row.width, row.height) == (i64::from(dw), i64::from(dh))
+            && row.upload_path.is_some()
+        {
+            report.already_upright += 1;
+            continue;
+        }
+        let in_use: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tasks t
+                 WHERE t.status IN ('q','run','retry')
+                   AND (t.ref_image_id = ?1
+                        OR t.batch_id IN (SELECT batch_id FROM batch_refs WHERE ref_image_id = ?1)))",
+        )
+        .bind(row.id)
+        .fetch_one(pool)
+        .await?;
+        report.fixes.push(OrientationFix {
+            ref_image_id: row.id,
+            name: row.name.clone(),
+            stored: (row.width, row.height),
+            display: (dw, dh),
+            in_use,
+        });
+        if dry_run {
+            continue;
+        }
+        let thumb_dir = Path::new(&row.thumb_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let refs_dir = src.parent().map(Path::to_path_buf).unwrap_or_default();
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(files::sanitize_filename)
+            .unwrap_or_else(|| format!("ref{}", row.id));
+        let made = files::decode::bounded(move |permit| {
+            let inspected = files::decode::inspect_image(&src, permit)?;
+            let thumb = unique_path(&thumb_dir, &format!("{stem}_upright"), "jpg");
+            files::write_thumbnail_from(&inspected.image, &thumb)?;
+            let upload = unique_path(&refs_dir, &format!("{stem}_up_upright"), "jpg");
+            if let Err(e) = files::write_upload_copy_from(&inspected.image, &upload) {
+                let _ = std::fs::remove_file(&thumb);
+                return Err(e);
+            }
+            Ok((thumb, upload, inspected.width, inspected.height))
+        })
+        .await;
+        let (thumb, upload, w, h) = match made {
+            Ok(v) => v,
+            Err(e) => {
+                report.failed.push(format!("{}：{e}", row.file_path));
+                continue;
+            }
+        };
+        let updated = sqlx::query(
+            "UPDATE ref_images SET width = ?2, height = ?3, thumb_path = ?4, upload_path = ?5
+              WHERE id = ?1",
+        )
+        .bind(row.id)
+        .bind(i64::from(w))
+        .bind(i64::from(h))
+        .bind(thumb.to_string_lossy().to_string())
+        .bind(upload.to_string_lossy().to_string())
+        .execute(pool)
+        .await;
+        if let Err(e) = updated {
+            let _ = std::fs::remove_file(&thumb);
+            let _ = std::fs::remove_file(&upload);
+            report.failed.push(format!("{}：{e}", row.file_path));
+            continue;
+        }
+        report.repaired += 1;
+        let _ = std::fs::remove_file(&row.thumb_path);
+        if let Some(old) = row.upload_path.filter(|p| p != &row.file_path) {
+            if !in_use {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+    }
+    tracing::info!(
+        scanned = report.scanned,
+        needs_fix = report.needs_fix,
+        repaired = report.repaired,
+        failed = report.failed.len(),
+        dry_run,
+        "参考图方向修复"
+    );
+    Ok(report)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
+mod tests {
+    use super::*;
+    use crate::db::test_support::test_pool;
+    use crate::files::decode::tests::{red_left_blue_right, with_orientation};
+
+    /// 模拟修复前的存量：原文件带 Orientation=6，库里记的是横幅原始尺寸与横躺的缩略图。
+    #[tokio::test]
+    async fn repair_rotates_stored_thumbnails_upload_copies_and_dimensions_once() {
+        let (pool, dir) = test_pool().await;
+        let refs = dir.path().join("refs/library");
+        let thumbs = dir.path().join("thumbs/library");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let original = refs.join("竖拍.jpeg");
+        std::fs::write(
+            &original,
+            with_orientation(&red_left_blue_right(300, 200), 6),
+        )
+        .unwrap();
+        let old_thumb = thumbs.join("竖拍.jpg");
+        let old_upload = refs.join("竖拍_up.jpg");
+        std::fs::write(&old_thumb, red_left_blue_right(300, 200)).unwrap();
+        std::fs::write(&old_upload, red_left_blue_right(300, 200)).unwrap();
+        let plain = refs.join("横拍.jpeg");
+        std::fs::write(&plain, red_left_blue_right(300, 200)).unwrap();
+        let s = |p: &Path| p.to_string_lossy().to_string();
+        let rotated_id = repo::insert(
+            &pool,
+            &repo::NewRefImage {
+                name: "竖拍".into(),
+                file_path: s(&original),
+                thumb_path: s(&old_thumb),
+                width: 300,
+                height: 200,
+                file_size: 1,
+                content_hash: None,
+                upload_path: Some(s(&old_upload)),
+                ephemeral: false,
+            },
+        )
+        .await
+        .unwrap();
+        repo::insert(
+            &pool,
+            &repo::NewRefImage {
+                name: "横拍".into(),
+                file_path: s(&plain),
+                thumb_path: s(&old_thumb),
+                width: 300,
+                height: 200,
+                file_size: 1,
+                content_hash: None,
+                upload_path: None,
+                ephemeral: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let preview = repair_orientation(&pool, true).await.unwrap();
+        assert_eq!(
+            (preview.scanned, preview.needs_fix, preview.repaired),
+            (2, 1, 0)
+        );
+        assert_eq!(preview.fixes[0].display, (200, 300));
+        let untouched = repo::get(&pool, rotated_id).await.unwrap().unwrap();
+        assert_eq!(
+            (untouched.width, untouched.height),
+            (300, 200),
+            "预演不改库"
+        );
+
+        let done = repair_orientation(&pool, false).await.unwrap();
+        assert_eq!((done.repaired, done.failed.len()), (1, 0));
+        let row = repo::get(&pool, rotated_id).await.unwrap().unwrap();
+        assert_eq!((row.width, row.height), (200, 300));
+        assert_ne!(
+            row.thumb_path,
+            s(&old_thumb),
+            "换新文件名，界面不会命中旧缓存"
+        );
+        let thumb = image::open(&row.thumb_path).unwrap();
+        assert!(thumb.height() > thumb.width(), "缩略图应是竖的");
+        let upload: Option<String> =
+            sqlx::query_scalar("SELECT upload_path FROM ref_images WHERE id = ?1")
+                .bind(rotated_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let upload = image::open(upload.unwrap()).unwrap();
+        assert!(upload.height() > upload.width(), "上传副本应是竖的");
+        assert!(!old_upload.exists(), "没有任务挂着时删掉横躺的旧副本");
+        assert!(original.exists(), "原文件不动");
+
+        let again = repair_orientation(&pool, false).await.unwrap();
+        assert_eq!(
+            (again.already_upright, again.repaired),
+            (1, 0),
+            "修过的不再重做"
+        );
+    }
 }

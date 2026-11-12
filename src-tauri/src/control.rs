@@ -424,6 +424,33 @@ async fn library_command(
                     .map_err(|e| AppError::InvalidInput(format!("图库引用格式不对：{e}")))?;
             Ok(json!({ "slots": lib::check_slots(db, &slots).await? }))
         }
+        "library.pack" => {
+            let spec: lib::PackSpec = serde_json::from_value(json!({
+                "style": opt_text(args, "style"),
+                "product": opt_text(args, "product"),
+                "slots": args.get("slots").cloned().unwrap_or(Value::Null),
+            }))
+            .map_err(|e| AppError::InvalidInput(format!("素材包格式不对：{e}")))?;
+            let mark = args
+                .get("markUsed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let export = args
+                .get("exportDir")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
+            let result =
+                lib::draw_pack(db, &spec, mark, export.as_deref(), now, &mut lib::os_rng).await?;
+            Ok(serde_json::to_value(result)?)
+        }
+        "library.fix-orientation" => {
+            let dry_run = args.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
+            Ok(serde_json::to_value(
+                crate::commands::refs::repair_orientation(db, dry_run).await?,
+            )?)
+        }
         "library.usage" => {
             if let Some(id) = args.get("id").and_then(Value::as_i64) {
                 return Ok(json!({ "usage": lib::usage_of_image(db, id).await? }));

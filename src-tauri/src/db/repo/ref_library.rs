@@ -389,13 +389,16 @@ pub struct Usage<'a> {
     pub slot: Option<i64>,
     /// 冷却期内或同单重复使用（可用图不够时的退路）。
     pub fallback: bool,
+    /// 抽中时实际执行的冷却天数（降级后的那一档）；手动标记为空。
+    pub cooldown_days: Option<i64>,
 }
 
 /// 记一次使用：台账一行 + 冗余的最近使用时间与次数，同一连接内完成。
 pub async fn record_usage(conn: &mut SqliteConnection, u: &Usage<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO ref_library_usage (image_id, used_at, source, job_id, item_name, slot, fallback)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO ref_library_usage
+           (image_id, used_at, source, job_id, item_name, slot, fallback, cooldown_days)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(u.image_id)
     .bind(u.used_at)
@@ -404,6 +407,7 @@ pub async fn record_usage(conn: &mut SqliteConnection, u: &Usage<'_>) -> Result<
     .bind(u.item_name)
     .bind(u.slot)
     .bind(u.fallback)
+    .bind(u.cooldown_days)
     .execute(&mut *conn)
     .await?;
     sqlx::query(
@@ -427,11 +431,12 @@ pub struct UsageRow {
     pub item_name: Option<String>,
     pub slot: Option<i64>,
     pub fallback: bool,
+    pub cooldown_days: Option<i64>,
 }
 
 pub async fn usage_for_job(pool: &SqlitePool, job_id: &str) -> Result<Vec<UsageRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT image_id, used_at, source, job_id, item_name, slot, fallback
+        "SELECT image_id, used_at, source, job_id, item_name, slot, fallback, cooldown_days
          FROM ref_library_usage WHERE job_id = ?1 ORDER BY id",
     )
     .bind(job_id)
@@ -445,11 +450,23 @@ pub async fn usage_for_image(
     limit: i64,
 ) -> Result<Vec<UsageRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT image_id, used_at, source, job_id, item_name, slot, fallback
+        "SELECT image_id, used_at, source, job_id, item_name, slot, fallback, cooldown_days
          FROM ref_library_usage WHERE image_id = ?1 ORDER BY used_at DESC, id DESC LIMIT ?2",
     )
     .bind(image_id)
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// 发给上游 / 导出时用的文件：有摆正或压缩过的上传副本就用它，否则用原图。
+/// 与调度器 `ref_path` 同一口径。
+pub async fn upload_source(
+    conn: &mut SqliteConnection,
+    ref_image_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT COALESCE(upload_path, file_path) FROM ref_images WHERE id = ?1")
+        .bind(ref_image_id)
+        .fetch_optional(conn)
+        .await
 }

@@ -9,7 +9,6 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
-use image::ImageReader;
 
 use crate::error::{AppError, AppResult};
 
@@ -90,16 +89,15 @@ impl DataDirs {
     }
 }
 
-/// 生成缩略图：长边缩到 <=512，输出 JPEG q80。返回**原图** (宽, 高)。
+/// 生成缩略图：长边缩到 <=512，输出 JPEG q80。返回**原图**显示尺寸 (宽, 高)。
 ///
 /// 返回值会写进 `ref_images.width/height`，所以它必须是原图尺寸而不是解码出来那张的
-/// 尺寸 —— `decode_scaled` 交回来的图通常大于 512 但远小于原图。
+/// 尺寸 —— `decode_scaled` 交回来的图通常大于 512 但远小于原图。尺寸按 EXIF 方向
+/// 交换过，与摆正后的缩略图一致。
 pub fn generate_thumbnail(src: &Path, dest: &Path, permit: &DecodePermit) -> AppResult<(u32, u32)> {
     let bytes = std::fs::read(src)?;
     // 尺寸只读文件头，不解码。
-    let (w, h) = ImageReader::new(std::io::Cursor::new(&bytes))
-        .with_guessed_format()?
-        .into_dimensions()?;
+    let (w, h, _) = decode::display_dimensions(&bytes)?;
     let img = decode::decode_scaled(&bytes, THUMB_MAX, permit)?;
     write_thumbnail_from(&img, dest)?;
     Ok((w, h))
@@ -154,7 +152,8 @@ pub fn write_thumbnail_from(img: &image::DynamicImage, dest: &Path) -> AppResult
     write_jpeg_scaled(img, dest, THUMB_MAX, THUMB_QUALITY)
 }
 
-/// 已解码的图 → 上传副本（长边 ≤2048，JPEG q85）。调用方须先过 [`is_oversize`]。
+/// 已解码的图 → 上传副本（长边 ≤2048，JPEG q85，不带 EXIF）。调用方须先过
+/// `InspectedImage::needs_upload_copy`（超限或带方向）。
 pub fn write_upload_copy_from(img: &image::DynamicImage, dest: &Path) -> AppResult<()> {
     write_jpeg_scaled(img, dest, UPLOAD_MAX_EDGE, UPLOAD_QUALITY)
 }

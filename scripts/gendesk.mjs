@@ -14,7 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 
 // This file is installed standalone. The installer and tests check the release version.
-const CLI_VERSION = "0.41.0";
+const CLI_VERSION = "0.42.0";
 const PROTOCOL = 2;
 const ORDER_VERSION = 1;
 

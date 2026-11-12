@@ -39,6 +39,7 @@ export type {
   RefMappingInput,
   Result,
   ReviewItemView,
+  ReviewReferenceView,
   Settings,
   SettingsPatch,
   SummaryCounts,

@@ -112,6 +112,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::tasks::count_interrupted,
             // review 域
             commands::review::list_pending_review,
+            commands::review::list_review_references,
             commands::review::accept_tasks,
             commands::review::reject_tasks,
             commands::intake::get_agent_cli_info,

@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use serde::Serialize;
 use specta::Type;
 use sqlx::FromRow;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::now_unix;
 use crate::db::repo::{
-    names as name_repo, prompts as prompt_repo, tasks as task_repo, trash as trash_repo,
-    works as work_repo,
+    names as name_repo, prompts as prompt_repo, refs as ref_repo, tasks as task_repo,
+    trash as trash_repo, works as work_repo,
 };
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::files;
 use crate::library::Organization;
 use crate::state::AppState;
@@ -140,6 +140,62 @@ pub async fn list_pending_review(
     let mut rows = pending_review_rows(&state.db, batch_id).await?;
     backfill_sizes(&state.db, &mut rows).await;
     Ok(rows)
+}
+
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewReferenceView {
+    pub position: u32,
+    pub image_path: String,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_review_references(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: i64,
+) -> AppResult<Vec<ReviewReferenceView>> {
+    let references = review_references(&state.db, task_id).await?;
+    let scope = app.asset_protocol_scope();
+    for reference in &references {
+        // 图库可以链接数据目录以外的文件，只开放当前附件的原图。
+        if !scope.is_allowed(&reference.image_path) {
+            scope
+                .allow_file(&reference.image_path)
+                .map_err(|error| AppError::Io(error.to_string()))?;
+        }
+    }
+    Ok(references)
+}
+
+async fn review_references(
+    pool: &sqlx::SqlitePool,
+    task_id: i64,
+) -> AppResult<Vec<ReviewReferenceView>> {
+    let task = sqlx::query_as::<_, (String, i64)>(
+        "SELECT params_json, ref_image_id FROM tasks WHERE id = ?1 AND status = 'rev'",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((params_json, primary)) = task else {
+        return Ok(Vec::new());
+    };
+    // 历史参数缺失或损坏时仍可沿用验收页原有的主图对比。
+    let Ok(ids) = crate::engine::reference_ids(&params_json, primary) else {
+        return Ok(Vec::new());
+    };
+    let mut references = Vec::new();
+    for (index, id) in ids.into_iter().enumerate().skip(1) {
+        if let Some(image) = ref_repo::get(pool, id).await? {
+            references.push(ReviewReferenceView {
+                position: index as u32 + 1,
+                image_path: image.file_path,
+            });
+        }
+    }
+    Ok(references)
 }
 
 async fn pending_review_rows(
@@ -776,6 +832,41 @@ mod tests {
             rows[0].organization.as_ref().unwrap().requirement,
             "桌面场景"
         );
+    }
+
+    #[tokio::test]
+    async fn review_references_expose_originals_in_attachment_order() {
+        let (pool, _d) = test_pool().await;
+        seed_task(&pool, "rev").await;
+        assert!(review_references(&pool, 1).await.unwrap().is_empty());
+
+        sqlx::query(
+            "INSERT INTO ref_images (id,name,file_path,thumb_path,upload_path,width,height,file_size,created_at)
+             VALUES (2,'details','/detail.jpg','/detail-thumb.jpg','/detail-upload.jpg',1,1,1,0),
+                    (3,'desk','/desk.jpg','/desk_thumb.jpg','/desk_upload.jpg',1,1,1,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET params_json=? WHERE id=1")
+            .bind(r#"{"referenceImageIds":[1,3,2]}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let references = review_references(&pool, 1).await.unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| (reference.position, reference.image_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, "/desk.jpg"), (3, "/detail.jpg")]
+        );
+
+        sqlx::query("UPDATE tasks SET params_json='bad legacy data' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(review_references(&pool, 1).await.unwrap().is_empty());
     }
 
     // E02：不通过时原图必须进入待清理文件列表（不立即物理删除），否则误触即永久丢原图。

@@ -5,6 +5,7 @@ import { dayLabel, hhmm } from "@/features/_shared/timeline";
 import { assetSrc, bg } from "@/lib/img";
 import {
   type ReviewItemView,
+  type ReviewReferenceView,
   commands,
   subscribeLivePhoto,
   subscribePoster,
@@ -898,8 +899,7 @@ export function ReviewPage() {
                       </button>
                     </>
                   )}
-                  <div className="fs11 fw6 t3 mt14">提示词原文</div>
-                  <div className="ptext mt6">{zoomItem.promptText}</div>
+                  <ReviewReferences key={zoomItem.id} taskId={zoomItem.id} />
                 </div>
                 <div className="rdbar">
                   <button
@@ -1010,6 +1010,51 @@ function AfterReviewHint() {
         </>
       )}
     </span>
+  );
+}
+
+function ReviewReferences({ taskId }: { taskId: number }) {
+  const [references, setReferences] = useState<ReviewReferenceView[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    unwrap(commands.listReviewReferences(taskId))
+      .then((images) => {
+        if (active) setReferences(images);
+      })
+      .catch(() => {
+        if (active) setLoadFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [taskId]);
+
+  if (loadFailed) return <p className="fs11 t3 mt14">无法读取附加参考图</p>;
+  return references.map(({ position, imagePath }) => (
+    <ReviewReferenceImage key={position} position={position} imagePath={imagePath} />
+  ));
+}
+
+function ReviewReferenceImage({ position, imagePath }: ReviewReferenceView) {
+  const [loadFailed, setLoadFailed] = useState(false);
+  return (
+    <figure className="rdreference mt14">
+      <figcaption className="fs11 fw6 t3">参考图 {position} · 原图</figcaption>
+      {loadFailed ? (
+        <div className="fs11 t3 mt6">原图无法打开</div>
+      ) : (
+        <img
+          className="rdrefimg mt6"
+          src={assetSrc(imagePath)}
+          alt={`参考图 ${position} 原图`}
+          decoding="async"
+          loading="lazy"
+          onError={() => setLoadFailed(true)}
+        />
+      )}
+    </figure>
   );
 }
 

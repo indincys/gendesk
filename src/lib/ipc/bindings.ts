@@ -1448,6 +1448,7 @@ backupProgress: BackupProgress,
 batchSummary: BatchSummary,
 intakeChanged: IntakeChanged,
 keyHealth: KeyHealth,
+libraryChanged: LibraryChanged,
 livePhotoChanged: LivePhotoChanged,
 posterChanged: PosterChanged,
 refImportProgress: RefImportProgress,
@@ -1464,6 +1465,7 @@ backupProgress: "backup-progress",
 batchSummary: "batch-summary",
 intakeChanged: "intake-changed",
 keyHealth: "key-health",
+libraryChanged: "library-changed",
 livePhotoChanged: "live-photo-changed",
 posterChanged: "poster-changed",
 refImportProgress: "ref-import-progress",
@@ -2158,6 +2160,12 @@ cooldownDays: number; sortOrder: number;
  * 全部款式下这一类未移出的图片数。
  */
 imageCount: number }
+/**
+ * 参考图库在应用界面之外变了（Agent 经 CLI 导入、改图、抽图记账，或工单收录抽中图）。
+ * 
+ * 只是一声「该重读了」：载荷不带数据，图库页收到后自己节流重读，避免把上万行塞进事件。
+ */
+export type LibraryChanged = { at: number }
 /**
  * 批量修改图片：改分类、启停、备注、移出或放回。
  */

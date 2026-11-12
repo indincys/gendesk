@@ -198,6 +198,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::updater::UpdateStateChanged,
             commands::backup::BackupProgress,
             commands::refs::RefImportProgress,
+            commands::ref_library::LibraryChanged,
             // CLI 工单收录事件
             commands::intake::IntakeChanged,
             // 视频流水线事件

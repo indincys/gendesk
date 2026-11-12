@@ -104,6 +104,16 @@ export async function subscribePoster(handler: () => void): Promise<() => void> 
   return () => un();
 }
 
+/**
+ * 参考图库在界面之外变了（CLI 导入/改图/抽图记账、工单收录抽中图）。
+ * 载荷不带数据，只是「该重读了」。
+ */
+export async function subscribeLibrary(handler: () => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const un = await events.libraryChanged.listen(handler);
+  return () => un();
+}
+
 /** 应用错误转为 Error 抛出（tauri-specta Result → 抛异常，便于 try/catch 统一处理）。 */
 export class IpcError extends Error {
   constructor(public readonly appError: AppError) {

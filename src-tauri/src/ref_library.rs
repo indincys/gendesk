@@ -24,6 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -32,6 +33,9 @@ use crate::db::repo::ref_library as repo;
 use crate::db::repo::refs as refs_repo;
 use crate::error::{AppError, AppResult};
 use crate::files::DataDirs;
+
+/// 图库导入同时处理几张（见 `import_files`）。解码另有全局上限，这个数只管 I/O 重叠。
+const IMPORT_PARALLEL: usize = 4;
 
 const DAY: i64 = 86_400;
 /// 单次随机抽取上限（预览用）。
@@ -816,23 +820,34 @@ pub async fn import_files(
         duplicates: Vec::new(),
         failed: Vec::new(),
     };
-    for (i, path) in paths.iter().enumerate() {
-        let short = Path::new(path)
+    // 几百上千张一次导入时，逐张串行会让 CPU 大半时间在等磁盘。这里同时铺开几张：
+    // 解码仍受 `files::decode` 的全局许可封顶（2～3 个），多出来的并发只用来重叠
+    // 读文件、算哈希与写库。同一批里内容相同的两张靠 `(style_id, content_hash)`
+    // 唯一约束兜底（`import_one` 里撞约束就清掉刚写的文件并记为重复）。
+    // `buffered` 保持回执与输入同序；进度按完成数报。
+    let short_of = |path: &String| {
+        Path::new(path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.clone());
-        progress(i as i64, total, &short, report.failed.len() as i64);
-        match import_one(
-            pool,
-            &refs_dir,
-            &thumbs_dir,
-            style_id,
-            category_id,
-            path,
-            now,
-        )
-        .await
-        {
+            .unwrap_or_else(|| path.clone())
+    };
+    if let Some(first) = paths.first() {
+        progress(0, total, &short_of(first), 0);
+    }
+    let (refs_dir, thumbs_dir) = (refs_dir.as_path(), thumbs_dir.as_path());
+    // 先收成 Vec 再进 stream：闭包留在 `Map` 适配器里会让外层 future 的 Send 推导卡在
+    // 高阶生命周期上（「FnOnce is not general enough」）。
+    let jobs: Vec<_> = paths
+        .iter()
+        .map(|path| async move {
+            let r = import_one(pool, refs_dir, thumbs_dir, style_id, category_id, path, now).await;
+            (path, r)
+        })
+        .collect();
+    let mut results = futures_util::stream::iter(jobs).buffered(IMPORT_PARALLEL);
+    let mut done = 0i64;
+    while let Some((path, result)) = results.next().await {
+        match result {
             Ok(Imported::New(v)) => report.imported.push(v),
             Ok(Imported::Restored(v)) => report.restored.push(v),
             Ok(Imported::Duplicate(id)) => report.duplicates.push(LibraryImportIssue {
@@ -849,7 +864,8 @@ pub async fn import_files(
                 });
             }
         }
-        progress(i as i64 + 1, total, &short, report.failed.len() as i64);
+        done += 1;
+        progress(done, total, &short_of(path), report.failed.len() as i64);
     }
     Ok(report)
 }
@@ -1835,6 +1851,54 @@ mod tests {
             .unwrap();
         assert_eq!(report.restored.len(), 1);
         assert!(!report.restored[0].removed);
+    }
+
+    /// 并发导入（`IMPORT_PARALLEL`）：同一批里内容相同的两张只入库一张，另一张记重复且不留孤儿文件；
+    /// 回执与输入同序，进度最后一声报满。
+    #[tokio::test]
+    async fn parallel_import_keeps_order_and_dedupes_within_one_batch() {
+        let (pool, dir) = test_pool().await;
+        let style = save_style(&pool, None, "王一博", "", "").await.unwrap();
+        let category = find_category(&pool, "正面图").await.unwrap().id;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let mut paths = Vec::new();
+        for k in 0..9u8 {
+            let p = src.join(format!("图{k}.png"));
+            std::fs::write(&p, png(k)).unwrap();
+            paths.push(p.to_string_lossy().to_string());
+        }
+        // 与第 0 张内容相同、名字不同：只能靠内容哈希认出来。
+        let twin = src.join("图0-副本.png");
+        std::fs::write(&twin, png(0)).unwrap();
+        paths.push(twin.to_string_lossy().to_string());
+
+        let dirs = DataDirs::new(dir.path().join("data"));
+        let last = std::sync::Mutex::new((0i64, 0i64));
+        let report = import_files(
+            &pool,
+            &dirs,
+            style,
+            category,
+            &paths,
+            &|done, total, _, _| {
+                *last.lock().unwrap() = (done, total);
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.imported.len(), 9);
+        assert_eq!(report.duplicates.len(), 1);
+        assert!(report.failed.is_empty());
+        let names: Vec<_> = report.imported.iter().map(|v| v.name.clone()).collect();
+        let want: Vec<_> = (0..9).map(|k| format!("图{k}")).collect();
+        assert_eq!(names, want, "回执须与输入同序");
+        assert_eq!(*last.lock().unwrap(), (10, 10));
+        let files = std::fs::read_dir(dirs.refs().join("library"))
+            .unwrap()
+            .count();
+        assert_eq!(files, 9, "撞重复的那张写过的文件要清掉");
     }
 
     #[tokio::test]

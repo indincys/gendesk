@@ -1,6 +1,9 @@
 //! 参考图库命令（薄壳）：规则在 `crate::ref_library`，CLI 控制通道调用同一组函数。
 
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use tauri::{AppHandle, State};
+use tauri_specta::Event;
 
 use crate::error::AppResult;
 use crate::ref_library::{
@@ -8,6 +11,25 @@ use crate::ref_library::{
     LibraryPickResult, LibraryUsageView,
 };
 use crate::state::AppState;
+
+/// 参考图库在应用界面之外变了（Agent 经 CLI 导入、改图、抽图记账，或工单收录抽中图）。
+///
+/// 只是一声「该重读了」：载荷不带数据，图库页收到后自己节流重读，避免把上万行塞进事件。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryChanged {
+    pub at: i64,
+}
+
+pub fn emit_changed(app: &AppHandle) {
+    if let Err(error) = (LibraryChanged {
+        at: crate::db::now_unix(),
+    })
+    .emit(app)
+    {
+        tracing::warn!(%error, "发送参考图库变化事件失败");
+    }
+}
 
 #[tauri::command]
 #[specta::specta]

@@ -14,6 +14,12 @@
 //!    （`MAX_CONCURRENCY` 分叉：设置页与 DB 都显示 50，只有真正跑的信号量是 10）。
 //! 2. **缩放解码**：JPEG 走 DCT 缩放，按 1/2·1/4·1/8 直接解出小图。
 //!
+//! 另有一条与预算无关、但同样只能在这里做的规则：**解出来的图一律按 EXIF 方向摆正**。
+//! 手机竖拍的照片像素本身是横着存的（如 iPhone 的 8064×6048 + Orientation=6），
+//! 靠 EXIF 告诉看图软件「转 90° 再显示」。`image` 与 `jpeg-decoder` 都只给原始像素，
+//! 不摆正的话缩略图、上传副本（还会丢掉 EXIF）全是横的，`ref_images.width/height`
+//! 也记成横幅——2026-11 一次导入 865 张实拍图全部躺倒就是这样来的。
+//!
 //! 信号量放进程级 `OnceLock` 而不是 `AppState`：`generate_thumbnail` 的调用方之一
 //! 是 `engine::dispatcher`，那里拿不到 `AppState`，穿线要动引擎装配与全部测试夹具。
 //! CPU/内存预算是机器属性、不是业务真相，故不违反「业务真相只在 Rust 命令层」那条。
@@ -21,7 +27,8 @@
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
-use image::{DynamicImage, GrayImage, ImageReader, RgbImage};
+use image::metadata::Orientation;
+use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader, RgbImage};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{AppError, AppResult};
@@ -29,21 +36,30 @@ use crate::error::{AppError, AppResult};
 /// The exact read/decode path shared by read-only preflight and reference import.
 pub struct InspectedImage {
     pub bytes: Vec<u8>,
+    /// **显示**尺寸：已按 EXIF 方向交换宽高，与 `image` 摆正后的像素一致。
     pub width: u32,
     pub height: u32,
     pub oversize: bool,
+    /// 原图带非默认 EXIF 方向（像素需要旋转/翻转才是人看到的样子）。
+    pub rotated: bool,
+    /// 已摆正的图。
     pub image: DynamicImage,
+}
+
+impl InspectedImage {
+    /// 要不要另出一份上传副本：超限要压，**带方向的图也要**——上游不保证认 EXIF，
+    /// 发原文件就可能拿横躺的商品图去生成。副本是摆正后的像素、不带 EXIF。
+    pub fn needs_upload_copy(&self) -> bool {
+        self.oversize || self.rotated
+    }
 }
 
 pub fn inspect_image(path: &std::path::Path, permit: &DecodePermit) -> AppResult<InspectedImage> {
     let bytes = std::fs::read(path)?;
-    let (width, height) = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()?
-        .into_dimensions()?;
-    let oversize = width > super::UPLOAD_MAX_EDGE
-        || height > super::UPLOAD_MAX_EDGE
-        || bytes.len() as u64 > super::UPLOAD_MAX_BYTES;
-    let target = if oversize {
+    let (width, height, orientation) = display_dimensions(&bytes)?;
+    let oversize = super::is_oversize(width, height, bytes.len() as u64);
+    let rotated = orientation != Orientation::NoTransforms;
+    let target = if oversize || rotated {
         super::UPLOAD_MAX_EDGE
     } else {
         super::THUMB_MAX
@@ -54,8 +70,80 @@ pub fn inspect_image(path: &std::path::Path, permit: &DecodePermit) -> AppResult
         width,
         height,
         oversize,
+        rotated,
         image,
     })
+}
+
+/// 读 EXIF 方向。没有、读不到或取值非法一律当作不变换——方向是展示提示，
+/// 不能因为它让一张本来能用的图导入失败。
+///
+/// JPEG 自己扫 APP1：`image` 的 JPEG 解码器为取 EXIF 会把整份文件复制进内存再解一次头，
+/// 对 26 MP 原图是白白多出的两份拷贝。其余格式（PNG eXIf、WebP、TIFF）交给 `image`。
+pub fn orientation_of(bytes: &[u8]) -> Orientation {
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        return jpeg_exif(bytes)
+            .and_then(Orientation::from_exif_chunk)
+            .unwrap_or(Orientation::NoTransforms);
+    }
+    ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .and_then(|mut d| d.orientation().ok())
+        .unwrap_or(Orientation::NoTransforms)
+}
+
+/// 方向是否交换宽高（含 90°/270° 的那四种）。
+pub fn swaps_axes(o: Orientation) -> bool {
+    matches!(
+        o,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    )
+}
+
+/// 原图的**显示**尺寸与方向。只读文件头，不解码像素。
+pub fn display_dimensions(bytes: &[u8]) -> AppResult<(u32, u32, Orientation)> {
+    let (w, h) = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()?
+        .into_dimensions()?;
+    let o = orientation_of(bytes);
+    Ok(if swaps_axes(o) { (h, w, o) } else { (w, h, o) })
+}
+
+/// JPEG 里第一个 EXIF APP1 段的 TIFF 部分（去掉 `Exif\0\0` 前缀）。
+fn jpeg_exif(bytes: &[u8]) -> Option<&[u8]> {
+    let mut i = 2usize;
+    loop {
+        if *bytes.get(i)? != 0xFF {
+            return None;
+        }
+        while bytes.get(i) == Some(&0xFF) {
+            i += 1;
+        }
+        let marker = *bytes.get(i)?;
+        i += 1;
+        match marker {
+            0x01 | 0xD0..=0xD7 => continue,
+            // EXIF 只会在扫描数据之前。
+            0xD9 | 0xDA => return None,
+            _ => {}
+        }
+        let len = usize::from(u16::from_be_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]));
+        if len < 2 {
+            return None;
+        }
+        if marker == 0xE1 {
+            let payload = bytes.get(i + 2..i + len)?;
+            if let Some(tiff) = payload.strip_prefix(b"Exif\0\0") {
+                return Some(tiff);
+            }
+        }
+        i += len;
+    }
 }
 
 /// 同时在跑的解码数上限。
@@ -127,20 +215,23 @@ where
         .map_err(|e| AppError::Internal(format!("图像处理任务失败：{e}")))?
 }
 
-/// 解码到「长边至少还有 `max_edge`」的尺寸。
+/// 解码到「长边至少还有 `max_edge`」的尺寸，**并按 EXIF 方向摆正**。
 ///
 /// JPEG 且能确定安全时走 DCT 缩放（内存与耗时都掉一个量级），否则原样全解码。
 /// 返回的图**通常大于** `max_edge`（DCT 只有 1/2·1/4·1/8 三档），调用方仍需
-/// 自己 `thumbnail()` 到确切尺寸。
+/// 自己 `thumbnail()` 到确切尺寸。缩略图、上传副本、确认卡预览都从这里出图，
+/// 摆正只在这一处做。
 pub fn decode_scaled(
     bytes: &[u8],
     max_edge: u32,
     _permit: &DecodePermit,
 ) -> AppResult<DynamicImage> {
-    if let Some(img) = try_decode_scaled_jpeg(bytes, max_edge) {
-        return Ok(img);
-    }
-    decode_full(bytes)
+    let mut img = match try_decode_scaled_jpeg(bytes, max_edge) {
+        Some(img) => img,
+        None => decode_full(bytes)?,
+    };
+    img.apply_orientation(orientation_of(bytes));
+    Ok(img)
 }
 
 /// 既有路径：交给 `image` 全分辨率解码。所有回落都落到这里。
@@ -242,7 +333,7 @@ fn scan_jpeg_header(bytes: &[u8]) -> Option<JpegHeader> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use image::codecs::jpeg::JpegEncoder;
     use image::ExtendedColorType;
@@ -375,6 +466,97 @@ mod tests {
             mae < 8.0,
             "缩放解码与全解码的平均绝对差 {mae:.2} 过大，疑似色彩通道错位"
         );
+    }
+
+    /// 在 SOI 之后塞一个只含 Orientation 的 EXIF APP1（大端，与 iPhone 一致）。
+    pub(crate) fn with_orientation(jpeg: &[u8], value: u16) -> Vec<u8> {
+        let mut tiff = b"MM\0\x2a\0\0\0\x08".to_vec();
+        tiff.extend_from_slice(&1u16.to_be_bytes());
+        tiff.extend_from_slice(&0x0112u16.to_be_bytes());
+        tiff.extend_from_slice(&3u16.to_be_bytes());
+        tiff.extend_from_slice(&1u32.to_be_bytes());
+        tiff.extend_from_slice(&value.to_be_bytes());
+        tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    /// 左半红、右半蓝的横图：转 90° 之后应是上红下蓝的竖图。
+    pub(crate) fn red_left_blue_right(w: u32, h: u32) -> Vec<u8> {
+        let mut img = RgbImage::new(w, h);
+        for (x, _, px) in img.enumerate_pixels_mut() {
+            *px = if x < w / 2 {
+                image::Rgb([220, 20, 20])
+            } else {
+                image::Rgb([20, 20, 220])
+            };
+        }
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, 92)
+            .encode(&img, w, h, ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn exif_orientation_is_read_and_applied_on_both_decode_paths() {
+        for (w, h, edge) in [(3000u32, 2000u32, 400u32), (300, 200, 512)] {
+            let b = with_orientation(&red_left_blue_right(w, h), 6);
+            assert_eq!(orientation_of(&b), Orientation::Rotate90);
+            let (dw, dh, _) = display_dimensions(&b).unwrap();
+            assert_eq!((dw, dh), (h, w), "显示尺寸应交换宽高");
+            let img = decode_scaled(&b, edge, &DecodePermit::for_test())
+                .unwrap()
+                .to_rgb8();
+            assert!(img.height() > img.width(), "{w}x{h} 应解成竖图");
+            let top = img.get_pixel(img.width() / 2, img.height() / 8);
+            let bottom = img.get_pixel(img.width() / 2, img.height() * 7 / 8);
+            assert!(top[0] > 150 && top[2] < 100, "上半应为红色：{top:?}");
+            assert!(
+                bottom[2] > 150 && bottom[0] < 100,
+                "下半应为蓝色：{bottom:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_odd_orientation_means_no_transform() {
+        let plain = red_left_blue_right(40, 20);
+        assert_eq!(orientation_of(&plain), Orientation::NoTransforms);
+        assert_eq!(
+            orientation_of(&with_orientation(&plain, 1)),
+            Orientation::NoTransforms
+        );
+        // 非法取值不能让导入失败。
+        assert_eq!(
+            orientation_of(&with_orientation(&plain, 42)),
+            Orientation::NoTransforms
+        );
+        assert_eq!(orientation_of(b"not an image"), Orientation::NoTransforms);
+        let (w, h, _) = display_dimensions(&with_orientation(&plain, 3)).unwrap();
+        assert_eq!((w, h), (40, 20), "180° 不交换宽高");
+    }
+
+    #[test]
+    fn rotated_images_always_get_an_upright_upload_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("竖拍.jpg");
+        std::fs::write(&small, with_orientation(&red_left_blue_right(300, 200), 6)).unwrap();
+        let got = inspect_image(&small, &DecodePermit::for_test()).unwrap();
+        assert!(!got.oversize && got.rotated && got.needs_upload_copy());
+        assert_eq!((got.width, got.height), (200, 300));
+        assert_eq!((got.image.width(), got.image.height()), (200, 300));
+        let plain = dir.path().join("横拍.jpg");
+        std::fs::write(&plain, red_left_blue_right(300, 200)).unwrap();
+        assert!(!inspect_image(&plain, &DecodePermit::for_test())
+            .unwrap()
+            .needs_upload_copy());
     }
 
     #[test]

@@ -2196,9 +2196,13 @@ now: number;
  */
 limits: LibraryLimits }
 /**
- * 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用；repeat = 同单重复。
+ * 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用（降级）；repeat = 同单重复。
  */
-export type LibraryPick = { tier: string; image: LibraryImageView }
+export type LibraryPick = { tier: string; 
+/**
+ * 这一张实际按几天冷却抽出来的；小于分类配置即为降级，0 = 一天内用过、取最久没用的。
+ */
+cooldownDays: number; image: LibraryImageView }
 export type LibraryPickResult = { style: string; category: string; requested: number; 
 /**
  * 启用且未移出的候选总数。
@@ -2213,7 +2217,7 @@ freshCount: number; picks: LibraryPick[];
  */
 markedUsed: boolean; message: string }
 export type LibraryStyleView = { id: number; name: string; product: string; note: string; total: number; available: number; byCategory: LibraryCategoryCount[] }
-export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean }
+export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean; cooldownDays: number | null }
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
 /**

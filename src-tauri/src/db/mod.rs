@@ -177,9 +177,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // 退回「最新一条迁移还没跑」的样子（0052 本身幂等，可安全重放）。
+        // 退回「有一条迁移还没跑」的样子。点名重放 0052（它本身幂等）而不是「最新一条」：
+        // 0053 起的迁移是 ADD COLUMN 这类不可重放的加法，重放最新一条会撞重复列，
+        // 测的就不再是升级前快照了。断言不变。
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version=?")
-            .bind(latest_embedded_migration())
+            .bind(52_i64)
             .execute(&pool)
             .await
             .unwrap();

@@ -21,6 +21,8 @@ use crate::files::decode::{self, DecodePermit};
 
 /// 预览缩略图长边像素。够看清「是不是这张图」即可。
 pub const PREVIEW_EDGE: u32 = 240;
+/// 预览出图口径版本，见 [`cache_key`]。2 = 按 EXIF 方向摆正。
+const PREVIEW_REVISION: u32 = 2;
 /// 预览缩略图 JPEG 质量。
 const PREVIEW_QUALITY: u8 = 72;
 
@@ -38,6 +40,8 @@ fn cache_key(src: &Path) -> AppResult<String> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // 出图口径的版本。口径变了（如开始按 EXIF 摆正）必须换键，否则旧的横躺预览永远命中。
+    PREVIEW_REVISION.hash(&mut h);
     // 规范化路径失败（比如刚被删）就退回原路径：键只需要稳定，不需要漂亮。
     let path = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
     path.to_string_lossy().hash(&mut h);

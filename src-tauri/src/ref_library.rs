@@ -2,14 +2,18 @@
 //!
 //! ## 抽图规则
 //!
-//! 每次抽一张，候选是该款式该分类下**启用且未移出**的图，分三档依次退让：
+//! 每次抽一张，候选是该款式该分类下**启用、未移出且原文件还在**的图（不符合的自动屏蔽），
+//! 分几档依次退让：
 //!
 //! 1. **可用**：不在冷却期内、本单也还没用过 —— 在这一档里均匀随机。
-//! 2. **冷却中**：冷却期内用过、本单没用过 —— 取最久没用的那张。
-//! 3. **本单已用**：本单里已经抽到过 —— 取本单用得最少、再最久没用的那张。
+//! 2. **冷却降级**：可用的不够时，冷却天数沿 [`COOLDOWN_LADDER`] 往下放宽
+//!    （如 15 → 10 → 7 → 5 → 3 → 2 → 1 天），在第一档凑得出图的冷却天数下**仍然随机**。
+//! 3. **最久没用**：一天内全都用过 —— 取最久没用的那张。
+//! 4. **本单已用**：本单里已经抽到过 —— 取本单用得最少、再最久没用的那张。
 //!
-//! 冷却天数按分类设（默认 7 天，0 = 不冷却）。可用图不够时不拒单，而是退到下一档并在
-//! 使用台账里标 `fallback`，回执里能看到哪几张是退而求其次。同一条目内绝不重复同一张图。
+//! 冷却天数按分类设（默认 7 天，0 = 免冷却，适合素材很少的分类）。可用图不够时不拒单，
+//! 而是退到下一档并在使用台账里标 `fallback`、记下实际执行的冷却天数，回执里能看到哪几张
+//! 是降级抽的、降到了几天。同一条目（或同一个素材包）内绝不重复同一张图。
 //!
 //! ## 什么时候算「用过」
 //!
@@ -36,6 +40,10 @@ pub const MAX_PICK: usize = 64;
 pub const DEFAULT_COOLDOWN_DAYS: i64 = 7;
 /// 冷却天数上限；与 0051 的 CHECK 一致（测试守着）。
 pub const MAX_COOLDOWN_DAYS: i64 = 365;
+/// 冷却降级阶梯（天，从大到小）。只用比分类配置更短的那几档。
+pub const COOLDOWN_LADDER: &[i64] = &[30, 15, 10, 7, 5, 3, 2, 1];
+/// 一个素材包最多几张图；与工单条目 `refs` 上限一致，抽出的包能原样当一条的参考图。
+pub const MAX_PACK_IMAGES: usize = 16;
 
 // ───────────────────────────── 视图 ─────────────────────────────
 
@@ -177,11 +185,13 @@ pub struct LibraryImportReport {
     pub failed: Vec<LibraryImportIssue>,
 }
 
-/// 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用；repeat = 同单重复。
+/// 抽中的一张及其档位：fresh = 可用；cooling = 冷却期内复用（降级）；repeat = 同单重复。
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryPick {
     pub tier: String,
+    /// 这一张实际按几天冷却抽出来的；小于分类配置即为降级，0 = 一天内用过、取最久没用的。
+    pub cooldown_days: i64,
     pub image: LibraryImageView,
 }
 
@@ -209,6 +219,8 @@ pub struct JobLibraryPick {
     /// 条目内第几张参考图，1 起。
     pub slot: i64,
     pub fallback: bool,
+    /// 实际执行的冷却天数（降级后）；旧记录为空。
+    pub cooldown_days: Option<i64>,
     pub image: LibraryImageView,
 }
 
@@ -346,10 +358,23 @@ impl Candidate {
     fn cooling(&self, now: i64) -> bool {
         cooling_until(self.last_used_at, self.cooldown_secs, now).is_some()
     }
+    /// 按 `days` 天冷却算是否已经过了冷却期。
+    fn rested(&self, now: i64, days: i64) -> bool {
+        self.last_used_at.map_or(true, |t| now - t >= days * DAY)
+    }
+}
+
+/// 一次抽取的结果：下标、档位，以及实际执行的冷却天数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choice {
+    pub index: usize,
+    pub tier: Tier,
+    pub cooldown_days: i64,
 }
 
 /// 从候选里抽一张。`exclude` 是硬排除（同一条目已选），`in_job` 是本单已用次数。
-/// `rng(n)` 返回 `0..n` 的随机下标。
+/// `rng(n)` 返回 `0..n` 的随机下标。只给测试用；业务路径都要降级天数，走 [`choose_detailed`]。
+#[cfg(test)]
 pub fn choose(
     cands: &[Candidate],
     now: i64,
@@ -357,16 +382,55 @@ pub fn choose(
     in_job: &HashMap<i64, u32>,
     rng: &mut dyn FnMut(usize) -> usize,
 ) -> Option<(usize, Tier)> {
+    choose_detailed(cands, now, exclude, in_job, rng).map(|c| (c.index, c.tier))
+}
+
+/// [`choose`] 的完整版：额外给出实际执行的冷却天数（降级到了哪一档）。
+pub fn choose_detailed(
+    cands: &[Candidate],
+    now: i64,
+    exclude: &HashSet<i64>,
+    in_job: &HashMap<i64, u32>,
+    rng: &mut dyn FnMut(usize) -> usize,
+) -> Option<Choice> {
     let open: Vec<usize> = (0..cands.len())
         .filter(|&i| !exclude.contains(&cands[i].id))
         .collect();
-    let fresh: Vec<usize> = open
+    let unused: Vec<usize> = open
         .iter()
         .copied()
-        .filter(|&i| !in_job.contains_key(&cands[i].id) && !cands[i].cooling(now))
+        .filter(|&i| !in_job.contains_key(&cands[i].id))
         .collect();
-    if !fresh.is_empty() {
-        return Some((fresh[rng(fresh.len()) % fresh.len()], Tier::Fresh));
+    let mut random = |pool: &[usize], tier: Tier, cooldown_days: i64| {
+        let index = pool[rng(pool.len()) % pool.len()];
+        Choice {
+            index,
+            tier,
+            cooldown_days,
+        }
+    };
+    let fresh: Vec<usize> = unused
+        .iter()
+        .copied()
+        .filter(|&i| !cands[i].cooling(now))
+        .collect();
+    if let Some(&first) = fresh.first() {
+        return Some(random(
+            &fresh,
+            Tier::Fresh,
+            cands[first].cooldown_secs / DAY,
+        ));
+    }
+    // 冷却降级：只取比配置更短的档，第一档凑得出图就在那一档里随机。
+    for &days in COOLDOWN_LADDER {
+        let pool: Vec<usize> = unused
+            .iter()
+            .copied()
+            .filter(|&i| cands[i].cooldown_secs > days * DAY && cands[i].rested(now, days))
+            .collect();
+        if !pool.is_empty() {
+            return Some(random(&pool, Tier::Cooling, days));
+        }
     }
     let last = |i: usize| cands[i].last_used_at.unwrap_or(i64::MIN);
     let oldest = |pool: Vec<usize>,
@@ -376,16 +440,29 @@ pub fn choose(
         let tied: Vec<usize> = pool.into_iter().filter(|&i| key(i) == best).collect();
         Some(tied[rng(tied.len()) % tied.len()])
     };
-    let cooling: Vec<usize> = open
-        .iter()
-        .copied()
-        .filter(|&i| !in_job.contains_key(&cands[i].id))
-        .collect();
-    if !cooling.is_empty() {
-        return oldest(cooling, &|i| (0, last(i)), rng).map(|i| (i, Tier::Cooling));
+    let choice = |index: usize, tier: Tier| Choice {
+        index,
+        tier,
+        cooldown_days: 0,
+    };
+    if !unused.is_empty() {
+        return oldest(unused, &|i| (0, last(i)), rng).map(|i| choice(i, Tier::Cooling));
     }
     let used = |i: usize| in_job.get(&cands[i].id).copied().unwrap_or(0);
-    oldest(open, &|i| (used(i), last(i)), rng).map(|i| (i, Tier::Repeat))
+    oldest(open, &|i| (used(i), last(i)), rng).map(|i| choice(i, Tier::Repeat))
+}
+
+/// 自动屏蔽：原文件已不在磁盘上的图不参与随机抽取（抽中了也发不出去）。
+fn usable(rows: Vec<repo::ImageRow>) -> Vec<repo::ImageRow> {
+    rows.into_iter()
+        .filter(|r| {
+            let ok = Path::new(&r.file_path).is_file();
+            if !ok {
+                tracing::warn!(id = r.id, path = %r.file_path, "图库图片原文件不存在，跳过");
+            }
+            ok
+        })
+        .collect()
 }
 
 /// 系统随机源（与 UID 同一个 OsRng）。
@@ -887,13 +964,18 @@ pub async fn pick(
         .await?
         .ok_or_else(|| AppError::InvalidInput("分类不存在".into()))?;
     let mut tx = pool.begin().await?;
-    let rows = repo::candidates(&mut tx, style_id, category_id).await?;
+    let rows = usable(repo::candidates(&mut tx, style_id, category_id).await?);
     let cands: Vec<Candidate> = rows.iter().map(candidate_of).collect();
     let fresh_count = cands.iter().filter(|c| !c.cooling(now)).count() as i64;
     let mut exclude = HashSet::new();
     let mut picks = Vec::new();
     while picks.len() < count {
-        let Some((i, tier)) = choose(&cands, now, &exclude, &HashMap::new(), &mut *rng) else {
+        let Some(Choice {
+            index: i,
+            tier,
+            cooldown_days,
+        }) = choose_detailed(&cands, now, &exclude, &HashMap::new(), &mut *rng)
+        else {
             break;
         };
         exclude.insert(cands[i].id);
@@ -908,23 +990,29 @@ pub async fn pick(
                     item_name: None,
                     slot: None,
                     fallback: tier != Tier::Fresh,
+                    cooldown_days: Some(cooldown_days),
                 },
             )
             .await?;
         }
         picks.push(LibraryPick {
             tier: tier.code().into(),
+            cooldown_days,
             image: LibraryImageView::from_row(rows[i].clone(), now),
         });
     }
     tx.commit().await?;
     let reused = picks.iter().filter(|p| p.tier != "fresh").count();
+    let floor = picks.iter().map(|p| p.cooldown_days).min().unwrap_or(0);
     let message = if picks.is_empty() {
         format!("{}/{} 没有启用的图片", style.name, category.name)
     } else if picks.len() < count {
         format!("库里只有 {} 张启用的图，少于要的 {count} 张", picks.len())
     } else if reused > 0 {
-        format!("可用图不够，其中 {reused} 张是冷却期内用过的")
+        format!(
+            "{} 天冷却内可用图不够，{reused} 张按降级冷却抽取（最低 {floor} 天）",
+            category.cooldown_days
+        )
     } else {
         "全部来自冷却期外的图".into()
     };
@@ -969,6 +1057,7 @@ pub async fn mark_used(pool: &SqlitePool, ids: &[i64], now: i64) -> AppResult<i6
                 item_name: None,
                 slot: None,
                 fallback,
+                cooldown_days: None,
             },
         )
         .await?;
@@ -995,6 +1084,9 @@ pub struct SlotPick {
     pub image_id: i64,
     pub ref_image_id: i64,
     pub fallback: bool,
+    /// 实际执行的冷却天数；点名的图与旧检查点为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_days: Option<i64>,
 }
 
 /// 为一份工单的全部图库位置抽图并记账，在调用方的事务里完成。
@@ -1040,6 +1132,7 @@ pub async fn draw_for_job(
             image_id: id,
             ref_image_id: row.ref_image_id,
             fallback,
+            cooldown_days: None,
         });
     }
     // 同一（款式, 分类）的候选只查一次；抽中后就地把最近使用改成 now。
@@ -1052,7 +1145,7 @@ pub async fn draw_for_job(
         let category = find_category(pool, &req.spec.category).await?;
         let key = (style.id, category.id);
         if let std::collections::hash_map::Entry::Vacant(e) = pools.entry(key) {
-            let rows = repo::candidates(&mut *conn, style.id, category.id).await?;
+            let rows = usable(repo::candidates(&mut *conn, style.id, category.id).await?);
             let cands = rows.iter().map(candidate_of).collect();
             e.insert((rows, cands));
         }
@@ -1060,7 +1153,12 @@ pub async fn draw_for_job(
             continue;
         };
         let exclude = per_item.entry(req.item).or_default();
-        let Some((i, tier)) = choose(cands, now, exclude, &in_job, &mut *rng) else {
+        let Some(Choice {
+            index: i,
+            tier,
+            cooldown_days,
+        }) = choose_detailed(cands, now, exclude, &in_job, &mut *rng)
+        else {
             let enabled = cands.len();
             return Err(AppError::InvalidInput(format!(
                 "条目「{}」要从 {} 抽图，但{}",
@@ -1083,6 +1181,7 @@ pub async fn draw_for_job(
             image_id: id,
             ref_image_id: rows[i].ref_image_id,
             fallback: tier != Tier::Fresh,
+            cooldown_days: Some(cooldown_days),
         });
     }
     let mut out = Vec::with_capacity(requests.len());
@@ -1098,6 +1197,7 @@ pub async fn draw_for_job(
                 item_name: Some(req.item_name),
                 slot: Some(pick.slot as i64 + 1),
                 fallback: pick.fallback,
+                cooldown_days: pick.cooldown_days,
             },
         )
         .await?;
@@ -1117,6 +1217,7 @@ pub async fn picks_for_job(pool: &SqlitePool, job_id: &str) -> AppResult<Vec<Job
                 item_name: u.item_name.unwrap_or_default(),
                 slot: u.slot.unwrap_or(0),
                 fallback: u.fallback,
+                cooldown_days: u.cooldown_days,
                 image: LibraryImageView::from_row(row, now),
             });
         }
@@ -1133,6 +1234,7 @@ pub struct LibraryUsageView {
     pub item_name: Option<String>,
     pub slot: Option<i64>,
     pub fallback: bool,
+    pub cooldown_days: Option<i64>,
 }
 
 pub async fn usage_of_image(pool: &SqlitePool, image_id: i64) -> AppResult<Vec<LibraryUsageView>> {
@@ -1146,8 +1248,290 @@ pub async fn usage_of_image(pool: &SqlitePool, image_id: i64) -> AppResult<Vec<L
             item_name: u.item_name,
             slot: u.slot,
             fallback: u.fallback,
+            cooldown_days: u.cooldown_days,
         })
         .collect())
+}
+
+// ───────────────────────────── 素材包 ─────────────────────────────
+
+/// 素材包里的一组：某分类抽几张。款式、产品缺省取整包的。
+///
+/// 与工单 `refs` 里的图库引用同一形状（多一个 `count`），同一份分类清单既能交给 GenDesk
+/// 收录时逐条抽，也能在这里一次抽成包导出给外部。
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PackSlotSpec {
+    pub category: String,
+    #[serde(default)]
+    pub count: Option<u32>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub product: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PackSpec {
+    #[serde(default)]
+    pub style: String,
+    #[serde(default)]
+    pub product: String,
+    pub slots: Vec<PackSlotSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackPick {
+    /// 包内顺序，1 起（对应 Image 1、Image 2…）。
+    pub slot: i64,
+    pub tier: String,
+    /// 分类配置的冷却天数。
+    pub configured_cooldown_days: i64,
+    /// 实际执行的冷却天数；小于配置即为降级。
+    pub cooldown_days: i64,
+    pub image: LibraryImageView,
+    /// 导出时这张图在导出目录里的文件名。
+    pub exported_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PackResult {
+    /// 记账时写进台账 job_id，`gendesk library usage --job-id <packId>` 可回查。
+    pub pack_id: String,
+    pub marked_used: bool,
+    pub picks: Vec<PackPick>,
+    /// 每个分类一句：可用多少、是否降级到了几天。
+    pub notes: Vec<String>,
+    pub export_dir: Option<String>,
+    pub manifest_path: Option<String>,
+}
+
+/// 导出目录里的清单文件名。
+pub const PACK_MANIFEST: &str = "素材包.json";
+
+fn new_pack_id(now: i64) -> String {
+    let stamp = chrono::DateTime::from_timestamp(now, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y%m%d-%H%M%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| now.to_string());
+    format!("pack-{stamp}-{:04x}", os_rng(0x10000))
+}
+
+/// 按分类清单抽一个素材包：包内不重复，每类先用冷却期外的图，不够就沿阶梯降级。
+///
+/// `export_dir` 给了就把每张图（摆正/压缩过的上传副本，与 GenDesk 发给上游的同一份）
+/// 拷进去并写 [`PACK_MANIFEST`]；**导出即记为使用**——文件离开 GenDesk 就无从得知何时被用。
+/// 没导出时 `mark_used` 决定是否记账（默认只预览）。任一类凑不够不重复的图就整包报错，
+/// 什么都不记、不拷。
+pub async fn draw_pack(
+    pool: &SqlitePool,
+    spec: &PackSpec,
+    mark_used: bool,
+    export_dir: Option<&Path>,
+    now: i64,
+    rng: &mut (dyn FnMut(usize) -> usize + Send),
+) -> AppResult<PackResult> {
+    if spec.slots.is_empty() {
+        return Err(AppError::InvalidInput("素材包至少要有一个分类".into()));
+    }
+    let mut wanted = Vec::new();
+    for (n, slot) in spec.slots.iter().enumerate() {
+        let count = slot.count.unwrap_or(1) as usize;
+        if count == 0 {
+            return Err(AppError::InvalidInput(format!(
+                "第 {} 组（{}）count 要 ≥1",
+                n + 1,
+                slot.category
+            )));
+        }
+        let lib_ref = LibraryRef {
+            library_id: None,
+            category: Some(slot.category.clone()),
+            style: slot.style.clone(),
+            product: slot.product.clone(),
+        };
+        let resolved = lib_ref
+            .resolve(&spec.style, &spec.product)
+            .map_err(AppError::InvalidInput)?;
+        wanted.push((resolved, count));
+    }
+    let total: usize = wanted.iter().map(|(_, c)| c).sum();
+    if total > MAX_PACK_IMAGES {
+        return Err(AppError::InvalidInput(format!(
+            "素材包一共 {total} 张，超过上限 {MAX_PACK_IMAGES}（与一条工单的参考图上限一致）"
+        )));
+    }
+    let export = export_dir.map(Path::to_path_buf);
+    if let Some(dir) = &export {
+        if !dir.is_absolute() {
+            return Err(AppError::InvalidInput(format!(
+                "导出目录要用绝对路径：{}",
+                dir.display()
+            )));
+        }
+        if dir.join(PACK_MANIFEST).exists() {
+            return Err(AppError::InvalidInput(format!(
+                "{} 里已经有一个素材包，换一个空目录",
+                dir.display()
+            )));
+        }
+    }
+    let mark = mark_used || export.is_some();
+    let pack_id = new_pack_id(now);
+
+    let mut tx = pool.begin().await?;
+    let mut exclude = HashSet::new();
+    let mut in_pack: HashMap<i64, u32> = HashMap::new();
+    let mut pools: HashMap<(i64, i64), (Vec<repo::ImageRow>, Vec<Candidate>)> = HashMap::new();
+    let mut picks: Vec<(PackPick, i64, bool)> = Vec::new();
+    let mut notes = Vec::new();
+    for (slot, count) in &wanted {
+        let style = find_style(pool, &slot.style, &slot.product).await?;
+        let category = find_category(pool, &slot.category).await?;
+        let key = (style.id, category.id);
+        if let std::collections::hash_map::Entry::Vacant(e) = pools.entry(key) {
+            let rows = usable(repo::candidates(&mut tx, style.id, category.id).await?);
+            let cands = rows.iter().map(candidate_of).collect();
+            e.insert((rows, cands));
+        }
+        let Some((rows, cands)) = pools.get_mut(&key) else {
+            continue;
+        };
+        let fresh = cands.iter().filter(|c| !c.cooling(now)).count();
+        let mut floor = category.cooldown_days;
+        for _ in 0..*count {
+            let Some(c) = choose_detailed(cands, now, &exclude, &in_pack, &mut *rng) else {
+                return Err(AppError::InvalidInput(format!(
+                    "{} 只有 {} 张可用的图（已屏蔽停用、移出和文件丢失的），素材包要 {count} 张且不能重复",
+                    slot.describe(),
+                    cands.len()
+                )));
+            };
+            if c.tier == Tier::Repeat {
+                return Err(AppError::InvalidInput(format!(
+                    "{} 的图不够这个素材包不重复地用",
+                    slot.describe()
+                )));
+            }
+            let id = cands[c.index].id;
+            exclude.insert(id);
+            *in_pack.entry(id).or_default() += 1;
+            cands[c.index].last_used_at = Some(now);
+            floor = floor.min(c.cooldown_days);
+            let row = rows[c.index].clone();
+            let ref_image_id = row.ref_image_id;
+            picks.push((
+                PackPick {
+                    slot: picks.len() as i64 + 1,
+                    tier: c.tier.code().into(),
+                    configured_cooldown_days: category.cooldown_days,
+                    cooldown_days: c.cooldown_days,
+                    image: LibraryImageView::from_row(row, now),
+                    exported_file: None,
+                },
+                ref_image_id,
+                c.tier != Tier::Fresh,
+            ));
+        }
+        notes.push(if category.cooldown_days == 0 {
+            format!("{}：免冷却，{} 张候选", slot.describe(), cands.len())
+        } else if floor < category.cooldown_days {
+            format!(
+                "{}：{} 天冷却外只有 {fresh} 张，降级到 {floor} 天冷却",
+                slot.describe(),
+                category.cooldown_days
+            )
+        } else {
+            format!(
+                "{}：{} 天冷却外有 {fresh} 张，未降级",
+                slot.describe(),
+                category.cooldown_days
+            )
+        });
+    }
+
+    let mut manifest_path = None;
+    if let Some(dir) = &export {
+        std::fs::create_dir_all(dir)?;
+        let mut entries = Vec::new();
+        for (pick, ref_image_id, _) in &mut picks {
+            let src = repo::upload_source(&mut tx, *ref_image_id)
+                .await?
+                .ok_or_else(|| AppError::Internal(format!("图库 #{} 没有文件", pick.image.id)))?;
+            let ext = Path::new(&src)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("jpg")
+                .to_lowercase();
+            let name = format!(
+                "{:02}_{}_{}.{ext}",
+                pick.slot,
+                crate::files::sanitize_filename(&pick.image.category),
+                pick.image.id
+            );
+            std::fs::copy(&src, dir.join(&name))
+                .map_err(|e| AppError::Internal(format!("导出 {src} 失败：{e}")))?;
+            entries.push(serde_json::json!({
+                "slot": pick.slot,
+                "file": name,
+                "libraryId": pick.image.id,
+                "style": pick.image.style,
+                "product": pick.image.product,
+                "category": pick.image.category,
+                "tier": pick.tier,
+                "configuredCooldownDays": pick.configured_cooldown_days,
+                "cooldownDays": pick.cooldown_days,
+                "sourceName": pick.image.name,
+            }));
+            pick.exported_file = Some(name);
+        }
+        let manifest = serde_json::json!({
+            "packId": pack_id,
+            "createdAt": now,
+            "style": spec.style,
+            "product": spec.product,
+            "markedUsed": true,
+            "note": "GenDesk 参考图素材包：文件已按拍摄方向摆正（与 GenDesk 发给生图接口的同一份），按 slot 顺序即 Image 1、Image 2…。导出时已记为使用；这些文件再投回 GenDesk 时当普通参考图文件用，不要改写成 libraryId，否则会重复记账。",
+            "notes": notes,
+            "images": entries,
+        });
+        let path = dir.join(PACK_MANIFEST);
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+        manifest_path = Some(path.to_string_lossy().to_string());
+    }
+    if mark {
+        for (pick, _, fallback) in &picks {
+            repo::record_usage(
+                &mut tx,
+                &repo::Usage {
+                    image_id: pick.image.id,
+                    used_at: now,
+                    source: "manual",
+                    job_id: Some(&pack_id),
+                    item_name: Some("素材包"),
+                    slot: Some(pick.slot),
+                    fallback: *fallback,
+                    cooldown_days: Some(pick.cooldown_days),
+                },
+            )
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(PackResult {
+        pack_id,
+        marked_used: mark,
+        picks: picks.into_iter().map(|(p, _, _)| p).collect(),
+        notes,
+        export_dir: export.map(|d| d.to_string_lossy().to_string()),
+        manifest_path,
+    })
 }
 
 /// 不查库地检查一组图库位置能否抽到（validate 用）：每个位置报候选与可用张数。
@@ -1180,7 +1564,7 @@ pub async fn check_slots(pool: &SqlitePool, slots: &[LibrarySlot]) -> AppResult<
             }
             let style = find_style(pool, &slot.style, &slot.product).await?;
             let category = find_category(pool, &slot.category).await?;
-            let rows = repo::candidates(&mut conn, style.id, category.id).await?;
+            let rows = usable(repo::candidates(&mut conn, style.id, category.id).await?);
             let fresh = rows
                 .iter()
                 .map(candidate_of)
@@ -1248,6 +1632,63 @@ mod tests {
         let exclude = HashSet::from([3, 4]);
         let (i, tier) = choose(&cands, now, &exclude, &job, &mut |_| 0).unwrap();
         assert_eq!((cands[i].id, tier), (2, Tier::Cooling));
+    }
+
+    #[test]
+    fn cooldown_relaxes_down_the_ladder_one_step_at_a_time() {
+        let now = 100 * DAY;
+        let cands = vec![
+            cand(1, Some(now - 12 * DAY), 15),
+            cand(2, Some(now - 8 * DAY), 15),
+            cand(3, Some(now - 4 * DAY), 15),
+            cand(4, Some(now - 30 * 3600), 15),
+            cand(5, Some(now - 3600), 15),
+        ];
+        let job = HashMap::new();
+        let mut exclude = HashSet::new();
+        // 15 天内全用过：10 → 7 → 3 → 1 天各放出一张，最后只剩一小时前用过的取最久没用。
+        for (id, days) in [(1, 10), (2, 7), (3, 3), (4, 1), (5, 0)] {
+            let c = choose_detailed(&cands, now, &exclude, &job, &mut |_| 0).unwrap();
+            assert_eq!(
+                (cands[c.index].id, c.tier, c.cooldown_days),
+                (id, Tier::Cooling, days)
+            );
+            exclude.insert(id);
+        }
+    }
+
+    #[test]
+    fn a_relaxed_step_is_still_random_and_fresh_reports_the_configured_days() {
+        let now = 100 * DAY;
+        let cands = vec![
+            cand(1, Some(now - 6 * DAY), 7),
+            cand(2, Some(now - 6 * DAY - 3600), 7),
+            cand(3, Some(now), 7),
+        ];
+        let none = HashSet::new();
+        let job = HashMap::new();
+        let seen: HashSet<i64> = (0..4)
+            .map(|k| {
+                let c = choose_detailed(&cands, now, &none, &job, &mut |n| k % n).unwrap();
+                assert_eq!(c.cooldown_days, 5);
+                cands[c.index].id
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            HashSet::from([1, 2]),
+            "降级档里随机，不是固定取最久没用"
+        );
+        let fresh = vec![cand(9, None, 15)];
+        let c = choose_detailed(&fresh, now, &none, &job, &mut |_| 0).unwrap();
+        assert_eq!((c.tier, c.cooldown_days), (Tier::Fresh, 15));
+        let exempt = vec![cand(9, Some(now), 0)];
+        let c = choose_detailed(&exempt, now, &none, &job, &mut |_| 0).unwrap();
+        assert_eq!(
+            (c.tier, c.cooldown_days),
+            (Tier::Fresh, 0),
+            "免冷却永远可用"
+        );
     }
 
     #[test]
@@ -1474,6 +1915,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(used, 0);
+    }
+
+    #[tokio::test]
+    async fn a_pack_degrades_per_category_exports_upright_copies_and_records_once() {
+        let (pool, dir) = test_pool().await;
+        let (_, front, ids) = seed(&pool, dir.path(), 4).await;
+        let now = crate::db::now_unix();
+        // 三张两天前用过，一张从没用过；正面图冷却 7 天。
+        mark_used(&pool, &ids[..3], now - 2 * DAY).await.unwrap();
+        // 原文件丢了的图自动屏蔽，不能被抽中。
+        let gone = list_images(&pool, None, Some(front), false, now)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|v| v.id == ids[2])
+            .unwrap();
+        std::fs::remove_file(&gone.file_path).unwrap();
+        let spec = PackSpec {
+            style: "王一博".into(),
+            product: String::new(),
+            slots: vec![PackSlotSpec {
+                category: "正面图".into(),
+                count: Some(2),
+                style: None,
+                product: None,
+            }],
+        };
+        let preview = draw_pack(&pool, &spec, false, None, now, &mut |_| 0)
+            .await
+            .unwrap();
+        assert!(!preview.marked_used);
+        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ref_library_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(used, 3, "预览不记账");
+
+        let out = dir.path().join("导出");
+        let pack = draw_pack(&pool, &spec, false, Some(&out), now, &mut |_| 0)
+            .await
+            .unwrap();
+        let got: Vec<(i64, &str, i64)> = pack
+            .picks
+            .iter()
+            .map(|p| (p.image.id, p.tier.as_str(), p.cooldown_days))
+            .collect();
+        assert_eq!(got, vec![(ids[3], "fresh", 7), (ids[0], "cooling", 2)]);
+        assert!(pack.notes[0].contains("降级到 2 天"), "{:?}", pack.notes);
+        assert!(pack.marked_used, "导出即记为使用");
+        for p in &pack.picks {
+            assert!(out.join(p.exported_file.as_ref().unwrap()).is_file());
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join(PACK_MANIFEST)).unwrap()).unwrap();
+        assert_eq!(manifest["packId"], pack.pack_id.as_str());
+        assert_eq!(manifest["images"][1]["cooldownDays"], 2);
+        let rows: Vec<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT image_id, cooldown_days FROM ref_library_usage WHERE job_id = ?1 ORDER BY slot",
+        )
+        .bind(&pack.pack_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, vec![(ids[3], Some(7)), (ids[0], Some(2))]);
+        // 同一目录不能再导一包。
+        assert!(draw_pack(&pool, &spec, false, Some(&out), now, &mut |_| 0)
+            .await
+            .is_err());
+
+        // 只剩 3 张能用（一张文件丢了），要 4 张不重复：整包报错，什么都不记。
+        let greedy = PackSpec {
+            slots: vec![PackSlotSpec {
+                count: Some(4),
+                ..spec.slots[0].clone()
+            }],
+            ..spec.clone()
+        };
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ref_library_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let err = draw_pack(&pool, &greedy, true, None, now, &mut |_| 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("只有 3 张"), "{err}");
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ref_library_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[tokio::test]

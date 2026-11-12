@@ -143,6 +143,48 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
       })),
     }),
     "library.update": ({ ids }) => ({ changed: ids.length }),
+    "library.pack": ({ slots, markUsed, exportDir }) => {
+      let n = 0;
+      const picks = slots.flatMap((s) =>
+        Array.from({ length: s.count ?? 1 }, () => {
+          n += 1;
+          return {
+            slot: n,
+            tier: s.category === "礼盒图" ? "cooling" : "fresh",
+            cooldownDays: s.category === "礼盒图" ? 3 : 7,
+            configuredCooldownDays: 7,
+            exportedFile: exportDir ? `${String(n).padStart(2, "0")}_${s.category}_${n}.jpg` : null,
+            image: {
+              id: n,
+              style: "檀健次款",
+              category: s.category,
+              name: "图",
+              filePath: "/库/图.jpg",
+            },
+          };
+        }),
+      );
+      return {
+        packId: "pack-test",
+        markedUsed: markUsed || Boolean(exportDir),
+        picks,
+        notes: ["礼盒图：降级到 3 天冷却"],
+        exportDir: exportDir ?? null,
+        manifestPath: exportDir ? path.join(exportDir, "素材包.json") : null,
+      };
+    },
+    "library.fix-orientation": ({ dryRun }) => ({
+      dryRun,
+      scanned: 3,
+      needsFix: 1,
+      repaired: dryRun ? 0 : 1,
+      alreadyUpright: 0,
+      missing: [],
+      failed: [],
+      fixes: [
+        { refImageId: 9, name: "竖拍", stored: [8064, 6048], display: [6048, 8064], inUse: false },
+      ],
+    }),
     "intake.confirm": ({ jobId }) => {
       const job = { ...jobs.get(jobId), status: "done" };
       jobs.set(jobId, job);
@@ -626,4 +668,123 @@ test("library commands forward to the app and refuse an app without the feature"
   const refused = await old.run("library", "overview");
   assert.equal(refused.code, 8);
   assert.match(refused.data.message, /reference-library/);
+});
+
+test("library pack takes --slot or --spec, previews by default and exports when asked", async (t) => {
+  const f = await fixture(t);
+  const preview = await f.run(
+    "library",
+    "pack",
+    "--style",
+    "檀健次款",
+    "--product",
+    "2027明星日历",
+    "--slot",
+    "正面图:2",
+    "--slot",
+    "45度角：2",
+    "--slot",
+    "礼盒图",
+  );
+  assert.equal(preview.code, 0, preview.data.message);
+  assert.deepEqual(f.calls.at(-1).args, {
+    style: "檀健次款",
+    product: "2027明星日历",
+    slots: [
+      { category: "正面图", count: 2 },
+      { category: "45度角", count: 2 },
+      { category: "礼盒图", count: 1 },
+    ],
+    markUsed: false,
+  });
+  assert.equal(preview.data.markedUsed, false);
+  assert.deepEqual(
+    preview.data.refs,
+    [1, 2, 3, 4, 5].map((libraryId) => ({ libraryId })),
+    "预览给出可直接写进工单的 refs",
+  );
+  assert.equal(preview.data.picks[4].cooldownDays, 3);
+
+  const specFile = path.join(f.input, "素材包.json");
+  await fs.writeFile(
+    specFile,
+    JSON.stringify({
+      style: "檀健次款",
+      slots: [
+        { category: "正面图", count: 2 },
+        { category: "内页展示图", count: 2 },
+      ],
+    }),
+  );
+  const out = path.join(f.home, "导出");
+  const exported = await f.run("library", "pack", "--spec", specFile, "--export", out);
+  assert.equal(exported.code, 0, exported.data.message);
+  assert.equal(f.calls.at(-1).args.exportDir, out);
+  assert.equal(exported.data.markedUsed, true);
+  assert.equal(exported.data.refs, undefined, "已记账就不再给 libraryId，免得重复记账");
+  assert.equal(exported.data.picks[0].file, "01_正面图_1.jpg");
+
+  for (const bad of [
+    ["library", "pack", "--style", "檀健次款"],
+    ["library", "pack", "--spec", specFile, "--slot", "正面图"],
+    ["library", "pack", "--style", "檀健次款", "--slot", "正面图:0"],
+  ])
+    assert.equal((await f.run(...bad)).code, 2, bad.join(" "));
+  await fs.writeFile(specFile, JSON.stringify({ style: "x", slots: [{ categroy: "正面图" }] }));
+  assert.equal((await f.run("library", "pack", "--spec", specFile)).code, 2);
+});
+
+test("library fix-orientation forwards dry-run and summarises the fixes", async (t) => {
+  const f = await fixture(t);
+  const dry = await f.run("library", "fix-orientation", "--dry-run");
+  assert.equal(dry.code, 0, dry.data.message);
+  assert.deepEqual(f.calls.at(-1).args, { dryRun: true });
+  assert.deepEqual(dry.data.fixes[0], {
+    refImageId: 9,
+    name: "竖拍",
+    stored: "8064x6048",
+    display: "6048x8064",
+  });
+  const done = await f.run("library", "fix-orientation");
+  assert.equal(done.data.repaired, 1);
+});
+
+test("manifest library references can ask for several distinct images with count", async (t) => {
+  const f = await fixture(t);
+  const manifest = path.join(f.input, "素材包清单.json");
+  const spec = {
+    version: 1,
+    organization: {
+      product: "2027明星日历",
+      style: "檀健次款",
+      requirement: "场景图",
+      source: "CLI",
+    },
+    items: [
+      {
+        name: "场景一",
+        promptFile: "桌面场景.txt",
+        refs: [{ category: "正面图", count: 2 }, { category: "礼盒图" }],
+      },
+    ],
+  };
+  await fs.writeFile(manifest, JSON.stringify(spec));
+  const submitted = await f.run("submit", "--manifest", manifest);
+  assert.equal(submitted.code, 0, submitted.data.message);
+  const [archived] = await fs.readdir(f.consumed);
+  const order = JSON.parse(await fs.readFile(path.join(f.consumed, archived, "工单.json"), "utf8"));
+  assert.deepEqual(order.items[0].refs, [
+    { category: "正面图" },
+    { category: "正面图" },
+    { category: "礼盒图" },
+  ]);
+  for (const bad of [
+    [{ category: "正面图", count: 0 }],
+    [{ libraryId: 7, count: 2 }],
+    [{ category: "正面图", count: 17 }],
+  ]) {
+    spec.items[0].refs = bad;
+    await fs.writeFile(manifest, JSON.stringify(spec));
+    assert.equal((await f.run("validate", "--manifest", manifest)).code, 2, JSON.stringify(bad));
+  }
 });

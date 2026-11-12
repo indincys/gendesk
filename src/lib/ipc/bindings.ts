@@ -1448,6 +1448,7 @@ backupProgress: BackupProgress,
 batchSummary: BatchSummary,
 intakeChanged: IntakeChanged,
 keyHealth: KeyHealth,
+libraryChanged: LibraryChanged,
 livePhotoChanged: LivePhotoChanged,
 posterChanged: PosterChanged,
 refImportProgress: RefImportProgress,
@@ -1464,6 +1465,7 @@ backupProgress: "backup-progress",
 batchSummary: "batch-summary",
 intakeChanged: "intake-changed",
 keyHealth: "key-health",
+libraryChanged: "library-changed",
 livePhotoChanged: "live-photo-changed",
 posterChanged: "poster-changed",
 refImportProgress: "ref-import-progress",
@@ -2159,6 +2161,12 @@ cooldownDays: number; sortOrder: number;
  */
 imageCount: number }
 /**
+ * 参考图库在应用界面之外变了（Agent 经 CLI 导入、改图、抽图记账，或工单收录抽中图）。
+ * 
+ * 只是一声「该重读了」：载荷不带数据，图库页收到后自己节流重读，避免把上万行塞进事件。
+ */
+export type LibraryChanged = { at: number }
+/**
  * 批量修改图片：改分类、启停、备注、移出或放回。
  */
 export type LibraryImagePatch = { categoryId: number | null; enabled: boolean | null; note: string | null; 
@@ -2166,7 +2174,15 @@ export type LibraryImagePatch = { categoryId: number | null; enabled: boolean | 
  * true = 移出图库（保留文件，不再参与抽取）；false = 放回。
  */
 removed: boolean | null }
-export type LibraryImageView = { id: number; styleId: number; style: string; product: string; categoryId: number; category: string; name: string; filePath: string; thumbPath: string; width: number; height: number; note: string; enabled: boolean; removed: boolean; lastUsedAt: number | null; useCount: number; 
+export type LibraryImageView = { id: number; styleId: number; style: string; product: string; categoryId: number; category: string; name: string; filePath: string; thumbPath: string; width: number; height: number; note: string; enabled: boolean; removed: boolean; 
+/**
+ * 映射本地原图（0054）；false = 旧版本拷进数据目录的副本。
+ */
+linked: boolean; 
+/**
+ * 原图此刻不在磁盘上（被移动、删除或所在的盘没接上）。这类图抽图时自动跳过。
+ */
+missing: boolean; lastUsedAt: number | null; useCount: number; 
 /**
  * 冷却到什么时候（unix 秒）；不在冷却期为空。
  */
@@ -2181,6 +2197,10 @@ export type LibraryImportReport = { imported: LibraryImageView[];
  * 之前移出、这次重新导入而放回的图。
  */
 restored: LibraryImageView[]; 
+/**
+ * 旧版本拷进来的副本，这次导入了同一张原图：改为映射原图并删掉副本（0054）。
+ */
+relinked: LibraryImageView[]; 
 /**
  * 本款式里已经有的同一张图，未重复入库。
  */

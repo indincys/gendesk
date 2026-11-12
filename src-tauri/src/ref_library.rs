@@ -24,6 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -32,6 +33,9 @@ use crate::db::repo::ref_library as repo;
 use crate::db::repo::refs as refs_repo;
 use crate::error::{AppError, AppResult};
 use crate::files::DataDirs;
+
+/// 图库导入同时处理几张（见 `import_files`）。解码另有全局上限，这个数只管 I/O 重叠。
+const IMPORT_PARALLEL: usize = 4;
 
 const DAY: i64 = 86_400;
 /// 单次随机抽取上限（预览用）。
@@ -127,6 +131,10 @@ pub struct LibraryImageView {
     pub note: String,
     pub enabled: bool,
     pub removed: bool,
+    /// 映射本地原图（0054）；false = 旧版本拷进数据目录的副本。
+    pub linked: bool,
+    /// 原图此刻不在磁盘上（被移动、删除或所在的盘没接上）。这类图抽图时自动跳过。
+    pub missing: bool,
     pub last_used_at: Option<i64>,
     pub use_count: i64,
     /// 冷却到什么时候（unix 秒）；不在冷却期为空。
@@ -152,6 +160,8 @@ impl LibraryImageView {
             note: r.note,
             enabled: r.enabled,
             removed: r.deleted_at.is_some(),
+            linked: r.linked,
+            missing: false,
             last_used_at: r.last_used_at,
             use_count: r.use_count,
             cooling_until,
@@ -180,6 +190,8 @@ pub struct LibraryImportReport {
     pub imported: Vec<LibraryImageView>,
     /// 之前移出、这次重新导入而放回的图。
     pub restored: Vec<LibraryImageView>,
+    /// 旧版本拷进来的副本，这次导入了同一张原图：改为映射原图并删掉副本（0054）。
+    pub relinked: Vec<LibraryImageView>,
     /// 本款式里已经有的同一张图，未重复入库。
     pub duplicates: Vec<LibraryImportIssue>,
     pub failed: Vec<LibraryImportIssue>,
@@ -533,13 +545,21 @@ pub async fn list_images(
     include_removed: bool,
     now: i64,
 ) -> AppResult<Vec<LibraryImageView>> {
-    Ok(
-        repo::list_images(pool, style_id, category_id, include_removed)
-            .await?
-            .into_iter()
-            .map(|r| LibraryImageView::from_row(r, now))
-            .collect(),
-    )
+    let rows = repo::list_images(pool, style_id, category_id, include_removed).await?;
+    // 映射之后原图可能被挪走；逐张 stat 一下（上万张也只是几十毫秒），放到阻塞线程上做。
+    tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .map(|r| {
+                let missing = !Path::new(&r.file_path).is_file();
+                LibraryImageView {
+                    missing,
+                    ..LibraryImageView::from_row(r, now)
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// 按名字找款式。产品写了就优先精确匹配；没写或库里款式没标产品时，同名唯一即可。
@@ -813,28 +833,46 @@ pub async fn import_files(
     let mut report = LibraryImportReport {
         imported: Vec::new(),
         restored: Vec::new(),
+        relinked: Vec::new(),
         duplicates: Vec::new(),
         failed: Vec::new(),
     };
-    for (i, path) in paths.iter().enumerate() {
-        let short = Path::new(path)
+    // 几百上千张一次导入时，逐张串行会让 CPU 大半时间在等磁盘。这里分两段：
+    // 读文件、算哈希、出缩略图（`prepare_one`）同时铺开几张——解码仍受 `files::decode`
+    // 的全局许可封顶（2～3 个）；写库（`commit_one`）则在下面的循环里**按输入顺序逐张**做，
+    // 于是图片编号与选择顺序一致（抽图在同等条件下按编号取，编号乱了结果就不可复现）。
+    // `buffered` 保证产出与输入同序。同一批里内容相同的两张靠 `(style_id, content_hash)`
+    // 唯一约束兜底：后提交的那张撞约束，清掉它的缩略图并记为重复。
+    let short_of = |path: &String| {
+        Path::new(path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.clone());
-        progress(i as i64, total, &short, report.failed.len() as i64);
-        match import_one(
-            pool,
-            &refs_dir,
-            &thumbs_dir,
-            style_id,
-            category_id,
-            path,
-            now,
-        )
-        .await
-        {
+            .unwrap_or_else(|| path.clone())
+    };
+    if let Some(first) = paths.first() {
+        progress(0, total, &short_of(first), 0);
+    }
+    let (refs_dir, thumbs_dir) = (refs_dir.as_path(), thumbs_dir.as_path());
+    // 先收成 Vec 再进 stream：闭包留在 `Map` 适配器里会让外层 future 的 Send 推导卡在
+    // 高阶生命周期上（「FnOnce is not general enough」）。
+    let jobs: Vec<_> = paths
+        .iter()
+        .map(|path| async move {
+            let r = prepare_one(pool, refs_dir, thumbs_dir, style_id, path).await;
+            (path, r)
+        })
+        .collect();
+    let mut prepared = futures_util::stream::iter(jobs).buffered(IMPORT_PARALLEL);
+    let mut done = 0i64;
+    while let Some((path, ready)) = prepared.next().await {
+        let result = match ready {
+            Ok(p) => commit_one(pool, refs_dir, style_id, category_id, path, p, now).await,
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(Imported::New(v)) => report.imported.push(v),
             Ok(Imported::Restored(v)) => report.restored.push(v),
+            Ok(Imported::Relinked(v)) => report.relinked.push(v),
             Ok(Imported::Duplicate(id)) => report.duplicates.push(LibraryImportIssue {
                 path: path.clone(),
                 message: "本款式已有这张图".into(),
@@ -849,7 +887,8 @@ pub async fn import_files(
                 });
             }
         }
-        progress(i as i64 + 1, total, &short, report.failed.len() as i64);
+        done += 1;
+        progress(done, total, &short_of(path), report.failed.len() as i64);
     }
     Ok(report)
 }
@@ -857,47 +896,101 @@ pub async fn import_files(
 enum Imported {
     New(LibraryImageView),
     Restored(LibraryImageView),
+    Relinked(LibraryImageView),
     Duplicate(i64),
 }
 
-async fn import_one(
+/// 文件侧做完、还没写库的一张。
+enum Prepared {
+    /// 本款式里已有同内容的图（可能是旧副本、可能已移出）。
+    Known(repo::ImageRow),
+    /// 新图：缩略图（与需要时的上传副本）已写进数据目录。
+    Fresh(crate::commands::refs::Ingested),
+}
+
+/// 只读库、只写数据目录：可以并发。
+async fn prepare_one(
     pool: &SqlitePool,
     refs_dir: &Path,
     thumbs_dir: &Path,
     style_id: i64,
-    category_id: i64,
     path: &str,
-    now: i64,
-) -> AppResult<Imported> {
+) -> AppResult<Prepared> {
     let source = PathBuf::from(path);
     if !source.is_absolute() {
         return Err(AppError::InvalidInput(format!("要用绝对路径：{path}")));
+    }
+    // 映射的前提是「原图归用户、副本归应用」。从数据目录里导入会把应用自己的副本当成原图，
+    // 之后清理旧副本时就可能删到别的图正在用的文件。
+    if refs_dir
+        .parent()
+        .is_some_and(|refs| source.starts_with(refs))
+    {
+        return Err(AppError::InvalidInput(
+            "这张图在 GenDesk 数据目录里，请从原图所在的文件夹导入".into(),
+        ));
     }
     let hash_src = source.clone();
     let hash = tokio::task::spawn_blocking(move || crate::files::content_hash(&hash_src))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
     if let Some(found) = repo::find_by_hash(pool, style_id, &hash).await? {
-        if found.deleted_at.is_none() {
-            return Ok(Imported::Duplicate(found.id));
-        }
-        let mut conn = pool.acquire().await?;
-        repo::revive(&mut conn, found.id, category_id).await?;
-        let row = repo::get_image(&mut conn, found.id)
-            .await?
-            .ok_or_else(|| AppError::Internal("放回的图片读不到".into()))?;
-        return Ok(Imported::Restored(LibraryImageView::from_row(row, now)));
+        return Ok(Prepared::Known(found));
     }
     let (rd, td, p) = (
         refs_dir.to_path_buf(),
         thumbs_dir.to_path_buf(),
         path.to_string(),
     );
-    let ing = crate::files::decode::bounded(move |permit| {
-        crate::commands::refs::ingest_one(&p, &rd, &td, permit)
+    // 映射：原图留在用户自己的目录里，数据目录只放缩略图与（需要时的）上传副本。
+    let mut ing = crate::files::decode::bounded(move |permit| {
+        crate::commands::refs::ingest_linked(&p, &rd, &td, permit)
     })
     .await?;
-    let content_hash = ing.content_hash.clone().unwrap_or(hash);
+    ing.content_hash.get_or_insert(hash);
+    Ok(Prepared::Fresh(ing))
+}
+
+/// 写库：调用方按输入顺序逐张调用。
+async fn commit_one(
+    pool: &SqlitePool,
+    refs_dir: &Path,
+    style_id: i64,
+    category_id: i64,
+    path: &str,
+    prepared: Prepared,
+    now: i64,
+) -> AppResult<Imported> {
+    let ing = match prepared {
+        Prepared::Known(found) => {
+            // 旧版本拷进来的副本，这次导入的正是它的原图（内容哈希相同）：改指向原图、删掉副本。
+            // 用户把原来那批文件夹再导一遍，图库占的空间就回来了，抽图记录、冷却、分类都不动。
+            let mut conn = pool.acquire().await?;
+            let relinked = match repo::relink(&mut conn, found.ref_image_id, path).await? {
+                Some(old) => {
+                    drop_library_copy(refs_dir, &old, path);
+                    true
+                }
+                None => false,
+            };
+            if found.deleted_at.is_some() {
+                repo::revive(&mut conn, found.id, category_id).await?;
+            } else if !relinked {
+                return Ok(Imported::Duplicate(found.id));
+            }
+            let row = repo::get_image(&mut conn, found.id)
+                .await?
+                .ok_or_else(|| AppError::Internal("图库图片读不到".into()))?;
+            let view = LibraryImageView::from_row(row, now);
+            return Ok(if found.deleted_at.is_some() {
+                Imported::Restored(view)
+            } else {
+                Imported::Relinked(view)
+            });
+        }
+        Prepared::Fresh(ing) => ing,
+    };
+    let content_hash = ing.content_hash.clone().unwrap_or_default();
     let mut tx = pool.begin().await?;
     let ref_id = refs_repo::insert(
         &mut *tx,
@@ -914,13 +1007,15 @@ async fn import_one(
         },
     )
     .await?;
+    repo::mark_linked(&mut tx, ref_id).await?;
     let id = match repo::insert_image(&mut tx, style_id, category_id, ref_id, &content_hash, now)
         .await
     {
         Ok(id) => id,
         Err(e) if unique_violation(&e) => {
             drop(tx);
-            for f in [Some(ing.file_path), Some(ing.thumb_path), ing.upload_path]
+            // 只清本次写进数据目录的缩略图与上传副本；file_path 是用户的原图，绝不能删。
+            for f in [Some(ing.thumb_path), ing.upload_path]
                 .into_iter()
                 .flatten()
             {
@@ -938,6 +1033,19 @@ async fn import_one(
         .ok_or_else(|| AppError::Internal("刚导入的图片读不到".into()))?;
     tx.commit().await?;
     Ok(Imported::New(LibraryImageView::from_row(row, now)))
+}
+
+/// 删掉一份已被原图取代的旧副本。只删数据目录 `refs/library/` 里、且不是原图本身的那份——
+/// 这是删除用户文件的唯一可能入口，所以判据写死在路径上，不信任调用方。
+/// 删不掉（Windows 上正被读取）就留着，它只是占点空间。
+fn drop_library_copy(refs_dir: &Path, old: &str, source: &str) {
+    let old_path = Path::new(old);
+    if old == source || !old_path.starts_with(refs_dir) {
+        return;
+    }
+    if let Err(error) = std::fs::remove_file(old_path) {
+        tracing::warn!(path = %old, %error, "旧图库副本没删掉，保留");
+    }
 }
 
 // ───────────────────────────── 预览抽取与手动记账 ─────────────────────────────
@@ -1835,6 +1943,145 @@ mod tests {
             .unwrap();
         assert_eq!(report.restored.len(), 1);
         assert!(!report.restored[0].removed);
+    }
+
+    /// 并发导入（`IMPORT_PARALLEL`）：同一批里内容相同的两张只入库一张，另一张记重复且不留孤儿文件；
+    /// 回执与输入同序，进度最后一声报满。
+    #[tokio::test]
+    async fn parallel_import_keeps_order_and_dedupes_within_one_batch() {
+        let (pool, dir) = test_pool().await;
+        let style = save_style(&pool, None, "王一博", "", "").await.unwrap();
+        let category = find_category(&pool, "正面图").await.unwrap().id;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let mut paths = Vec::new();
+        for k in 0..9u8 {
+            let p = src.join(format!("图{k}.png"));
+            std::fs::write(&p, png(k)).unwrap();
+            paths.push(p.to_string_lossy().to_string());
+        }
+        // 与第 0 张内容相同、名字不同：只能靠内容哈希认出来。
+        let twin = src.join("图0-副本.png");
+        std::fs::write(&twin, png(0)).unwrap();
+        paths.push(twin.to_string_lossy().to_string());
+
+        let dirs = DataDirs::new(dir.path().join("data"));
+        let last = std::sync::Mutex::new((0i64, 0i64));
+        let report = import_files(
+            &pool,
+            &dirs,
+            style,
+            category,
+            &paths,
+            &|done, total, _, _| {
+                *last.lock().unwrap() = (done, total);
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.imported.len(), 9);
+        assert_eq!(report.duplicates.len(), 1);
+        assert!(report.failed.is_empty());
+        let names: Vec<_> = report.imported.iter().map(|v| v.name.clone()).collect();
+        let want: Vec<_> = (0..9).map(|k| format!("图{k}")).collect();
+        assert_eq!(names, want, "回执须与输入同序");
+        assert_eq!(*last.lock().unwrap(), (10, 10));
+        let thumbs = std::fs::read_dir(dirs.thumbs().join("library"))
+            .unwrap()
+            .count();
+        assert_eq!(thumbs, 9, "撞重复的那张写过的缩略图要清掉");
+        assert!(
+            twin.exists() && src.join("图0.png").exists(),
+            "原图一张都不能删"
+        );
+    }
+
+    /// 映射（0054）：原图不拷进数据目录，file_path 就是源文件；数据目录只有缩略图。
+    #[tokio::test]
+    async fn import_links_the_original_instead_of_copying_it() {
+        let (pool, dir) = test_pool().await;
+        let (_, _, ids) = seed(&pool, dir.path(), 2).await;
+        let dirs = DataDirs::new(dir.path().join("data"));
+        let src_root = dir.path().join("src").to_string_lossy().to_string();
+        let thumb_root = dirs.thumbs().to_string_lossy().to_string();
+        let views = list_images(&pool, None, None, false, 0).await.unwrap();
+        for v in &views {
+            assert!(v.linked && !v.missing);
+            assert!(v.file_path.starts_with(&src_root), "{}", v.file_path);
+            assert!(v.thumb_path.starts_with(&thumb_root), "{}", v.thumb_path);
+        }
+        assert_eq!(
+            std::fs::read_dir(dirs.refs().join("library"))
+                .unwrap()
+                .count(),
+            0,
+            "不带方向的小图不需要上传副本，数据目录里不该有原图拷贝"
+        );
+
+        // 原图被挪走：列表标出来（抽图本来就跳过它）。
+        std::fs::remove_file(dir.path().join("src/正面0.png")).unwrap();
+        let views = list_images(&pool, None, None, false, 0).await.unwrap();
+        assert!(views.iter().find(|v| v.id == ids[0]).unwrap().missing);
+    }
+
+    /// 旧版本拷进来的副本：再导入一次原图，就改指向原图并删掉副本；记录与身份不变。
+    #[tokio::test]
+    async fn reimporting_the_original_relinks_an_old_copy_and_frees_it() {
+        let (pool, dir) = test_pool().await;
+        let (style, category, ids) = seed(&pool, dir.path(), 1).await;
+        let dirs = DataDirs::new(dir.path().join("data"));
+        let source = dir.path().join("src/正面0.png");
+        // 造一行旧口径：file_path 指向数据目录里的拷贝，linked = 0。
+        let copy = dirs.refs().join("library/正面0.png");
+        std::fs::copy(&source, &copy).unwrap();
+        sqlx::query(
+            "UPDATE ref_images SET file_path = ?1, linked = 0
+              WHERE id = (SELECT ref_image_id FROM ref_library_images WHERE id = ?2)",
+        )
+        .bind(copy.to_string_lossy().to_string())
+        .bind(ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let src = source.to_string_lossy().to_string();
+        let one = std::slice::from_ref(&src);
+        let report = import_files(&pool, &dirs, style, category, one, &|_, _, _, _| {})
+            .await
+            .unwrap();
+        assert_eq!(report.relinked.len(), 1);
+        assert_eq!(
+            report.relinked[0].id, ids[0],
+            "同一行，抽图记录与冷却都跟着走"
+        );
+        assert_eq!(report.relinked[0].file_path, src);
+        assert!(report.relinked[0].linked);
+        assert!(!copy.exists(), "副本删掉，空间腾出来");
+        assert!(source.exists(), "原图不动");
+
+        // 再导一次就只是重复。
+        let again = import_files(&pool, &dirs, style, category, one, &|_, _, _, _| {})
+            .await
+            .unwrap();
+        assert_eq!((again.relinked.len(), again.duplicates.len()), (0, 1));
+
+        // 从数据目录里导入会被拒：那里的文件归应用，不能当原图映射。
+        let inside = dirs.refs().join("library/别的.png");
+        std::fs::write(&inside, png(9)).unwrap();
+        let inside_s = inside.to_string_lossy().to_string();
+        let refused = import_files(
+            &pool,
+            &dirs,
+            style,
+            category,
+            std::slice::from_ref(&inside_s),
+            &|_, _, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused.failed.len(), 1);
+        assert!(inside.exists());
     }
 
     #[tokio::test]

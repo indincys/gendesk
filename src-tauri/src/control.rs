@@ -170,6 +170,24 @@ fn arg<'a>(args: &'a Value, key: &str) -> AppResult<&'a str> {
 }
 
 async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Value> {
+    let out = dispatch_inner(app, cmd, args).await;
+    // 成功失败都推：收录失败也可能已抽图记账（检查点之后才出错），宁可多刷一次。
+    if touches_library(cmd) {
+        crate::commands::ref_library::emit_changed(app);
+    }
+    out
+}
+
+/// 这条命令会不会改动参考图库（图片、计数、冷却）。只读查询不推，免得 CLI 轮询时界面跟着空转。
+fn touches_library(cmd: &str) -> bool {
+    match cmd {
+        "intake.submit" | "intake.confirm" | "intake.retry" => true,
+        "library.overview" | "library.images" | "library.check" | "library.usage" => false,
+        other => other.starts_with("library."),
+    }
+}
+
+async fn dispatch_inner(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Value> {
     use crate::commands::intake;
     let state = app.state::<AppState>();
     match cmd {
@@ -448,7 +466,7 @@ async fn library_command(
         "library.fix-orientation" => {
             let dry_run = args.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
             Ok(serde_json::to_value(
-                crate::commands::refs::repair_orientation(db, dry_run).await?,
+                crate::commands::refs::repair_orientation(db, &state.dirs, dry_run).await?,
             )?)
         }
         "library.usage" => {

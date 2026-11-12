@@ -104,6 +104,29 @@ pub(crate) fn ingest_one(
     thumbs_dir: &Path,
     permit: &files::decode::DecodePermit,
 ) -> AppResult<Ingested> {
+    ingest_with(path, refs_dir, thumbs_dir, false, permit)
+}
+
+/// 同 [`ingest_one`]，但**不拷原图**：`file_path` 就是源文件本身（参考图库的映射导入，0054）。
+///
+/// 缩略图和（带方向或超限时的）上传副本照旧写进 `thumbs_dir` / `refs_dir`——它们都在数据目录里，
+/// 源文件所在的目录一个字节都不写。哈希、尺寸、缩略图口径与拷贝导入完全相同。
+pub(crate) fn ingest_linked(
+    path: &str,
+    refs_dir: &Path,
+    thumbs_dir: &Path,
+    permit: &files::decode::DecodePermit,
+) -> AppResult<Ingested> {
+    ingest_with(path, refs_dir, thumbs_dir, true, permit)
+}
+
+fn ingest_with(
+    path: &str,
+    refs_dir: &Path,
+    thumbs_dir: &Path,
+    linked: bool,
+    permit: &files::decode::DecodePermit,
+) -> AppResult<Ingested> {
     let src = PathBuf::from(path);
     let stem = src
         .file_stem()
@@ -123,8 +146,14 @@ pub(crate) fn ingest_one(
     let img = inspected.image;
     let file_size = bytes.len() as i64;
     let content_hash = Some(files::content_hash_bytes(&bytes));
-    let dest = unique_path(refs_dir, &stem, &ext);
-    std::fs::write(&dest, &bytes)?;
+    let dest = if linked {
+        src.clone()
+    } else {
+        let dest = unique_path(refs_dir, &stem, &ext);
+        std::fs::write(&dest, &bytes)?;
+        dest
+    };
+    drop(bytes);
 
     let thumb = unique_path(thumbs_dir, &stem, "jpg");
     files::write_thumbnail_from(&img, &thumb)?;
@@ -319,6 +348,7 @@ pub struct OrientationRepairReport {
 /// 只在显式命令里跑（`gendesk library fix-orientation`），应用启动不做任何补扫。
 pub(crate) async fn repair_orientation(
     pool: &sqlx::SqlitePool,
+    dirs: &files::DataDirs,
     dry_run: bool,
 ) -> AppResult<OrientationRepairReport> {
     #[derive(sqlx::FromRow)]
@@ -330,9 +360,10 @@ pub(crate) async fn repair_orientation(
         upload_path: Option<String>,
         width: i64,
         height: i64,
+        linked: bool,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, name, file_path, thumb_path, upload_path, width, height
+        "SELECT id, name, file_path, thumb_path, upload_path, width, height, linked
            FROM ref_images WHERE deleted_at IS NULL ORDER BY id",
     )
     .fetch_all(pool)
@@ -403,7 +434,14 @@ pub(crate) async fn repair_orientation(
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let refs_dir = src.parent().map(Path::to_path_buf).unwrap_or_default();
+        // 映射的原图（0054）在用户自己的目录里：上传副本必须写进数据目录，不能写在原图旁边。
+        let refs_dir = if row.linked {
+            let dir = dirs.refs().join("library");
+            std::fs::create_dir_all(&dir)?;
+            dir
+        } else {
+            src.parent().map(Path::to_path_buf).unwrap_or_default()
+        };
         let stem = src
             .file_stem()
             .and_then(|s| s.to_str())
@@ -490,6 +528,7 @@ mod tests {
         std::fs::write(&old_thumb, red_left_blue_right(300, 200)).unwrap();
         std::fs::write(&old_upload, red_left_blue_right(300, 200)).unwrap();
         let plain = refs.join("横拍.jpeg");
+        let dirs = files::DataDirs::new(dir.path().to_path_buf());
         std::fs::write(&plain, red_left_blue_right(300, 200)).unwrap();
         let s = |p: &Path| p.to_string_lossy().to_string();
         let rotated_id = repo::insert(
@@ -525,7 +564,7 @@ mod tests {
         .await
         .unwrap();
 
-        let preview = repair_orientation(&pool, true).await.unwrap();
+        let preview = repair_orientation(&pool, &dirs, true).await.unwrap();
         assert_eq!(
             (preview.scanned, preview.needs_fix, preview.repaired),
             (2, 1, 0)
@@ -538,7 +577,7 @@ mod tests {
             "预演不改库"
         );
 
-        let done = repair_orientation(&pool, false).await.unwrap();
+        let done = repair_orientation(&pool, &dirs, false).await.unwrap();
         assert_eq!((done.repaired, done.failed.len()), (1, 0));
         let row = repo::get(&pool, rotated_id).await.unwrap().unwrap();
         assert_eq!((row.width, row.height), (200, 300));
@@ -560,7 +599,7 @@ mod tests {
         assert!(!old_upload.exists(), "没有任务挂着时删掉横躺的旧副本");
         assert!(original.exists(), "原文件不动");
 
-        let again = repair_orientation(&pool, false).await.unwrap();
+        let again = repair_orientation(&pool, &dirs, false).await.unwrap();
         assert_eq!(
             (again.already_upright, again.repaired),
             (1, 0),

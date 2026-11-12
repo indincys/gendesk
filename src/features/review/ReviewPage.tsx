@@ -232,7 +232,8 @@ export function ReviewPage() {
   const [focusId, setFocusId] = useState<number | null>(null);
   const [pending, setPending] = useState<Set<number>>(new Set());
   const [onlyPending, setOnlyPending] = useState(false);
-  const [sortMode, setSortMode] = useState<ReviewMode>("requirement");
+  // 默认按提交（一次工单一组）：审图时最常对照的是「这一单交了什么」，按需求放第二位。
+  const [sortMode, setSortMode] = useState<ReviewMode>("batch");
   const lastClicked = useRef<number | null>(null);
   const [compareRef, setCompareRef] = useState(false);
   const [holdRef, setHoldRef] = useState(false);
@@ -636,19 +637,19 @@ export function ReviewPage() {
           <div className="seg" role="group" aria-label="验收分组方式">
             <button
               type="button"
-              className={cn("sgi", sortMode === "requirement" && "on")}
-              aria-pressed={sortMode === "requirement"}
-              onClick={() => changeView("requirement", onlyPending)}
-            >
-              按需求
-            </button>
-            <button
-              type="button"
               className={cn("sgi", sortMode === "batch" && "on")}
               aria-pressed={sortMode === "batch"}
               onClick={() => changeView("batch", onlyPending)}
             >
               按提交
+            </button>
+            <button
+              type="button"
+              className={cn("sgi", sortMode === "requirement" && "on")}
+              aria-pressed={sortMode === "requirement"}
+              onClick={() => changeView("requirement", onlyPending)}
+            >
+              按需求
             </button>
           </div>
           <select

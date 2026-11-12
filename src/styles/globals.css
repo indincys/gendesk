@@ -5551,11 +5551,22 @@ a:hover {
   background: var(--accbg);
   flex: none;
 }
-.rlgrid {
+/* 虚拟网格：行高由 RefLibraryPage 的 CARD_META_H / GRID_GAP / GRID_PAD_X 算出，与这里的定高定距是一对。
+ * 列数、行高、位移走内联样式；这里只管不随数据变的部分。 */
+.rlvlist {
+  position: relative;
+  width: 100%;
+}
+.rlrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 14px;
-  padding: 16px 18px 40px;
+  align-content: start;
+  column-gap: 14px;
+  padding: 0 18px;
 }
 .rlcard {
   cursor: pointer;
@@ -5588,6 +5599,13 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 6px;
+  height: 20px;
+  flex: none;
+}
+.rlsub {
+  height: 14px;
+  line-height: 14px;
+  flex: none;
 }
 .rlform {
   display: grid;

@@ -36,6 +36,8 @@ pub struct ImageRow {
     pub thumb_path: String,
     pub width: i64,
     pub height: i64,
+    /// 0054：`file_path` 是用户自己的原图（映射），不是拷进数据目录的副本。
+    pub linked: bool,
     pub style: String,
     pub product: String,
     pub category: String,
@@ -44,7 +46,7 @@ pub struct ImageRow {
 
 const IMAGE_SELECT: &str = "SELECT i.id, i.style_id, i.category_id, i.ref_image_id,
         i.note, i.enabled, i.last_used_at, i.use_count, i.created_at, i.deleted_at,
-        r.name, r.file_path, r.thumb_path, r.width, r.height,
+        r.name, r.file_path, r.thumb_path, r.width, r.height, r.linked,
         s.name AS style, s.product, c.name AS category, c.cooldown_days
      FROM ref_library_images i
      JOIN ref_images r ON r.id = i.ref_image_id
@@ -285,6 +287,38 @@ pub async fn list_images(
     .bind(include_deleted)
     .fetch_all(pool)
     .await
+}
+
+/// 把刚入库的 ref_images 行标成映射（0054）。与 insert 同事务。
+pub async fn mark_linked(
+    conn: &mut SqliteConnection,
+    ref_image_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE ref_images SET linked = 1 WHERE id = ?1")
+        .bind(ref_image_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// 旧版本拷进来的副本 → 改指向用户原图。只改还是副本的行（`linked = 0`），返回改前的副本路径。
+pub async fn relink(
+    conn: &mut SqliteConnection,
+    ref_image_id: i64,
+    source: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let old: Option<String> =
+        sqlx::query_scalar("SELECT file_path FROM ref_images WHERE id = ?1 AND linked = 0")
+            .bind(ref_image_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(old) = old else { return Ok(None) };
+    sqlx::query("UPDATE ref_images SET file_path = ?2, linked = 1 WHERE id = ?1 AND linked = 0")
+        .bind(ref_image_id)
+        .bind(source)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Some(old))
 }
 
 pub async fn get_image(

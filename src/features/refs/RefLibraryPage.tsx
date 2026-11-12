@@ -10,15 +10,34 @@ import {
   type LibraryOverview,
   type LibraryStyleView,
   commands,
+  subscribeLibrary,
   subscribeRefImportProgress,
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Dices, ImagePlus, Pencil, Plus, Settings2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const NO_PATCH: LibraryImagePatch = { categoryId: null, enabled: null, note: null, removed: null };
+
+/*
+ * 网格几何。与 globals.css 里 `.rlrow` / `.rlcard` / `.rlmeta` / `.rlsub` 是一对，改一处必须改另一处：
+ * 虚拟列表按这里算出的行高摆位，不逐行回测（回测是滚动时的强制同步布局，见 CLAUDE.md「图片网格」②）。
+ */
+/** 卡片最小列宽：每行放得下几张由它和容器宽度决定。 */
+const CARD_MIN_W = 150;
+/** 列间距与行间距。 */
+const GRID_GAP = 14;
+/** 网格左右内边距（`.rlrow` 的 padding）。 */
+const GRID_PAD_X = 18;
+const GRID_PAD_TOP = 16;
+const GRID_PAD_BOTTOM = 40;
+/** 方图下方的文字区：卡片 gap 5 + 徽章行 20 + gap 5 + 用量行 14。 */
+const CARD_META_H = 44;
+/** 外部改动（CLI 导入、工单抽图）合并重读的窗口：一次投单可能连发几声。 */
+const EXTERNAL_REFRESH_MS = 300;
 
 /** 「11-14」这种短日期。 */
 function shortDate(unix: number): string {
@@ -26,11 +45,14 @@ function shortDate(unix: number): string {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 卡片上的状态徽章：停用 / 已移出 / 冷却到哪天 / 可用。 */
+/** 卡片上的状态徽章：已移出 / 原图丢失 / 停用 / 冷却到哪天 / 可用。 */
 function statusBadge(img: LibraryImageView): { text: string; tone: string } {
   if (img.removed) return { text: "已移出", tone: "b-gray" };
+  // 图库映射本地原图：原图被挪走、删掉或所在的盘没接上，这张就抽不到了。
+  if (img.missing) return { text: "原图丢失", tone: "b-red" };
   if (!img.enabled) return { text: "停用", tone: "b-gray" };
-  if (img.coolingUntil) return { text: `冷却至 ${shortDate(img.coolingUntil)}`, tone: "b-amber" };
+  if (img.coolingUntil && img.coolingUntil > Date.now() / 1000)
+    return { text: `冷却至 ${shortDate(img.coolingUntil)}`, tone: "b-amber" };
   return { text: "可用", tone: "b-green" };
 }
 
@@ -56,6 +78,9 @@ export function RefLibraryPage() {
   const [pickCount, setPickCount] = useState(3);
   const [importing, setImporting] = useState<RefImportState | null>(null);
   const busy = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /** 只认最后一次发出的读图请求：快速切款式时，先发后到的旧结果不许盖掉新的。 */
+  const imagesSeq = useRef(0);
 
   const refreshOverview = useCallback(async () => {
     try {
@@ -70,14 +95,16 @@ export function RefLibraryPage() {
   }, []);
 
   const refreshImages = useCallback(async () => {
+    const seq = ++imagesSeq.current;
     if (styleId === null) {
       setImages([]);
       return;
     }
     try {
-      setImages(await unwrap(commands.listLibraryImages(styleId, categoryId, showRemoved)));
+      const rows = await unwrap(commands.listLibraryImages(styleId, categoryId, showRemoved));
+      if (seq === imagesSeq.current) setImages(rows);
     } catch (e) {
-      toast.error(`读取图片失败：${message(e)}`);
+      if (seq === imagesSeq.current) toast.error(`读取图片失败：${message(e)}`);
     }
   }, [styleId, categoryId, showRemoved]);
 
@@ -93,6 +120,46 @@ export function RefLibraryPage() {
     void refreshImages();
   }, [refreshImages]);
 
+  // 应用界面之外的改动（Agent 经 CLI 导入/改图、工单收录抽中图）由后端推一声，这里合并后重读。
+  // 用 ref 取最新的 refresh，订阅只建一次，不随筛选条件反复挂退。
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let unsub: (() => void) | undefined;
+    let alive = true;
+    void subscribeLibrary(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // 自己正在导入时不插队：导入结束的 finally 里会统一重读。
+        if (!busy.current) void refreshRef.current();
+      }, EXTERNAL_REFRESH_MS);
+    }).then((un) => {
+      if (alive) unsub = un;
+      else un();
+    });
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      unsub?.();
+    };
+  }, []);
+
+  // 冷却到期不会有任何事件：在最早一张到期的那一刻重读一次，「可用」计数与徽章随之更新。
+  const nextCoolEnd = useMemo(() => {
+    let min = Number.POSITIVE_INFINITY;
+    for (const i of images) if (i.coolingUntil && i.coolingUntil < min) min = i.coolingUntil;
+    return min;
+  }, [images]);
+  useEffect(() => {
+    if (!Number.isFinite(nextCoolEnd)) return;
+    const ms = Math.max(1000, nextCoolEnd * 1000 - Date.now() + 1000);
+    // setTimeout 上限约 24.8 天；更远的到期等下次重读时再排。
+    if (ms > 2 ** 31 - 1) return;
+    const t = setTimeout(() => void refreshRef.current(), ms);
+    return () => clearTimeout(t);
+  }, [nextCoolEnd]);
+
   const style = overview?.styles.find((s) => s.id === styleId) ?? null;
   const categories = overview?.categories ?? [];
   const limits = overview?.limits ?? null;
@@ -100,13 +167,58 @@ export function RefLibraryPage() {
   const countOf = (cid: number) => style?.byCategory.find((c) => c.categoryId === cid);
   const selected = useMemo(() => images.filter((i) => sel.has(i.id)), [images, sel]);
 
-  const toggle = (id: number) =>
-    setSel((s) => {
-      const next = new Set(s);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+  // 稳定引用：卡片是 memo 的，点一张只重绘这一张，而不是整屏。
+  const toggle = useCallback(
+    (id: number) =>
+      setSel((s) => {
+        const next = new Set(s);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }),
+    [],
+  );
+
+  /*
+   * 虚拟化 —— 上万张时「滚动不卡顿」的依据。全量挂 DOM 时，每张卡都要解码缩略图、参与样式
+   * 计算，点一下选中还会整屏重绘。这里按行虚拟，只渲染视口附近的几行；行高精确可算。
+   * 容器宽度只取 ResizeObserver 的 contentRect（见 CLAUDE.md「图片网格」③）。
+   */
+  const [gridW, setGridW] = useState(0);
+  const hasImages = images.length > 0;
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !hasImages) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = entry?.contentRect.width ?? 0;
+      if (w) setGridW((cur) => (Math.abs(w - cur) > 1 ? w : cur));
     });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasImages]);
+  const inner = Math.max(CARD_MIN_W, gridW - GRID_PAD_X * 2);
+  const cols = Math.max(1, Math.floor((inner + GRID_GAP) / (CARD_MIN_W + GRID_GAP)));
+  const colW = (inner - GRID_GAP * (cols - 1)) / cols;
+  const rowH = colW + CARD_META_H + GRID_GAP;
+  const rowCount = gridW > 0 ? Math.ceil(images.length / cols) : 0;
+  const virt = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => rowH,
+    paddingStart: GRID_PAD_TOP,
+    paddingEnd: GRID_PAD_BOTTOM - GRID_GAP,
+    overscan: 3,
+  });
+  // 列数或列宽一变，所有行的偏移都要重算。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowH/cols 是重算的触发条件
+  useLayoutEffect(() => {
+    virt.measure();
+  }, [rowH, cols]);
+  // 换款式/分类就是换了一份列表：回到顶部，别停在上一份的第 3000 张那里。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在筛选条件变化时回顶
+  useLayoutEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [styleId, categoryId, showRemoved]);
 
   async function runImport(paths: string[], cid: number) {
     if (styleId === null || busy.current) return;
@@ -118,6 +230,7 @@ export function RefLibraryPage() {
     try {
       const r = await unwrap(commands.importLibraryImages(styleId, cid, paths));
       const parts = [`导入 ${r.imported.length} 张`];
+      if (r.relinked.length) parts.push(`${r.relinked.length} 张旧副本改为映射原图`);
       if (r.restored.length) parts.push(`放回 ${r.restored.length} 张`);
       if (r.duplicates.length) parts.push(`${r.duplicates.length} 张已在库里`);
       if (r.failed.length) parts.push(`${r.failed.length} 张读不了`);
@@ -186,7 +299,7 @@ export function RefLibraryPage() {
   return (
     <PageScaffold
       title="参考图库"
-      caption="工单按款式和分类随机抽图，冷却期内用过的图优先跳过"
+      caption="映射本地原图（不另存副本）· 工单按款式和分类随机抽图，冷却期内用过的图优先跳过"
       right={right}
       bodyClassName="rlwb"
     >
@@ -344,7 +457,7 @@ export function RefLibraryPage() {
           </div>
         )}
 
-        <div className="pbody">
+        <div className="pbody" ref={scrollRef}>
           {!style ? (
             <div className="bigempty">
               <div className="fs13 fw5 t2">选择或新建一个款式</div>
@@ -355,45 +468,33 @@ export function RefLibraryPage() {
                 {style.name}
                 {category ? ` · ${category.name}` : ""} 还没有图片
               </div>
-              <div className="fs12 t3">点右上角「导入图片」，从本地选图放进图库。</div>
+              <div className="fs12 t3">
+                点右上角「导入图片」选本地图片。图库只记住原图位置，不另存一份，原图请别挪动。
+              </div>
             </div>
           ) : (
-            <div className="rlgrid">
-              {images.map((img) => {
-                const b = statusBadge(img);
-                const src = assetSrc(img.thumbPath);
+            <div className="rlvlist" style={{ height: virt.getTotalSize() }}>
+              {virt.getVirtualItems().map((row) => {
+                const from = row.index * cols;
                 return (
                   <div
-                    key={img.id}
-                    className={cn(
-                      "rlcard",
-                      sel.has(img.id) && "sel",
-                      (!img.enabled || img.removed) && "off",
-                    )}
-                    onClick={() => toggle(img.id)}
-                    onKeyDown={(e) => e.key === " " && toggle(img.id)}
-                    role="button"
-                    tabIndex={0}
-                    title={img.filePath}
+                    key={row.index}
+                    className="rlrow"
+                    style={{
+                      height: rowH,
+                      transform: `translateY(${row.start}px)`,
+                      gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+                    }}
                   >
-                    <div className="rlimg ph">
-                      {src ? (
-                        <img className="thumbimg" src={src} alt="" loading="lazy" />
-                      ) : (
-                        <div className="thumbfill" />
-                      )}
-                    </div>
-                    <div className="rlmeta">
-                      <span className={cn("bdg", b.tone)}>{b.text}</span>
-                      <span className="f1" />
-                      <span className="fs10 t3 mono">#{img.id}</span>
-                    </div>
-                    <div className="fs10 t3 nowrap ohide">
-                      {categoryId === null ? `${img.category} · ` : ""}
-                      {img.useCount > 0
-                        ? `用过 ${img.useCount} 次 · 上次 ${shortDate(img.lastUsedAt ?? 0)}`
-                        : "还没用过"}
-                    </div>
+                    {images.slice(from, from + cols).map((img) => (
+                      <LibraryCard
+                        key={img.id}
+                        img={img}
+                        selected={sel.has(img.id)}
+                        showCategory={categoryId === null}
+                        onToggle={toggle}
+                      />
+                    ))}
                   </div>
                 );
               })}
@@ -466,6 +567,58 @@ export function RefLibraryPage() {
     </PageScaffold>
   );
 }
+
+/**
+ * 一张图库卡片。memo：只有这一张的数据或选中态变了才重绘。
+ * 高度构成与 `CARD_META_H` 是一对（`.rlmeta` 20 + `.rlsub` 14 + 两个 5 的间距）。
+ */
+const LibraryCard = memo(function LibraryCard({
+  img,
+  selected,
+  showCategory,
+  onToggle,
+}: {
+  img: LibraryImageView;
+  selected: boolean;
+  showCategory: boolean;
+  onToggle: (id: number) => void;
+}) {
+  const b = statusBadge(img);
+  const src = assetSrc(img.thumbPath);
+  return (
+    <div
+      className={cn(
+        "rlcard",
+        selected && "sel",
+        (!img.enabled || img.removed || img.missing) && "off",
+      )}
+      onClick={() => onToggle(img.id)}
+      onKeyDown={(e) => e.key === " " && onToggle(img.id)}
+      role="button"
+      tabIndex={0}
+      title={img.missing ? `原图不在了：${img.filePath}` : img.filePath}
+    >
+      <div className="rlimg ph">
+        {src ? (
+          <img className="thumbimg" src={src} alt="" decoding="async" draggable={false} />
+        ) : (
+          <div className="thumbfill" />
+        )}
+      </div>
+      <div className="rlmeta">
+        <span className={cn("bdg", b.tone)}>{b.text}</span>
+        <span className="f1" />
+        <span className="fs10 t3 mono">#{img.id}</span>
+      </div>
+      <div className="rlsub fs10 t3 nowrap ohide">
+        {showCategory ? `${img.category} · ` : ""}
+        {img.useCount > 0
+          ? `用过 ${img.useCount} 次 · 上次 ${shortDate(img.lastUsedAt ?? 0)}`
+          : "还没用过"}
+      </div>
+    </div>
+  );
+});
 
 function StyleModal({
   style,

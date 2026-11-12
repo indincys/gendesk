@@ -102,6 +102,8 @@ export function WorksPage() {
   // ── 分节 ─────────────────────────────────────────────────────
   // 后端已按「批次倒序 + 批次内生成序」返回，这里只做连续切分，不重排序。
   const sections = useMemo<Section[]>(() => buildSections(works, groupBy), [works, groupBy]);
+  // 卡片 → 在 works 里的位置（Shift 连选用）。逐张 findIndex 是 O(n²)，一页 300 张就是九万次比较。
+  const indexOf = useMemo(() => new Map(works.map((w, i) => [w.id, i])), [works]);
 
   const toggleFav = async (w: WorkView) => {
     setWorks((cur) => cur.map((x) => (x.id === w.id ? { ...x, favorite: x.favorite ? 0 : 1 } : x)));
@@ -403,7 +405,7 @@ export function WorksPage() {
               </div>
               <div className="wgrid" style={{ paddingTop: 0 }}>
                 {s.works.map((w) => {
-                  const idx = works.findIndex((x) => x.id === w.id);
+                  const idx = indexOf.get(w.id) ?? -1;
                   return (
                     <div
                       key={w.id}

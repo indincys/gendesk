@@ -28,7 +28,7 @@ gendesk submit --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source <来源>]
                [--name <图片语义名>] [--ratio 3:4] [--format jpeg] [--quality high]
 gendesk status <jobId>
-gendesk confirm <jobId>      超阈值待确认的工单，仅在用户明确同意后调用
+gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
 gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
 gendesk overview             任务各态数量与视频待办
 gendesk v2v pending          待改写的图生视频条目（含缩略图路径与改写说明）
@@ -50,6 +50,12 @@ gendesk library update --id 12 [--id 13] [--category <分类>] [--enable|--disab
 gendesk library mark-used --id 12 [--id 13]     在 GenDesk 以外用过这些图时手动记一次
 gendesk library usage --job-id <jobId> | --id 12
 gendesk library fix-orientation [--dry-run]     按 EXIF 方向重做已导入参考图的缩略图、上传副本与尺寸
+Poster 衔接（开启「自动导入 Poster」时，submit 发现款式对不上 Poster 商品就转待确认、不生图）：
+gendesk poster resolve --product <产品> --style <款式>     这个款式审稿通过后会进哪个 Poster 商品
+gendesk poster bind --product <产品> --style <款式> --target <Poster 商品名或 ID>
+                    用户确认后保存绑定，之后同款自动导入；停在「需处理」的同款批次随即续导
+gendesk poster backfill [--product <产品>] [--style <款式>] [--apply]
+                    补导从未进过 Poster 的历史成品（只补静态图）；默认只预演，--apply 才登记并导入
 款式写 --product 区分同名款式。清单 ref/refs 可写图库引用，收录时由应用抽图并记账：
   {"category":"正面图"}（款式取条目 organization.style）· {"category":"礼盒图","style":"王一博"} · {"libraryId":12}
   {"category":"正面图","count":2} 展开成连续两张不重复的正面图。素材包.json：
@@ -565,7 +571,7 @@ function jobResult(jobId, job, extra = {}) {
     ...extra,
     next:
       status === "hold"
-        ? `超过 ${job.taskCount ?? "阈值"} 张的单在等待确认：先向用户说明张数并取得同意，再运行 gendesk confirm ${jobId}`
+        ? `工单在等待确认：${job.message ?? ""}。先向用户说明原因并取得同意（Poster 款式对不上时，按用户确认的商品先运行 gendesk poster bind），再运行 gendesk confirm ${jobId}`
         : status === "error"
           ? `收录失败：${job.message ?? ""}。修正后运行 gendesk retry ${jobId}`
           : "已建批开跑；生成结果在 GenDesk 审图页人工验收",
@@ -636,10 +642,10 @@ async function writePackage(root, prepared) {
   return dir;
 }
 
-function requireFeature(hello, feature) {
+function requireFeature(hello, feature, label = "参考图库") {
   check(
     Array.isArray(hello?.features) && hello.features.includes(feature),
-    `当前运行的 GenDesk 不支持 ${feature}（参考图库）。请更新并重启 GenDesk`,
+    `当前运行的 GenDesk 不支持 ${feature}（${label}）。请更新并重启 GenDesk`,
     8,
   );
 }
@@ -992,6 +998,58 @@ async function library(sub, positional, opts) {
 
 // ---------------------------------------------------------------- 视频改写
 
+// ---------------------------------------------------------------- Poster 衔接
+
+const POSTER_OPTIONS = {
+  resolve: ["product", "style"],
+  bind: ["product", "style", "target"],
+  backfill: ["product", "style", "apply"],
+};
+
+async function poster(sub, positional, opts) {
+  check(sub in POSTER_OPTIONS, `poster 只支持 ${Object.keys(POSTER_OPTIONS).join(" / ")}`);
+  check(positional.length === 0, `poster ${sub} 不接受位置参数`);
+  for (const key of Object.keys(opts))
+    check(POSTER_OPTIONS[sub].includes(key), `poster ${sub} 不支持 --${key}`);
+  const product = opts.product?.trim() ?? "";
+  const style = opts.style?.trim() ?? "";
+  if (sub !== "backfill") check(product || style, "需要 --product 或 --style");
+  const { conn, hello } = await connect({ launch: true });
+  requireFeature(hello, "poster-link", "Poster 衔接");
+  switch (sub) {
+    case "resolve": {
+      const data = await rpc(conn, "poster.resolve", { product, style });
+      const [target] = data.targets;
+      return {
+        status: target?.targetId ? "ok" : "unresolved",
+        autoImport: data.autoImport,
+        ...target,
+        next: target?.targetId
+          ? `审稿通过后进入 Poster「${target.targetName}」`
+          : `${target?.warning ?? "对不上 Poster 商品"}。向用户确认对应商品后运行 gendesk poster bind --product … --style … --target <商品名>`,
+      };
+    }
+    case "bind": {
+      const target = requiredText(opts.target, "--target");
+      const data = await rpc(conn, "poster.bind", { product, style, target });
+      return { status: "ok", autoImport: data.autoImport, ...data.target };
+    }
+    case "backfill": {
+      const data = await rpc(conn, "poster.backfill", { product, style, apply: !!opts.apply });
+      const unresolved = data.groups.filter((g) => !g.targetId);
+      return {
+        status: "ok",
+        ...data,
+        next: data.applied
+          ? `已登记 ${data.images} 张（${data.batches} 批），后台导入中；在设置 › 审稿后自动化查看进度`
+          : unresolved.length
+            ? "预演完成；对不上的款式先 gendesk poster bind，再加 --apply 补导"
+            : "预演完成；确认后加 --apply 补导",
+      };
+    }
+  }
+}
+
 async function rewriteLines(file) {
   const text = await fs.readFile(filePath(file), "utf8").catch((e) => {
     throw new CliError(`无法读取改写结果 ${file}：${e.message}`);
@@ -1049,6 +1107,11 @@ const LIBRARY_FLAGS = {
   restore: { type: "boolean" },
 };
 
+const POSTER_FLAGS = {
+  target: { type: "string" },
+  apply: { type: "boolean" },
+};
+
 const COMMANDS = {
   doctor: { positionals: 0, options: [] },
   validate: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
@@ -1059,10 +1122,11 @@ const COMMANDS = {
   overview: { positionals: 0, options: [] },
   v2v: { positionals: 1, options: ["file"] },
   library: { positionals: -1, options: Object.keys(LIBRARY_FLAGS) },
+  poster: { positionals: -1, options: ["product", "style", ...Object.keys(POSTER_FLAGS)] },
 };
 
 function exitCode(result) {
-  return { hold: 4, error: 5, duplicate: 6, not_found: 7 }[result.status] ?? 0;
+  return { hold: 4, unresolved: 4, error: 5, duplicate: 6, not_found: 7 }[result.status] ?? 0;
 }
 
 async function main() {
@@ -1071,6 +1135,7 @@ async function main() {
     options: Object.fromEntries([
       ...["manifest", "job-id", "file", ...SINGLE_OPTIONS].map((key) => [key, { type: "string" }]),
       ...Object.entries(LIBRARY_FLAGS),
+      ...Object.entries(POSTER_FLAGS),
       ...["help", "version"].map((key) => [key, { type: "boolean" }]),
     ]),
   });
@@ -1160,6 +1225,9 @@ async function main() {
     }
     case "library":
       result = await library(rest[0], rest.slice(1), opts);
+      break;
+    case "poster":
+      result = await poster(rest[0], rest.slice(1), opts);
       break;
     case "v2v": {
       const [sub] = rest;

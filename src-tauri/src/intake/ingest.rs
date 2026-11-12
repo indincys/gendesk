@@ -34,6 +34,26 @@ use crate::importer::ParsedGroup;
 /// 抽成 trait 只为一件事：让收录的端到端测试不必启动整个引擎（那要 provider 工厂、
 /// 事件汇、密钥存储三样东西）。同 `engine::events::EventSink` 的理由——
 /// 「这条链路到底把什么写进了库」是本模块唯一值得测的东西，不该被装配成本挡住。
+/// 投单时的 Poster 归属检查。开启「自动导入 Poster」时，返回审稿通过后进不了 Poster
+/// 的款式说明；空 = 放行。放在收录里而不是审稿后：对不上的图生成了也进不了 Poster，
+/// 等到审稿才发现时钱已经花了。
+#[async_trait::async_trait]
+pub trait PosterGate: Send + Sync {
+    async fn unresolved(&self, keys: &[(String, String)]) -> Vec<String>;
+}
+
+/// 不做检查（测试用）。
+#[cfg(test)]
+pub struct NoPosterGate;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl PosterGate for NoPosterGate {
+    async fn unresolved(&self, _keys: &[(String, String)]) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 pub trait Kick: Send + Sync {
     fn kick(&self);
 }
@@ -70,6 +90,8 @@ pub struct Ctx {
     pub progress: Arc<dyn ProgressSink>,
     /// 任务数超过它就不自动开跑，转「待确认」。`<= 0` = 不限。
     pub threshold: i64,
+    /// Poster 款式对不上时同样转「待确认」。
+    pub poster: Arc<dyn PosterGate>,
     /// 收录互斥锁。**必须全进程共用同一把**：CLI 的重复提交、确认与重试串行执行。
     pub lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -270,11 +292,17 @@ async fn ingest_dir(
         }
     }
 
-    // 3. 阈值。**确认.txt 是确认的唯一表达**——`gendesk confirm` 做的事就是替你写下它。
+    // 3. 阈值与 Poster 归属。**确认.txt 是确认的唯一表达**——`gendesk confirm` 做的事就是
+    //    替你写下它；确认同时放行两项（用户可能明确不需要进 Poster）。
     let confirmed = dir.join(super::CONFIRM_FILE).is_file();
     let total = plan.task_count();
-    if !confirmed && ctx.threshold > 0 && total > ctx.threshold {
-        return record_hold(ctx, &plan, total, ctx.threshold).await;
+    if !confirmed {
+        let over = ctx.threshold > 0 && total > ctx.threshold;
+        let poster = ctx.poster.unresolved(&plan.poster_keys()).await;
+        if over || !poster.is_empty() {
+            let threshold = over.then_some(ctx.threshold);
+            return record_hold(ctx, &plan, total, threshold, &poster).await;
+        }
     }
 
     // 4. 记账在动手之前。
@@ -370,20 +398,30 @@ async fn record_failure(
     Ok(Some(view))
 }
 
-/// 超阈值：**什么都不导入**，记一行 hold + 写 待确认.txt。
+/// 超阈值或 Poster 款式对不上：**什么都不导入**，记一行 hold + 写 待确认.txt。
 async fn record_hold(
     ctx: &Ctx,
     plan: &Plan,
     total: i64,
-    threshold: i64,
+    threshold: Option<i64>,
+    poster: &[String],
 ) -> AppResult<Option<JobView>> {
-    let msg = format!("共 {total} 张图（{total} 个条目），超过阈值 {threshold}，等待确认");
+    let mut reasons = Vec::new();
+    if let Some(threshold) = threshold {
+        reasons.push(format!(
+            "共 {total} 张图（{total} 个条目），超过阈值 {threshold}"
+        ));
+    }
+    if !poster.is_empty() {
+        reasons.push(format!("Poster 款式对不上：{}", poster.join("；")));
+    }
+    let msg = format!("{}，等待确认", reasons.join("；"));
     let row_id = start_job(ctx, &plan.job_id, &plan.dir_name).await?;
     repo::mark_hold(&ctx.pool, row_id, &msg, total, total).await?;
     write_receipt(
         &plan.dir,
         super::HOLD_FILE,
-        &hold_text(plan, total, threshold),
+        &hold_text(plan, total, threshold, poster),
     );
     let view = repo::get(&ctx.pool, row_id).await?;
     write_json_receipt(&plan.dir, &view);
@@ -833,16 +871,35 @@ fn result_text(plan: &Plan, done: &Applied) -> String {
     s
 }
 
-fn hold_text(plan: &Plan, total: i64, threshold: i64) -> String {
-    format!(
-        "这份工单超过了自动开跑阈值，**还没有导入任何东西**（提示词、参考图一条都没进库）。\n\n\
-         共 {total} 张图 = {total} 个条目（一条 = 一个任务 = 一张图）\n\
-         参考图 {} 张 · 将建 1 个批次（一次工单 = 一个 run）\n\
-         当前阈值：{threshold}\n\n\
-         用户明确同意后运行 `gendesk confirm {}` 开跑；不想跑就直接删掉整个工单目录。\n",
-        plan.distinct_refs().len(),
+fn hold_text(plan: &Plan, total: i64, threshold: Option<i64>, poster: &[String]) -> String {
+    let mut s = String::from(
+        "这份工单在等待确认，**还没有导入任何东西**（提示词、参考图一条都没进库）。\n\n",
+    );
+    if let Some(threshold) = threshold {
+        s.push_str(&format!(
+            "超过自动开跑阈值：共 {total} 张图 = {total} 个条目（一条 = 一个任务 = 一张图）\n\
+             参考图 {} 张 · 将建 1 个批次（一次工单 = 一个 run）\n\
+             当前阈值：{threshold}\n\n",
+            plan.distinct_refs().len(),
+        ));
+    }
+    if !poster.is_empty() {
+        s.push_str("已开启「自动导入 Poster」，但这些款式审稿通过后进不了 Poster：\n");
+        for line in poster {
+            s.push_str(&format!("- {line}\n"));
+        }
+        s.push_str(
+            "\n款式名写错：改成参考图库里的产品 / 款式名后，用新的 jobId 重新投单，删掉本目录。\n\
+             新款式第一次投单：用户确认对应商品后运行 \
+             `gendesk poster bind --product <产品> --style <款式> --target <Poster 商品名>`。\n\
+             用户明确不需要进 Poster 时可直接确认，审稿后在设置里对该批选「不导入」。\n\n",
+        );
+    }
+    s.push_str(&format!(
+        "用户明确同意后运行 `gendesk confirm {}` 开跑；不想跑就直接删掉整个工单目录。\n",
         plan.job_id,
-    )
+    ));
+    s
 }
 
 /// 失败回执。**如实交代已经导入了多少** —— 这不是措辞问题，是重投安全的前提。
@@ -959,6 +1016,7 @@ mod tests {
                 engine: kick.clone(),
                 progress: progress.clone(),
                 threshold,
+                poster: Arc::new(NoPosterGate),
                 lock: Arc::new(tokio::sync::Mutex::new(())),
             },
             kick,
@@ -1974,6 +2032,65 @@ mod tests {
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].task_count, 4);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// 测试用 Poster 检查：记下被问到的款式，并把它们都报成对不上。
+    #[derive(Default)]
+    struct RejectingPoster(std::sync::Mutex<Vec<(String, String)>>);
+
+    #[async_trait::async_trait]
+    impl PosterGate for RejectingPoster {
+        async fn unresolved(&self, keys: &[(String, String)]) -> Vec<String> {
+            self.0.lock().unwrap().extend_from_slice(keys);
+            keys.iter()
+                .map(|(sku, style)| format!("「{sku} / {style}」尚未绑定"))
+                .collect()
+        }
+    }
+
+    // Poster 款式对不上：和超阈值一样什么都不导入，确认后照常开跑。
+    #[tokio::test]
+    async fn unmatched_poster_style_holds_until_confirmed() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (mut ctx, kick) = ctx_for(&pool, data.path(), 100);
+        let gate = Arc::new(RejectingPoster::default());
+        ctx.poster = gate.clone();
+        let dir = make_job(
+            home.path(),
+            "job-poster",
+            "",
+            &[
+                ("W-甲-01", "甲1", "a.png", ""),
+                ("W-甲-02", "甲2", "a.png", ""),
+            ],
+        );
+
+        let held = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(held[0].status, "hold");
+        assert!(
+            held[0].message.contains("Poster 款式对不上"),
+            "{}",
+            held[0].message
+        );
+        assert!(!held[0].message.contains("超过阈值"), "{}", held[0].message);
+        assert_eq!(
+            *gate.0.lock().unwrap(),
+            vec![("55".to_string(), "王一博".to_string())],
+            "同一款式只问一次"
+        );
+        let text = std::fs::read_to_string(dir.join(super::super::HOLD_FILE)).unwrap();
+        assert!(text.contains("gendesk poster bind"), "{text}");
+        for t in ["batches", "prompts", "ref_images", "tasks"] {
+            assert_eq!(count(&pool, t).await, 0, "{t} 在待确认时必须是空的");
+        }
+
+        repo::delete(&pool, held[0].id).await.unwrap();
+        std::fs::write(dir.join(super::super::CONFIRM_FILE), "ok").unwrap();
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(kick.0.load(Ordering::SeqCst), 1);
     }
 

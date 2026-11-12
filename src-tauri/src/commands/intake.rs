@@ -99,6 +99,25 @@ fn notify_job(app: &AppHandle, j: &JobView) {
     sink.notify(title, body);
 }
 
+/// 投单时按当前绑定与 Poster 商品目录检查归属。读不到 Poster（未安装、接口超时）时
+/// 只记日志放行：那是暂时状态，审稿后的导入会自行重试；只有确定对不上的款式才拦。
+struct PosterCheck {
+    pool: sqlx::SqlitePool,
+}
+
+#[async_trait::async_trait]
+impl intake::ingest::PosterGate for PosterCheck {
+    async fn unresolved(&self, keys: &[(String, String)]) -> Vec<String> {
+        match crate::poster::unresolved(&self.pool, keys).await {
+            Ok(missing) => missing,
+            Err(error) => {
+                tracing::warn!(%error, "投单时读不到 Poster 商品，跳过归属检查");
+                Vec::new()
+            }
+        }
+    }
+}
+
 fn ctx_of(state: &AppState) -> Ctx {
     Ctx {
         pool: state.db.clone(),
@@ -106,6 +125,9 @@ fn ctx_of(state: &AppState) -> Ctx {
         engine: state.engine.clone(),
         progress: Arc::new(intake::ingest::NoProgress),
         threshold: TASK_THRESHOLD,
+        poster: Arc::new(PosterCheck {
+            pool: state.db.clone(),
+        }),
         // **必须是 AppState 里那一把**：并发的 CLI 调用各自构造 Ctx，各拿一把新锁就等于没有锁。
         lock: state.intake_lock.clone(),
     }

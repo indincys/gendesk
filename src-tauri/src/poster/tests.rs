@@ -158,7 +158,7 @@ import sys,json,pathlib,hashlib
 def check(entry):
     assert hashlib.sha256(pathlib.Path(entry['path']).read_bytes()).hexdigest()==entry['sha256']
 if sys.argv[1]=='export-image-products':
-    print(json.dumps({{'schema':'poster.images/1','products':[{{'id':'fixed-id','name':'王俊凯日历（2027）'}},{{'id':'cup-id','name':'陶瓷水杯'}}]}}))
+    print(json.dumps({{'schema':'poster.images/1','products':[{{'id':'fixed-id','name':'王俊凯日历（2027）'}},{{'id':'cup-id','name':'陶瓷水杯'}},{{'id':'tan-id','name':'檀健次日历（2027）'}}]}}))
 elif sys.argv[1]=='image-import-spec':
     print(json.dumps({{'capabilities':{capabilities}}}))
 else:
@@ -429,4 +429,172 @@ fn explicit_generic_products_without_legacy_sku_do_not_merge_poster_selection_gr
         a.poster_keys("旧SKU", "原款式"),
         ("旧SKU".into(), "原款式".into())
     );
+}
+
+#[test]
+fn unified_calendar_product_matches_library_style_names_exactly() {
+    assert_eq!(identity("2027明星日历", "檀健次款"), Ok(Some("檀健次")));
+    assert_eq!(identity("2027明星日历", "檀健次"), Ok(Some("檀健次")));
+    assert_eq!(identity("明星日历2027", "鞠婧祎"), Ok(Some("鞠婧祎")));
+    // 变体款式不取前缀，要用户绑定一次。
+    assert_eq!(identity("2027明星日历", "谢霆锋演唱会款"), Ok(None));
+    // 其他产品的款式名不参与识别。
+    assert_eq!(identity("陶瓷水杯", "王一博款"), Ok(None));
+    assert!(identity("王俊凯日历", "蔡徐坤款").is_err());
+    let products = vec![client::PosterProduct {
+        id: "tan".into(),
+        name: "檀健次日历（2027）".into(),
+        is_generic: false,
+    }];
+    let checks = check_with(
+        &[
+            ("2027明星日历".into(), "檀健次款".into()),
+            ("2027明星日历".into(), "檀健次款".into()),
+            ("2027明星日历".into(), "谢霆锋演唱会款".into()),
+        ],
+        &products,
+        &[],
+    );
+    assert_eq!(checks.len(), 2, "同一款式只检查一次");
+    assert_eq!(checks[0].target_id.as_deref(), Some("tan"));
+    assert!(checks[1].target_id.is_none() && !checks[1].warning.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn submit_check_lists_unmatched_styles_until_bound_from_cli() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    let mut settings = enabled(&fake_poster(root.path(), false));
+    let keys = vec![
+        ("2027明星日历".to_string(), "檀健次款".to_string()),
+        ("2027明星日历".to_string(), "谢霆锋演唱会款".to_string()),
+    ];
+    settings.auto_import = false;
+    set_settings(&pool, &settings).await;
+    assert!(
+        unresolved(&pool, &keys).await.unwrap().is_empty(),
+        "未开启不检查"
+    );
+
+    settings.auto_import = true;
+    set_settings(&pool, &settings).await;
+    let missing = unresolved(&pool, &keys).await.unwrap();
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(
+        missing[0].contains("2027明星日历 / 谢霆锋演唱会款"),
+        "{missing:?}"
+    );
+
+    // 名称不存在、或选成另一位明星的商品都拒绝。
+    assert!(
+        bind_style(&pool, "2027明星日历", "谢霆锋演唱会款", "不存在")
+            .await
+            .is_err()
+    );
+    assert!(
+        bind_style(&pool, "2027明星日历", "檀健次款", "王俊凯日历（2027）")
+            .await
+            .is_err()
+    );
+    let bound = bind_style(&pool, "2027明星日历", "谢霆锋演唱会款", "陶瓷水杯")
+        .await
+        .unwrap();
+    assert_eq!(bound.target_id.as_deref(), Some("cup-id"));
+    assert!(unresolved(&pool, &keys).await.unwrap().is_empty());
+
+    // 停在「需处理」的同款批次在绑定后续导成功。
+    let id = accept_one(&pool, root.path(), "2027明星日历", "谢霆锋演唱会款", false).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert_eq!(state(&pool, &id).await.0, "done");
+}
+
+#[cfg(unix)]
+async fn insert_work(pool: &SqlitePool, root: &Path, uid: &str, style: &str, file: bool) -> i64 {
+    let path = root.join("成品").join(format!("{uid}.png"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    if file {
+        image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
+            .save(&path)
+            .unwrap();
+    }
+    let organization = serde_json::json!({
+        "product": "2027明星日历", "style": style, "requirement": "桌面场景图", "source": "test"
+    });
+    sqlx::query_scalar(
+        "INSERT INTO accepted_works(image_path,thumb_path,prompt_text,accepted_at,item_name,uid,style,organization_json)
+        VALUES(?,?,'',0,'场景图',?,?,?) RETURNING id",
+    )
+    .bind(path.to_string_lossy().as_ref())
+    .bind("")
+    .bind(uid)
+    .bind(style)
+    .bind(organization.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn backfill_registers_only_never_tracked_works_with_known_targets() {
+    use backfill::{backfill, Filter};
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    let mut settings = enabled(&fake_poster(root.path(), false));
+    settings.auto_import = false;
+    set_settings(&pool, &settings).await;
+    insert_work(&pool, root.path(), "a001", "檀健次款", true).await;
+    insert_work(&pool, root.path(), "a002", "檀健次款", true).await;
+    insert_work(&pool, root.path(), "a003", "檀健次款", false).await;
+    insert_work(&pool, root.path(), "a004", "谢霆锋演唱会款", true).await;
+
+    // 预演不写库；开关关着时不能真正补导。
+    let dry = backfill(&pool, root.path(), &Filter::default(), false)
+        .await
+        .unwrap();
+    assert!(!dry.applied && dry.batches == 0);
+    let tan = dry
+        .groups
+        .iter()
+        .find(|g| g.target.style == "檀健次款")
+        .unwrap();
+    assert_eq!((tan.count, tan.missing_files), (2, 1));
+    assert!(backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .is_err());
+
+    settings.auto_import = true;
+    set_settings(&pool, &settings).await;
+    let only = Filter {
+        product: None,
+        style: Some("谢霆锋演唱会款".into()),
+    };
+    let report = backfill(&pool, root.path(), &only, true).await.unwrap();
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.batches, 0, "对不上的款式不建批");
+
+    let report = backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .unwrap();
+    assert_eq!((report.images, report.batches), (2, 1));
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poster_batches WHERE state='done'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(done, 1);
+
+    // 再跑一次不重复登记；绑定后补上剩下的款式。
+    let again = backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .unwrap();
+    assert_eq!(again.batches, 0);
+    bind_style(&pool, "2027明星日历", "谢霆锋演唱会款", "陶瓷水杯")
+        .await
+        .unwrap();
+    let last = backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .unwrap();
+    assert_eq!((last.images, last.batches), (1, 1));
 }

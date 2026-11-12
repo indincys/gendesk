@@ -273,6 +273,21 @@ impl Plan {
     pub fn task_count(&self) -> i64 {
         self.items.len() as i64
     }
+    /// 审稿通过后这些条目会按哪些 `(sku, style)` 找 Poster 商品（去重、保持顺序）。
+    /// 与验收时 `Organization::poster_keys` 同一口径：条目归属优先，旧工单沿用 sku/style。
+    pub fn poster_keys(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for it in &self.items {
+            let key = match crate::library::Organization::from_params(&it.params_json) {
+                Ok(Some(org)) => org.poster_keys(&it.sku, &it.style),
+                _ => (it.sku.clone(), it.style.clone()),
+            };
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+        out
+    }
     /// 本单用到的**去重后**参考图（保持出现顺序）。
     ///
     /// 多个条目常常挂同一张图（正面 / 侧面各写一条提示词，却共用一张原图）。

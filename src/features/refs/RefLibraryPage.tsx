@@ -45,9 +45,11 @@ function shortDate(unix: number): string {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 卡片上的状态徽章：停用 / 已移出 / 冷却到哪天 / 可用。 */
+/** 卡片上的状态徽章：已移出 / 原图丢失 / 停用 / 冷却到哪天 / 可用。 */
 function statusBadge(img: LibraryImageView): { text: string; tone: string } {
   if (img.removed) return { text: "已移出", tone: "b-gray" };
+  // 图库映射本地原图：原图被挪走、删掉或所在的盘没接上，这张就抽不到了。
+  if (img.missing) return { text: "原图丢失", tone: "b-red" };
   if (!img.enabled) return { text: "停用", tone: "b-gray" };
   if (img.coolingUntil && img.coolingUntil > Date.now() / 1000)
     return { text: `冷却至 ${shortDate(img.coolingUntil)}`, tone: "b-amber" };
@@ -228,6 +230,7 @@ export function RefLibraryPage() {
     try {
       const r = await unwrap(commands.importLibraryImages(styleId, cid, paths));
       const parts = [`导入 ${r.imported.length} 张`];
+      if (r.relinked.length) parts.push(`${r.relinked.length} 张旧副本改为映射原图`);
       if (r.restored.length) parts.push(`放回 ${r.restored.length} 张`);
       if (r.duplicates.length) parts.push(`${r.duplicates.length} 张已在库里`);
       if (r.failed.length) parts.push(`${r.failed.length} 张读不了`);
@@ -296,7 +299,7 @@ export function RefLibraryPage() {
   return (
     <PageScaffold
       title="参考图库"
-      caption="工单按款式和分类随机抽图，冷却期内用过的图优先跳过"
+      caption="映射本地原图（不另存副本）· 工单按款式和分类随机抽图，冷却期内用过的图优先跳过"
       right={right}
       bodyClassName="rlwb"
     >
@@ -465,7 +468,9 @@ export function RefLibraryPage() {
                 {style.name}
                 {category ? ` · ${category.name}` : ""} 还没有图片
               </div>
-              <div className="fs12 t3">点右上角「导入图片」，从本地选图放进图库。</div>
+              <div className="fs12 t3">
+                点右上角「导入图片」选本地图片。图库只记住原图位置，不另存一份，原图请别挪动。
+              </div>
             </div>
           ) : (
             <div className="rlvlist" style={{ height: virt.getTotalSize() }}>
@@ -582,12 +587,16 @@ const LibraryCard = memo(function LibraryCard({
   const src = assetSrc(img.thumbPath);
   return (
     <div
-      className={cn("rlcard", selected && "sel", (!img.enabled || img.removed) && "off")}
+      className={cn(
+        "rlcard",
+        selected && "sel",
+        (!img.enabled || img.removed || img.missing) && "off",
+      )}
       onClick={() => onToggle(img.id)}
       onKeyDown={(e) => e.key === " " && onToggle(img.id)}
       role="button"
       tabIndex={0}
-      title={img.filePath}
+      title={img.missing ? `原图不在了：${img.filePath}` : img.filePath}
     >
       <div className="rlimg ph">
         {src ? (

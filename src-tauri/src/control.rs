@@ -466,7 +466,7 @@ async fn library_command(
         "library.fix-orientation" => {
             let dry_run = args.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
             Ok(serde_json::to_value(
-                crate::commands::refs::repair_orientation(db, dry_run).await?,
+                crate::commands::refs::repair_orientation(db, &state.dirs, dry_run).await?,
             )?)
         }
         "library.usage" => {

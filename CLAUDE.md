@@ -198,7 +198,7 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 会让人点重试拿到第二份提示词）· 投单 skill 装在用户级 `~/.claude/skills/`（仓库内
 `.claude/skills/gendesk-intake/` 是源，改完要同步过去）；字段表只链接主规范，不在 skill 副本里重复维护。
 
-**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。冷却不够时按阶梯降级（0053 起台账记实际冷却天数），原文件丢失的图自动屏蔽。素材包导出即记账（台账 job_id = packId），导出的是上传副本口径的文件。
+**参考图库（0051）** — 图片文件仍是一行 `ref_images`（任务外键父表），`ref_library_images` 只加款式、分类、启停、移出与最近使用；收录直接复用那一行不复制文件，**图库导入映射原图不拷贝（0054 `ref_images.linked`）**：`file_path` 是用户自己的文件，应用只读——不移动、不删除、不在它旁边写东西（缩略图与上传副本一律写数据目录，`repair_orientation` 同理）；删旧副本只经 `drop_library_copy` 且路径必须在 `refs/library/` 内，从数据目录导入直接拒；旧副本在用户重新导入原图时 `relink` 改指向并删副本。导入是并发准备 + 按输入顺序逐张写库（编号顺序影响同条件抽图，不能乱）。生成页选择器（`list_active`）把它们排除。工单 `ref`/`refs` 的对象项是图库引用，`intake::RefSlot` 区分包内文件与图库位置，`PlannedItem.ref_paths` 只含包内文件。抽图发生在导入提示词**之前**、与检查点同事务记账（`ref_library_usage`），检查点 `library` 存抽中结果，重试原样沿用；内容指纹对纯文件单与旧版逐字节相同。移出只置 `deleted_at`，排队任务仍可能用着文件。冷却不够时按阶梯降级（0053 起台账记实际冷却天数），原文件丢失的图自动屏蔽。素材包导出即记账（台账 job_id = packId），导出的是上传副本口径的文件。
 
 **作品目录（用户 2026-11-05）** — 通用工具，不绑定日历或任何产品项目。统一根目录可配置；成品按 `成品/生成图片或生成视频/产品/款式/需求/`，缺少产品或款式省略层级，同需求跨生成、验收、尝试持续归并。日期只进文件名，运行批次只在内部台账。任务 params_json.organization → 作品 organization_json → 视频独立 organization_json，父图删除不丢视频归属。新工单可用顶层或条目 organization；旧工单不从图片名猜归属。图片通过时从用户草稿移到内部恢复快照，外部只有一份成品，Poster 直接引用。已有文件只经显式离线维护命令备份、预演、重绑后整理。见 `docs/作品目录整理.md`。
 

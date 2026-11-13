@@ -67,6 +67,20 @@ pub async fn mark_done<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
     Ok(())
 }
 
+/// 写一句完成说明（外部成图导入单用它告诉人「没调用生图」）。
+pub async fn set_message<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
+    id: i64,
+    message: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE intake_jobs SET message = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(message)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Persist the last committed stage counts. Its identities are in intake_checkpoints.
 /// A final batch can only become visible in the same transaction as a done ledger.
 pub async fn mark_error(

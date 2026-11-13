@@ -266,8 +266,9 @@ pub async fn mark_running(
 /// 落盘完成 → 待验收。`size` 是结果图的真实像素（0027）：验收页按真实比例排版，
 /// 而比例必须在渲染**之前**就知道，否则每张图加载完都会把下面的行往下顶一次。
 /// 拿不到（解码失败）就存 NULL，由验收页读缩略图文件头补齐。
-pub async fn mark_review(
-    pool: &SqlitePool,
+/// 外部成图导入（`mode=import`）在建批事务里直接调用它，故接受任意执行器。
+pub async fn mark_review<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    pool: E,
     id: i64,
     result_image_path: &str,
     result_thumb_path: &str,

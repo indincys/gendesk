@@ -76,7 +76,12 @@ export function AppShell() {
         if (j.status === "done") {
           // 一份工单可能拆出多个批次（各组比例不同时）。
           const b = j.batchIds.map((x) => `#${x}`).join(" ");
-          toast(`收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`);
+          // 外部成图导入单完成时带说明（没有「开跑」，图已在待验收）；生图单完成时 message 为空。
+          toast(
+            j.message
+              ? `收到工单「${j.jobId}」· 批次 ${b} · ${j.message}`
+              : `收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`,
+          );
         } else if (j.status === "hold") {
           // 超阈值：琥珀而不是红——它不是错误，是在等人表态。放行只在 Agent 里经用户同意后
           // `gendesk confirm`，应用这边只提示，不设第二个确认入口。

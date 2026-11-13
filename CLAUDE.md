@@ -8,7 +8,8 @@ GenDesk：内部图片生产工具。Tauri 2 桌面应用，单实例、纯本�
 前端 React 19 + Zustand + Vite（`src/`），后端 Rust（`src-tauri/src/`），二者只经
 tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 macOS 12+ Apple Silicon。
 
-三条流水线：**生图**（Agent 经 `gendesk submit` 投单 → 批量生成 → 人工审图 → **按产品、款式、需求归档**）·
+三条流水线：**生图**（Agent 经 `gendesk submit` 投单 → 批量生成 → 人工审图 → **按产品、款式、需求归档**；
+外部已生成的图经 `gendesk import` 直接进待验收，同一套审图与归档）·
 **图生视频 v2v**（验收图 → Agent 经 `gendesk v2v` 改写提示词 → 即梦 CLI 提交 → 轮询落盘 → 交付）·
 **审稿后自动化**（可选：自动转实况图、自动导入 Poster）。
 
@@ -191,6 +192,7 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 一次都花钱 · **一份工单 = 一个 run**：参数下沉到 `tasks.params_json`（0045），不再决定切分；
 读取单点 `dispatcher::task_params`，任务级优先、批次级兜底 ·
 **job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账与空检查点同事务、在**动手之前**，阶段进度与对应写入同事务；恢复保留原行和身份 ·
+**外部成图导入（`mode=import`）**：整单级，每条 `result` 指向包内 `results/` 的成图；与生图单共用 plan/检查点/建批，只在建批事务里把任务直接置 `rev`（成图事务外先落草稿位置，经 `openai::deliver` 同口径处理），调度器只取已提交的 q 态故不会调接口。指纹只在导入单多 `mode`/`results` 两项，生图单内容身份不变。不受张数阈值限制，Poster 检查照旧；参考图不许按分类随机抽。旧应用不认 mode 会当生图单，故 CLI 先查 `external-results` 能力与预检回显 `mode` ·
 **阈值(默认 100 张)**：超了转 `hold` **什么都不导入**，由 Agent 向用户说明后 `gendesk confirm`；开启 Poster 自动导入时款式对不上商品、或显式 posterType 对不上 Poster 图片类型同样转 `hold`（读不到 Poster 不拦），确认同时放行两项 ·
 **归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
 静默改值正是「我明明写了 9:16 却不生效」的成因）· **写路径只有一条**：提示词走

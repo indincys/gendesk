@@ -314,7 +314,8 @@ async fn ingest_dir(
     let confirmed = dir.join(super::CONFIRM_FILE).is_file();
     let total = plan.task_count();
     if !confirmed {
-        let over = ctx.threshold > 0 && total > ctx.threshold;
+        // 阈值管的是花钱：外部成图导入不调用生图，不受它限制。
+        let over = !plan.import && ctx.threshold > 0 && total > ctx.threshold;
         let poster = PosterIssues {
             styles: ctx.poster.unresolved(&plan.poster_keys()).await,
             types: ctx.poster.unresolved_types(&plan.poster_types()).await,
@@ -515,6 +516,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
         return Err(AppError::InvalidInput("工单内容或参考图已改变，不能复用已导入检查点；请还原原内容后重试，或先核对原工单再另行授权新单".into()));
     }
     if checkpoint.prompt_ids.is_empty()
+        && !plan.import
         && ctx.threshold > 0
         && plan.task_count() > ctx.threshold
         && !plan.dir.join(super::CONFIRM_FILE).is_file()
@@ -523,7 +525,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
             "修订工单超过当前阈值，请先明确确认再重试".into(),
         ));
     }
-    checkpoint.fingerprint = checked.fingerprint;
+    checkpoint.fingerprint = checked.fingerprint.clone();
     checkpoint.unbound_identity = false;
     if checkpoint
         .refs
@@ -763,11 +765,43 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     //
     // 批次级 params_json 留空：这一单的参数在任务行上，批次级那份只是生成页手动建批
     // 的兜底。写一个「代表性的」进去反而骗人 —— 一单里可能有三种画幅。
+    //
+    // 外部成图导入单：成图先落到与生图结果相同的草稿位置（事务外，文件无法回滚），
+    // 再在**同一个事务**里建批并把任务直接置为待验收。调度器只认已提交的 q 态，
+    // 而这些任务提交时已经是 rev，所以不会有任何一张被拿去调接口。
+    let mut staged_files = crate::files::copy::CreatedFilesGuard::new(Vec::new());
+    let staged = if plan.import {
+        stage_results(ctx, plan, &checked, &mut staged_files).await?
+    } else {
+        Vec::new()
+    };
     let output_dir = ctx.dirs.outputs().to_string_lossy().to_string();
     let mut tx = ctx.pool.begin().await?;
     let (batch_id, task_count) =
         engine::create_batch_from_specs_in_tx(&mut tx, &output_dir, "{}", &specs).await?;
     task_repo::rename_batch(&mut *tx, batch_id, &plan.note).await?;
+    if plan.import {
+        let task_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE batch_id = ?1 ORDER BY id")
+                .bind(batch_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        if task_ids.len() != staged.len() {
+            return Err(AppError::Internal(
+                "外部成图数与任务数不一致，已回滚".into(),
+            ));
+        }
+        for (task_id, result) in task_ids.iter().zip(&staged) {
+            task_repo::mark_review(
+                &mut *tx,
+                *task_id,
+                &result.image.to_string_lossy(),
+                &result.thumb.to_string_lossy(),
+                result.size,
+            )
+            .await?;
+        }
+    }
     checkpoint.applied.batch_ids = vec![batch_id];
     for (params, wire) in plan.param_sets() {
         checkpoint.applied.params_json.push(params);
@@ -775,9 +809,114 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     }
     checkpoint.applied.task_count = task_count;
     checkpoint.save(&mut tx, plan, row_id, true).await?;
+    if plan.import {
+        repo::set_message(&mut *tx, row_id, &import_message(task_count)).await?;
+    }
     tx.commit().await?;
+    staged_files.preserve_all();
     *out = checkpoint.applied;
     Ok(())
+}
+
+/// 导入单完成时台账上的一句话（应用通知与 CLI 回执都读它）。
+pub(crate) fn import_message(count: i64) -> String {
+    format!("外部成图 {count} 张已进待验收，未调用生图")
+}
+
+/// 落好的一张外部成图。
+struct StagedResult {
+    image: PathBuf,
+    thumb: PathBuf,
+    size: Option<(u32, u32)>,
+}
+
+/// 外部成图 → 与生图结果同一个草稿位置（作品根 `_草稿/生成图片/产品/款式/需求/`）+ 缩略图。
+///
+/// 输出处理与生图同一个函数（`openai::deliver`）：按条目的格式与「清元数据 / 去 C2PA」
+/// 开关处理，所以外部成图验收通过后交付出去的文件与 GenDesk 自己生成的同一口径。
+/// 文件名身份由 jobId 与条目序号决定：重试时覆盖同一个文件，不会越积越多。
+async fn stage_results(
+    ctx: &Ctx,
+    plan: &Plan,
+    checked: &super::preflight::CheckedPlan,
+    created: &mut crate::files::copy::CreatedFilesGuard,
+) -> AppResult<Vec<StagedResult>> {
+    use sha2::{Digest, Sha256};
+    if checked.results.len() != plan.items.len() {
+        return Err(AppError::InvalidInput(
+            "外部成图导入单每条都要有成图".into(),
+        ));
+    }
+    let root = crate::library::root(&ctx.pool).await?;
+    let job_hash = format!("{:x}", Sha256::digest(plan.job_id.as_bytes()));
+    let thumbs = ctx.dirs.thumbs().join("import").join(&job_hash);
+    std::fs::create_dir_all(&thumbs)?;
+    let at = now_unix();
+    let mut out = Vec::with_capacity(plan.items.len());
+    for (index, (item, check)) in plan.items.iter().zip(&checked.results).enumerate() {
+        let source = item
+            .result_path
+            .as_ref()
+            .ok_or_else(|| AppError::InvalidInput(format!("条目「{}」缺成图", item.name)))?;
+        let raw = std::fs::read(source)?;
+        if crate::files::content_hash_bytes(&raw) != check.content_hash {
+            return Err(AppError::InvalidInput(format!(
+                "条目「{}」的成图在预检后发生变化，未导入",
+                item.name
+            )));
+        }
+        let params = crate::provider::GenParams::from_json(&item.params_json);
+        let image = crate::provider::openai::deliver(
+            &raw,
+            params.output_format.as_deref(),
+            params.clear_ai_metadata.unwrap_or(true),
+            params.remove_c2pa.unwrap_or(true),
+        )
+        .map_err(|e| {
+            AppError::InvalidInput(format!(
+                "条目「{}」的成图处理失败：{}",
+                item.name, e.message
+            ))
+        })?;
+        let identity = format!("import{}n{}", &job_hash[..10], index + 1);
+        let full = match crate::library::Organization::from_params(&item.params_json)? {
+            Some(organization) => {
+                let dir = organization.directory(&root, false, false);
+                std::fs::create_dir_all(&dir)?;
+                dir.join(crate::library::filename(
+                    &organization.requirement,
+                    &identity,
+                    at,
+                    &image.ext,
+                ))
+            }
+            None => {
+                std::fs::create_dir_all(ctx.dirs.results())?;
+                ctx.dirs.results().join(format!("{identity}.{}", image.ext))
+            }
+        };
+        std::fs::write(&full, &image.bytes)?;
+        created.track(full.clone());
+        let thumb = thumbs.join(format!("{}.jpg", index + 1));
+        let (full_c, thumb_c) = (full.clone(), thumb.clone());
+        let size = crate::files::decode::bounded(move |permit| {
+            crate::files::generate_thumbnail(&full_c, &thumb_c, permit)
+        })
+        .await
+        .ok();
+        let thumb = if size.is_some() {
+            created.track(thumb.clone());
+            thumb
+        } else {
+            full.clone()
+        };
+        out.push(StagedResult {
+            image: full,
+            thumb,
+            size,
+        });
+    }
+    Ok(out)
 }
 
 async fn prepare_reference(
@@ -877,6 +1016,21 @@ fn duplicate_text(job_id: &str) -> String {
 }
 
 fn result_text(plan: &Plan, done: &Applied) -> String {
+    if plan.import {
+        return format!(
+            "GenDesk 已收录外部成图，未调用生图。\n\n\
+             工单：{}\n成图：{} 张（已进待验收）\n参考图：{}\n批次：{}\n\n\
+             验收请在 GenDesk 的验收页完成。\n",
+            plan.job_id,
+            done.task_count,
+            done.ref_count,
+            done.batch_ids
+                .iter()
+                .map(|b| format!("#{b}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
     let mut s = format!(
         "GenDesk 已收录并开跑。\n\n\
          工单：{}\n条目：{}\n参考图：{}\n任务（= 出图张数）：{}\n批次：{}\n\n",
@@ -2208,6 +2362,163 @@ mod tests {
         let jobs = scan(&ctx, home.path()).await.unwrap();
         assert_eq!(jobs[0].status, "done", "{}", jobs[0].message);
         assert_eq!(jobs[0].task_count, 2);
+    }
+
+    /// 外部成图导入单（`mode=import`）：成图落到草稿位置、任务**直接**是待验收，
+    /// 一张都不进 q 态（调度器只取 q，故不会调接口花钱）；不受张数阈值限制。
+    #[tokio::test]
+    async fn imported_results_land_in_review_without_ever_being_queued() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let works = tempfile::tempdir().unwrap();
+        crate::db::repo::settings::set_raw(
+            &pool,
+            &serde_json::json!({
+                "scheduleStrategy": "round_robin", "retryCount": 1, "outputDir": works.path(),
+                "motion": "standard", "paused": false, "onboarded": true,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        // 先确认作品根真的指到临时目录，绝不往用户主目录里写。
+        assert_eq!(crate::library::root(&pool).await.unwrap(), works.path());
+        // 阈值 1、两张图：生图单会 hold，导入单不花钱，照常收录。
+        let (ctx, _kick) = ctx_for(&pool, data.path(), 1);
+        let dir = make_job(
+            home.path(),
+            "codex-成图",
+            r#","mode":"import","organization":{"product":"陶瓷水杯","style":"奶油白款","requirement":"厨房场景图","source":"Codex"}"#,
+            &[
+                (
+                    "水杯晨光",
+                    "晨光桌面",
+                    "a.png",
+                    r#","result":"results/1.png""#,
+                ),
+                (
+                    "水杯窗边",
+                    "窗边竖幅",
+                    "a.png",
+                    r#","result":"results/2.png""#,
+                ),
+            ],
+        );
+        std::fs::create_dir_all(dir.join("results")).unwrap();
+        std::fs::write(dir.join("results/1.png"), png()).unwrap();
+        std::fs::write(dir.join("results/2.png"), png()).unwrap();
+
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.status, "done", "导入应成功：{}", job.message);
+        assert_eq!(job.task_count, 2);
+        assert_eq!(job.message, import_message(2));
+
+        let rows: Vec<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+            "SELECT status, result_image_path, result_thumb_path, params_json FROM tasks ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (status, image, thumb, params) in &rows {
+            assert_eq!(status, "rev", "外部成图必须直接待验收");
+            let image = PathBuf::from(image.as_deref().unwrap());
+            assert!(image.is_file());
+            assert!(
+                image.starts_with(
+                    works
+                        .path()
+                        .join("_草稿/生成图片/陶瓷水杯/奶油白款/厨房场景图")
+                ),
+                "成图应与生图结果同一个草稿位置：{}",
+                image.display()
+            );
+            assert!(Path::new(thumb.as_deref().unwrap()).is_file());
+            let params: serde_json::Value = serde_json::from_str(params).unwrap();
+            assert_eq!(params["externalResult"], serde_json::json!(true));
+        }
+        let attempts = count(&pool, "task_attempts").await;
+        assert_eq!(attempts, 0, "没有任何生图尝试");
+        let receipt = std::fs::read_dir(super::super::consumed_dir(home.path()))
+            .unwrap()
+            .flatten()
+            .next()
+            .map(|e| std::fs::read_to_string(e.path().join(super::super::RESULT_FILE)).unwrap())
+            .unwrap();
+        assert!(receipt.contains("未调用生图"));
+
+        // 同一份重投：去重挡住，不会再导入一份。
+        let again = make_job(
+            home.path(),
+            "codex-成图-重投",
+            r#","jobId":"codex-成图","mode":"import","organization":{"product":"陶瓷水杯","style":"奶油白款","requirement":"厨房场景图","source":"Codex"}"#,
+            &[(
+                "水杯晨光",
+                "晨光桌面",
+                "a.png",
+                r#","result":"results/1.png""#,
+            )],
+        );
+        std::fs::create_dir_all(again.join("results")).unwrap();
+        std::fs::write(again.join("results/1.png"), png()).unwrap();
+        assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert_eq!(count(&pool, "tasks").await, 2);
+    }
+
+    /// 导入单缺成图、生图单夹带成图、导入单按分类随机抽参考图，都整单拒收、什么都不导入。
+    #[tokio::test]
+    async fn result_fields_must_match_the_order_mode() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (ctx, _kick) = ctx_for(&pool, data.path(), 100);
+        make_job(
+            home.path(),
+            "a-导入缺图",
+            r#","mode":"import""#,
+            &simple("甲"),
+        );
+        let dir = make_job(
+            home.path(),
+            "b-生图带图",
+            "",
+            &[("乙", "正文", "a.png", r#","result":"results/1.png""#)],
+        );
+        std::fs::create_dir_all(dir.join("results")).unwrap();
+        std::fs::write(dir.join("results/1.png"), png()).unwrap();
+        make_job(
+            home.path(),
+            "c-未知模式",
+            r#","mode":"edit""#,
+            &simple("丙"),
+        );
+        let jobs = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(jobs.len(), 3);
+        assert!(jobs.iter().all(|j| j.status == "error"), "{jobs:?}");
+        assert!(
+            jobs[0].message.contains("没写 result"),
+            "{}",
+            jobs[0].message
+        );
+        assert!(
+            jobs[1].message.contains("gendesk import"),
+            "{}",
+            jobs[1].message
+        );
+        assert!(jobs[2].message.contains("mode"), "{}", jobs[2].message);
+        assert_eq!(count(&pool, "tasks").await, 0);
+        assert_eq!(count(&pool, "prompts").await, 0);
+
+        let spec: super::super::OrderSpec = serde_json::from_str(
+            r#"{"version":1,"mode":"import","items":[{"name":"丁","sku":"55","style":"王一博",
+                "ref":{"category":"正面图"},"result":"results/1.png"}]}"#,
+        )
+        .unwrap();
+        let err = super::super::plan_from_spec(home.path(), "d", &spec).unwrap_err();
+        assert!(err.contains("不能按分类随机抽"), "{err}");
     }
 
     // 条目没点名挂靠 → 拒单，不猜。挂靠现在是**条目级、每条必填**：

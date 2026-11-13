@@ -1,6 +1,6 @@
 ---
 name: gendesk-intake
-description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，检查并在已有生成授权内投递，回读收录状态。用于用户要求送去 GenDesk、跑图或续做已授权批次；只要提示词时仅准备文件和预检，不提交生图。
+description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，检查并在已有生成授权内投递，回读收录状态；也把 Codex 等外部已生成的图连同提示词与参考图导入 GenDesk 待验收。用于用户要求送去 GenDesk、跑图、续做已授权批次，或把外部成图交给 GenDesk 验收；只要提示词时仅准备文件和预检，不提交生图。
 ---
 
 # GenDesk 生图投单
@@ -33,3 +33,11 @@ description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，
 - 状态不明或命令中断：gendesk status <原jobId>，不自动换 ID 重投或重跑成功项。确实新增一次生成时才在授权内使用新的 jobId。
 
 用户只要提示词时停在文件交付和预检，不 submit。
+
+## 外部成图进验收（Codex 等）
+
+图已经在 GenDesk 之外生成好（如 Codex 生图）时，不要 submit（那会重新生图）。用同一份清单，每个条目多写 `result`（成图本地路径），先 gendesk validate --manifest <清单>，再 gendesk import --manifest <清单>；单张可用 gendesk import --result <成图> --prompt <正文> --ref <参考图> --product … --style … --requirement … --source Codex。规则见规范第 9 节：
+
+- 每条都写 result，一单不混生图；promptFile 写生成时实际用的正文，ref/refs 写实际用的参考图（本地文件或 libraryId），不写 `{"category":…}` 随机抽；library pack 导出包里的图按普通文件写。
+- organization 照常填写，决定成品目录与 Poster 归属。导入不调用生图、不花钱，不需要生成授权，也不受张数阈值限制；Poster 对不上时同样 hold，按上文处理。
+- 返回 ingested 即图已在待验收（job.message 写明未调用生图），提醒用户在 GenDesk 审图页验收。CLI 报「不支持外部成图导入」时，让用户更新并重启 GenDesk，再 pnpm install:cli 同步命令。

@@ -32,6 +32,7 @@ pub const FEATURES: &[&str] = &[
     "v2v-rewrite",
     "reference-library",
     "poster-link",
+    "external-results",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。

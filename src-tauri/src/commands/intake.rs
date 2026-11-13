@@ -75,6 +75,11 @@ fn notify_job(app: &AppHandle, j: &JobView) {
     use crate::engine::events::EventSink;
     let sink = crate::engine::events::TauriSink::new(app.clone());
     let (title, body) = match j.status.as_str() {
+        // 外部成图导入单：没有「开跑」，图已经在待验收里。
+        "done" if !j.message.is_empty() => (
+            "外部成图已进验收".to_string(),
+            format!("{} · {}", j.job_id, j.message),
+        ),
         "done" => {
             let b = j
                 .batch_ids

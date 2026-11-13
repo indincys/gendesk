@@ -19,7 +19,11 @@ const png = await fs.readFile(new URL("../src-tauri/icons/32x32.png", import.met
  */
 async function fixture(
   t,
-  { online = true, hold = false, features = ["reference-library", "poster-link"] } = {},
+  {
+    online = true,
+    hold = false,
+    features = ["reference-library", "poster-link", "external-results"],
+  } = {},
 ) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gendesk-cli-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
@@ -51,6 +55,8 @@ import fs from "node:fs";
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 if (process.argv[2] !== "validate-intake") process.exit(2);
 process.stdout.write(JSON.stringify({status:"validated",validation:"full",protocolVersion:1,
+  mode: process.env.GENDESK_TEST_OLD_APP ? undefined : (input.order.mode ?? "generate"),
+  results: Object.keys(input.results ?? {}),
   taskCount:input.order.items.length,refCount:Object.keys(input.references).length}));
 `,
   );
@@ -246,6 +252,7 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
       batches: apply ? 1 : 0,
     }),
   };
+  const extraEnv = {};
   const token = "test-token";
   let port = 1;
   if (online) {
@@ -284,7 +291,7 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
 
   async function run(...values) {
     const options = {
-      env: { ...process.env, HOME: home, USERPROFILE: home, GENDESK_LAUNCH: "0" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, GENDESK_LAUNCH: "0", ...extraEnv },
       timeout: 15000,
     };
     try {
@@ -294,7 +301,20 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
       return { code: e.code, data: JSON.parse(e.stdout) };
     }
   }
-  return { home, root, input, args, mock, calls, jobs, pending, consumed, run, connection };
+  return {
+    home,
+    root,
+    input,
+    args,
+    mock,
+    calls,
+    jobs,
+    pending,
+    consumed,
+    run,
+    connection,
+    extraEnv,
+  };
 }
 
 const commands = (f) => f.calls.map((c) => c.cmd);
@@ -513,7 +533,9 @@ test("the canonical documentation manifest is accepted by the current CLI", asyn
       await fs.mkdir(path.dirname(prompt), { recursive: true });
       await fs.writeFile(prompt, "Image 1 为产品，Image 2 为环境。保留产品结构。\n");
       // Library references ({"category": …}) have no local file to prepare.
-      for (const input of (item.refs ?? [item.ref]).filter((r) => typeof r === "string")) {
+      // External-result orders (mode=import) also carry the already generated image.
+      const files = [...(item.refs ?? [item.ref]), item.result];
+      for (const input of files.filter((r) => typeof r === "string")) {
         const image = path.join(f.input, input);
         await fs.mkdir(path.dirname(image), { recursive: true });
         await fs.writeFile(image, Buffer.concat([png, Buffer.from(input)]));
@@ -932,4 +954,96 @@ test("poster commands resolve, bind and backfill through the app", async (t) => 
   const refused = await old.run("poster", "resolve", "--style", "檀健次款");
   assert.equal(refused.code, 8);
   assert.match(refused.data.message, /poster-link/);
+});
+
+test("import packages external results and never goes through submit's generation path", async (t) => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.input, "成图一.png"), png);
+  const second = Buffer.concat([png, Buffer.from([0])]);
+  await fs.writeFile(path.join(f.input, "成图二.png"), second);
+  await fs.writeFile(path.join(f.input, "窗边.txt"), "窗边竖幅\n");
+  const manifest = path.join(f.input, "成图清单.json");
+  await fs.writeFile(
+    manifest,
+    JSON.stringify({
+      version: 1,
+      organization: {
+        product: "陶瓷水杯",
+        style: "奶油白款",
+        requirement: "厨房场景图",
+        source: "Codex",
+      },
+      items: [
+        { name: "晨光", promptFile: "桌面场景.txt", ref: "商品实拍.png", result: "成图一.png" },
+        { name: "窗边", promptFile: "窗边.txt", ref: "商品实拍.png", result: "成图二.png" },
+      ],
+    }),
+  );
+
+  // submit 拒收导入清单（否则会重新生图花钱）；validate 识别为导入单。
+  const wrong = await f.run("submit", "--manifest", manifest);
+  assert.equal(wrong.code, 2);
+  assert.match(wrong.data.message, /gendesk import/);
+  const checked = await f.run("validate", "--manifest", manifest);
+  assert.equal(checked.code, 0, checked.data.message);
+  assert.equal(checked.data.mode, "import");
+  assert.equal(checked.data.resultCount, 2);
+  assert.equal(checked.data.preflight.results.length, 2);
+
+  const result = await f.run("import", "--manifest", manifest);
+  assert.equal(result.code, 0, result.data.message);
+  assert.equal(result.data.status, "ingested");
+  assert.equal(result.data.mode, "import");
+  assert.match(result.data.next, /待验收/);
+  const [archived] = await fs.readdir(f.consumed);
+  const dir = path.join(f.consumed, archived);
+  const order = JSON.parse(await fs.readFile(path.join(dir, "工单.json"), "utf8"));
+  assert.equal(order.mode, "import");
+  for (const item of order.items) assert.match(item.result, /^results\/[a-f0-9]{64}\.png$/);
+  assert.deepEqual(
+    await fs.readFile(path.join(dir, order.items[1].result)),
+    second,
+    "成图按原字节打包",
+  );
+
+  // 生图清单不能走 import；一部分条目带 result 也不行。
+  const plain = await f.run("import", ...f.args);
+  assert.equal(plain.code, 2);
+  assert.match(plain.data.message, /result/);
+  const mixed = path.join(f.input, "混合.json");
+  await fs.writeFile(
+    mixed,
+    JSON.stringify({
+      version: 1,
+      organization: { requirement: "厨房场景图" },
+      items: [
+        { name: "甲", promptFile: "桌面场景.txt", ref: "商品实拍.png", result: "成图一.png" },
+        { name: "乙", promptFile: "窗边.txt", ref: "商品实拍.png" },
+      ],
+    }),
+  );
+  assert.match((await f.run("import", "--manifest", mixed)).data.message, /有的没写/);
+});
+
+test("import refuses an app that does not understand external results", async (t) => {
+  const old = await fixture(t, { features: ["reference-library", "poster-link"] });
+  await fs.writeFile(path.join(old.input, "成图.png"), png);
+  const args = [...old.args, "--result", path.join(old.input, "成图.png")];
+  const refused = await old.run("import", ...args);
+  assert.equal(refused.code, 8);
+  assert.match(refused.data.message, /external-results/);
+  await assert.rejects(fs.stat(old.pending), { code: "ENOENT" });
+
+  const stale = await fixture(t);
+  await fs.writeFile(path.join(stale.input, "成图.png"), png);
+  stale.extraEnv.GENDESK_TEST_OLD_APP = "1";
+  const binary = await stale.run(
+    "import",
+    ...stale.args,
+    "--result",
+    path.join(stale.input, "成图.png"),
+  );
+  assert.equal(binary.code, 8);
+  assert.match(binary.data.message, /不支持外部成图导入/);
+  assert.ok(!commands(stale).includes("intake.submit"));
 });

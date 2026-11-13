@@ -295,7 +295,7 @@ impl ImageProvider for OpenAiCompatible {
 /// PNG 时那条规则会把 PNG 悄悄变成 JPG——「选了 PNG 拿到 JPG」是纯粹的失信，
 /// 故显式选择优先：PNG 走容器级剥离（抹 tEXt/zTXt/iTXt/eXIf 与 caBX），
 /// 拿到的不是 PNG 就重编码成 PNG。
-fn deliver(
+pub(crate) fn deliver(
     raw: &[u8],
     want_format: Option<&str>,
     clear_meta: bool,

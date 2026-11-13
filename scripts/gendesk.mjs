@@ -28,6 +28,11 @@ gendesk submit --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source <来源>]
                [--poster-type <Poster 图片类型|封面|未分类>]
                [--name <图片语义名>] [--ratio 3:4] [--format jpeg] [--quality high]
+gendesk import --manifest <成图清单.json>
+gendesk import --result <成图> --prompt <正文.txt> --ref <参考图>
+               --product <产品> --style <款式> --requirement <需求> [--source Codex]
+               外部（如 Codex）已生成的图直接进 GenDesk 待验收：不调用生图、不花钱；
+               清单每条比生图清单多一个 result（成图路径），参考图写当时实际用的那几张
 gendesk status <jobId>
 gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
 gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
@@ -80,6 +85,7 @@ organization 按产品/款式/需求持续归档，条目整对象覆盖顶层�
 validate 调用应用二进制做只读完整预检（参数取值、实际图片解码与归属），不投单、不生图。
 submit 在 GenDesk 未运行时于后台启动它（macOS），收录完成才返回；生成与人工验收在应用内。
 改写结果文件：JSON 数组、{"lines":[…]} 或每行一个 JSON；每条 {"id":"W123","videoPrompt":"…"}。
+外部成图清单 = 生图清单 + 每条 "result":"成图.png"；validate 同样可用，会实际解码每张成图。
 所有结果/错误均为 JSON。
 退出码：0 成功；2 输入错误；4 待确认；5 收录或应用处理失败；6 重名未收录；7 未找到；8 应用不可用。
 相同内容默认使用相同 jobId，防止重放计费；有意重跑请给新的 --job-id。`;
@@ -224,9 +230,14 @@ const SINGLE_OPTIONS = [
   "requirement",
   "source",
   "poster-type",
+  "result",
 ];
 
-async function prepare(opts) {
+/**
+ * 清单 → 待打包的工单。`mode`：`generate`（submit）、`import`（外部成图）、
+ * 省略时按清单判断（validate：每条都有 result 即导入单）。
+ */
+async function prepare(opts, mode) {
   let spec;
   let base = process.cwd();
   if (opts.manifest) {
@@ -270,6 +281,7 @@ async function prepare(opts) {
           style: opts.style,
           promptFile: prompt,
           ref: opts.ref,
+          result: opts.result,
         },
       ],
     };
@@ -280,6 +292,21 @@ async function prepare(opts) {
     spec,
     ["version", "jobId", "note", "purpose", "skill", "defaults", "items", "organization"],
     "清单",
+  );
+  check(Array.isArray(spec.items) && spec.items.length > 0, "items 必须包含至少一个条目");
+  const withResult = spec.items.filter((item) => item?.result !== undefined).length;
+  check(
+    withResult === 0 || withResult === spec.items.length,
+    "清单里有的条目写了 result、有的没写：外部成图导入单每条都要写成图，生图单一条都不写",
+  );
+  const importing = withResult > 0;
+  check(
+    mode !== "generate" || !importing,
+    "清单里写了 result（外部已生成的图），这是导入单：请用 gendesk import，submit 会重新生图",
+  );
+  check(
+    mode !== "import" || importing,
+    "gendesk import 要求每个条目写 result（外部已生成的成图路径）",
   );
   check(spec.version === undefined || spec.version === 1, "清单 version 只支持 1");
   for (const key of ["jobId", "note", "purpose", "skill"]) {
@@ -299,16 +326,26 @@ async function prepare(opts) {
   }
   organization(spec.organization, "organization");
   const defaults = { quality: "high", ...parameters(spec.defaults ?? {}, "defaults") };
-  check(Array.isArray(spec.items) && spec.items.length > 0, "items 必须包含至少一个条目");
   const seen = new Set();
   const files = [];
   const refs = new Map();
+  const results = new Map();
   const items = [];
   for (const [index, item] of spec.items.entries()) {
     const label = `items[${index}]`;
     knownKeys(
       item,
-      ["name", "sku", "style", "promptFile", "ref", "refs", "organization", ...PARAM_KEYS],
+      [
+        "name",
+        "sku",
+        "style",
+        "promptFile",
+        "ref",
+        "refs",
+        "result",
+        "organization",
+        ...PARAM_KEYS,
+      ],
       label,
     );
     const name = safeName(item.name, `${label}.name`);
@@ -348,6 +385,10 @@ async function prepare(opts) {
           `${label}.refs 图库引用的 count 要是 1～16 的整数`,
         );
         check(count === 1 || one.libraryId === undefined, `${label} 点名 libraryId 时不能写 count`);
+        check(
+          !importing || one.libraryId !== undefined,
+          `${label}：外部成图已经生成，参考图要写当时实际用的那张（本地文件或 libraryId），不能按分类随机抽`,
+        );
         const ref = libraryRef(one, `${label}.refs`);
         for (let k = 0; k < count; k += 1) orderedRefs.push({ ...ref });
         check(orderedRefs.length <= 16, `${label}.refs 展开后超过 16 张`);
@@ -368,6 +409,17 @@ async function prepare(opts) {
       check(!orderedRefs.includes(relative), `${label} 重复引用同一张图`);
       orderedRefs.push(relative);
     }
+    let result;
+    if (importing) {
+      const source = await fs.realpath(await readableFile(item.result, base, `${label}.result`));
+      const hash = await digestFile(source);
+      result = `results/${hash}${path.extname(source).toLowerCase()}`;
+      check(
+        ![...results.values()].some((r) => r.relative === result),
+        `${label}.result 与前面的条目是同一张图：一张成图只能对应一个条目`,
+      );
+      results.set(source, { source, relative: result, hash });
+    }
     const params = parameters(
       Object.fromEntries(
         PARAM_KEYS.filter((key) => item[key] !== undefined).map((key) => [key, item[key]]),
@@ -378,6 +430,7 @@ async function prepare(opts) {
       name,
       sku,
       style,
+      ...(result ? { result } : {}),
       ...(item.organization !== undefined
         ? { organization: organization(item.organization, `${label}.organization`) }
         : {}),
@@ -386,7 +439,13 @@ async function prepare(opts) {
     });
     files.push({ name, bytes });
   }
-  const order = { ...spec, version: ORDER_VERSION, defaults, items };
+  const order = {
+    ...spec,
+    version: ORDER_VERSION,
+    defaults,
+    ...(importing ? { mode: "import" } : {}),
+    items,
+  };
   order.jobId = undefined;
   const hash = createHash("sha256")
     .update(
@@ -400,7 +459,15 @@ async function prepare(opts) {
   const librarySlots = items
     .flatMap((item) => item.refs ?? [item.ref])
     .filter((ref) => typeof ref === "object").length;
-  return { order, files, refs: [...distinctRefs.values()], hash, librarySlots };
+  return {
+    order,
+    files,
+    refs: [...distinctRefs.values()],
+    results: [...results.values()],
+    importing,
+    hash,
+    librarySlots,
+  };
 }
 
 // ---------------------------------------------------------------- 连接
@@ -526,6 +593,9 @@ async function nativePreflight(conn, prepared) {
       prepared.files.map((file) => [file.name, file.bytes.toString("utf8")]),
     ),
     references: Object.fromEntries(prepared.refs.map((ref) => [ref.relative, ref.source])),
+    ...(prepared.importing
+      ? { results: Object.fromEntries(prepared.results.map((r) => [r.relative, r.source])) }
+      : {}),
   };
   const result = spawnSync(filePath(binary), ["validate-intake"], {
     input: JSON.stringify(input),
@@ -546,6 +616,12 @@ async function nativePreflight(conn, prepared) {
       report.validation === "full" &&
       report.taskCount === prepared.order.items.length,
     "预检协议或任务数不匹配，未投递",
+  );
+  // 旧版应用不认识 mode=import，会把它当生图单预检通过——那样投下去就是重新生图花钱。
+  check(
+    !prepared.importing || report.mode === "import",
+    "当前 GenDesk 应用不支持外部成图导入（预检没有识别 mode=import）。请更新并重启 GenDesk",
+    8,
   );
   return report;
 }
@@ -571,9 +647,12 @@ function libraryPicks(reply) {
   };
 }
 
-function jobResult(jobId, job, extra = {}) {
+function jobResult(jobId, job, extra = {}, importing = false) {
   if (!job) return { jobId, status: "not_found", ...extra };
   const status = STATUS[job.status] ?? job.status;
+  const done = importing
+    ? "外部成图已进 GenDesk 待验收（未调用生图）；请提醒用户在审图页验收"
+    : "已建批开跑；生成结果在 GenDesk 审图页人工验收";
   return {
     jobId,
     status,
@@ -584,7 +663,7 @@ function jobResult(jobId, job, extra = {}) {
         ? `工单在等待确认：${job.message ?? ""}。先向用户说明原因并取得同意（Poster 款式对不上时，按用户确认的商品先运行 gendesk poster bind），再运行 gendesk confirm ${jobId}`
         : status === "error"
           ? `收录失败：${job.message ?? ""}。修正后运行 gendesk retry ${jobId}`
-          : "已建批开跑；生成结果在 GenDesk 审图页人工验收",
+          : done,
   };
 }
 
@@ -630,12 +709,13 @@ async function writePackage(root, prepared) {
   // On failure the directory stays WITHOUT READY, so the app refuses to ingest it.
   await fs.mkdir(path.join(dir, "prompts"));
   await fs.mkdir(path.join(dir, "refs"));
-  for (const ref of refs) {
+  if (prepared.importing) await fs.mkdir(path.join(dir, "results"));
+  for (const ref of [...refs, ...(prepared.results ?? [])]) {
     const target = path.join(dir, ref.relative);
     await fs.copyFile(ref.source, target);
     check(
       (await digestFile(target)) === ref.hash,
-      `复制过程中参考图发生变化：${ref.source}。未提交，请重新检查输入`,
+      `复制过程中图片发生变化：${ref.source}。未提交，请重新检查输入`,
     );
   }
   for (const file of files)
@@ -671,11 +751,17 @@ async function submit(prepared) {
       `jobId 已存在且内容不同或不是 CLI 工单：${order.jobId}。请核对，不会覆盖或重投`,
     );
   if (prepared.librarySlots > 0) requireFeature(hello, "reference-library");
+  if (prepared.importing) requireFeature(hello, "external-results", "外部成图导入");
   const knownReply = await rpc(conn, "intake.status", { jobId: order.jobId });
   const known = knownReply.job;
   const pending = path.join(pendingDir(conn.root), order.jobId);
   if (known && !(await exists(pending)))
-    return jobResult(order.jobId, known, { ...meta, reused: true, ...libraryPicks(knownReply) });
+    return jobResult(
+      order.jobId,
+      known,
+      { ...meta, reused: true, ...libraryPicks(knownReply) },
+      prepared.importing,
+    );
   if (await exists(pending)) {
     check(
       await exists(path.join(pending, "READY.txt")),
@@ -688,12 +774,18 @@ async function submit(prepared) {
   const reply = await rpc(conn, "intake.submit", { dir: order.jobId });
   // null = the directory was already ingested by a concurrent call; read the ledger instead.
   const final = reply.job ? reply : await rpc(conn, "intake.status", { jobId: order.jobId });
-  return jobResult(order.jobId, final.job, {
-    ...meta,
-    reused: packages.length > 0,
-    ...(launched ? { launched: true } : {}),
-    ...libraryPicks(final),
-  });
+  return jobResult(
+    order.jobId,
+    final.job,
+    {
+      ...meta,
+      ...(prepared.importing ? { mode: "import" } : {}),
+      reused: packages.length > 0,
+      ...(launched ? { launched: true } : {}),
+      ...libraryPicks(final),
+    },
+    prepared.importing,
+  );
 }
 
 // ---------------------------------------------------------------- 参考图库
@@ -1158,6 +1250,7 @@ const COMMANDS = {
   doctor: { positionals: 0, options: [] },
   validate: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
   submit: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
+  import: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
   status: { positionals: 1, options: [] },
   confirm: { positionals: 1, options: [] },
   retry: { positionals: 1, options: [] },
@@ -1242,6 +1335,7 @@ async function main() {
         jobId: prepared.order.jobId,
         taskCount: prepared.order.items.length,
         refCount: prepared.refs.length,
+        ...(prepared.importing ? { mode: "import", resultCount: prepared.results.length } : {}),
         ...(library ? { library } : {}),
         order: prepared.order,
         preflight,
@@ -1252,7 +1346,10 @@ async function main() {
       break;
     }
     case "submit":
-      result = await submit(await prepare(opts));
+      result = await submit(await prepare(opts, "generate"));
+      break;
+    case "import":
+      result = await submit(await prepare(opts, "import"));
       break;
     case "status":
     case "confirm":

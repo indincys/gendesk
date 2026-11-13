@@ -15,6 +15,9 @@ pub struct ExternalInput {
     pub order: OrderSpec,
     pub prompts: HashMap<String, String>,
     pub references: HashMap<String, String>,
+    /// 外部成图（`mode=import`）：清单内相对路径 → 本地文件。生图单没有这一项。
+    #[serde(default)]
+    pub results: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,27 +34,44 @@ pub struct ReferenceCheck {
 pub struct CheckedPlan {
     pub fingerprint: String,
     pub references: Vec<ReferenceCheck>,
+    /// 外部成图逐条核对结果（与 `plan.items` 同序）；生图单为空。
+    pub results: Vec<ReferenceCheck>,
+}
+
+/// 实际解码一张图并取内容摘要。参考图与外部成图共用同一口径。
+async fn inspect(source: PathBuf, what: &str) -> AppResult<ReferenceCheck> {
+    let path = source.clone();
+    crate::files::decode::bounded(move |permit| {
+        let image = crate::files::decode::inspect_image(&path, permit)?;
+        Ok(ReferenceCheck {
+            source: path,
+            sha256: format!("{:x}", Sha256::digest(&image.bytes)),
+            content_hash: crate::files::content_hash_bytes(&image.bytes),
+            width: image.width,
+            height: image.height,
+        })
+    })
+    .await
+    .map_err(|error| {
+        AppError::InvalidInput(format!("{what}解码失败 {}：{error}", source.display()))
+    })
 }
 
 pub async fn check(plan: &Plan) -> AppResult<CheckedPlan> {
     let mut references = Vec::new();
     for source in plan.distinct_refs() {
-        let path = source.clone();
-        let checked = crate::files::decode::bounded(move |permit| {
-            let image = crate::files::decode::inspect_image(&path, permit)?;
-            Ok(ReferenceCheck {
-                source: path,
-                sha256: format!("{:x}", Sha256::digest(&image.bytes)),
-                content_hash: crate::files::content_hash_bytes(&image.bytes),
-                width: image.width,
-                height: image.height,
-            })
-        })
-        .await
-        .map_err(|error| {
-            AppError::InvalidInput(format!("参考图解码失败 {}：{error}", source.display()))
-        })?;
-        references.push(checked);
+        references.push(inspect(source, "参考图").await?);
+    }
+    let mut results = Vec::new();
+    for item in &plan.items {
+        if let Some(source) = &item.result_path {
+            results.push(inspect(source.clone(), "成图").await?);
+        }
+    }
+    if plan.import && results.len() != plan.items.len() {
+        return Err(AppError::InvalidInput(
+            "外部成图导入单每条都要有成图".into(),
+        ));
     }
     let items: Vec<_> = plan
         .items
@@ -74,11 +94,19 @@ pub async fn check(plan: &Plan) -> AppResult<CheckedPlan> {
         })
         .collect();
     // refGroup / ephemeral 已随参考图库下线；保留固定值，使旧检查点的内容身份不变。
-    let bytes = serde_json::to_vec(&serde_json::json!({"items":items,"note":plan.note,
-        "purpose":plan.purpose,"skill":plan.skill,"refGroup":null,"ephemeral":false}))?;
+    let mut identity = serde_json::json!({"items":items,"note":plan.note,
+        "purpose":plan.purpose,"skill":plan.skill,"refGroup":null,"ephemeral":false});
+    // 只有导入单才多这两项：生图单的内容身份与旧版逐字节相同。
+    if plan.import {
+        identity["mode"] = serde_json::json!(super::MODE_IMPORT);
+        identity["results"] =
+            serde_json::json!(results.iter().map(|r| &r.sha256).collect::<Vec<_>>());
+    }
+    let bytes = serde_json::to_vec(&identity)?;
     Ok(CheckedPlan {
         fingerprint: format!("{:x}", Sha256::digest(bytes)),
         references,
+        results,
     })
 }
 
@@ -93,6 +121,8 @@ pub async fn external(input: ExternalInput) -> AppResult<serde_json::Value> {
     Ok(
         serde_json::json!({"status":"validated","validation":"full","protocolVersion":1,
         "appVersion":env!("CARGO_PKG_VERSION"),"taskCount":plan.task_count(),
+        "mode": if plan.import { super::MODE_IMPORT } else { "generate" },
+        "results":checked.results,
         "refCount":checked.references.len(),"fingerprint":checked.fingerprint,
         "references":checked.references,
         "librarySlots":plan.library_slots().into_iter().map(|(item, slot, spec)| serde_json::json!({

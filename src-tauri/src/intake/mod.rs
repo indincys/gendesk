@@ -5,6 +5,7 @@
 //!     工单.json                     ← 全部元信息（唯一入口）
 //!     refs/王一博-正面.jpg
 //!     prompts/W-王一博-55-正面.txt   ← 文件名 = 未来的图片名主干；内容 = 纯正文
+//!     results/<摘要>.png            ← 仅外部成图导入单（`mode=import`）：已生成的图
 //!     说明.md                       ← 可选，给人看的方向地图
 //!     READY.txt                     ← CLI 最后写；没有它的目录拒绝收录
 //! <交接根>/生图/_已收录/<工单目录>-<ts>/   ← 成功后移档，内含 结果.txt
@@ -67,6 +68,8 @@ pub const ORDER: &str = "工单.json";
 pub const PROMPTS: &str = "prompts";
 /// 参考图目录。`items[].ref` 是工单目录内的相对路径，习惯上落在这里。
 pub const REFS: &str = "refs";
+/// 整单模式：外部成图导入（不调用生图，直接进待验收）。
+pub const MODE_IMPORT: &str = "import";
 
 /// 回执文件：让 Agent 侧能回读结果，而不必猜后面发生了什么。
 pub const ERROR_FILE: &str = "错误.txt";
@@ -147,6 +150,10 @@ pub struct OrderSpec {
     pub skill: Option<String>,
     /// 工单级默认参数；条目没写时用它。
     pub defaults: ParamsSpec,
+    /// 整单模式：缺省 / `generate` = 生图；`import` = 外部成图导入（每条带 `result`，
+    /// 不调用生图、不花钱，任务直接进待验收）。**整单级**：一单里混着生成与导入，
+    /// 交付侧就分不清哪张是谁出的。
+    pub mode: Option<String>,
     pub items: Vec<ItemSpec>,
 }
 
@@ -168,6 +175,8 @@ pub struct ItemSpec {
     pub ref_path: Option<RefInput>,
     /// 有序多参考图；与 ref 二选一。第一张仍是任务的主商品图。
     pub refs: Vec<RefInput>,
+    /// 外部已生成的图（工单目录内相对路径）。只在 `mode=import` 时出现且每条必填。
+    pub result: Option<String>,
     /// 条目级参数（覆盖 `defaults`）。
     #[serde(flatten)]
     pub params: ParamsSpec,
@@ -247,6 +256,8 @@ pub struct Plan {
     /// 归一化后的受控用途；空串 = 没有用途。
     pub purpose: String,
     pub skill: Option<String>,
+    /// 外部成图导入单：不建待生成任务，直接把 `PlannedItem::result_path` 放进待验收。
+    pub import: bool,
     pub items: Vec<PlannedItem>,
 }
 
@@ -266,6 +277,8 @@ pub struct PlannedItem {
     pub params_json: String,
     /// 实际会进 multipart 的字段。
     pub wire_json: String,
+    /// 外部成图（`mode=import`）：已确认存在的文件。生图单恒为 `None`。
+    pub result_path: Option<PathBuf>,
 }
 
 impl Plan {
@@ -518,6 +531,15 @@ fn plan_with_inputs(
         return Err(format!("{ORDER} 的 items 是空的：至少要有一个条目"));
     }
     let purpose = normalize_purpose(spec.purpose.as_deref().unwrap_or(""))?;
+    let import = match spec.mode.as_deref().map(str::trim) {
+        None | Some("") | Some("generate") => false,
+        Some(MODE_IMPORT) => true,
+        Some(other) => {
+            return Err(format!(
+                "{ORDER} 的 mode「{other}」不认识：只有 generate（生图）与 import（外部成图导入）"
+            ))
+        }
+    };
     let job_id = spec
         .job_id
         .as_deref()
@@ -595,6 +617,12 @@ fn plan_with_inputs(
                     let slot = lib
                         .resolve(default_style, &organization.product)
                         .map_err(|e| format!("items[{i}]「{name}」：{e}"))?;
+                    if import && slot.library_id.is_none() {
+                        return Err(format!(
+                            "items[{i}]「{name}」：外部成图已经生成，参考图要写当时实际用的那张\
+                             （本地文件或 libraryId），不能按分类随机抽"
+                        ));
+                    }
                     if slot.library_id.is_some() && slots.contains(&RefSlot::Library(slot.clone()))
                     {
                         return Err(format!("items[{i}]「{name}」重复引用同一张图"));
@@ -640,12 +668,50 @@ fn plan_with_inputs(
         if prompt_text.is_empty() {
             return Err(format!("{PROMPTS}/{name}.txt 是空的"));
         }
+        let raw_result = it
+            .result
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        let result_path = match (import, raw_result) {
+            (false, None) => None,
+            (false, Some(_)) => {
+                return Err(format!(
+                    "items[{i}]「{name}」写了 result（外部成图），但这一单不是 mode=import。\
+                     外部成图请用 gendesk import 投递"
+                ))
+            }
+            (true, None) => {
+                return Err(format!(
+                    "items[{i}]「{name}」没写 result：外部成图导入单每条都要指向已生成的图"
+                ))
+            }
+            (true, Some(raw)) => {
+                let packaged = safe_join(dir, raw)?;
+                let path = match external {
+                    Some(input) => input
+                        .results
+                        .get(raw)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| format!("成图映射缺失：{raw}"))?,
+                    None => packaged,
+                };
+                if !path.is_file() {
+                    return Err(format!("items[{i}]「{name}」的成图不存在：{raw}"));
+                }
+                Some(path)
+            }
+        };
         let (mut params_json, wire_json) = build_params(&it.params.overlay(&spec.defaults))
             .map_err(|e| format!("items[{i}]「{name}」的参数有问题：{e}"))?;
         organization.validate().map_err(|e| e.to_string())?;
         let mut params: serde_json::Value =
             serde_json::from_str(&params_json).map_err(|e| e.to_string())?;
         params["organization"] = serde_json::to_value(&organization).map_err(|e| e.to_string())?;
+        if import {
+            // 只是来源标记：这张图不是 GenDesk 调接口生成的，审图与追溯时据此区分。
+            params["externalResult"] = serde_json::Value::Bool(true);
+        }
         params_json = params.to_string();
         items.push(PlannedItem {
             name: name.to_string(),
@@ -656,6 +722,7 @@ fn plan_with_inputs(
             slots,
             params_json,
             wire_json,
+            result_path,
         });
     }
 
@@ -698,6 +765,7 @@ fn plan_with_inputs(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        import,
         items,
     })
 }

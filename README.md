@@ -31,6 +31,7 @@ pnpm install:cli          # macOS/Unix：更新 ~/.local/bin/gendesk 的独立�
 gendesk doctor
 gendesk validate --manifest /路径/场景任务.json
 gendesk submit --manifest /路径/场景任务.json
+gendesk import --manifest /路径/成图清单.json   # Codex 等外部已生成的图，直接进待验收
 gendesk status <jobId>
 gendesk v2v pending
 ```

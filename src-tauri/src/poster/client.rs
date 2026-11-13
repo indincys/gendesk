@@ -18,11 +18,25 @@ pub struct PosterProduct {
     pub is_generic: bool,
 }
 
+/// Poster 的图片类型（全软件一套，用户在 Poster 里自己定）。归属依据是 `id`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PosterImageType {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub schema: String,
     pub products: Vec<PosterProduct>,
+    /// 旧版 Poster 没有这一项（不支持按类型导入）时为 `None`，与「一个类型都没建」区分开。
+    #[serde(default)]
+    pub image_types: Option<Vec<PosterImageType>>,
 }
+
+/// 封面库（`purpose: cover`）。缺省的图片库不写出，旧请求逐字节不变。
+pub const PURPOSE_COVER: &str = "cover";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +50,12 @@ pub struct ImageItem {
     /// 实况配对视频；有它时 `path` 是同名 JPG，Poster 按内容标识符核对配对。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_video: Option<LiveVideo>,
+    /// `cover` 进封面库；缺省进图片库。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// Poster 图片类型 ID；缺省 = 未分类。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +82,9 @@ pub struct ItemResult {
     pub product_id: String,
     pub image_id: String,
     pub status: String,
+    /// 新版 Poster 回报这张图入库后的类型（用户已分过类的图保持原类型）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +129,11 @@ async fn run(executable: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
 }
 
 pub async fn products(executable: &Path) -> AppResult<Vec<PosterProduct>> {
+    Ok(catalog(executable).await?.products)
+}
+
+/// 商品目录（不含通用款）连同图片类型。
+pub async fn catalog(executable: &Path) -> AppResult<Catalog> {
     let data = run(executable, &["export-image-products"]).await?;
     let catalog: Catalog = serde_json::from_slice(&data).map_err(|_| {
         AppError::InvalidInput("Poster 尚不支持图片接口，请安装包含图片接收接口的版本".into())
@@ -123,11 +151,14 @@ pub async fn products(executable: &Path) -> AppResult<Vec<PosterProduct>> {
             "Poster 商品目录存在空或重复 ID".into(),
         ));
     }
-    Ok(catalog
-        .products
-        .into_iter()
-        .filter(|p| !p.is_generic)
-        .collect())
+    Ok(Catalog {
+        products: catalog
+            .products
+            .into_iter()
+            .filter(|p| !p.is_generic)
+            .collect(),
+        ..catalog
+    })
 }
 
 /// Poster `image-import-spec` 是否声明了某项能力。
@@ -189,6 +220,26 @@ pub async fn import(executable: &Path, manifest: &Path, request: &Request) -> Ap
         )
         .await?;
     }
+    if request.items.iter().any(|item| item.type_id.is_some()) {
+        require_capability(
+            executable,
+            "image-type",
+            "当前 Poster 尚不支持按图片类型导入，请先更新 Poster；本批保留，可安全重试",
+        )
+        .await?;
+    }
+    if request
+        .items
+        .iter()
+        .any(|item| item.purpose.as_deref() == Some(PURPOSE_COVER))
+    {
+        require_capability(
+            executable,
+            "cover",
+            "当前 Poster 尚不支持导入封面，请先更新 Poster；本批保留，可安全重试",
+        )
+        .await?;
+    }
     let path = manifest.to_string_lossy();
     let data = run(executable, &["import-images", &path, "--apply"]).await?;
     let receipt: Receipt = serde_json::from_slice(&data)
@@ -242,6 +293,8 @@ mod tests {
                 byte_size: 1,
                 source: "ai".into(),
                 live_video: None,
+                purpose: None,
+                type_id: None,
             }],
         };
         let mut receipt = Receipt {
@@ -254,6 +307,7 @@ mod tests {
                 product_id: "p".into(),
                 image_id: "id".into(),
                 status: "imported".into(),
+                type_id: None,
             }],
         };
         assert!(validate_receipt(&request, &receipt).is_ok());

@@ -7,6 +7,9 @@
 //!
 //! 同一套匹配也用在投单前（`unresolved`，对不上就让工单待确认、不生图）、CLI 绑定
 //! （`bind_style`）与历史成品补导（`backfill`）。
+//!
+//! 商品之内进哪个库位（封面库、某个图片类型、未分类）由作品归属的 `posterType` 或需求名决定，
+//! 见 `slot`；在交付时按当时的 Poster 类型目录解析，随请求一起冻结。
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +23,7 @@ use crate::error::{AppError, AppResult};
 
 pub mod backfill;
 pub mod client;
+pub mod slot;
 pub(crate) mod storage;
 #[cfg(test)]
 mod tests;
@@ -202,12 +206,18 @@ pub struct Image {
     pub wants_live: bool,
     pub live_image: Option<String>,
     pub live_video: Option<String>,
+    /// 作品归属快照；作品记录已删时为空（按未分类处理）。
+    pub organization_json: Option<String>,
+    /// 交付时按 Poster 类型目录解析出的库位。
+    #[sqlx(skip)]
+    pub slot: slot::Slot,
 }
 
 async fn images(pool: &SqlitePool, batch: &str) -> AppResult<Vec<Image>> {
     Ok(sqlx::query_as(
         "SELECT i.uid,i.item_name,i.sku,i.style,i.image_path,i.product_id,i.product_name,
-            i.wants_live,i.live_image,i.live_video, w.image_path AS canonical_path
+            i.wants_live,i.live_image,i.live_video, w.image_path AS canonical_path,
+            w.organization_json
         FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=? ORDER BY i.work_id",
     )
     .bind(batch)
@@ -421,14 +431,46 @@ fn check_with(
     out
 }
 
+/// 读 Poster 商品目录（含图片类型）。
+pub async fn catalog(pool: &SqlitePool) -> AppResult<client::Catalog> {
+    let settings = load_settings(pool).await?;
+    client::catalog(Path::new(&settings.executable)).await
+}
+
 /// 读 Poster 商品目录，逐个款式给出归属。
 pub async fn check_targets(
     pool: &SqlitePool,
     keys: &[(String, String)],
 ) -> AppResult<Vec<TargetCheck>> {
-    let settings = load_settings(pool).await?;
-    let products = client::products(Path::new(&settings.executable)).await?;
-    Ok(check_with(keys, &products, &bindings(pool).await?))
+    let products = catalog(pool).await?.products;
+    check_targets_in(pool, keys, &products).await
+}
+
+/// 同 [`check_targets`]，商品目录由调用方给（CLI 同时要类型目录，只读一次 Poster）。
+pub async fn check_targets_in(
+    pool: &SqlitePool,
+    keys: &[(String, String)],
+    products: &[client::PosterProduct],
+) -> AppResult<Vec<TargetCheck>> {
+    Ok(check_with(keys, products, &bindings(pool).await?))
+}
+
+/// 投单前检查显式指定的 Poster 类型（`organization.posterType`）：开启自动导入时，返回对不上
+/// 的说明；按需求名自动对应的不检查（对不上只是未分类）。读不到 Poster 时返回错误。
+pub async fn unresolved_types(pool: &SqlitePool, labels: &[String]) -> AppResult<Vec<String>> {
+    if labels.is_empty() || !load_settings(pool).await?.auto_import {
+        return Ok(Vec::new());
+    }
+    let types = catalog(pool).await?.image_types;
+    let mut out = Vec::new();
+    for label in labels {
+        if let Err(reason) = slot::resolve(label, true, types.as_deref()) {
+            if !out.contains(&reason) {
+                out.push(reason);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 投单前检查：开启自动导入时，返回审稿通过后进不了 Poster 的款式说明；
@@ -645,8 +687,11 @@ async fn waiting_for_live(pool: &SqlitePool, items: &[Image]) -> AppResult<bool>
 }
 
 /// 自动匹配商品：已有绑定优先，其次 20 款明星名唯一匹配。匹配不上就报出款式名。
-async fn resolve_products(pool: &SqlitePool, executable: &Path, id: &str) -> AppResult<()> {
-    let products = client::products(executable).await?;
+async fn resolve_products(
+    pool: &SqlitePool,
+    products: Vec<client::PosterProduct>,
+    id: &str,
+) -> AppResult<()> {
     let preview = PosterPreview {
         groups: groups(&images(pool, id).await?, &products, &bindings(pool).await?),
         products,
@@ -671,6 +716,33 @@ async fn resolve_products(pool: &SqlitePool, executable: &Path, id: &str) -> App
     apply_bindings(pool, id, &preview, &choices).await
 }
 
+/// 逐张定库位（封面 / 图片类型 / 未分类）。显式类型对不上时整批停下并写明原因，
+/// 在 Poster 建好同名类型（或更新 Poster）后重试即可。
+fn assign_slots(
+    mut items: Vec<Image>,
+    types: Option<&[client::PosterImageType]>,
+) -> AppResult<Vec<Image>> {
+    let mut problems: Vec<String> = Vec::new();
+    for item in &mut items {
+        match slot::of_work(item.organization_json.as_deref(), types) {
+            Ok(found) => item.slot = found,
+            Err(reason) => {
+                if !problems.contains(&reason) {
+                    problems.push(reason);
+                }
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(items)
+    } else {
+        Err(AppError::InvalidInput(format!(
+            "图片类型对不上：{}",
+            problems.join("；")
+        )))
+    }
+}
+
 async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
     let settings = load_settings(pool).await?;
     let executable = Path::new(&settings.executable);
@@ -689,8 +761,9 @@ async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult
                 .await?;
             return Ok(());
         }
-        resolve_products(pool, executable, id).await?;
-        let items = images(pool, id).await?;
+        let catalog = client::catalog(executable).await?;
+        resolve_products(pool, catalog.products, id).await?;
+        let items = assign_slots(images(pool, id).await?, catalog.image_types.as_deref())?;
         let source_json = settings::get_by_key(pool, "posterSource")
             .await?
             .ok_or_else(|| AppError::Internal("Poster 来源标识未初始化".into()))?;

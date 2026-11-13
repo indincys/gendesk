@@ -40,6 +40,23 @@ use crate::importer::ParsedGroup;
 #[async_trait::async_trait]
 pub trait PosterGate: Send + Sync {
     async fn unresolved(&self, keys: &[(String, String)]) -> Vec<String>;
+    /// 显式指定的 Poster 图片类型（`organization.posterType`）里对不上的说明；空 = 放行。
+    async fn unresolved_types(&self, _labels: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// 投单时查出的 Poster 归属问题：款式对不上商品、显式类型对不上 Poster 图片类型。
+#[derive(Debug, Default)]
+struct PosterIssues {
+    styles: Vec<String>,
+    types: Vec<String>,
+}
+
+impl PosterIssues {
+    fn is_empty(&self) -> bool {
+        self.styles.is_empty() && self.types.is_empty()
+    }
 }
 
 /// 不做检查（测试用）。
@@ -298,7 +315,10 @@ async fn ingest_dir(
     let total = plan.task_count();
     if !confirmed {
         let over = ctx.threshold > 0 && total > ctx.threshold;
-        let poster = ctx.poster.unresolved(&plan.poster_keys()).await;
+        let poster = PosterIssues {
+            styles: ctx.poster.unresolved(&plan.poster_keys()).await,
+            types: ctx.poster.unresolved_types(&plan.poster_types()).await,
+        };
         if over || !poster.is_empty() {
             let threshold = over.then_some(ctx.threshold);
             return record_hold(ctx, &plan, total, threshold, &poster).await;
@@ -404,7 +424,7 @@ async fn record_hold(
     plan: &Plan,
     total: i64,
     threshold: Option<i64>,
-    poster: &[String],
+    poster: &PosterIssues,
 ) -> AppResult<Option<JobView>> {
     let mut reasons = Vec::new();
     if let Some(threshold) = threshold {
@@ -412,8 +432,14 @@ async fn record_hold(
             "共 {total} 张图（{total} 个条目），超过阈值 {threshold}"
         ));
     }
-    if !poster.is_empty() {
-        reasons.push(format!("Poster 款式对不上：{}", poster.join("；")));
+    if !poster.styles.is_empty() {
+        reasons.push(format!("Poster 款式对不上：{}", poster.styles.join("；")));
+    }
+    if !poster.types.is_empty() {
+        reasons.push(format!(
+            "Poster 图片类型对不上：{}",
+            poster.types.join("；")
+        ));
     }
     let msg = format!("{}，等待确认", reasons.join("；"));
     let row_id = start_job(ctx, &plan.job_id, &plan.dir_name).await?;
@@ -871,7 +897,7 @@ fn result_text(plan: &Plan, done: &Applied) -> String {
     s
 }
 
-fn hold_text(plan: &Plan, total: i64, threshold: Option<i64>, poster: &[String]) -> String {
+fn hold_text(plan: &Plan, total: i64, threshold: Option<i64>, poster: &PosterIssues) -> String {
     let mut s = String::from(
         "这份工单在等待确认，**还没有导入任何东西**（提示词、参考图一条都没进库）。\n\n",
     );
@@ -883,9 +909,9 @@ fn hold_text(plan: &Plan, total: i64, threshold: Option<i64>, poster: &[String])
             plan.distinct_refs().len(),
         ));
     }
-    if !poster.is_empty() {
+    if !poster.styles.is_empty() {
         s.push_str("已开启「自动导入 Poster」，但这些款式审稿通过后进不了 Poster：\n");
-        for line in poster {
+        for line in &poster.styles {
             s.push_str(&format!("- {line}\n"));
         }
         s.push_str(
@@ -893,6 +919,17 @@ fn hold_text(plan: &Plan, total: i64, threshold: Option<i64>, poster: &[String])
              新款式第一次投单：用户确认对应商品后运行 \
              `gendesk poster bind --product <产品> --style <款式> --target <Poster 商品名>`。\n\
              用户明确不需要进 Poster 时可直接确认，审稿后在设置里对该批选「不导入」。\n\n",
+        );
+    }
+    if !poster.types.is_empty() {
+        s.push_str("已开启「自动导入 Poster」，但这些显式指定的 Poster 图片类型对不上：\n");
+        for line in &poster.types {
+            s.push_str(&format!("- {line}\n"));
+        }
+        s.push_str(
+            "\nposterType 写错：改成 `gendesk poster resolve` 列出的 Poster 图片类型、`封面` 或 `未分类`\
+             （或删掉 posterType 按需求名自动对应），用新的 jobId 重新投单，删掉本目录。\n\
+             需要新类型：请用户先在 Poster 里新建同名类型，再确认。\n\n",
         );
     }
     s.push_str(&format!(
@@ -2047,6 +2084,64 @@ mod tests {
                 .map(|(sku, style)| format!("「{sku} / {style}」尚未绑定"))
                 .collect()
         }
+    }
+
+    /// 测试用 Poster 检查：款式都对得上，记下被问到的显式类型并全部报成对不上。
+    #[derive(Default)]
+    struct RejectingTypes(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl PosterGate for RejectingTypes {
+        async fn unresolved(&self, _keys: &[(String, String)]) -> Vec<String> {
+            Vec::new()
+        }
+        async fn unresolved_types(&self, labels: &[String]) -> Vec<String> {
+            self.0.lock().unwrap().extend_from_slice(labels);
+            labels
+                .iter()
+                .map(|l| format!("Poster 里没有图片类型「{l}」"))
+                .collect()
+        }
+    }
+
+    // 显式 posterType 对不上：同样什么都不导入；只问显式写的，按需求名的不拦。
+    #[tokio::test]
+    async fn unknown_explicit_poster_type_holds_without_importing() {
+        let (pool, _d) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let (mut ctx, kick) = ctx_for(&pool, data.path(), 100);
+        let gate = Arc::new(RejectingTypes::default());
+        ctx.poster = gate.clone();
+        make_job(
+            home.path(),
+            "job-type",
+            "",
+            &[
+                (
+                    "侧面",
+                    "正文一",
+                    "a.png",
+                    r#","organization":{"product":"2027明星日历","style":"王一博","requirement":"侧面图","posterType":"侧视图"}"#,
+                ),
+                (
+                    "正面",
+                    "正文二",
+                    "a.png",
+                    r#","organization":{"product":"2027明星日历","style":"王一博","requirement":"正视图"}"#,
+                ),
+            ],
+        );
+        let held = scan(&ctx, home.path()).await.unwrap();
+        assert_eq!(held[0].status, "hold", "{}", held[0].message);
+        assert!(
+            held[0].message.contains("Poster 图片类型对不上") && held[0].message.contains("侧视图"),
+            "{}",
+            held[0].message
+        );
+        assert_eq!(*gate.0.lock().unwrap(), vec!["侧视图".to_string()]);
+        assert_eq!(count(&pool, "prompts").await, 0);
+        assert_eq!(kick.0.load(Ordering::SeqCst), 0);
     }
 
     // Poster 款式对不上：和超阈值一样什么都不导入，确认后照常开跑。

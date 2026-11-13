@@ -14,6 +14,8 @@ fn image(sku: &str, style: &str) -> Image {
         wants_live: false,
         live_image: None,
         live_video: None,
+        organization_json: None,
+        slot: slot::Slot::Untyped,
     }
 }
 
@@ -597,4 +599,128 @@ async fn backfill_registers_only_never_tracked_works_with_known_targets() {
         .await
         .unwrap();
     assert_eq!((last.images, last.batches), (1, 1));
+}
+
+/// 新版 Poster：带图片类型目录与 `image-type` / `cover` 能力，把收到的请求原样留在旁边供断言。
+#[cfg(unix)]
+fn typed_poster(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("PosterTyped");
+    std::fs::write(&path, r##"#!/usr/bin/env python3
+import sys,json,pathlib
+if sys.argv[1]=='export-image-products':
+    print(json.dumps({'schema':'poster.images/1','products':[{'id':'tan-id','name':'檀健次日历（2027）'}],
+        'imageTypes':[{'id':'front-id','name':'正视图'},{'id':'gift-id','name':'礼盒图'}]}))
+elif sys.argv[1]=='image-import-spec':
+    print(json.dumps({'capabilities':['image-type','cover']}))
+else:
+    data=json.loads(pathlib.Path(sys.argv[2]).read_text())
+    pathlib.Path(__file__).with_name('received.json').write_text(json.dumps(data))
+    data['applied']=True
+    data['items']=[{'externalId':x['externalId'],'productId':x['productId'],'imageId':'image-'+x['externalId'],'status':'imported','typeId':x.get('typeId')} for x in data['items']]
+    print(json.dumps(data))
+"##).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+async fn insert_organized_work(
+    pool: &SqlitePool,
+    root: &Path,
+    uid: &str,
+    organization: serde_json::Value,
+) {
+    let path = root.join("成品").join(format!("{uid}.png"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([4, 5, 6]))
+        .save(&path)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO accepted_works(image_path,thumb_path,prompt_text,accepted_at,item_name,uid,style,organization_json)
+        VALUES(?,'','',0,'图',?,'',?)",
+    )
+    .bind(path.to_string_lossy().as_ref())
+    .bind(uid)
+    .bind(organization.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// 审稿通过的图按原定类型进 Poster：需求「正视图」进同名类型、「封面」进封面库、
+/// 场景需求进未分类；Agent 显式指定却不存在的类型让整批停下并写明原因。
+#[cfg(unix)]
+#[tokio::test]
+async fn accepted_images_land_in_their_poster_type_or_cover() {
+    use backfill::{backfill, Filter};
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    let executable = typed_poster(root.path());
+    set_settings(&pool, &enabled(&executable)).await;
+    let org = |requirement: &str, poster_type: &str| {
+        serde_json::json!({"product": "2027明星日历", "style": "檀健次款",
+            "requirement": requirement, "posterType": poster_type})
+    };
+    insert_organized_work(&pool, root.path(), "t001", org("正视图", "")).await;
+    insert_organized_work(&pool, root.path(), "t002", org("封面", "")).await;
+    insert_organized_work(&pool, root.path(), "t003", org("桌面场景图", "")).await;
+    // 需求名与 Poster 类型不同名时，Agent 用 posterType 指定。
+    insert_organized_work(&pool, root.path(), "t004", org("礼盒特写", "礼盒图")).await;
+    let report = backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .unwrap();
+    assert_eq!(report.batches, 1);
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poster_batches WHERE state='done'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(done, 1);
+    let received: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.path().join("received.json")).unwrap())
+            .unwrap();
+    let by_uid = |uid: &str| {
+        received["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["externalId"] == uid)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_uid("t001")["typeId"], "front-id");
+    assert!(by_uid("t001").get("purpose").is_none());
+    assert_eq!(by_uid("t002")["purpose"], "cover");
+    assert!(by_uid("t002").get("typeId").is_none());
+    assert!(by_uid("t003").get("typeId").is_none() && by_uid("t003").get("purpose").is_none());
+    assert_eq!(by_uid("t004")["typeId"], "gift-id");
+
+    // 显式类型在 Poster 里不存在：投单前就能查出，交付时整批停在「需处理」。
+    assert_eq!(
+        unresolved_types(&pool, &["正视图".into(), "封面".into(), "未分类".into()])
+            .await
+            .unwrap(),
+        Vec::<String>::new()
+    );
+    let missing = unresolved_types(&pool, &["侧视图".into()]).await.unwrap();
+    assert!(
+        missing.len() == 1 && missing[0].contains("侧视图"),
+        "{missing:?}"
+    );
+    insert_organized_work(&pool, root.path(), "t005", org("侧面图", "侧视图")).await;
+    backfill(&pool, root.path(), &Filter::default(), true)
+        .await
+        .unwrap();
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let (state, error): (String, String) =
+        sqlx::query_as("SELECT state,last_error FROM poster_batches WHERE state<>'done'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    assert!(
+        error.contains("图片类型对不上") && error.contains("侧视图"),
+        "{error}"
+    );
 }

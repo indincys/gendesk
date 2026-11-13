@@ -288,6 +288,20 @@ impl Plan {
         }
         out
     }
+    /// 条目里**显式指定**的 Poster 图片类型（`organization.posterType`，去重保序）。
+    /// 按需求名自动对应的不在内：对不上只是未分类，不拦单。
+    pub fn poster_types(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for it in &self.items {
+            if let Ok(Some(org)) = crate::library::Organization::from_params(&it.params_json) {
+                let wanted = org.poster_type();
+                if !wanted.is_empty() && !out.iter().any(|t| t == wanted) {
+                    out.push(wanted.to_string());
+                }
+            }
+        }
+        out
+    }
     /// 本单用到的**去重后**参考图（保持出现顺序）。
     ///
     /// 多个条目常常挂同一张图（正面 / 侧面各写一条提示词，却共用一张原图）。

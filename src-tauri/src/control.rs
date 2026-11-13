@@ -191,11 +191,39 @@ async fn poster_command(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_else(|| vec![(text(args, "product"), text(args, "style"))]);
-            if keys.iter().all(|(p, s)| p.is_empty() && s.is_empty()) {
+            let keys = keys
+                .into_iter()
+                .filter(|(p, s)| !p.is_empty() || !s.is_empty())
+                .collect::<Vec<_>>();
+            // 库位：Agent 显式指定的 posterType 优先，否则按需求名自动对应（与交付同一套规则）。
+            let organization = crate::library::Organization {
+                requirement: text(args, "requirement"),
+                poster_type: Some(text(args, "posterType")).filter(|t| !t.is_empty()),
+                ..Default::default()
+            };
+            let wants_slot =
+                !organization.requirement.is_empty() || !organization.poster_type().is_empty();
+            if keys.is_empty() && !wants_slot {
                 return Err(AppError::InvalidInput("缺少产品或款式".into()));
             }
-            let targets = poster::check_targets(&state.db, &keys).await?;
-            Ok(json!({ "autoImport": auto_import, "targets": targets }))
+            let catalog = poster::catalog(&state.db).await?;
+            let targets = poster::check_targets_in(&state.db, &keys, &catalog.products).await?;
+            let slot = wants_slot.then(|| {
+                let (label, explicit) = poster::slot::wanted(&organization);
+                match poster::slot::resolve(label, explicit, catalog.image_types.as_deref()) {
+                    Ok(slot) => json!(slot),
+                    Err(warning) => json!({ "kind": "unresolved", "warning": warning }),
+                }
+            });
+            let image_types = catalog
+                .image_types
+                .map(|types| types.into_iter().map(|t| t.name).collect::<Vec<_>>());
+            Ok(json!({
+                "autoImport": auto_import,
+                "targets": targets,
+                "slot": slot,
+                "imageTypes": image_types,
+            }))
         }
         "poster.bind" => {
             let target = {

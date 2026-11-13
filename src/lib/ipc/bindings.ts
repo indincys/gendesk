@@ -2271,7 +2271,12 @@ resPrices: ResPrice[];
  * 是否是 vip 通道 —— 界面上要把它标出来（同规格贵 5.5 倍，只买到不排队）。
  */
 vip: boolean }
-export type Organization = { product: string; style: string; requirement: string; source: string }
+export type Organization = { product: string; style: string; requirement: string; source: string; 
+/**
+ * 审稿通过后进 Poster 的哪个库位：Poster 图片类型名、`封面` 或 `未分类`。空 = 按需求名自动对应
+ * （见 `poster::slot`）。只影响 Poster，不参与目录；空时不写出，旧快照与内容指纹逐字节不变。
+ */
+posterType?: string | null }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 export type PosterBatch = { id: string; createdAt: number; state: string; lastError: string; count: number; 
 /**

@@ -26,6 +26,7 @@ gendesk validate --manifest <任务清单.json>
 gendesk submit --manifest <任务清单.json>
 gendesk submit --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source <来源>]
+               [--poster-type <Poster 图片类型|封面|未分类>]
                [--name <图片语义名>] [--ratio 3:4] [--format jpeg] [--quality high]
 gendesk status <jobId>
 gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
@@ -51,7 +52,9 @@ gendesk library mark-used --id 12 [--id 13]     在 GenDesk 以外用过这些�
 gendesk library usage --job-id <jobId> | --id 12
 gendesk library fix-orientation [--dry-run]     按 EXIF 方向重做已导入参考图的缩略图、上传副本与尺寸
 Poster 衔接（开启「自动导入 Poster」时，submit 发现款式对不上 Poster 商品就转待确认、不生图）：
-gendesk poster resolve --product <产品> --style <款式>     这个款式审稿通过后会进哪个 Poster 商品
+gendesk poster resolve --product <产品> --style <款式> [--requirement <需求>] [--poster-type <类型>]
+                    这个款式审稿通过后进哪个 Poster 商品；带需求或类型时还给出进哪个库位
+                    （封面 / 图片类型 / 未分类）与 Poster 现有的图片类型
 gendesk poster bind --product <产品> --style <款式> --target <Poster 商品名或 ID>
                     用户确认后保存绑定，之后同款自动导入；停在「需处理」的同款批次随即续导
 gendesk poster backfill [--product <产品>] [--style <款式>] [--apply]
@@ -67,6 +70,8 @@ gendesk poster backfill [--product <产品>] [--style <款式>] [--apply]
 清单中的 promptFile/ref/refs 相对清单文件所在目录解析，可用绝对路径和 ~/。
 多参考图用清单 refs（有序 1～16 张），与 ref 二选一；一项仍只生成一张图。
 organization 按产品/款式/需求持续归档，条目整对象覆盖顶层；无 SKU 的任务不虚构编号。
+审稿通过后进 Poster 的库位按需求名自动对应：「封面」进封面库，与 Poster 图片类型同名（如「正视图」）
+进该类型，其余进未分类；需求名与类型不同名时在 organization 写 posterType（类型名、封面或未分类）。
 批量清单示例：
 {"version":1,"organization":{"product":"陶瓷水杯","style":"奶油白款","requirement":"厨房场景图","source":"CLI"},
  "defaults":{"ratio":"3:4","format":"jpeg","quality":"high"},"items":[
@@ -218,6 +223,7 @@ const SINGLE_OPTIONS = [
   "product",
   "requirement",
   "source",
+  "poster-type",
 ];
 
 async function prepare(opts) {
@@ -236,13 +242,17 @@ async function prepare(opts) {
     const prompt = requiredText(opts.prompt, "--prompt");
     spec = {
       note: opts.note,
-      ...(opts.product !== undefined || opts.requirement !== undefined || opts.source !== undefined
+      ...(opts.product !== undefined ||
+      opts.requirement !== undefined ||
+      opts.source !== undefined ||
+      opts["poster-type"] !== undefined
         ? {
             organization: {
               product: opts.product ?? "",
               style: opts.style ?? "",
               requirement: opts.requirement ?? opts.note ?? "",
               source: opts.source ?? "CLI",
+              ...(opts["poster-type"] !== undefined ? { posterType: opts["poster-type"] } : {}),
             },
           }
         : {}),
@@ -277,7 +287,7 @@ async function prepare(opts) {
   }
   function organization(value, label) {
     if (value === undefined) return undefined;
-    knownKeys(value, ["product", "style", "requirement", "source"], label);
+    knownKeys(value, ["product", "style", "requirement", "source", "posterType"], label);
     for (const [key, text] of Object.entries(value)) {
       check(typeof text === "string", `${label}.${key} 必须是字符串`);
       if (text && key !== "source") {
@@ -1001,7 +1011,7 @@ async function library(sub, positional, opts) {
 // ---------------------------------------------------------------- Poster 衔接
 
 const POSTER_OPTIONS = {
-  resolve: ["product", "style"],
+  resolve: ["product", "style", "requirement", "poster-type"],
   bind: ["product", "style", "target"],
   backfill: ["product", "style", "apply"],
 };
@@ -1013,20 +1023,52 @@ async function poster(sub, positional, opts) {
     check(POSTER_OPTIONS[sub].includes(key), `poster ${sub} 不支持 --${key}`);
   const product = opts.product?.trim() ?? "";
   const style = opts.style?.trim() ?? "";
-  if (sub !== "backfill") check(product || style, "需要 --product 或 --style");
+  const requirement = opts.requirement?.trim() ?? "";
+  const posterType = opts["poster-type"]?.trim() ?? "";
+  if (sub !== "backfill")
+    check(
+      product || style || (sub === "resolve" && (requirement || posterType)),
+      sub === "resolve"
+        ? "需要 --product / --style 或 --requirement / --poster-type"
+        : "需要 --product 或 --style",
+    );
   const { conn, hello } = await connect({ launch: true });
   requireFeature(hello, "poster-link", "Poster 衔接");
   switch (sub) {
     case "resolve": {
-      const data = await rpc(conn, "poster.resolve", { product, style });
+      const data = await rpc(conn, "poster.resolve", { product, style, requirement, posterType });
       const [target] = data.targets;
+      const slot = data.slot;
+      const slotOk = !slot || slot.kind !== "unresolved";
+      const where = !slot
+        ? ""
+        : slot.kind === "cover"
+          ? "的封面库"
+          : slot.kind === "type"
+            ? `的图片类型「${slot.name}」`
+            : slot.kind === "untyped"
+              ? "的图片库（未分类）"
+              : "";
+      const notes = [];
+      if (target && !target.targetId)
+        notes.push(
+          `${target.warning || "对不上 Poster 商品"}。向用户确认对应商品后运行 gendesk poster bind --product … --style … --target <商品名>`,
+        );
+      if (!slotOk)
+        notes.push(
+          `${slot.warning}。改写 organization.posterType（Poster 图片类型名、封面或未分类），或请用户先在 Poster 新建该类型`,
+        );
       return {
-        status: target?.targetId ? "ok" : "unresolved",
+        status: (!target || target.targetId) && slotOk ? "ok" : "unresolved",
         autoImport: data.autoImport,
-        ...target,
-        next: target?.targetId
-          ? `审稿通过后进入 Poster「${target.targetName}」`
-          : `${target?.warning ?? "对不上 Poster 商品"}。向用户确认对应商品后运行 gendesk poster bind --product … --style … --target <商品名>`,
+        ...(target ?? {}),
+        ...(slot ? { slot } : {}),
+        ...(data.imageTypes !== undefined ? { imageTypes: data.imageTypes } : {}),
+        next: notes.length
+          ? notes.join("；")
+          : target
+            ? `审稿通过后进入 Poster「${target.targetName}」${where}`
+            : `审稿通过后进入 Poster 商品${where}`,
       };
     }
     case "bind": {
@@ -1122,7 +1164,10 @@ const COMMANDS = {
   overview: { positionals: 0, options: [] },
   v2v: { positionals: 1, options: ["file"] },
   library: { positionals: -1, options: Object.keys(LIBRARY_FLAGS) },
-  poster: { positionals: -1, options: ["product", "style", ...Object.keys(POSTER_FLAGS)] },
+  poster: {
+    positionals: -1,
+    options: ["product", "style", "requirement", "poster-type", ...Object.keys(POSTER_FLAGS)],
+  },
 };
 
 function exitCode(result) {

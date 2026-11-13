@@ -52,7 +52,11 @@ pub fn prepare(
             .filter(|id| !id.is_empty())
             .ok_or_else(|| AppError::InvalidInput("有图片尚未指定 Poster 商品".into()))?;
         let product_name = image.product_name.as_deref().unwrap_or(product_id);
-        if let (Some(jpg), Some(mov)) = (&image.live_image, &image.live_video) {
+        let (purpose, type_id) = image.slot.wire();
+        // 封面库不收实况视频：封面只交静态成品。
+        let live = (image.slot != super::slot::Slot::Cover)
+            .then_some((&image.live_image, &image.live_video));
+        if let Some((Some(jpg), Some(mov))) = live {
             items.push(live_item(image, product_id, jpg, mov)?);
             continue;
         }
@@ -99,6 +103,8 @@ pub fn prepare(
             byte_size: bytes.len() as u64,
             source: "ai".into(),
             live_video: None,
+            purpose,
+            type_id,
         });
     }
     if items.is_empty() {
@@ -119,6 +125,7 @@ fn live_item(
     jpg: &str,
     mov: &str,
 ) -> AppResult<client::ImageItem> {
+    let (purpose, type_id) = image.slot.wire();
     image::image_dimensions(jpg)
         .map_err(|e| AppError::InvalidInput(format!("实况静态图无法读取：{e}")))?;
     let still = std::fs::read(jpg)?;
@@ -135,5 +142,7 @@ fn live_item(
             sha256: format!("{:x}", Sha256::digest(&video)),
             byte_size: video.len() as u64,
         }),
+        purpose,
+        type_id,
     })
 }

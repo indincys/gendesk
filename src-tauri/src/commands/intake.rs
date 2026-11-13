@@ -116,6 +116,16 @@ impl intake::ingest::PosterGate for PosterCheck {
             }
         }
     }
+
+    async fn unresolved_types(&self, labels: &[String]) -> Vec<String> {
+        match crate::poster::unresolved_types(&self.pool, labels).await {
+            Ok(missing) => missing,
+            Err(error) => {
+                tracing::warn!(%error, "投单时读不到 Poster 图片类型，跳过类型检查");
+                Vec::new()
+            }
+        }
+    }
 }
 
 fn ctx_of(state: &AppState) -> Ctx {

@@ -15,14 +15,20 @@ pub struct Organization {
     pub style: String,
     pub requirement: String,
     pub source: String,
+    /// 审稿通过后进 Poster 的哪个库位：Poster 图片类型名、`封面` 或 `未分类`。空 = 按需求名自动对应
+    /// （见 `poster::slot`）。只影响 Poster，不参与目录；空时不写出，旧快照与内容指纹逐字节不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub poster_type: Option<String>,
 }
 
 impl Organization {
     pub fn validate(&self) -> AppResult<()> {
         for (label, value) in [
-            ("产品", &self.product),
-            ("款式", &self.style),
-            ("需求", &self.requirement),
+            ("产品", self.product.as_str()),
+            ("款式", self.style.as_str()),
+            ("需求", self.requirement.as_str()),
+            ("Poster 类型", self.poster_type()),
         ] {
             if !value.is_empty()
                 && (value.trim() != value
@@ -49,7 +55,13 @@ impl Organization {
             style: style.trim().into(),
             requirement: requirement.trim().into(),
             source: String::new(),
+            poster_type: None,
         }
+    }
+
+    /// 显式指定的 Poster 库位；空 = 按需求名自动对应。
+    pub fn poster_type(&self) -> &str {
+        self.poster_type.as_deref().unwrap_or_default()
     }
 
     pub fn from_params(params: &str) -> AppResult<Option<Self>> {

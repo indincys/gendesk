@@ -20,8 +20,9 @@ tauri-specta 生成的类型化 IPC 通信。仅支持 Windows 10/11 x64 与 mac
 `live_photo.rs` 用内置 Swift 助手 `gendesk-live`（`src-tauri/live-photo/`，build.rs 在 macOS 上编译成
 externalBin，素材在 `resources/live-photo/`）把通过的图转成 JPG + MOV。`poster/` 把每次通过登记成
 一个批次，按 `(sku, style)` → 已保存绑定 → 20 款名单（含 `2027明星日历` + `姓名款`）解析 Poster 商品 ID，
-解析不出整批停在「需处理」；开启时 `gendesk submit` 收录前用同一规则检查（`PosterGate`），对不上转 hold
-不生图，`gendesk poster bind / backfill` 绑定与补导历史成品。两项都开时批次等实况配对落盘再连同视频导入（0050）。只调用 Poster 通用 `export-image-products` /
+解析不出整批停在「需处理」；商品内的库位（封面库 / 同名图片类型 / 未分类）按归属的 `posterType` 或需求名
+由 `poster::slot` 在交付时解析；开启时 `gendesk submit` 收录前用同一规则检查（`PosterGate`：款式与显式
+posterType），对不上转 hold 不生图，`gendesk poster bind / backfill` 绑定与补导历史成品。两项都开时批次等实况配对落盘再连同视频导入（0050）。只调用 Poster 通用 `export-image-products` /
 `import-images` CLI，不写对方 SQLite。见 `docs/Poster图片接入.md`。
 
 ## 常用命令
@@ -71,7 +72,7 @@ cd src-tauri && cargo test --lib refs_insert_list -- --exact --nocapture
 | `intake/`    | 工单收录：`mod`(工单.json 结构 + 全量校验 + 参数归一化) · `preflight`(只读预检，供 `validate-intake`) · `ingest`(收录 + 去重 + 移档 + 检查点恢复)。 |
 | `library.rs` | 作品目录规则（产品/款式/需求）；`library/maintenance` 是显式离线整理命令。 |
 | `ref_library.rs` | 参考图库（0051/0053）：款式 × 分类存图、按分类冷却并沿 `COOLDOWN_LADDER` 降级的随机抽图（`choose_detailed`）、收录时抽图记账（`draw_for_job`）、素材包抽取与导出（`draw_pack`）。 |
-| `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
+| `poster/`    | Poster 自动导入：设置 · 商品解析与绑定 · `slot`(封面/图片类型/未分类库位) · 批次台账 · `client`(Poster CLI) · `storage`(成品引用/兜底副本)。 |
 | `live_photo.rs` | 实况图队列：调用内置 `gendesk-live`，配对完成回填 Poster 批次。 |
 | `secrets.rs` | API Key 本地加密文件存储（XChaCha20-Poly1305）。                                                                                                                   |
 | `files/`     | 数据目录 · 缩略图 · 命名 · 废纸篓文件搬运。`ids/` 号池，`importer/` txt 解析。                                                                                                 |
@@ -190,7 +191,7 @@ gendesk submit（打包 + 写 READY）→ control: intake.submit → intake::pla
 一次都花钱 · **一份工单 = 一个 run**：参数下沉到 `tasks.params_json`（0045），不再决定切分；
 读取单点 `dispatcher::task_params`，任务级优先、批次级兜底 ·
 **job\_id 去重**：收录恰好一次，磁盘标记不可靠而重复收录 = 重复花钱；记账与空检查点同事务、在**动手之前**，阶段进度与对应写入同事务；恢复保留原行和身份 ·
-**阈值(默认 100 张)**：超了转 `hold` **什么都不导入**，由 Agent 向用户说明后 `gendesk confirm`；开启 Poster 自动导入时款式对不上商品同样转 `hold`（读不到 Poster 不拦），确认同时放行两项 ·
+**阈值(默认 100 张)**：超了转 `hold` **什么都不导入**，由 Agent 向用户说明后 `gendesk confirm`；开启 Poster 自动导入时款式对不上商品、或显式 posterType 对不上 Poster 图片类型同样转 `hold`（读不到 Poster 不拦），确认同时放行两项 ·
 **归一化只改拼法不改取值**（`jpg→jpeg` 是拼法；边长非 16 倍数是取值 → **拒单**，
 静默改值正是「我明明写了 9:16 却不生效」的成因）· **写路径只有一条**：提示词走
 `commands::prompts::{build_preview_from_parsed, commit_preview}`，参考图走

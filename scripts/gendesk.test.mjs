@@ -196,8 +196,15 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
     overview: () => ({ tasks: { queued: 1, running: 0, review: 2, failed: 0 }, paused: false }),
     "v2v.pending": () => ({ groups: [], skipped: 0 }),
     "v2v.rewrite": ({ lines }) => ({ applied: lines.length }),
-    "poster.resolve": ({ style }) => ({
+    "poster.resolve": ({ style, requirement, posterType }) => ({
       autoImport: true,
+      imageTypes: ["正视图", "礼盒图"],
+      slot:
+        requirement || posterType
+          ? posterType === "侧视图"
+            ? { kind: "unresolved", warning: "Poster 里没有图片类型「侧视图」" }
+            : { kind: "type", id: "front", name: "正视图" }
+          : null,
       targets: [
         style === "檀健次款"
           ? {
@@ -456,6 +463,19 @@ test("organization permits non-product tasks and item ownership replaces the def
   assert.deepEqual(order.items[1].organization, { requirement: "空间概念图" });
   assert.equal(order.items[1].style, "");
   spec.organization.product = " 陶瓷水杯";
+  await fs.writeFile(manifest, JSON.stringify(spec));
+  assert.equal((await f.run("validate", "--manifest", manifest)).code, 2);
+  // posterType：需求名与 Poster 图片类型不同名时由 Agent 显式指定库位。
+  spec.organization.product = "陶瓷水杯";
+  spec.items[1].organization = { requirement: "正面特写", posterType: "正视图" };
+  await fs.writeFile(manifest, JSON.stringify(spec));
+  const typed = await f.run("validate", "--manifest", manifest);
+  assert.equal(typed.code, 0, typed.data.message);
+  assert.deepEqual(typed.data.order.items[1].organization, {
+    requirement: "正面特写",
+    posterType: "正视图",
+  });
+  spec.items[1].organization.posterType = " 正视图";
   await fs.writeFile(manifest, JSON.stringify(spec));
   assert.equal((await f.run("validate", "--manifest", manifest)).code, 2);
 });
@@ -856,6 +876,29 @@ test("poster commands resolve, bind and backfill through the app", async (t) => 
   );
   assert.equal(unknown.code, 4);
   assert.match(unknown.data.next, /gendesk poster bind/);
+  const typed = await f.run(
+    "poster",
+    "resolve",
+    "--product",
+    "2027明星日历",
+    "--style",
+    "檀健次款",
+    "--requirement",
+    "正视图",
+  );
+  assert.equal(typed.code, 0, typed.data.message);
+  assert.deepEqual(f.calls.at(-1).args, {
+    product: "2027明星日历",
+    style: "檀健次款",
+    requirement: "正视图",
+    posterType: "",
+  });
+  assert.equal(typed.data.slot.name, "正视图");
+  assert.deepEqual(typed.data.imageTypes, ["正视图", "礼盒图"]);
+  assert.match(typed.data.next, /图片类型「正视图」/);
+  const missingType = await f.run("poster", "resolve", "--poster-type", "侧视图");
+  assert.equal(missingType.code, 4);
+  assert.match(missingType.data.next, /posterType/);
 
   const bound = await f.run(
     "poster",

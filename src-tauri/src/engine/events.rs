@@ -111,6 +111,10 @@ impl TauriSink {
 
 impl EventSink for TauriSink {
     fn status_changed(&self, e: TaskStatusChanged) {
+        // 生成失败的任务不再拦着它那一组图片包：这一组可能就此审完了。
+        if e.status == TaskStatus::Fail {
+            crate::commands::poster::settle_sets(self.app.clone(), e.batch_id);
+        }
         let _ = e.emit(&self.app);
     }
     fn progress(&self, e: TaskProgress) {

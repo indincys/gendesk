@@ -1,9 +1,13 @@
 //! 审稿通过的图自动导入 Poster 对应款式（设置里手动开启，默认关闭）。
 //!
-//! GenDesk 负责款式适配、交接台账（0046/0050）与安全重试；Poster 只收图片。开启后验收
-//! 不再询问：每次验收建一个批次，自动按已保存的绑定或 20 款明星名匹配商品；匹配不上的
-//! 款式让批次停在「失败」并写明原因，用户在设置里指定一次商品后自动续导。同时开启实况图
-//! 时，批次等配对落盘后带着视频一起导入。
+//! GenDesk 负责款式适配、交接台账（0046/0050/0055）与安全重试；Poster 只收内容。开启后验收
+//! 不再询问：自动按已保存的绑定或 20 款明星名匹配商品；匹配不上的款式让批次停在「失败」并写明
+//! 原因，用户在设置里指定一次商品后自动续导。同时开启实况图时，批次等配对落盘后带着视频一起导入。
+//!
+//! 通过的图按 [`set_key`] 分组：同一次提交 × 同一款式 × 同一需求的图是同一套背景，组成 Poster 里
+//! 的一条图文（图片包，`import-image-sets`，不带文案，在 Poster 里配）。同组的图可能分几次通过，
+//! 所以每组是一个独立的批次，跨验收收图，等这一组没有图待审了才按任务编号排序组成；第 1 张是封面。
+//! 进封面库的图、以及这一组图文组成之后才通过的图，照旧每次验收一个批次散进图片库（`import-images`）。
 //!
 //! 同一套匹配也用在投单前（`unresolved`，对不上就让工单待确认、不生图）、CLI 绑定
 //! （`bind_style`）与历史成品补导（`backfill`）。
@@ -20,6 +24,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 use crate::db::{now_unix, repo::settings};
 use crate::error::{AppError, AppResult};
+use crate::library::Organization;
 
 pub mod backfill;
 pub mod client;
@@ -120,7 +125,40 @@ pub async fn finish_review(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// 一张通过图属于哪一组图片包：同一次提交（GenDesk 批次）× 同一款式 × 同一库位名
+/// （显式 `posterType`，缺省需求名）。同一套背景一起生成的图，天然是一套。
+/// 进封面库的图不组图文，返回 `None`。键是 JSON 数组，首项是 GenDesk 批次号。
+pub fn set_key(
+    batch_id: i64,
+    organization: &Organization,
+    sku: &str,
+    style: &str,
+) -> Option<String> {
+    let (label, _) = slot::wanted(organization);
+    if slot::is_cover(label.trim()) {
+        return None;
+    }
+    let (sku, style) = organization.poster_keys(sku, style);
+    serde_json::to_string(&(batch_id, sku, style, label.trim())).ok()
+}
+
+/// 键里的 GenDesk 批次号（结算时只看这一批的任务）。
+fn set_key_batch(key: &str) -> Option<i64> {
+    serde_json::from_str::<(i64, String, String, String)>(key)
+        .ok()
+        .map(|k| k.0)
+}
+
+/// 一张作品在交接台账里的位置：任务编号决定图文内顺序；有 `set_key` 的进那一组的图片包。
+pub struct Placement<'a> {
+    pub task_id: i64,
+    pub set_key: Option<&'a str>,
+}
+
 /// 验收事务内登记一张作品。`wants_live` = 同时开启了实况图，要等配对。
+///
+/// 有图片包键时登记进这一组还没组成的图文批次（没有就新建，与登记同一事务）；这一组的图文已经
+/// 组成（或已放弃）后才通过的图，Poster 里没法再往那条图文里加，照旧散进图片库。
 #[allow(clippy::too_many_arguments)]
 pub async fn track_image(
     tx: &mut Transaction<'_, Sqlite>,
@@ -131,12 +169,17 @@ pub async fn track_image(
     (sku, style): (&str, &str),
     image_path: &Path,
     wants_live: bool,
+    placement: Placement<'_>,
 ) -> AppResult<()> {
+    let target = match placement.set_key {
+        Some(key) => open_set_batch(tx, batch, key).await?,
+        None => batch.to_string(),
+    };
     sqlx::query(
-        "INSERT INTO poster_images(batch_id,work_id,uid,item_name,sku,style,image_path,wants_live)
-        VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO poster_images(batch_id,work_id,uid,item_name,sku,style,image_path,wants_live,task_id)
+        VALUES(?,?,?,?,?,?,?,?,?)",
     )
-    .bind(batch)
+    .bind(&target)
     .bind(work_id)
     .bind(uid)
     .bind(item_name)
@@ -144,9 +187,77 @@ pub async fn track_image(
     .bind(style)
     .bind(image_path.to_string_lossy().as_ref())
     .bind(wants_live)
+    .bind(placement.task_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// 这一组还在收图的图文批次：请求没冻结、没完成也没放弃。没有就新建；已经组成过就退回散图批次。
+async fn open_set_batch(
+    tx: &mut Transaction<'_, Sqlite>,
+    loose: &str,
+    key: &str,
+) -> AppResult<String> {
+    let existing: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT id,state,request_json IS NULL FROM poster_batches WHERE set_key=? ORDER BY created_at,rowid",
+    )
+    .bind(key)
+    .fetch_all(&mut **tx)
+    .await?;
+    if let Some((id, _, _)) = existing
+        .iter()
+        .find(|(_, state, open)| *open && matches!(state.as_str(), "queued" | "failed"))
+    {
+        return Ok(id.clone());
+    }
+    if !existing.is_empty() {
+        return Ok(loose.to_string());
+    }
+    let id = new_id();
+    // 直接排队：交付时先看这一组还有没有图待审，有就继续等，不会提前组成。
+    sqlx::query(
+        "INSERT INTO poster_batches(id,created_at,state,library_root,set_key)
+        SELECT ?,?,'queued',library_root,? FROM poster_batches WHERE id=?",
+    )
+    .bind(&id)
+    .bind(now_unix())
+    .bind(key)
+    .bind(loose)
+    .execute(&mut **tx)
+    .await?;
+    Ok(id)
+}
+
+/// 这一组还有几张图没审完（待生成、生成中、重试中、待验收）。生成失败的不等：它要人工恢复，
+/// 恢复后再通过的图散进图片库。批次退休后任务行不在了，自然是 0。
+async fn pending_in_set(pool: &SqlitePool, key: &str) -> AppResult<i64> {
+    let Some(batch) = set_key_batch(key) else {
+        return Ok(0);
+    };
+    let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT t.id,t.params_json,COALESCE(p.sku_code,''),COALESCE(p.style,''),COALESCE(g.name,'')
+        FROM tasks t LEFT JOIN prompts p ON p.id=t.prompt_id LEFT JOIN prompt_groups g ON g.id=p.group_id
+        WHERE t.batch_id=? AND t.status IN ('q','run','retry','rev')",
+    )
+    .bind(batch)
+    .fetch_all(pool)
+    .await?;
+    let mut pending = 0;
+    for (task, params, sku, style, group) in rows {
+        // 与验收时同一口径定归属；归属读不出的任务验收也会报错，不可能进这一组，不等它。
+        let organization = match Organization::from_params(&params) {
+            Ok(found) => found.unwrap_or_else(|| Organization::legacy(&sku, &style, &group)),
+            Err(error) => {
+                tracing::warn!(%error, task, "任务归属无法读取，不计入图片包等待");
+                continue;
+            }
+        };
+        if set_key(batch, &organization, &sku, &style).as_deref() == Some(key) {
+            pending += 1;
+        }
+    }
+    Ok(pending)
 }
 
 /// 实况配对落盘：写回等待它的 Poster 条目。返回是否有批次在等（调用方据此触发导入）。
@@ -178,19 +289,37 @@ pub struct PosterBatch {
     pub count: i64,
     /// 仍在等实况图配对的张数（>0 时批次排队但暂不导入）。
     pub waiting_live: i64,
+    /// 这一批是一条图文（图片包），不是散进图片库的图。
+    pub is_set: bool,
+    /// 图文还在收图时，这一组还没审完的张数（>0 时等审完再组成）。
+    #[sqlx(skip)]
+    pub waiting_review: i64,
 }
 
 pub async fn batches(pool: &SqlitePool) -> AppResult<Vec<PosterBatch>> {
-    Ok(sqlx::query_as(
+    let mut list: Vec<PosterBatch> = sqlx::query_as(
         "SELECT b.id,b.created_at,b.state,b.last_error,COUNT(i.work_id) AS count,
-            SUM(i.wants_live=1 AND i.live_image IS NULL) AS waiting_live
+            SUM(i.wants_live=1 AND i.live_image IS NULL) AS waiting_live,
+            b.set_key IS NOT NULL AS is_set
         FROM poster_batches b JOIN poster_images i ON i.batch_id=b.id
         WHERE b.state<>'skipped'
         GROUP BY b.id ORDER BY CASE b.state WHEN 'failed' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
         b.created_at DESC,b.rowid DESC LIMIT 50",
     )
     .fetch_all(pool)
-    .await?)
+    .await?;
+    let open: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,set_key FROM poster_batches
+        WHERE set_key IS NOT NULL AND request_json IS NULL AND state IN ('queued','failed')",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, key) in open {
+        if let Some(batch) = list.iter_mut().find(|b| b.id == id) {
+            batch.waiting_review = pending_in_set(pool, &key).await?;
+        }
+    }
+    Ok(list)
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -218,7 +347,8 @@ async fn images(pool: &SqlitePool, batch: &str) -> AppResult<Vec<Image>> {
         "SELECT i.uid,i.item_name,i.sku,i.style,i.image_path,i.product_id,i.product_name,
             i.wants_live,i.live_image,i.live_video, w.image_path AS canonical_path,
             w.organization_json
-        FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=? ORDER BY i.work_id",
+        FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=?
+        ORDER BY i.task_id,i.work_id",
     )
     .bind(batch)
     .fetch_all(pool)
@@ -743,37 +873,153 @@ fn assign_slots(
     }
 }
 
-async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
+/// 交付前的共同准备：等实况、定商品、定库位，返回按任务编号排好的图与来源实例 ID。
+/// `None` = 还在等实况图（批次已放回排队）。
+async fn ready_images(
+    pool: &SqlitePool,
+    executable: &Path,
+    id: &str,
+) -> AppResult<Option<(Vec<Image>, String)>> {
+    if waiting_for_live(pool, &images(pool, id).await?).await? {
+        sqlx::query("UPDATE poster_batches SET state='queued',last_error='' WHERE id=?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        return Ok(None);
+    }
+    let catalog = client::catalog(executable).await?;
+    resolve_products(pool, catalog.products, id).await?;
+    let items = assign_slots(images(pool, id).await?, catalog.image_types.as_deref())?;
+    let source_json = settings::get_by_key(pool, "posterSource")
+        .await?
+        .ok_or_else(|| AppError::Internal("Poster 来源标识未初始化".into()))?;
+    Ok(Some((items, serde_json::from_str(&source_json)?)))
+}
+
+fn library_root(root: String, data_root: &Path) -> String {
+    if root.is_empty() {
+        fallback_root(data_root).to_string_lossy().into_owned()
+    } else {
+        root
+    }
+}
+
+/// 一条图文：这一组审完才组成（还有图待审就继续排队等），请求冻结后重试原样复用。
+/// 先预览再落库；回执里的图文素材 ID 记进 `material_id` 对账。
+async fn deliver_set(
+    pool: &SqlitePool,
+    data_root: &Path,
+    id: &str,
+    key: &str,
+    root: String,
+    request_json: Option<String>,
+) -> AppResult<()> {
     let settings = load_settings(pool).await?;
     let executable = Path::new(&settings.executable);
-    let (root, request_json): (String, Option<String>) =
-        sqlx::query_as("SELECT library_root,request_json FROM poster_batches WHERE id=?")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
-    let request: client::Request = if let Some(json) = request_json {
+    let request: client::SetsRequest = if let Some(json) = request_json {
         serde_json::from_str(&json)?
     } else {
-        if waiting_for_live(pool, &images(pool, id).await?).await? {
+        if pending_in_set(pool, key).await? > 0 {
             sqlx::query("UPDATE poster_batches SET state='queued',last_error='' WHERE id=?")
                 .bind(id)
                 .execute(pool)
                 .await?;
             return Ok(());
         }
-        let catalog = client::catalog(executable).await?;
-        resolve_products(pool, catalog.products, id).await?;
-        let items = assign_slots(images(pool, id).await?, catalog.image_types.as_deref())?;
-        let source_json = settings::get_by_key(pool, "posterSource")
-            .await?
-            .ok_or_else(|| AppError::Internal("Poster 来源标识未初始化".into()))?;
-        let source_id: String = serde_json::from_str(&source_json)?;
-        let batch = id.to_string();
-        let root = if root.is_empty() {
-            fallback_root(data_root).to_string_lossy().into_owned()
-        } else {
-            root
+        let Some((items, source_id)) = ready_images(pool, executable, id).await? else {
+            return Ok(());
         };
+        let count = items.len() as i64;
+        let (root, batch) = (library_root(root, data_root), id.to_string());
+        let request = tokio::task::spawn_blocking(move || {
+            storage::prepare_set(&root, &batch, source_id, &items)
+        })
+        .await
+        .map_err(|e| AppError::Io(e.to_string()))??;
+        // 冻结与「这一组的图都在请求里」同一条语句判定：验收与交付不共用一把锁，冻结前若又登记
+        // 进了一张图，这次不冻结，等登记它的那次验收结束再来组。
+        let frozen = sqlx::query(
+            "UPDATE poster_batches SET request_json=? WHERE id=? AND request_json IS NULL
+            AND (SELECT COUNT(*) FROM poster_images WHERE batch_id=?)=?",
+        )
+        .bind(serde_json::to_string(&request)?)
+        .bind(id)
+        .bind(id)
+        .bind(count)
+        .execute(pool)
+        .await?;
+        if frozen.rows_affected() != 1 {
+            return Ok(());
+        }
+        request
+    };
+    let manifest = data_root.join("Poster交接").join(format!("{id}.json"));
+    let bytes = serde_json::to_vec_pretty(&request)?;
+    let manifest_path = manifest.clone();
+    tokio::task::spawn_blocking(move || storage::atomic_write(&manifest_path, &bytes))
+        .await
+        .map_err(|e| AppError::Io(e.to_string()))??;
+    let receipt = client::import_sets(executable, &manifest, &request).await?;
+    let material = receipt.items.first().and_then(|item| item.id.clone());
+    sqlx::query(
+        "UPDATE poster_batches SET state='done',last_error='',receipt_json=?,material_id=? WHERE id=?",
+    )
+    .bind(serde_json::to_string(&receipt)?)
+    .bind(material)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 只结算某一次提交下还在收图的图文（那一批有任务生成失败、或有图移进废纸篓时调用），
+/// 不顺带重试别的失败批次。
+pub async fn settle_sets_of(
+    pool: &SqlitePool,
+    data_root: &Path,
+    gendesk_batch: i64,
+) -> AppResult<()> {
+    if !load_settings(pool).await?.auto_import {
+        return Ok(());
+    }
+    let open: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,set_key FROM poster_batches
+        WHERE set_key IS NOT NULL AND request_json IS NULL AND state='queued' ORDER BY created_at,rowid",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, key) in open {
+        if set_key_batch(&key) != Some(gendesk_batch) {
+            continue;
+        }
+        if let Err(error) = deliver_one(pool, data_root, &id).await {
+            sqlx::query("UPDATE poster_batches SET state='failed',last_error=? WHERE id=? AND state IN ('queued','failed')")
+                .bind(error.to_string()).bind(&id).execute(pool).await?;
+            tracing::warn!(%error, batch=%id, "Poster 图文导入待重试");
+        }
+    }
+    Ok(())
+}
+
+async fn deliver_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
+    let (root, request_json, set_key): (String, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT library_root,request_json,set_key FROM poster_batches WHERE id=?")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    if let Some(key) = set_key {
+        return deliver_set(pool, data_root, id, &key, root, request_json).await;
+    }
+    let settings = load_settings(pool).await?;
+    let executable = Path::new(&settings.executable);
+    let request: client::Request = if let Some(json) = request_json {
+        serde_json::from_str(&json)?
+    } else {
+        let Some((items, source_id)) = ready_images(pool, executable, id).await? else {
+            return Ok(());
+        };
+        let batch = id.to_string();
+        let root = library_root(root, data_root);
         let request =
             tokio::task::spawn_blocking(move || storage::prepare(&root, &batch, source_id, &items))
                 .await

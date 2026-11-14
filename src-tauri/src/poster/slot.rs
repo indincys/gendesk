@@ -56,7 +56,7 @@ pub fn wanted(organization: &Organization) -> (&str, bool) {
     }
 }
 
-fn is_cover(label: &str) -> bool {
+pub fn is_cover(label: &str) -> bool {
     matches!(label, "封面" | "封面图") || label.eq_ignore_ascii_case(PURPOSE_COVER)
 }
 

@@ -118,6 +118,45 @@ pub fn prepare(
     })
 }
 
+/// 生成一条图文的导入请求：图与图片库请求同一口径（成品原地引用、实况带视频、类型照旧），
+/// 按 `images` 的顺序（任务编号）组成一条，第 1 张是封面。图文编号用批次 ID，冻结后重投即 `duplicate`。
+pub fn prepare_set(
+    root: &str,
+    batch: &str,
+    source_id: String,
+    images: &[Image],
+) -> AppResult<client::SetsRequest> {
+    let request = prepare(root, batch, source_id, images)?;
+    let product_id = request
+        .items
+        .first()
+        .map(|item| item.product_id.clone())
+        .unwrap_or_default();
+    if request
+        .items
+        .iter()
+        .any(|item| item.product_id != product_id)
+    {
+        return Err(AppError::InvalidInput(
+            "同一组图对应了不同的 Poster 商品，无法组成一条图文".into(),
+        ));
+    }
+    Ok(client::SetsRequest {
+        schema: client::SETS_SCHEMA.into(),
+        source_id: request.source_id,
+        batch_id: request.batch_id.clone(),
+        items: vec![client::SetItem {
+            external_id: request.batch_id,
+            product_id,
+            images: request
+                .items
+                .into_iter()
+                .map(client::SetImage::from_item)
+                .collect::<AppResult<_>>()?,
+        }],
+    })
+}
+
 /// 实况配对：JPG 作为图片本体，MOV 作为配对视频，都引用 `成品/实况照片/` 里的原文件。
 fn live_item(
     image: &Image,

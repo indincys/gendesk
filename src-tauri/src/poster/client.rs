@@ -97,6 +97,86 @@ pub struct Receipt {
     pub items: Vec<ItemResult>,
 }
 
+/// 图文（`poster.image-sets/1`）：几张图按发布先后组成一条图文，带图一次导入。
+pub const SETS_SCHEMA: &str = "poster.image-sets/1";
+
+/// 图文里直接带的一张图：同 `import-images` 的一项，但不写商品和用途（商品取图文的，用途固定图片库）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetImage {
+    pub external_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub byte_size: u64,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_video: Option<LiveVideo>,
+}
+
+impl SetImage {
+    /// 图片库请求的一项转成图文里的一张。封面库的图不能组进图文。
+    pub fn from_item(item: ImageItem) -> AppResult<Self> {
+        if item.purpose.is_some() {
+            return Err(AppError::InvalidInput("封面不能组进图文".into()));
+        }
+        Ok(Self {
+            external_id: item.external_id,
+            path: item.path,
+            sha256: item.sha256,
+            byte_size: item.byte_size,
+            source: item.source,
+            type_id: item.type_id,
+            live_video: item.live_video,
+        })
+    }
+}
+
+/// 一条图文。标题、正文、话题都不带：文案在 Poster 里配，配不上就是「缺标题」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetItem {
+    pub external_id: String,
+    pub product_id: String,
+    pub images: Vec<SetImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetsRequest {
+    pub schema: String,
+    pub source_id: String,
+    pub batch_id: String,
+    pub items: Vec<SetItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetResult {
+    pub external_id: String,
+    pub product_id: String,
+    /// 图文素材 ID；预览时还没有。
+    #[serde(default)]
+    pub id: Option<String>,
+    pub status: String,
+    /// 这条图文用到的图片库图 ID，按发布先后。
+    #[serde(default)]
+    pub image_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetsReceipt {
+    pub schema: String,
+    pub source_id: String,
+    pub batch_id: String,
+    pub applied: bool,
+    pub items: Vec<SetResult>,
+    #[serde(default)]
+    pub paired: i64,
+}
+
 pub fn discover_executable() -> PathBuf {
     let home = super::home();
     let local = home.join("Applications/Poster.app/Contents/MacOS/Poster");
@@ -246,6 +326,85 @@ pub async fn import(executable: &Path, manifest: &Path, request: &Request) -> Ap
         .map_err(|_| AppError::InvalidInput("Poster 回执无法读取，本批可安全重试".into()))?;
     validate_receipt(request, &receipt)?;
     Ok(receipt)
+}
+
+/// Poster 的图文导入是否支持直接带图（`import-spec image-sets` 的字段表里有 `items[].images`）。
+async fn require_sets_with_images(executable: &Path) -> AppResult<()> {
+    const MISSING: &str = "当前 Poster 尚不支持带图导入图文，请先更新 Poster；本组保留，可安全重试";
+    let data = run(executable, &["import-spec", "image-sets"])
+        .await
+        .map_err(|_| AppError::InvalidInput(MISSING.into()))?;
+    let spec: serde_json::Value =
+        serde_json::from_slice(&data).map_err(|_| AppError::InvalidInput(MISSING.into()))?;
+    if spec["kind"]["schema"] == SETS_SCHEMA && spec["kind"]["fields"]["items[].images"].is_string()
+    {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(MISSING.into()))
+    }
+}
+
+/// 导入图文：先不带 `--apply` 预览（与正式导入同一套检查），通过了再落库。
+/// 同一来源身份重投回执 `duplicate`，不会在 Poster 里多出一条。
+pub async fn import_sets(
+    executable: &Path,
+    manifest: &Path,
+    request: &SetsRequest,
+) -> AppResult<SetsReceipt> {
+    require_sets_with_images(executable).await?;
+    let path = manifest.to_string_lossy();
+    let preview = run(executable, &["import-image-sets", &path]).await?;
+    let preview: SetsReceipt = serde_json::from_slice(&preview).map_err(|_| {
+        AppError::InvalidInput("Poster 图文预检回执无法读取，本组可安全重试".into())
+    })?;
+    validate_sets_receipt(request, &preview, false)?;
+    let data = run(executable, &["import-image-sets", &path, "--apply"]).await?;
+    let receipt: SetsReceipt = serde_json::from_slice(&data)
+        .map_err(|_| AppError::InvalidInput("Poster 图文回执无法读取，本组可安全重试".into()))?;
+    validate_sets_receipt(request, &receipt, true)?;
+    Ok(receipt)
+}
+
+pub(super) fn validate_sets_receipt(
+    request: &SetsRequest,
+    receipt: &SetsReceipt,
+    applied: bool,
+) -> AppResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    let valid =
+        receipt.schema == SETS_SCHEMA
+            && receipt.source_id == request.source_id
+            && receipt.batch_id == request.batch_id
+            && receipt.applied == applied
+            && receipt.items.len() == request.items.len()
+            && receipt.items.iter().all(|result| {
+                let Some(item) = request.items.iter().find(|i| {
+                    i.external_id == result.external_id && i.product_id == result.product_id
+                }) else {
+                    return false;
+                };
+                let has_id = result.id.as_deref().is_some_and(|id| !id.is_empty());
+                // 新建与重投都要回报这条图文实际用到的图，张数必须和这一组一致。
+                let same_images = result.image_ids.as_ref().is_some_and(|ids| {
+                    ids.len() == item.images.len() && ids.iter().all(|id| !id.is_empty())
+                });
+                seen.insert(&result.external_id)
+                    && match result.status.as_str() {
+                        "ready" => !applied && same_images,
+                        "imported" => applied && has_id && same_images,
+                        "duplicate" => has_id && same_images,
+                        // 用户在 Poster 里删了这条图文：不复活，也不再要求图片对得上。
+                        "deleted" => has_id,
+                        _ => false,
+                    }
+            });
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(
+            "Poster 图文回执与本组图片不一致，未标记完成".into(),
+        ))
+    }
 }
 
 fn validate_receipt(request: &Request, receipt: &Receipt) -> AppResult<()> {

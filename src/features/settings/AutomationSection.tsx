@@ -164,7 +164,8 @@ export function AutomationSection({ id }: { id: string }) {
             {!!failed.length && <span className="bdg b-red">{failed.length} 批需处理</span>}
           </div>
           <div className="fs11 t3 mt6">
-            通过的图按款式进入 Poster 对应商品的图片库存。Poster
+            通过的图按款式进入 Poster 对应商品。同一次提交、同一款式、同一需求的图等这一组审完，
+            组成一条图文（图片包，第 1 张作封面），标题文案在 Poster 里配；封面图进封面库。Poster
             直接引用作品目录里的成品，导入后请保留原文件。关闭只暂停新批次，已有记录保留。
           </div>
           {settings && (
@@ -246,6 +247,8 @@ function BatchRow({
       <span className="bdg b-red">需处理</span>
     ) : batch.state === "done" ? (
       <span className="bdg b-green">已导入</span>
+    ) : batch.waitingReview > 0 ? (
+      <span className="bdg b-amber">等本组 {batch.waitingReview} 张审完</span>
     ) : batch.waitingLive > 0 ? (
       <span className="bdg b-amber">等 {batch.waitingLive} 张实况图</span>
     ) : (
@@ -255,7 +258,9 @@ function BatchRow({
     <div className={cn("pbrow", batch.state === "failed" && "bad")}>
       <div className="fx ac gap8">
         {badge}
-        <span className="fs12">{batch.count} 张</span>
+        <span className="fs12">
+          {batch.isSet ? `图文 · ${batch.count} 张` : `${batch.count} 张`}
+        </span>
         <span className="mono fs10 t3">{when}</span>
         <div className="f1" />
         {batch.state === "failed" && (

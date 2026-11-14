@@ -23,6 +23,8 @@ use crate::state::AppState;
 /// 作品行落库之后由 `attach_work` 认领。见 `db::repo::names` 的模块注释。
 struct AcceptPlan {
     poster_identity: (String, String),
+    /// 这张图属于哪一组图片包（`poster::set_key`）；进封面库的为空。
+    poster_set: Option<String>,
     snapshot_path: Option<PathBuf>,
     organization_json: String,
     task_id: i64,
@@ -469,6 +471,12 @@ async fn accept_inner(
             .to_string();
         jobs.push(AcceptPlan {
             poster_identity: organization.poster_keys(&row.item_sku, &row.item_style),
+            poster_set: crate::poster::set_key(
+                row.batch_id,
+                &organization,
+                &row.item_sku,
+                &row.item_style,
+            ),
             snapshot_path: PathBuf::from(&src)
                 .starts_with(library_root.join("_草稿"))
                 .then(|| {
@@ -566,6 +574,10 @@ async fn accept_inner(
                 (&plan.poster_identity.0, &plan.poster_identity.1),
                 poster_path,
                 plan.live_photo_dir.is_some(),
+                crate::poster::Placement {
+                    task_id: row.id,
+                    set_key: plan.poster_set.as_deref(),
+                },
             )
             .await?;
         }
@@ -693,7 +705,11 @@ fn rejected_file_paths(image: &Option<String>, thumb: &Option<String>) -> Vec<St
 /// 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
 #[tauri::command]
 #[specta::specta]
-pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> AppResult<i64> {
+pub async fn reject_tasks(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    task_ids: Vec<i64>,
+) -> AppResult<i64> {
     let _guard = state.review_lock.lock().await;
     let mut rejected = 0i64;
     let mut batches: Vec<i64> = Vec::new();
@@ -737,6 +753,8 @@ pub async fn reject_tasks(state: State<'_, AppState>, task_ids: Vec<i64>) -> App
     tx.commit().await?;
 
     for b in &batches {
+        // 这一组剩下的图移进废纸篓后，已通过的那几张就该组成图片包了。
+        crate::commands::poster::settle_sets(app.clone(), *b);
         let _ = task_repo::archive_if_all_terminal(&state.db, *b).await;
         // 验收改变了任务态：补发批次汇总，驱动侧栏「待验收」徽章即时更新。
         state.engine.emit_summary(*b).await;

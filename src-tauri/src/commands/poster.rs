@@ -34,6 +34,20 @@ pub fn start_delivery(app: AppHandle) {
     });
 }
 
+/// 某一次提交下还在收图的图文：有图移进废纸篓或生成失败后，这一组可能已经审完，就地组成。
+/// 只碰这一批的图文，不顺带重试别的失败批次（生成失败可能一下来很多条）。
+pub fn settle_sets(app: AppHandle, gendesk_batch: i64) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let _guard = state.poster_lock.lock().await;
+        if let Err(error) = poster::settle_sets_of(&state.db, &state.dirs.root, gendesk_batch).await
+        {
+            tracing::error!(%error, "结算 Poster 图文失败");
+        }
+        emit(&app);
+    });
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_poster_settings(state: State<'_, AppState>) -> AppResult<PosterSettings> {

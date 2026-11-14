@@ -23,8 +23,8 @@ externalBin，素材在 `resources/live-photo/`）把通过的图转成 JPG + MO
 一个批次，按 `(sku, style)` → 已保存绑定 → 20 款名单（含 `2027明星日历` + `姓名款`）解析 Poster 商品 ID，
 解析不出整批停在「需处理」；商品内的库位（封面库 / 同名图片类型 / 未分类）按归属的 `posterType` 或需求名
 由 `poster::slot` 在交付时解析；开启时 `gendesk submit` 收录前用同一规则检查（`PosterGate`：款式与显式
-posterType），对不上转 hold 不生图，`gendesk poster bind / backfill` 绑定与补导历史成品。两项都开时批次等实况配对落盘再连同视频导入（0050）。只调用 Poster 通用 `export-image-products` /
-`import-images` CLI，不写对方 SQLite。见 `docs/Poster图片接入.md`。
+posterType），对不上转 hold 不生图，`gendesk poster bind / backfill` 绑定与补导历史成品。两项都开时批次等实况配对落盘再连同视频导入（0050）。同一次提交 × 款式 × 需求的通过图等这一组审完组成一条 Poster 图文（`import-image-sets` 带图，先预览再落库，0055），封面图与组成之后才通过的图照旧散进图片库。只调用 Poster 通用 `export-image-products` /
+`import-images` / `import-image-sets` CLI，不写对方 SQLite。见 `docs/Poster图片接入.md`。
 
 ## 常用命令
 

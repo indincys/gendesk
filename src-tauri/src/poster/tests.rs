@@ -102,6 +102,10 @@ async fn accept_one(pool: &SqlitePool, root: &Path, sku: &str, style: &str, live
         (sku, style),
         &path,
         live,
+        Placement {
+            task_id: 1,
+            set_key: None,
+        },
     )
     .await
     .unwrap();
@@ -418,6 +422,54 @@ async fn real_poster_cli_roundtrip() {
     // 保留隔离库与永久文件，供人工核对。
 }
 
+/// 可选的跨应用联调（图片包）：同一组分两次通过、一张移进废纸篓，组成一条图文；再投回 duplicate。
+/// 隔离要求同上；Poster 隔离库里要有「鞠婧祎日历（2027）」。
+#[tokio::test]
+#[ignore = "需显式提供隔离的 Poster CLI 与数据目录"]
+async fn real_poster_image_set_roundtrip() {
+    let root = PathBuf::from(std::env::var("GENDESK_POSTER_E2E_DATA_DIR").expect("需隔离数据目录"));
+    assert!(root.is_absolute() && root.to_string_lossy().contains("_草稿/开发验证/"));
+    std::fs::create_dir_all(&root).unwrap();
+    let pool = crate::db::connect(&root.join("gendesk.db")).await.unwrap();
+    initialize(&pool).await.unwrap();
+    let executable =
+        PathBuf::from(std::env::var("GENDESK_POSTER_E2E_BIN").expect("需隔离 CLI 包装器"));
+    set_settings(&pool, &enabled(&executable)).await;
+    let scene = calendar("鞠婧祎", "桌面场景图");
+    seed_review(
+        &pool,
+        &[(1, scene.clone()), (2, scene.clone()), (3, scene.clone())],
+    )
+    .await;
+    pass(&pool, &root, &[(3, scene.clone())]).await;
+    pass(&pool, &root, &[(1, scene.clone())]).await;
+    sqlx::query("UPDATE tasks SET status='rej' WHERE id=2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver_pending(&pool, &root).await.unwrap();
+    let (id, st, _, material) = set_batches(&pool).await.remove(0);
+    assert_eq!(st, "done", "{:?}", state(&pool, &id).await);
+    let receipt: String = sqlx::query_scalar("SELECT receipt_json FROM poster_batches WHERE id=?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let receipt: client::SetsReceipt = serde_json::from_str(&receipt).unwrap();
+    assert_eq!(receipt.items[0].status, "imported");
+    assert_eq!(receipt.items[0].image_ids.as_ref().unwrap().len(), 2);
+    // 回执丢了再投：同一来源身份回 duplicate，Poster 里不多出一条。
+    sqlx::query("UPDATE poster_batches SET state='failed' WHERE id=?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver_pending(&pool, &root).await.unwrap();
+    let (_, st, _, again) = set_batches(&pool).await.remove(0);
+    assert_eq!((st.as_str(), &again), ("done", &material));
+    println!("Poster 图文素材 ID：{}", material.unwrap());
+}
+
 #[test]
 fn explicit_generic_products_without_legacy_sku_do_not_merge_poster_selection_groups() {
     let a = crate::library::Organization::legacy("陶瓷水杯", "奶油白款", "厨房场景");
@@ -722,5 +774,440 @@ async fn accepted_images_land_in_their_poster_type_or_cover() {
     assert!(
         error.contains("图片类型对不上") && error.contains("侧视图"),
         "{error}"
+    );
+}
+
+// ── 图片包（0055）：同一次提交 × 同一款式 × 同一需求的通过图组成 Poster 里的一条图文 ──
+
+/// 支持 `import-image-sets` 的假 Poster：记下每次调用；图文按来源身份记账，重投回 `duplicate`。
+/// `sets = false` 模拟还不支持带图组图文的旧版。
+#[cfg(unix)]
+fn fake_poster_sets(root: &Path, sets: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("Poster");
+    let script = r##"#!/usr/bin/env python3
+import sys,json,pathlib,hashlib
+here=pathlib.Path(__file__).parent
+with (here/'calls.log').open('a') as f: f.write(' '.join(sys.argv[1:])+'\n')
+def check(entry):
+    assert hashlib.sha256(pathlib.Path(entry['path']).read_bytes()).hexdigest()==entry['sha256']
+cmd=sys.argv[1]
+if cmd=='export-image-products':
+    print(json.dumps({'schema':'poster.images/1','imageTypes':[],'products':[{'id':'tan-id','name':'檀健次日历（2027）'},{'id':'wang-id','name':'王俊凯日历（2027）'}]}))
+elif cmd=='image-import-spec':
+    print(json.dumps({'capabilities':['image-type','cover']}))
+elif cmd=='import-spec':
+    if not SETS: sys.exit(1)
+    print(json.dumps({'schema':'poster.import-spec/1','kind':{'schema':'poster.image-sets/1','fields':{'items[].images':'直接带图'}}}))
+elif cmd=='import-image-sets':
+    data=json.loads(pathlib.Path(sys.argv[2]).read_text())
+    apply='--apply' in sys.argv
+    store=here/'sets.json'
+    sets=json.loads(store.read_text()) if store.exists() else {}
+    for item in data['items']:
+        for img in item['images']:
+            check(img)
+            assert 'productId' not in img and 'purpose' not in img
+    if apply and (here/'fail-sets-once').exists():
+        (here/'fail-sets-once').unlink()
+        sys.exit(7)
+    out=[]
+    for item in data['items']:
+        key=data['sourceId']+'/'+item['externalId']
+        ids=['image-'+i['externalId'] for i in item['images']]
+        base={'externalId':item['externalId'],'productId':item['productId'],'imageIds':ids}
+        if key in sets: out.append(dict(base,id=sets[key]['id'],status='duplicate'))
+        elif apply:
+            sets[key]={'id':'set-'+item['externalId'],'images':[i['externalId'] for i in item['images']]}
+            out.append(dict(base,id=sets[key]['id'],status='imported'))
+        else: out.append(dict(base,status='ready'))
+    store.write_text(json.dumps(sets))
+    data['applied']=apply
+    data['items']=out
+    data['paired']=0
+    print(json.dumps(data))
+else:
+    data=json.loads(pathlib.Path(sys.argv[2]).read_text())
+    for item in data['items']: check(item)
+    data['applied']=True
+    data['items']=[{'externalId':x['externalId'],'productId':x['productId'],'imageId':'image-'+x['externalId'],'status':'imported'} for x in data['items']]
+    print(json.dumps(data))
+"##
+    .replace("SETS", if sets { "True" } else { "False" });
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn calendar(style: &str, requirement: &str) -> Organization {
+    Organization::legacy("2027明星日历", style, requirement)
+}
+
+/// 一次提交（GenDesk 批次 1）下的待验收任务，带归属快照；任务编号即审稿页的组内顺序。
+async fn seed_review(pool: &SqlitePool, tasks: &[(i64, Organization)]) {
+    sqlx::query("INSERT OR IGNORE INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
+    sqlx::query("INSERT OR IGNORE INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/f','/t',1,1,1,0)").execute(pool).await.unwrap();
+    sqlx::query("INSERT OR IGNORE INTO batches (id,created_at,output_dir,params_json,status) VALUES (1,0,'/out','{}','running')").execute(pool).await.unwrap();
+    for (task, organization) in tasks {
+        sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (?,1,?,'t','active','library',0,0)")
+            .bind(task).bind(format!("GG-{task:04}")).execute(pool).await.unwrap();
+        let params = serde_json::json!({ "organization": organization }).to_string();
+        sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at,params_json) VALUES (?,1,1,?,'t','rev',0,0,?)")
+            .bind(task).bind(task).bind(params).execute(pool).await.unwrap();
+    }
+}
+
+/// 模拟一次验收（按 ⏎、通过所选或通过本组都一样）：登记这些任务的图，任务置 pass。
+async fn pass(pool: &SqlitePool, root: &Path, tasks: &[(i64, Organization)]) -> String {
+    let id = new_id();
+    assert!(begin_review(pool, root, &id).await.unwrap());
+    for (task, organization) in tasks {
+        let path = root.join("成品").join(format!("task{task}.png"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([*task as u8, 100, 110]))
+            .save(&path)
+            .unwrap();
+        let (sku, style) = organization.poster_keys("", "");
+        let key = set_key(1, organization, "", "");
+        let mut tx = pool.begin().await.unwrap();
+        // 与真实验收一样，作品行（含归属快照）和台账在同一事务里写。
+        let work_id: i64 = sqlx::query_scalar(
+            "INSERT INTO accepted_works(image_path,thumb_path,prompt_text,accepted_at,item_name,uid,style,organization_json,task_id)
+            VALUES(?,'','',0,'桌面场景',?,'',?,?) RETURNING id",
+        )
+        .bind(path.to_string_lossy().as_ref())
+        .bind(format!("u{task:03}"))
+        .bind(serde_json::to_string(organization).unwrap())
+        .bind(task)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        track_image(
+            &mut tx,
+            &id,
+            work_id,
+            &format!("u{task:03}"),
+            "桌面场景",
+            (&sku, &style),
+            &path,
+            false,
+            Placement {
+                task_id: *task,
+                set_key: key.as_deref(),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET status='pass' WHERE id=?")
+            .bind(task)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    finish_review(pool, &id).await.unwrap();
+    id
+}
+
+fn calls(root: &Path, command: &str) -> Vec<String> {
+    std::fs::read_to_string(root.join("calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with(command))
+        .map(String::from)
+        .collect()
+}
+
+async fn set_batches(pool: &SqlitePool) -> Vec<(String, String, Option<String>, Option<String>)> {
+    sqlx::query_as(
+        "SELECT id,state,request_json,material_id FROM poster_batches WHERE set_key IS NOT NULL ORDER BY created_at,rowid",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn passes_of_one_group_wait_for_the_group_then_become_one_image_set_in_task_order() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(&fake_poster_sets(root.path(), true))).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    let group: Vec<_> = (1..=4).map(|t| (t, scene.clone())).collect();
+    seed_review(&pool, &group).await;
+
+    // 不满意第 4 张：先单张通过第 3 张，再通过所选第 1 张——同一组，分两次点。
+    let first = pass(&pool, root.path(), &[(3, scene.clone())]).await;
+    let second = pass(&pool, root.path(), &[(1, scene.clone())]).await;
+    let sets = set_batches(&pool).await;
+    assert_eq!(sets.len(), 1, "同一组只有一条图文");
+    // 两次验收自己的散图批次一张都没收，已删掉。
+    for loose in [&first, &second] {
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poster_batches WHERE id=?")
+            .bind(loose)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert_eq!(state(&pool, &sets[0].0).await.0, "queued", "还有图待审就等");
+    assert!(calls(root.path(), "import-image-sets").is_empty());
+    let listed = batches(&pool).await.unwrap();
+    assert!(listed[0].is_set && listed[0].count == 2 && listed[0].waiting_review == 2);
+
+    // 第 4 张移进废纸篓、第 2 张通过：这一组审完，组成一条图文。
+    sqlx::query("UPDATE tasks SET status='rej' WHERE id=4")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, root.path(), &[(2, scene.clone())]).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let sets = set_batches(&pool).await;
+    assert_eq!(sets.len(), 1);
+    let (id, st, request, material) = &sets[0];
+    assert_eq!(st, "done");
+    assert_eq!(material.as_deref(), Some(format!("set-{id}").as_str()));
+    let request: client::SetsRequest = serde_json::from_str(request.as_deref().unwrap()).unwrap();
+    assert_eq!(request.schema, client::SETS_SCHEMA);
+    assert_eq!(request.items.len(), 1);
+    let item = &request.items[0];
+    assert_eq!(item.product_id, "tan-id");
+    let order: Vec<_> = item.images.iter().map(|i| i.external_id.as_str()).collect();
+    assert_eq!(
+        order,
+        ["u001", "u002", "u003"],
+        "按任务编号排，第 1 张是封面"
+    );
+    // 先预览，再落库；从不走散图导入。
+    let set_calls = calls(root.path(), "import-image-sets");
+    assert_eq!(set_calls.len(), 2);
+    assert!(!set_calls[0].ends_with("--apply") && set_calls[1].ends_with("--apply"));
+    assert!(calls(root.path(), "import-images").is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn image_set_retry_reuses_frozen_request_and_never_creates_a_second_set() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(&fake_poster_sets(root.path(), true))).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    seed_review(&pool, &[(1, scene.clone()), (2, scene.clone())]).await;
+    std::fs::write(root.path().join("fail-sets-once"), "").unwrap();
+    pass(
+        &pool,
+        root.path(),
+        &[(2, scene.clone()), (1, scene.clone())],
+    )
+    .await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let (id, st, frozen, _) = set_batches(&pool).await.remove(0);
+    assert_eq!(st, "failed");
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let (_, st, again, material) = set_batches(&pool).await.remove(0);
+    assert_eq!(st, "done");
+    assert_eq!(frozen, again, "重试原样复用冻结的请求");
+    // 回执丢了再投一次：Poster 认出同一来源身份，回 duplicate，不会多出一条。
+    sqlx::query("UPDATE poster_batches SET state='failed' WHERE id=?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let (_, st, _, again_material) = set_batches(&pool).await.remove(0);
+    assert_eq!((st.as_str(), again_material), ("done", material));
+    let store: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.path().join("sets.json")).unwrap())
+            .unwrap();
+    assert_eq!(store.as_object().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn styles_split_into_separate_sets_covers_and_late_passes_stay_loose() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(&fake_poster_sets(root.path(), true))).await;
+    let tan = calendar("檀健次", "桌面场景图");
+    let wang = calendar("王俊凯", "桌面场景图");
+    let cover = calendar("檀健次", "封面");
+    assert_eq!(set_key(1, &cover, "", ""), None, "封面进封面库，不组图文");
+    // 同一场景一次给两款生图：各款各成一条图文，进各自的商品。
+    seed_review(
+        &pool,
+        &[
+            (1, tan.clone()),
+            (2, wang.clone()),
+            (3, tan.clone()),
+            (4, cover.clone()),
+            (5, tan.clone()),
+        ],
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET status='fail' WHERE id=5")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(
+        &pool,
+        root.path(),
+        &[
+            (1, tan.clone()),
+            (2, wang.clone()),
+            (3, tan.clone()),
+            (4, cover.clone()),
+        ],
+    )
+    .await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let sets = set_batches(&pool).await;
+    assert_eq!(sets.len(), 2);
+    let mut products = sets
+        .iter()
+        .map(|(_, st, request, _)| {
+            assert_eq!(st, "done", "生成失败的第 5 张不拦着这一组");
+            let request: client::SetsRequest =
+                serde_json::from_str(request.as_deref().unwrap()).unwrap();
+            (
+                request.items[0].product_id.clone(),
+                request.items[0].images.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    products.sort();
+    assert_eq!(
+        products,
+        [("tan-id".to_string(), 2), ("wang-id".to_string(), 1)]
+    );
+    // 封面走散图导入进封面库。
+    let loose: Vec<String> = sqlx::query_scalar(
+        "SELECT request_json FROM poster_batches WHERE set_key IS NULL AND state='done'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(loose.len(), 1);
+    let request: client::Request = serde_json::from_str(&loose[0]).unwrap();
+    assert_eq!(request.items.len(), 1);
+    assert_eq!(
+        request.items[0].purpose.as_deref(),
+        Some(client::PURPOSE_COVER)
+    );
+
+    // 失败的第 5 张恢复后通过：这一组的图文已经组成，没法再往里加，散进图片库，不另起一条。
+    sqlx::query("UPDATE tasks SET status='rev' WHERE id=5")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, root.path(), &[(5, tan.clone())]).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert_eq!(set_batches(&pool).await.len(), 2);
+    let loose: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM poster_batches WHERE set_key IS NULL AND state='done'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(loose, 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn old_poster_without_image_sets_fails_with_update_hint_and_keeps_the_set() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(&fake_poster_sets(root.path(), false))).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    seed_review(&pool, &[(1, scene.clone())]).await;
+    pass(&pool, root.path(), &[(1, scene.clone())]).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    let (id, ..) = set_batches(&pool).await.remove(0);
+    let (st, error) = state(&pool, &id).await;
+    assert_eq!(st, "failed");
+    assert!(error.contains("更新 Poster"), "{error}");
+    assert!(calls(root.path(), "import-image-sets").is_empty());
+
+    // 更新 Poster 后重试即导入。
+    fake_poster_sets(root.path(), true);
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert_eq!(state(&pool, &id).await.0, "done");
+}
+
+#[tokio::test]
+async fn settling_one_submission_leaves_other_submissions_sets_alone() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(Path::new("/missing/Poster"))).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    seed_review(&pool, &[(1, scene.clone())]).await;
+    pass(&pool, root.path(), &[(1, scene.clone())]).await;
+    // 别的提交（批次 2）结算时不碰批次 1 的图文。
+    settle_sets_of(&pool, root.path(), 2).await.unwrap();
+    let (id, ..) = set_batches(&pool).await.remove(0);
+    assert_eq!(state(&pool, &id).await, ("queued".into(), String::new()));
+    // 本批结算时去交付（读不到 Poster 就停在需处理、写明原因）。
+    settle_sets_of(&pool, root.path(), 1).await.unwrap();
+    assert_eq!(state(&pool, &id).await.0, "failed");
+}
+
+#[test]
+fn set_receipt_must_match_the_group_images_and_product() {
+    let image = |id: &str| client::SetImage {
+        external_id: id.into(),
+        path: String::new(),
+        sha256: String::new(),
+        byte_size: 1,
+        source: "ai".into(),
+        type_id: None,
+        live_video: None,
+    };
+    let request = client::SetsRequest {
+        schema: client::SETS_SCHEMA.into(),
+        source_id: "s".into(),
+        batch_id: "b".into(),
+        items: vec![client::SetItem {
+            external_id: "b".into(),
+            product_id: "p".into(),
+            images: vec![image("u1"), image("u2")],
+        }],
+    };
+    let receipt = |status: &str, applied: bool, product: &str, ids: &[&str]| client::SetsReceipt {
+        schema: client::SETS_SCHEMA.into(),
+        source_id: "s".into(),
+        batch_id: "b".into(),
+        applied,
+        paired: 0,
+        items: vec![client::SetResult {
+            external_id: "b".into(),
+            product_id: product.into(),
+            id: (status != "ready").then(|| "m".into()),
+            status: status.into(),
+            image_ids: Some(ids.iter().map(|s| s.to_string()).collect()),
+        }],
+    };
+    let check = |r| client::validate_sets_receipt(&request, &r, r.applied).is_ok();
+    assert!(check(receipt("ready", false, "p", &["i1", "i2"])));
+    assert!(check(receipt("imported", true, "p", &["i1", "i2"])));
+    assert!(check(receipt("duplicate", true, "p", &["i1", "i2"])));
+    assert!(check(receipt("deleted", true, "p", &[])));
+    assert!(!check(receipt("imported", true, "p", &["i1"])), "少一张");
+    assert!(
+        !check(receipt("imported", true, "other", &["i1", "i2"])),
+        "商品不对"
+    );
+    assert!(
+        !check(receipt("ready", true, "p", &["i1", "i2"])),
+        "落库回执还是预览态"
+    );
+    assert!(
+        client::validate_sets_receipt(
+            &request,
+            &receipt("imported", true, "p", &["i1", "i2"]),
+            false
+        )
+        .is_err(),
+        "预览不该已落库"
     );
 }

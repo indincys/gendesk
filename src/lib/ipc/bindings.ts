@@ -2282,7 +2282,15 @@ export type PosterBatch = { id: string; createdAt: number; state: string; lastEr
 /**
  * 仍在等实况图配对的张数（>0 时批次排队但暂不导入）。
  */
-waitingLive: number }
+waitingLive: number; 
+/**
+ * 这一批是一条图文（图片包），不是散进图片库的图。
+ */
+isSet: boolean; 
+/**
+ * 图文还在收图时，这一组还没审完的张数（>0 时等审完再组成）。
+ */
+waitingReview: number }
 export type PosterChanged = { at: number }
 export type PosterChoice = { key: string; productId: string }
 export type PosterGroup = { key: string; sku: string; style: string; count: number; productId: string | null; warning: string }

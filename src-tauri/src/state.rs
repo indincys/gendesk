@@ -24,6 +24,7 @@ pub struct AppState {
     pub review_lock: tokio::sync::Mutex<()>,
     pub poster_lock: tokio::sync::Mutex<()>,
     pub live_photo_wake: tokio::sync::Notify,
+    pub codex_review_wake: tokio::sync::Notify,
 }
 
 impl AppState {
@@ -44,6 +45,7 @@ impl AppState {
             review_lock: tokio::sync::Mutex::new(()),
             poster_lock: tokio::sync::Mutex::new(()),
             live_photo_wake: tokio::sync::Notify::new(),
+            codex_review_wake: tokio::sync::Notify::new(),
         }
     }
 }

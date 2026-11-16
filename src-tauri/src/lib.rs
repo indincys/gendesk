@@ -3,6 +3,7 @@
 //! 业务真相只在 Rust（技术文档 §1 铁律）；前端仅经 `src/lib/ipc/` 出入。
 //! IPC 契约由 tauri-specta 在此集中登记，自动导出到 `src/lib/ipc/bindings.ts`。
 
+mod codex_review;
 mod commands;
 mod control;
 mod db;
@@ -528,10 +529,11 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 应用内更新：启动后与每 6 小时自查一次，后台下载，界面只负责「重启安装」。
     commands::updater::start(app.handle().clone());
 
-    // Agent CLI 控制通道。隔离数据目录的调试实例不覆盖正式连接文件。
-    if let Err(err) = control::start(app.handle().clone(), debug_data_dir_override().is_none()) {
+    // 调试验收的连接文件与收件目录位于隔离数据根。
+    if let Err(err) = control::start(app.handle().clone()) {
         tracing::warn!(error = %err, "CLI 控制通道启动失败");
     }
+    codex_review::start(app.handle().clone());
 
     // 视频流水线：后台轮询已提交条目。
     v2v::runner::spawn(

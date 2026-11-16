@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -326,6 +327,66 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
 }
 
 const commands = (f) => f.calls.map((c) => c.cmd);
+
+test("review MCP restricts calls to the assigned intake and preserves deduplication", async (t) => {
+  const f = await fixture(t);
+  const sample = "sample";
+  const next = "codex-review-12-pass";
+  const group = "staged-review";
+  const manifest = path.join(f.input, "formal.json");
+  await fs.writeFile(
+    manifest,
+    JSON.stringify({
+      version: 1,
+      jobId: next,
+      posterBatch: { id: group, final: true },
+      organization: { product: "测试", style: "测试", requirement: "试样验收", source: "test" },
+      items: [{ name: "正式图", promptFile: "桌面场景.txt", ref: "商品实拍.png" }],
+    }),
+  );
+  const proc = spawn(process.execPath, [cli, "__review-mcp", f.input, sample, next, group], {
+    env: { ...process.env, GENDESK_HANDOFF_DIR: f.root },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let output = "";
+  proc.stdout.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  const calls = [
+    ["status", "another-job"],
+    ["library", "pack", "--export", f.root],
+    ["submit", "--manifest", path.join(f.root, "连接.json")],
+    ["submit", "--manifest", manifest],
+    ["submit", "--manifest", manifest],
+  ];
+  const exited = once(proc, "close");
+  proc.stdin.end(
+    `${calls
+      .map((args, id) =>
+        JSON.stringify({
+          id,
+          method: "tools/call",
+          params: { name: "gendesk", arguments: { args } },
+        }),
+      )
+      .join("\n")}\n`,
+  );
+  assert.deepEqual(await exited, [0, null]);
+  const parsed = output
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line).result);
+  assert.deepEqual(
+    parsed.slice(0, 3).map((r) => r.isError),
+    [true, true, true],
+  );
+  const outcomes = parsed.slice(3).map((r) => JSON.parse(r.content[0].text));
+  assert.deepEqual(
+    outcomes.map((r) => r.status),
+    ["ingested", "ingested"],
+  );
+  assert.equal(commands(f).filter((c) => c === "intake.submit").length, 1);
+});
 
 test("version works without a connection and matches the application release", async (t) => {
   const f = await fixture(t, { online: false });

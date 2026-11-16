@@ -146,6 +146,9 @@ pub fn filename(name: &str, identity: &str, at: i64, ext: &str) -> String {
 }
 
 pub fn default_root() -> PathBuf {
+    if let Some(root) = crate::debug_data_dir_override() {
+        return root.join("作品库");
+    }
     crate::poster::home().join("GenDesk作品库")
 }
 

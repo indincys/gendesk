@@ -111,6 +111,9 @@ pub const ORDER_VERSION: i64 = 1;
 /// **故意不放在应用数据目录里**：那个路径随 bundle id 变化，而 CLI 要把连接文件的
 /// 位置写死才能做到「什么都不用输入」。主目录下的固定名字跨平台稳定、用户找得到。
 pub fn default_root() -> PathBuf {
+    if let Some(root) = crate::debug_data_dir_override() {
+        return root.join("交接");
+    }
     crate::poster::home().join("GenDesk交接")
 }
 
@@ -156,6 +159,7 @@ pub struct OrderSpec {
     pub mode: Option<String>,
     /// Explicit Poster grouping across separate intake submissions.
     pub poster_batch: Option<crate::poster::intake_group::Spec>,
+    pub codex_review: Option<crate::codex_review::Target>,
     pub items: Vec<ItemSpec>,
 }
 
@@ -261,6 +265,7 @@ pub struct Plan {
     /// 外部成图导入单：不建待生成任务，直接把 `PlannedItem::result_path` 放进待验收。
     pub import: bool,
     pub poster_batch: Option<crate::poster::intake_group::Spec>,
+    pub codex_review: Option<crate::codex_review::Target>,
     pub items: Vec<PlannedItem>,
 }
 
@@ -546,6 +551,17 @@ fn plan_with_inputs(
     if let Some(group) = &spec.poster_batch {
         crate::poster::intake_group::validate_id(&group.id)?;
     }
+    if let Some(target) = &spec.codex_review {
+        target.validate()?;
+        if spec.items.len() != 1
+            || !spec
+                .poster_batch
+                .as_ref()
+                .is_some_and(|group| !group.final_import)
+        {
+            return Err("codexReview 只用于一张试样，且 posterBatch.final 必须为 false".into());
+        }
+    }
     let job_id = spec
         .job_id
         .as_deref()
@@ -773,6 +789,7 @@ fn plan_with_inputs(
             .map(str::to_string),
         import,
         poster_batch: spec.poster_batch.clone(),
+        codex_review: spec.codex_review.clone(),
         items,
     })
 }

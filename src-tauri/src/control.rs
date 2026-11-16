@@ -35,6 +35,7 @@ pub const FEATURES: &[&str] = &[
     "external-results",
     "staged-poster-batches",
     "staged-poster-generation",
+    "codex-review-continuation",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。
@@ -71,14 +72,12 @@ pub fn connection_path() -> PathBuf {
 }
 
 /// 启动监听并写连接文件。失败只影响 CLI，不阻断应用启动。
-pub fn start(app: AppHandle, publish: bool) -> AppResult<()> {
+pub fn start(app: AppHandle) -> AppResult<()> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = crate::poster::new_id();
-    if publish {
-        write_connection(port, &token)?;
-    }
+    write_connection(port, &token)?;
     let _ = LISTENING.set(port);
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::from_std(listener) {
@@ -331,6 +330,7 @@ async fn dispatch_inner(app: &AppHandle, cmd: &str, args: Value) -> AppResult<Va
                 crate::db::repo::intake::get_by_job_id(&state.db, arg(&args, "jobId")?).await?;
             with_picks(&state, json!({ "job": job })).await
         }
+        "review.status" => crate::codex_review::status(&state.db, arg(&args, "jobId")?).await,
         library if library.starts_with("library.") => {
             library_command(app, &state, library, &args).await
         }

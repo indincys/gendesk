@@ -2530,6 +2530,57 @@ mod tests {
         assert_eq!(count(&pool, "tasks").await, 2);
     }
 
+    #[tokio::test]
+    async fn generation_submissions_share_a_poster_group_before_any_task_runs() {
+        let (pool, data) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        make_job(
+            home.path(),
+            "a-试样",
+            r#","posterBatch":{"id":"staged-generated","final":false}"#,
+            &simple("试样"),
+        );
+        let sample = submit(&ctx, home.path(), "a-试样").await.unwrap().unwrap();
+        assert_eq!(sample.status, "done", "{}", sample.message);
+        let open: bool = sqlx::query_scalar(
+            "SELECT NOT closed FROM poster_intake_groups WHERE id='staged-generated'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(open);
+
+        make_job(
+            home.path(),
+            "b-续作",
+            r#","posterBatch":{"id":"staged-generated","final":true}"#,
+            &[
+                ("近景", "近景正文", "b.png", ""),
+                ("中景", "中景正文", "c.png", ""),
+            ],
+        );
+        let rest = submit(&ctx, home.path(), "b-续作").await.unwrap().unwrap();
+        assert_eq!(rest.status, "done", "{}", rest.message);
+        assert_ne!(sample.batch_ids, rest.batch_ids);
+        let linked: Vec<(String, bool, String)> = sqlx::query_as(
+            "SELECT g.id,g.closed,t.status FROM tasks t JOIN batches b ON b.id=t.batch_id
+            JOIN poster_intake_groups g ON g.id=b.poster_group_id ORDER BY t.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            linked,
+            vec![("staged-generated".into(), true, "q".into()); 3]
+        );
+        assert_eq!(
+            kick.0.load(Ordering::SeqCst),
+            2,
+            "两次生图投单都正常唤醒调度器"
+        );
+    }
+
     /// 导入单缺成图、生图单夹带成图、导入单按分类随机抽参考图，都整单拒收、什么都不导入。
     #[tokio::test]
     async fn result_fields_must_match_the_order_mode() {

@@ -154,7 +154,7 @@ pub struct OrderSpec {
     /// 不调用生图、不花钱，任务直接进待验收）。**整单级**：一单里混着生成与导入，
     /// 交付侧就分不清哪张是谁出的。
     pub mode: Option<String>,
-    /// Explicit Poster grouping across separate imports of externally generated images.
+    /// Explicit Poster grouping across separate intake submissions.
     pub poster_batch: Option<crate::poster::intake_group::Spec>,
     pub items: Vec<ItemSpec>,
 }
@@ -544,9 +544,6 @@ fn plan_with_inputs(
         }
     };
     if let Some(group) = &spec.poster_batch {
-        if !import {
-            return Err("posterBatch 只用于外部成图导入（gendesk import）".into());
-        }
         crate::poster::intake_group::validate_id(&group.id)?;
     }
     let job_id = spec

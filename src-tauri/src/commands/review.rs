@@ -618,7 +618,11 @@ async fn accept_inner(
         if let Some(dir) = &plan.live_photo_dir {
             crate::live_photo::enqueue(&mut tx, out_path, dir).await?;
         }
+        let wake_codex = crate::codex_review::decide(&mut tx, row.id, "pass", at).await?;
         tx.commit().await?;
+        if wake_codex {
+            state.codex_review_wake.notify_one();
+        }
         if let Some(snapshot) = &plan.snapshot_path {
             copied_guard.preserve(snapshot);
             if let Err(e) = std::fs::remove_file(src) {
@@ -729,6 +733,7 @@ pub async fn reject_tasks(
     let _guard = state.review_lock.lock().await;
     let mut rejected = 0i64;
     let mut batches: Vec<i64> = Vec::new();
+    let mut wake_codex = false;
     let at = now_unix();
     let rows = accept_rows(&state.db, &task_ids).await?;
     let mut tx = state.db.begin().await?;
@@ -761,12 +766,16 @@ pub async fn reject_tasks(
             },
         )
         .await?;
+        wake_codex |= crate::codex_review::decide(&mut tx, row.id, "reject", at).await?;
         rejected += 1;
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
     }
     tx.commit().await?;
+    if wake_codex {
+        state.codex_review_wake.notify_one();
+    }
 
     for b in &batches {
         // 这一组剩下的图移进废纸篓后，已通过的那几张就该组成图片包了。

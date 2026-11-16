@@ -547,6 +547,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     if let Some(group) = &plan.poster_batch {
         crate::poster::intake_group::check(&ctx.pool, group).await?;
     }
+    crate::codex_review::check(&ctx.pool, plan).await?;
     let mut tx = ctx.pool.begin().await?;
     checkpoint.save(&mut tx, plan, row_id, false).await?;
     tx.commit().await?;
@@ -786,6 +787,7 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     if let Some(group) = &plan.poster_batch {
         crate::poster::intake_group::attach(&mut tx, batch_id, group).await?;
     }
+    crate::codex_review::register(&mut tx, plan, batch_id).await?;
     if plan.import {
         let task_ids: Vec<i64> =
             sqlx::query_scalar("SELECT id FROM tasks WHERE batch_id = ?1 ORDER BY id")
@@ -2579,6 +2581,96 @@ mod tests {
             2,
             "两次生图投单都正常唤醒调度器"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_review_pass_and_reject_each_allow_only_their_own_next_intake() {
+        let (pool, data) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        let (ctx, kick) = ctx_for(&pool, data.path(), 100);
+        let target = serde_json::json!({
+            "threadId":"0194388e-f401-7f64-b86b-aac993e27140",
+            "cwd":data.path()
+        });
+        for decision in ["pass", "reject"] {
+            let sample_id = format!("sample-{decision}");
+            let poster_id = format!("poster-{decision}");
+            let sample_header = format!(
+                r#","posterBatch":{{"id":"{poster_id}","final":false}},"codexReview":{target}"#
+            );
+            make_job(home.path(), &sample_id, &sample_header, &simple("试样"));
+            let sample = submit(&ctx, home.path(), &sample_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample.status, "done", "{}", sample.message);
+            let before = crate::codex_review::status(&pool, &sample_id)
+                .await
+                .unwrap();
+            assert!(before["decision"].is_null());
+            let task = before["taskId"].as_i64().unwrap();
+
+            let mut tx = pool.begin().await.unwrap();
+            assert!(crate::codex_review::decide(&mut tx, task, decision, 1)
+                .await
+                .unwrap());
+            tx.rollback().await.unwrap();
+            assert_eq!(
+                crate::codex_review::status(&pool, &sample_id)
+                    .await
+                    .unwrap(),
+                before
+            );
+
+            let mut tx = pool.begin().await.unwrap();
+            assert!(crate::codex_review::decide(&mut tx, task, decision, 2)
+                .await
+                .unwrap());
+            assert!(!crate::codex_review::decide(&mut tx, task, decision, 3)
+                .await
+                .unwrap());
+            tx.commit().await.unwrap();
+            let event = crate::codex_review::status(&pool, &sample_id)
+                .await
+                .unwrap();
+            assert_eq!(event["decision"], decision);
+            let next = event["nextJobId"].as_str().unwrap();
+
+            // A different job ID can't bypass the stable event ID and enqueue extra generation.
+            let wrong_id = format!("wrong-{decision}");
+            make_job(home.path(), &wrong_id, &sample_header, &simple("误投"));
+            let wrong = submit(&ctx, home.path(), &wrong_id).await.unwrap().unwrap();
+            assert_eq!(wrong.status, "error");
+            assert!(wrong.message.contains("续作工单 ID"), "{}", wrong.message);
+
+            let header = if decision == "pass" {
+                format!(r#","posterBatch":{{"id":"{poster_id}","final":true}}"#)
+            } else {
+                sample_header
+            };
+            make_job(home.path(), next, &header, &simple("续作"));
+            let result = submit(&ctx, home.path(), next).await.unwrap().unwrap();
+            assert_eq!(result.status, "done", "{}", result.message);
+            let closed: bool =
+                sqlx::query_scalar("SELECT closed FROM poster_intake_groups WHERE id=?")
+                    .bind(&poster_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(closed, decision == "pass");
+            let new_review = crate::codex_review::status(&pool, next).await.unwrap();
+            if decision == "reject" {
+                assert_eq!(new_review["batchId"], result.batch_ids[0]);
+                assert!(new_review["decision"].is_null());
+            } else {
+                assert!(new_review.is_null());
+            }
+            let before = count(&pool, "tasks").await;
+            make_job(home.path(), next, &header, &simple("续作"));
+            assert!(submit(&ctx, home.path(), next).await.unwrap().is_none());
+            assert_eq!(count(&pool, "tasks").await, before);
+        }
+        assert_eq!(kick.0.load(Ordering::SeqCst), 4);
     }
 
     /// 导入单缺成图、生图单夹带成图、导入单按分类随机抽参考图，都整单拒收、什么都不导入。

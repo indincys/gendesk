@@ -3,15 +3,16 @@
 // (127.0.0.1 + per-launch token from ~/GenDesk交接/连接.json). Imports, scheduling,
 // keys and review stay inside GenDesk's Rust backend; this client only packages
 // orders and forwards commands.
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-import { parseArgs } from "node:util";
+import { parseArgs, promisify } from "node:util";
 
 // This file is installed standalone. The installer and tests check the release version.
 const CLI_VERSION = "0.45.1";
@@ -34,6 +35,7 @@ gendesk import --result <成图> --prompt <正文.txt> --ref <参考图>
                外部（如 Codex）已生成的图直接进 GenDesk 待验收：不调用生图、不花钱；
                清单每条比生图清单多一个 result（成图路径），参考图写当时实际用的那几张
 gendesk status <jobId>
+gendesk review status <试样jobId>  查看原聊天的验收事件、续作工单 ID 与投递状态
 gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
 gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
 gendesk overview             任务各态数量与视频待办
@@ -311,6 +313,7 @@ async function prepare(opts, mode) {
       "items",
       "organization",
       "posterBatch",
+      "codexReview",
     ],
     "清单",
   );
@@ -327,6 +330,23 @@ async function prepare(opts, mode) {
     check(
       typeof spec.posterBatch.final === "boolean",
       "posterBatch.final 必须明确写 true 或 false",
+    );
+  }
+  if (spec.codexReview !== undefined) {
+    const target = spec.codexReview;
+    knownKeys(target, ["threadId", "cwd"], "codexReview");
+    check(
+      typeof target.threadId === "string" &&
+        /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(target.threadId),
+      "codexReview.threadId 必须是原 Codex 聊天的 UUID",
+    );
+    check(
+      typeof target.cwd === "string" && path.isAbsolute(target.cwd),
+      "codexReview.cwd 必须是原 Codex 聊天的工作目录绝对路径",
+    );
+    check(
+      spec.items.length === 1 && spec.posterBatch?.final === false,
+      "codexReview 只用于一张试样，且 posterBatch.final 必须为 false",
     );
   }
   check(
@@ -501,7 +521,9 @@ async function prepare(opts, mode) {
 
 // ---------------------------------------------------------------- 连接
 
-const ROOT = path.join(os.homedir(), "GenDesk交接");
+const ROOT = process.env.GENDESK_HANDOFF_DIR
+  ? path.resolve(process.env.GENDESK_HANDOFF_DIR)
+  : path.join(os.homedir(), "GenDesk交接");
 const CONNECTION = path.join(ROOT, "连接.json");
 const pendingDir = (root) => path.join(root, "生图", "收件");
 const consumedDir = (root) => path.join(root, "生图", "_已收录");
@@ -658,6 +680,13 @@ async function nativePreflight(conn, prepared) {
     "当前 GenDesk 应用不支持分次提交同一 Poster 批次。请更新并重启 GenDesk",
     8,
   );
+  const target = prepared.order.codexReview;
+  check(
+    !target ||
+      (report.codexReview?.threadId === target.threadId && report.codexReview?.cwd === target.cwd),
+    "当前 GenDesk 应用不支持在试样验收后恢复 Codex。请更新并重启 GenDesk",
+    8,
+  );
   return report;
 }
 
@@ -791,6 +820,7 @@ async function submit(prepared) {
     );
   if (prepared.librarySlots > 0) requireFeature(hello, "reference-library");
   if (prepared.importing) requireFeature(hello, "external-results", "外部成图导入");
+  if (order.codexReview) requireFeature(hello, "codex-review-continuation", "试样验收恢复原聊天");
   if (order.posterBatch) {
     requireFeature(
       hello,
@@ -1309,6 +1339,7 @@ const COMMANDS = {
   submit: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
   import: { positionals: 0, options: ["manifest", "job-id", ...SINGLE_OPTIONS] },
   status: { positionals: 1, options: [] },
+  review: { positionals: 2, options: [] },
   confirm: { positionals: 1, options: [] },
   retry: { positionals: 1, options: [] },
   overview: { positionals: 0, options: [] },
@@ -1422,6 +1453,15 @@ async function main() {
       result = { status: "ok", ...(await rpc(conn, "overview")) };
       break;
     }
+    case "review": {
+      check(rest[0] === "status", "用法：gendesk review status <试样jobId>");
+      const jobId = requiredText(rest[1], "试样jobId");
+      const { conn, hello } = await connect({ launch: false });
+      requireFeature(hello, "codex-review-continuation", "试样验收恢复原聊天");
+      const review = await rpc(conn, "review.status", { jobId });
+      result = review ? { status: "ok", ...review } : { status: "not_found", jobId };
+      break;
+    }
     case "library":
       result = await library(rest[0], rest.slice(1), opts);
       break;
@@ -1447,7 +1487,107 @@ async function main() {
   process.exitCode = exitCode(result);
 }
 
-main().catch((e) => {
+// A resumed turn runs inside the usual Codex sandbox. This local MCP tool
+// carries only the original sample, its next job and read-only library calls.
+async function serveReview([cwd, sample, next, group]) {
+  const workspace = await fs.realpath(cwd);
+  check(sample && next?.startsWith("codex-review-") && group, "验收续作上下文不完整");
+  const exec = promisify(execFile);
+  const tool = {
+    name: "gendesk",
+    description:
+      "Run GenDesk CLI for this review only. Pass argv without the executable. Supports doctor, overview, status, review status, library previews, validate/submit/import --manifest <workspace file>, and retry of the assigned job. Use this tool in place of shell gendesk.",
+    inputSchema: {
+      type: "object",
+      properties: { args: { type: "array", items: { type: "string" } } },
+      required: ["args"],
+      additionalProperties: false,
+    },
+  };
+  async function call(args) {
+    check(
+      Array.isArray(args) && args.every((arg) => typeof arg === "string"),
+      "args 必须为字符串数组",
+    );
+    const [cmd, sub, value] = args;
+    let argv = args;
+    if (["validate", "submit", "import"].includes(cmd)) {
+      check(args.length === 3 && sub === "--manifest", "请提供 --manifest 和本聊天内的清单路径");
+      const manifest = await fs.realpath(path.resolve(workspace, value));
+      const relative = path.relative(workspace, manifest);
+      check(
+        !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative),
+        "续作清单必须位于原聊天项目内",
+      );
+      const spec = JSON.parse(await fs.readFile(manifest, "utf8"));
+      check(spec.jobId === next && spec.posterBatch?.id === group, "这份清单不属于当前验收事件");
+      argv = [cmd, sub, manifest, "--job-id", next];
+    } else {
+      const allowed =
+        (["doctor", "overview"].includes(cmd) && args.length === 1) ||
+        (cmd === "status" && args.length === 2 && [sample, next].includes(sub)) ||
+        (cmd === "retry" && args.length === 2 && sub === next) ||
+        (cmd === "review" &&
+          sub === "status" &&
+          args.length === 3 &&
+          [sample, next].includes(value)) ||
+        (cmd === "library" &&
+          ["overview", "images", "pick", "pack", "usage"].includes(sub) &&
+          !args.slice(2).some((arg) => /^--(export|mark-used|spec)(=|$)/.test(arg))) ||
+        (cmd === "poster" && sub === "resolve");
+      check(allowed, "该命令超出当前 GenDesk 验收续作范围");
+    }
+    const { stdout } = await exec(process.execPath, [process.argv[1], ...argv], {
+      cwd: workspace,
+      timeout: 300000,
+      maxBuffer: 24 * 1024 * 1024,
+      env: { ...process.env, GENDESK_LAUNCH: "0" },
+    }).catch((error) => {
+      if (error.stdout) return { stdout: error.stdout };
+      throw error;
+    });
+    return stdout;
+  }
+
+  for await (const line of createInterface({
+    input: process.stdin,
+    crlfDelay: Number.POSITIVE_INFINITY,
+  })) {
+    const msg = JSON.parse(line);
+    if (msg.id === undefined) continue;
+    const response = { jsonrpc: "2.0", id: msg.id };
+    switch (msg.method) {
+      case "initialize":
+        response.result = {
+          protocolVersion: msg.params.protocolVersion,
+          capabilities: { tools: {} },
+          serverInfo: { name: "gendesk_review", version: CLI_VERSION },
+        };
+        break;
+      case "ping":
+        response.result = {};
+        break;
+      case "tools/list":
+        response.result = { tools: [tool] };
+        break;
+      case "tools/call":
+        try {
+          check(msg.params.name === tool.name, "未知 GenDesk 工具");
+          const value = await call(msg.params.arguments?.args);
+          response.result = { content: [{ type: "text", text: value }] };
+        } catch (e) {
+          response.result = { isError: true, content: [{ type: "text", text: e.message }] };
+        }
+        break;
+      default:
+        response.error = { code: -32601, message: "Unknown MCP method" };
+    }
+    process.stdout.write(`${JSON.stringify(response)}\n`);
+  }
+}
+
+const command = process.argv[2] === "__review-mcp" ? serveReview(process.argv.slice(3)) : main();
+command.catch((e) => {
   process.stdout.write(
     `${JSON.stringify({ status: "client_error", message: e.message }, null, 2)}\n`,
   );

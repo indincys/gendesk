@@ -277,6 +277,7 @@ struct AcceptRow {
     params_json: String,
     id: i64,
     batch_id: i64,
+    poster_group_id: Option<String>,
     /// 批次名 = 投单名（一次工单 = 一个 run）。写进作品记录的 `jobId`。
     batch_note: Option<String>,
     ref_image_id: i64,
@@ -298,7 +299,8 @@ struct AcceptRow {
     item_purpose: String,
 }
 
-const ACCEPT_SELECT: &str = "SELECT t.params_json, t.id, t.batch_id, b.note AS batch_note,
+const ACCEPT_SELECT: &str =
+    "SELECT t.params_json, t.id, t.batch_id, b.note AS batch_note, b.poster_group_id,
         t.ref_image_id, t.prompt_id,
         t.prompt_text_snapshot, t.result_image_path, t.result_thumb_path,
         COALESCE(r.name,'') AS ref_name, COALESCE(p.code,'') AS prompt_code,
@@ -472,7 +474,7 @@ async fn accept_inner(
         jobs.push(AcceptPlan {
             poster_identity: organization.poster_keys(&row.item_sku, &row.item_style),
             poster_set: crate::poster::set_key(
-                row.batch_id,
+                &crate::poster::SetScope::new(row.batch_id, row.poster_group_id.clone()),
                 &organization,
                 &row.item_sku,
                 &row.item_style,

@@ -41,3 +41,4 @@ description: 将提示词文件与有序参考图准备为 GenDesk CLI 清单，
 - 每条都写 result，一单不混生图；promptFile 写生成时实际用的正文，ref/refs 写实际用的参考图（本地文件或 libraryId），不写 `{"category":…}` 随机抽；library pack 导出包里的图按普通文件写。
 - organization 照常填写，决定成品目录与 Poster 归属。导入不调用生图、不花钱，不需要生成授权，也不受张数阈值限制；Poster 对不上时同样 hold，按上文处理。
 - 返回 ingested 即图已在待验收（job.message 写明未调用生图），提醒用户在 GenDesk 审图页验收。CLI 报「不支持外部成图导入」时，让用户更新并重启 GenDesk，再 pnpm install:cli 同步命令。
+- 先试样通过、后续生成余图且要进同一条 Poster 图文时，从试样清单就按接入规范第 9 节的「先试样、后续做」声明 `posterBatch`；记住这一套的 ID，最后一份续作沿用它并收齐。试样与续作用各自的工单，续作只导新图。给每份清单的 `note` 写具体画面和阶段，避免同一天多个审图批次都叫「产品 · 需求」。如果用户决定不续做，按规范结束这一批。

@@ -22,7 +22,7 @@ async function fixture(
   {
     online = true,
     hold = false,
-    features = ["reference-library", "poster-link", "external-results"],
+    features = ["reference-library", "poster-link", "external-results", "staged-poster-batches"],
   } = {},
 ) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gendesk-cli-"));
@@ -56,6 +56,7 @@ const input = JSON.parse(fs.readFileSync(0, "utf8"));
 if (process.argv[2] !== "validate-intake") process.exit(2);
 process.stdout.write(JSON.stringify({status:"validated",validation:"full",protocolVersion:1,
   mode: process.env.GENDESK_TEST_OLD_APP ? undefined : (input.order.mode ?? "generate"),
+  posterBatch: process.env.GENDESK_TEST_OLD_GROUPS ? undefined : input.order.posterBatch,
   results: Object.keys(input.results ?? {}),
   taskCount:input.order.items.length,refCount:Object.keys(input.references).length}));
 `,
@@ -69,6 +70,7 @@ process.stdout.write(JSON.stringify({status:"validated",validation:"full",protoc
   const handlers = {
     hello: () => ({ protocol: 2, root, taskThreshold: 100, features }),
     "intake.status": ({ jobId }) => ({ job: jobs.get(jobId) ?? null }),
+    "poster.finish-batch": ({ id }) => ({ id, closed: true }),
     "intake.submit": async ({ dir }) => {
       const order = JSON.parse(await fs.readFile(path.join(pending, dir, "工单.json"), "utf8"));
       await fs.stat(path.join(pending, dir, "READY.txt"));
@@ -1046,4 +1048,54 @@ test("import refuses an app that does not understand external results", async (t
   assert.equal(binary.code, 8);
   assert.match(binary.data.message, /不支持外部成图导入/);
   assert.ok(!commands(stale).includes("intake.submit"));
+});
+
+test("staged imports carry a shared Poster batch without reusing the intake job", async (t) => {
+  const f = await fixture(t);
+  const manifest = path.join(f.input, "成图清单.json");
+  const group = { id: "chen-window-lamp", final: false };
+  const spec = {
+    version: 1,
+    note: "窗边宫灯试样",
+    organization: { product: "明星日历", style: "陈奕迅款", requirement: "桌面场景图" },
+    posterBatch: group,
+    items: [
+      { name: "宫灯图", promptFile: "桌面场景.txt", ref: "商品实拍.png", result: "试样.png" },
+    ],
+  };
+  await fs.writeFile(path.join(f.input, "试样.png"), png);
+  await fs.writeFile(manifest, JSON.stringify(spec));
+  const run = (cmd) => f.run(cmd, "--manifest", manifest);
+  const validated = await run("validate");
+  assert.deepEqual(validated.data.preflight.posterBatch, group);
+  f.extraEnv.GENDESK_TEST_OLD_GROUPS = "1";
+  const incompatible = await run("import");
+  assert.equal(incompatible.code, 8);
+  assert.ok(!commands(f).includes("intake.submit"));
+  f.extraEnv.GENDESK_TEST_OLD_GROUPS = undefined;
+
+  const first = await run("import");
+  assert.equal(first.code, 0, first.data.message);
+  assert.deepEqual(first.data.posterBatch, group);
+  assert.equal((await run("import")).data.reused, true);
+
+  const last = { ...group, final: true };
+  await fs.writeFile(manifest, JSON.stringify({ ...spec, posterBatch: last }));
+  const second = await run("import");
+  assert.equal(second.code, 0, second.data.message);
+  assert.notEqual(second.data.jobId, first.data.jobId);
+  assert.deepEqual(second.data.posterBatch, last);
+  for (const [jobId, posterBatch] of [
+    [first.data.jobId, group],
+    [second.data.jobId, last],
+  ]) {
+    const dir = path.join(f.consumed, `${jobId}-1700000000`);
+    const order = JSON.parse(await fs.readFile(path.join(dir, "工单.json"), "utf8"));
+    assert.deepEqual(order.posterBatch, posterBatch);
+  }
+  assert.deepEqual((await f.run("poster", "finish-batch", group.id)).data, {
+    status: "ok",
+    id: group.id,
+    closed: true,
+  });
 });

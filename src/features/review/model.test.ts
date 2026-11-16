@@ -76,4 +76,24 @@ describe("图片验收分组", () => {
     expect(itemLabel(item)).toBe("桌景第五张");
     expect(refLabel(item)).toBe("参考图 #5");
   });
+
+  it("同一需求的多次提交把款式和编号放在标题，保留具体主题", () => {
+    const items = [
+      image(130, { organization, batchNote: "明星日历 · 桌面场景" }),
+      image(131, { organization, batchNote: "窗边宫灯试样" }),
+      image(132, { organization: { ...organization, style: "款式乙" } }),
+    ];
+    for (const mode of ["batch", "time"] as const) {
+      const heads = buildSections(items, mode, now).flatMap(({ heads }) =>
+        heads.filter((head) => head.kind === "cluster"),
+      );
+      expect(heads.map(({ name }) => name)).toEqual([
+        "款式乙 · 提交 #132",
+        "款式甲 · 提交 #131",
+        "款式甲 · 提交 #130",
+      ]);
+      expect(heads[1]?.detail).toContain("窗边宫灯试样 · 桌面场景 · 明星日历");
+      expect(heads[2]?.detail).toMatch(/^桌面场景 · 明星日历 · /);
+    }
+  });
 });

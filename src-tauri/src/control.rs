@@ -33,6 +33,7 @@ pub const FEATURES: &[&str] = &[
     "reference-library",
     "poster-link",
     "external-results",
+    "staged-poster-batches",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。
@@ -259,6 +260,16 @@ async fn poster_command(
                 crate::commands::poster::start_delivery(app.clone());
             }
             Ok(serde_json::to_value(report)?)
+        }
+        "poster.finish-batch" => {
+            let id = arg(args, "id")?;
+            {
+                let _guard = state.intake_lock.lock().await;
+                poster::intake_group::finish(&state.db, id).await?;
+            }
+            crate::commands::poster::emit(app);
+            crate::commands::poster::start_delivery(app.clone());
+            Ok(json!({ "id": id, "closed": true }))
         }
         other => Err(AppError::InvalidInput(format!("未知命令：{other}"))),
     }

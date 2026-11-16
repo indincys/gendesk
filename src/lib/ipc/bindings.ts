@@ -2290,7 +2290,7 @@ isSet: boolean;
 /**
  * 图文还在收图时，这一组还没审完的张数（>0 时等审完再组成）。
  */
-waitingReview: number }
+waitingReview: number; waitingIntake: boolean }
 export type PosterChanged = { at: number }
 export type PosterChoice = { key: string; productId: string }
 export type PosterGroup = { key: string; sku: string; style: string; count: number; productId: string | null; warning: string }

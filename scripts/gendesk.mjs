@@ -33,6 +33,8 @@ gendesk import --result <成图> --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source Codex]
                外部（如 Codex）已生成的图直接进 GenDesk 待验收：不调用生图、不花钱；
                清单每条比生图清单多一个 result（成图路径），参考图写当时实际用的那几张
+               分批导入同一套：清单顶层 posterBatch: {"id":"同一批次ID","final":false}；
+               最后一次沿用同一个 id，写 "final":true，Poster 等收齐、审完才组成图文
 gendesk status <jobId>
 gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
 gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
@@ -64,6 +66,7 @@ gendesk poster bind --product <产品> --style <款式> --target <Poster 商品�
                     用户确认后保存绑定，之后同款自动导入；停在「需处理」的同款批次随即续导
 gendesk poster backfill [--product <产品>] [--style <款式>] [--apply]
                     补导从未进过 Poster 的历史成品（只补静态图）；默认只预演，--apply 才登记并导入
+gendesk poster finish-batch <id>   确认不再续做时收齐已导入的图，等它们审完再交给 Poster
 款式写 --product 区分同名款式。清单 ref/refs 可写图库引用，收录时由应用抽图并记账：
   {"category":"正面图"}（款式取条目 organization.style）· {"category":"礼盒图","style":"王一博"} · {"libraryId":12}
   {"category":"正面图","count":2} 展开成连续两张不重复的正面图。素材包.json：
@@ -126,6 +129,14 @@ function object(value, label) {
 function knownKeys(value, keys, label) {
   object(value, label);
   for (const key of Object.keys(value)) check(keys.includes(key), `${label} 不支持字段 ${key}`);
+}
+
+function posterBatchId(id) {
+  check(
+    typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id),
+    "posterBatch.id 要用 1～80 个英文字母、数字、横线或下划线，首字符必须是字母或数字",
+  );
+  return id;
 }
 
 function requiredText(value, label) {
@@ -290,7 +301,17 @@ async function prepare(opts, mode) {
   }
   knownKeys(
     spec,
-    ["version", "jobId", "note", "purpose", "skill", "defaults", "items", "organization"],
+    [
+      "version",
+      "jobId",
+      "note",
+      "purpose",
+      "skill",
+      "defaults",
+      "items",
+      "organization",
+      "posterBatch",
+    ],
     "清单",
   );
   check(Array.isArray(spec.items) && spec.items.length > 0, "items 必须包含至少一个条目");
@@ -300,6 +321,15 @@ async function prepare(opts, mode) {
     "清单里有的条目写了 result、有的没写：外部成图导入单每条都要写成图，生图单一条都不写",
   );
   const importing = withResult > 0;
+  if (spec.posterBatch !== undefined) {
+    check(importing, "posterBatch 只用于外部成图导入（gendesk import）");
+    knownKeys(spec.posterBatch, ["id", "final"], "posterBatch");
+    posterBatchId(spec.posterBatch.id);
+    check(
+      typeof spec.posterBatch.final === "boolean",
+      "posterBatch.final 必须明确写 true 或 false",
+    );
+  }
   check(
     mode !== "generate" || !importing,
     "清单里写了 result（外部已生成的图），这是导入单：请用 gendesk import，submit 会重新生图",
@@ -623,6 +653,12 @@ async function nativePreflight(conn, prepared) {
     "当前 GenDesk 应用不支持外部成图导入（预检没有识别 mode=import）。请更新并重启 GenDesk",
     8,
   );
+  const group = prepared.order.posterBatch;
+  check(
+    !group || (group.id === report.posterBatch?.id && group.final === report.posterBatch?.final),
+    "当前 GenDesk 应用不支持分批导入同一 Poster 批次。请更新并重启 GenDesk",
+    8,
+  );
   return report;
 }
 
@@ -743,7 +779,11 @@ function requireFeature(hello, feature, label = "参考图库") {
 async function submit(prepared) {
   const { conn, hello, launched } = await connect({ launch: true });
   const { order, hash } = prepared;
-  const meta = { taskCount: order.items.length, refCount: prepared.refs.length };
+  const meta = {
+    taskCount: order.items.length,
+    refCount: prepared.refs.length,
+    ...(order.posterBatch ? { posterBatch: order.posterBatch } : {}),
+  };
   const packages = await packagesOf(conn.root, order.jobId);
   for (const dir of packages)
     check(
@@ -752,6 +792,7 @@ async function submit(prepared) {
     );
   if (prepared.librarySlots > 0) requireFeature(hello, "reference-library");
   if (prepared.importing) requireFeature(hello, "external-results", "外部成图导入");
+  if (order.posterBatch) requireFeature(hello, "staged-poster-batches", "分批导入同一 Poster 批次");
   const knownReply = await rpc(conn, "intake.status", { jobId: order.jobId });
   const known = knownReply.job;
   const pending = path.join(pendingDir(conn.root), order.jobId);
@@ -1106,13 +1147,24 @@ const POSTER_OPTIONS = {
   resolve: ["product", "style", "requirement", "poster-type"],
   bind: ["product", "style", "target"],
   backfill: ["product", "style", "apply"],
+  "finish-batch": [],
 };
 
 async function poster(sub, positional, opts) {
   check(sub in POSTER_OPTIONS, `poster 只支持 ${Object.keys(POSTER_OPTIONS).join(" / ")}`);
-  check(positional.length === 0, `poster ${sub} 不接受位置参数`);
+  if (sub === "finish-batch") {
+    check(positional.length === 1, "用法：gendesk poster finish-batch <id>");
+  } else {
+    check(positional.length === 0, `poster ${sub} 不接受位置参数`);
+  }
   for (const key of Object.keys(opts))
     check(POSTER_OPTIONS[sub].includes(key), `poster ${sub} 不支持 --${key}`);
+  if (sub === "finish-batch") {
+    const id = posterBatchId(positional[0]);
+    const { conn, hello } = await connect({ launch: true });
+    requireFeature(hello, "staged-poster-batches", "分批导入同一 Poster 批次");
+    return { status: "ok", ...(await rpc(conn, "poster.finish-batch", { id })) };
+  }
   const product = opts.product?.trim() ?? "";
   const style = opts.style?.trim() ?? "";
   const requirement = opts.requirement?.trim() ?? "";

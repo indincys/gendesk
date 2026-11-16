@@ -61,6 +61,9 @@ fn emit(app: &AppHandle, jobs: &[JobView]) {
     for j in jobs {
         notify_job(app, j);
     }
+    if jobs.iter().any(|job| job.status == "done") {
+        crate::commands::poster::emit(app);
+    }
     let _ = IntakeChanged {
         jobs: jobs.to_vec(),
     }

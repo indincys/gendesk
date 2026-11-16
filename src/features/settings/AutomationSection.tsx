@@ -247,6 +247,8 @@ function BatchRow({
       <span className="bdg b-red">需处理</span>
     ) : batch.state === "done" ? (
       <span className="bdg b-green">已导入</span>
+    ) : batch.waitingIntake ? (
+      <span className="bdg b-amber">等剩余图片收齐</span>
     ) : batch.waitingReview > 0 ? (
       <span className="bdg b-amber">等本组 {batch.waitingReview} 张审完</span>
     ) : batch.waitingLive > 0 ? (

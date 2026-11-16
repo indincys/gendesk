@@ -845,15 +845,19 @@ fn calendar(style: &str, requirement: &str) -> Organization {
 
 /// 一次提交（GenDesk 批次 1）下的待验收任务，带归属快照；任务编号即审稿页的组内顺序。
 async fn seed_review(pool: &SqlitePool, tasks: &[(i64, Organization)]) {
+    seed_review_batch(pool, 1, tasks).await;
+}
+
+async fn seed_review_batch(pool: &SqlitePool, batch: i64, tasks: &[(i64, Organization)]) {
     sqlx::query("INSERT OR IGNORE INTO prompt_groups (id,name,prefix,scene,is_temp,created_at) VALUES (1,'g','GG','',0,0)").execute(pool).await.unwrap();
     sqlx::query("INSERT OR IGNORE INTO ref_images (id,name,file_path,thumb_path,width,height,file_size,created_at) VALUES (1,'r','/f','/t',1,1,1,0)").execute(pool).await.unwrap();
-    sqlx::query("INSERT OR IGNORE INTO batches (id,created_at,output_dir,params_json,status) VALUES (1,0,'/out','{}','running')").execute(pool).await.unwrap();
+    sqlx::query("INSERT OR IGNORE INTO batches (id,created_at,output_dir,params_json,status) VALUES (?,0,'/out','{}','running')").bind(batch).execute(pool).await.unwrap();
     for (task, organization) in tasks {
         sqlx::query("INSERT INTO prompts (id,group_id,code,text,status,source,created_at,updated_at) VALUES (?,1,?,'t','active','library',0,0)")
             .bind(task).bind(format!("GG-{task:04}")).execute(pool).await.unwrap();
         let params = serde_json::json!({ "organization": organization }).to_string();
-        sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at,params_json) VALUES (?,1,1,?,'t','rev',0,0,?)")
-            .bind(task).bind(task).bind(params).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,batch_id,ref_image_id,prompt_id,prompt_text_snapshot,status,created_at,updated_at,params_json) VALUES (?,?,1,?,'t','rev',0,0,?)")
+            .bind(task).bind(batch).bind(task).bind(params).execute(pool).await.unwrap();
     }
 }
 
@@ -868,8 +872,11 @@ async fn pass(pool: &SqlitePool, root: &Path, tasks: &[(i64, Organization)]) -> 
             .save(&path)
             .unwrap();
         let (sku, style) = organization.poster_keys("", "");
-        let key = set_key(1, organization, "", "");
         let mut tx = pool.begin().await.unwrap();
+        let (batch, group) =
+            sqlx::query_as("SELECT b.id,b.poster_group_id FROM tasks t JOIN batches b ON b.id=t.batch_id WHERE t.id=?")
+                .bind(task).fetch_one(&mut *tx).await.unwrap();
+        let key = set_key(&SetScope::new(batch, group), organization, "", "");
         // 与真实验收一样，作品行（含归属快照）和台账在同一事务里写。
         let work_id: i64 = sqlx::query_scalar(
             "INSERT INTO accepted_works(image_path,thumb_path,prompt_text,accepted_at,item_name,uid,style,organization_json,task_id)
@@ -989,6 +996,68 @@ async fn passes_of_one_group_wait_for_the_group_then_become_one_image_set_in_tas
 
 #[cfg(unix)]
 #[tokio::test]
+async fn staged_sample_is_held_after_approval_and_delivered_with_the_approved_remainder() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    set_settings(&pool, &enabled(&fake_poster_sets(root.path(), true))).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    let mut spec = intake_group::Spec {
+        id: "tan-window".into(),
+        final_import: false,
+    };
+    seed_review_batch(&pool, 1, &[(1, scene.clone())]).await;
+    let mut tx = pool.begin().await.unwrap();
+    intake_group::attach(&mut tx, 1, &spec).await.unwrap();
+    tx.commit().await.unwrap();
+
+    pass(&pool, root.path(), &[(1, scene.clone())]).await;
+    sqlx::query("DELETE FROM batches WHERE id=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert!(calls(root.path(), "import-image-sets").is_empty());
+    let waiting = batches(&pool).await.unwrap().remove(0);
+    assert!(waiting.waiting_intake);
+    assert_eq!(waiting.waiting_review, 0, "试样已经审完，仍需等续作");
+
+    seed_review_batch(&pool, 2, &[(2, scene.clone()), (3, scene.clone())]).await;
+    spec.final_import = true;
+    let mut tx = pool.begin().await.unwrap();
+    intake_group::attach(&mut tx, 2, &spec).await.unwrap();
+    tx.commit().await.unwrap();
+    pass(&pool, root.path(), &[(2, scene)]).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert!(calls(root.path(), "import-image-sets").is_empty());
+    let waiting = batches(&pool).await.unwrap().remove(0);
+    assert!(!waiting.waiting_intake);
+    assert_eq!(waiting.waiting_review, 1);
+
+    sqlx::query("UPDATE tasks SET status='rej' WHERE id=3")
+        .execute(&pool)
+        .await
+        .unwrap();
+    settle_sets_of(&pool, root.path(), 2).await.unwrap();
+    let sets = set_batches(&pool).await;
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0].1, "done");
+    let request: client::SetsRequest = serde_json::from_str(sets[0].2.as_deref().unwrap()).unwrap();
+    assert_eq!(request.items.len(), 1);
+    let images: Vec<_> = request.items[0]
+        .images
+        .iter()
+        .map(|i| i.external_id.as_str())
+        .collect();
+    assert_eq!(images, ["u001", "u002"]);
+    assert_eq!(
+        calls(root.path(), "import-image-sets").len(),
+        2,
+        "只预览和写入一条图文"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn image_set_retry_reuses_frozen_request_and_never_creates_a_second_set() {
     let (pool, root) = crate::db::test_support::test_pool().await;
     initialize(&pool).await.unwrap();
@@ -1033,7 +1102,11 @@ async fn styles_split_into_separate_sets_covers_and_late_passes_stay_loose() {
     let tan = calendar("檀健次", "桌面场景图");
     let wang = calendar("王俊凯", "桌面场景图");
     let cover = calendar("檀健次", "封面");
-    assert_eq!(set_key(1, &cover, "", ""), None, "封面进封面库，不组图文");
+    assert_eq!(
+        set_key(&SetScope::Submission(1), &cover, "", ""),
+        None,
+        "封面进封面库，不组图文"
+    );
     // 同一场景一次给两款生图：各款各成一条图文，进各自的商品。
     seed_review(
         &pool,

@@ -83,7 +83,7 @@ function sectionHead(
   const from = Math.min(...times);
   const to = Math.max(...times);
   const time = `${dayLabel(to, now)} ${clusterTime({ from, to })}`;
-  const name =
+  let name =
     mode === "ref"
       ? refLabel(first)
       : mode === "group"
@@ -96,7 +96,22 @@ function sectionHead(
     const styles = [...new Set(items.map((item) => item.organization?.style).filter(Boolean))];
     const names = styles.slice(0, 3).join("、");
     const contents = styles.length > 3 ? `${names}等 ${styles.length} 款` : names;
-    detail = [`提交 #${first.batchId}`, time, contents].filter(Boolean).join(" · ");
+    const submission = `提交 #${first.batchId}`;
+    if (contents) {
+      const org = organizationOf(first);
+      const subject = [org?.requirement, org?.product].filter(Boolean).join(" · ");
+      const defaultNote = [org?.product, org?.requirement].filter(Boolean).join(" · ");
+      const note = readableName(first.batchNote);
+      const topic =
+        note && note !== defaultNote && note !== subject && note !== contents ? note : "";
+      name = styles.length === 1 ? `${contents} · ${submission}` : `${submission} · ${contents}`;
+      detail =
+        styles.length === 1
+          ? [topic, subject, time].filter(Boolean).join(" · ")
+          : [submissionLabel(items), time].join(" · ");
+    } else {
+      detail = [submission, time].join(" · ");
+    }
   }
   return { kind: "cluster", name, detail, ids };
 }

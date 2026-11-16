@@ -102,6 +102,9 @@ pub async fn check(plan: &Plan) -> AppResult<CheckedPlan> {
         identity["results"] =
             serde_json::json!(results.iter().map(|r| &r.sha256).collect::<Vec<_>>());
     }
+    if let Some(group) = &plan.poster_batch {
+        identity["posterBatch"] = serde_json::to_value(group)?;
+    }
     let bytes = serde_json::to_vec(&identity)?;
     Ok(CheckedPlan {
         fingerprint: format!("{:x}", Sha256::digest(bytes)),
@@ -122,6 +125,7 @@ pub async fn external(input: ExternalInput) -> AppResult<serde_json::Value> {
         serde_json::json!({"status":"validated","validation":"full","protocolVersion":1,
         "appVersion":env!("CARGO_PKG_VERSION"),"taskCount":plan.task_count(),
         "mode": if plan.import { super::MODE_IMPORT } else { "generate" },
+        "posterBatch":plan.poster_batch,
         "results":checked.results,
         "refCount":checked.references.len(),"fingerprint":checked.fingerprint,
         "references":checked.references,

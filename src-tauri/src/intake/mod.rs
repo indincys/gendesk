@@ -154,6 +154,8 @@ pub struct OrderSpec {
     /// 不调用生图、不花钱，任务直接进待验收）。**整单级**：一单里混着生成与导入，
     /// 交付侧就分不清哪张是谁出的。
     pub mode: Option<String>,
+    /// Explicit Poster grouping across separate imports of externally generated images.
+    pub poster_batch: Option<crate::poster::intake_group::Spec>,
     pub items: Vec<ItemSpec>,
 }
 
@@ -258,6 +260,7 @@ pub struct Plan {
     pub skill: Option<String>,
     /// 外部成图导入单：不建待生成任务，直接把 `PlannedItem::result_path` 放进待验收。
     pub import: bool,
+    pub poster_batch: Option<crate::poster::intake_group::Spec>,
     pub items: Vec<PlannedItem>,
 }
 
@@ -540,6 +543,12 @@ fn plan_with_inputs(
             ))
         }
     };
+    if let Some(group) = &spec.poster_batch {
+        if !import {
+            return Err("posterBatch 只用于外部成图导入（gendesk import）".into());
+        }
+        crate::poster::intake_group::validate_id(&group.id)?;
+    }
     let job_id = spec
         .job_id
         .as_deref()
@@ -766,6 +775,7 @@ fn plan_with_inputs(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         import,
+        poster_batch: spec.poster_batch.clone(),
         items,
     })
 }

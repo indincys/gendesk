@@ -544,6 +544,9 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
         *out = checkpoint.applied;
         return Ok(());
     }
+    if let Some(group) = &plan.poster_batch {
+        crate::poster::intake_group::check(&ctx.pool, group).await?;
+    }
     let mut tx = ctx.pool.begin().await?;
     checkpoint.save(&mut tx, plan, row_id, false).await?;
     tx.commit().await?;
@@ -780,6 +783,9 @@ async fn apply(ctx: &Ctx, plan: &Plan, row_id: i64, out: &mut Applied) -> AppRes
     let (batch_id, task_count) =
         engine::create_batch_from_specs_in_tx(&mut tx, &output_dir, "{}", &specs).await?;
     task_repo::rename_batch(&mut *tx, batch_id, &plan.note).await?;
+    if let Some(group) = &plan.poster_batch {
+        crate::poster::intake_group::attach(&mut tx, batch_id, group).await?;
+    }
     if plan.import {
         let task_ids: Vec<i64> =
             sqlx::query_scalar("SELECT id FROM tasks WHERE batch_id = ?1 ORDER BY id")
@@ -2465,6 +2471,62 @@ mod tests {
         std::fs::create_dir_all(again.join("results")).unwrap();
         std::fs::write(again.join("results/1.png"), png()).unwrap();
         assert!(scan(&ctx, home.path()).await.unwrap().is_empty());
+        assert_eq!(count(&pool, "tasks").await, 2);
+    }
+
+    #[tokio::test]
+    async fn external_imports_close_the_poster_group_with_the_final_review_tasks() {
+        let (pool, data) = test_pool().await;
+        let home = tempfile::tempdir().unwrap();
+        crate::db::repo::settings::set_raw(
+            &pool,
+            &serde_json::json!({
+                "scheduleStrategy":"round_robin", "retryCount":1, "outputDir":data.path(),
+                "motion":"standard", "paused":false, "onboarded":true,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(crate::library::root(&pool).await.unwrap(), data.path());
+        let (ctx, _) = ctx_for(&pool, data.path(), 500);
+        let send = |job: &'static str, id: &'static str, last| {
+            let ctx = &ctx;
+            let root = home.path();
+            async move {
+                let header =
+                    format!(r#","mode":"import","posterBatch":{{"id":"{id}","final":{last}}}"#);
+                let dir = make_job(
+                    root,
+                    job,
+                    &header,
+                    &[(job, "正文", "a.png", r#","result":"results/a.png""#)],
+                );
+                std::fs::create_dir_all(dir.join("results")).unwrap();
+                std::fs::write(dir.join("results/a.png"), png()).unwrap();
+                submit(ctx, root, job).await.unwrap().unwrap()
+            }
+        };
+
+        let missing = send("wrong-id", "missing", true).await;
+        assert!(missing.message.contains("找不到 Poster 批次"));
+        assert_eq!(count(&pool, "tasks").await, 0);
+
+        let sample = send("sample", "same-session", false).await;
+        assert_eq!(sample.status, "done", "{}", sample.message);
+        let remainder = send("remainder", "same-session", true).await;
+        assert_eq!(remainder.status, "done", "{}", remainder.message);
+        assert_ne!(sample.batch_ids, remainder.batch_ids);
+        let linked: Vec<(String, bool, String)> = sqlx::query_as(
+            "SELECT g.id,g.closed,t.status FROM tasks t JOIN batches b ON b.id=t.batch_id
+            JOIN poster_intake_groups g ON g.id=b.poster_group_id ORDER BY t.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, vec![("same-session".into(), true, "rev".into()); 2]);
+        let late = send("too-late", "same-session", false).await;
+        assert!(late.message.contains("已收齐"));
         assert_eq!(count(&pool, "tasks").await, 2);
     }
 

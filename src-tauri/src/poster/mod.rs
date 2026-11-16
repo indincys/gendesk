@@ -28,6 +28,7 @@ use crate::library::Organization;
 
 pub mod backfill;
 pub mod client;
+pub(crate) mod intake_group;
 pub mod slot;
 pub(crate) mod storage;
 #[cfg(test)]
@@ -125,11 +126,36 @@ pub async fn finish_review(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// 一张通过图属于哪一组图片包：同一次提交（GenDesk 批次）× 同一款式 × 同一库位名
-/// （显式 `posterType`，缺省需求名）。同一套背景一起生成的图，天然是一套。
-/// 进封面库的图不组图文，返回 `None`。键是 JSON 数组，首项是 GenDesk 批次号。
-pub fn set_key(
-    batch_id: i64,
+/// Keep existing numeric keys for ordinary submissions. Staged imports use their explicit group ID.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum SetScope {
+    Submission(i64),
+    Staged(String),
+}
+
+impl SetScope {
+    pub fn new(batch_id: i64, group_id: Option<String>) -> Self {
+        group_id.map_or(Self::Submission(batch_id), Self::Staged)
+    }
+
+    async fn waiting_intake(&self, pool: &SqlitePool) -> AppResult<bool> {
+        match self {
+            Self::Submission(_) => Ok(false),
+            Self::Staged(id) => Ok(sqlx::query_scalar(
+                "SELECT NOT closed FROM poster_intake_groups WHERE id=?",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await?),
+        }
+    }
+}
+
+/// One submission or staged group × product/style × requirement (or explicit posterType).
+/// Covers go directly into the image library.
+pub(crate) fn set_key(
+    scope: &SetScope,
     organization: &Organization,
     sku: &str,
     style: &str,
@@ -139,14 +165,11 @@ pub fn set_key(
         return None;
     }
     let (sku, style) = organization.poster_keys(sku, style);
-    serde_json::to_string(&(batch_id, sku, style, label.trim())).ok()
+    serde_json::to_string(&(scope, sku, style, label.trim())).ok()
 }
 
-/// 键里的 GenDesk 批次号（结算时只看这一批的任务）。
-fn set_key_batch(key: &str) -> Option<i64> {
-    serde_json::from_str::<(i64, String, String, String)>(key)
-        .ok()
-        .map(|k| k.0)
+fn set_scope(key: &str) -> AppResult<SetScope> {
+    Ok(serde_json::from_str::<(SetScope, String, String, String)>(key)?.0)
 }
 
 /// 一张作品在交接台账里的位置：任务编号决定图文内顺序；有 `set_key` 的进那一组的图片包。
@@ -231,16 +254,21 @@ async fn open_set_batch(
 
 /// 这一组还有几张图没审完（待生成、生成中、重试中、待验收）。生成失败的不等：它要人工恢复，
 /// 恢复后再通过的图散进图片库。批次退休后任务行不在了，自然是 0。
-async fn pending_in_set(pool: &SqlitePool, key: &str) -> AppResult<i64> {
-    let Some(batch) = set_key_batch(key) else {
-        return Ok(0);
+async fn pending_in_set(pool: &SqlitePool, key: &str, scope: &SetScope) -> AppResult<i64> {
+    let by_scope = match scope {
+        SetScope::Submission(_) => "t.batch_id=?",
+        SetScope::Staged(_) => "t.batch_id IN (SELECT id FROM batches WHERE poster_group_id=?)",
     };
-    let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+    let sql = format!(
         "SELECT t.id,t.params_json,COALESCE(p.sku_code,''),COALESCE(p.style,''),COALESCE(g.name,'')
         FROM tasks t LEFT JOIN prompts p ON p.id=t.prompt_id LEFT JOIN prompt_groups g ON g.id=p.group_id
-        WHERE t.batch_id=? AND t.status IN ('q','run','retry','rev')",
-    )
-    .bind(batch)
+        WHERE {by_scope} AND t.status IN ('q','run','retry','rev')",
+    );
+    let query = sqlx::query_as(&sql);
+    let rows: Vec<(i64, String, String, String, String)> = match scope {
+        SetScope::Submission(batch) => query.bind(batch),
+        SetScope::Staged(id) => query.bind(id),
+    }
     .fetch_all(pool)
     .await?;
     let mut pending = 0;
@@ -253,7 +281,7 @@ async fn pending_in_set(pool: &SqlitePool, key: &str) -> AppResult<i64> {
                 continue;
             }
         };
-        if set_key(batch, &organization, &sku, &style).as_deref() == Some(key) {
+        if set_key(scope, &organization, &sku, &style).as_deref() == Some(key) {
             pending += 1;
         }
     }
@@ -294,6 +322,9 @@ pub struct PosterBatch {
     /// 图文还在收图时，这一组还没审完的张数（>0 时等审完再组成）。
     #[sqlx(skip)]
     pub waiting_review: i64,
+    // The caller hasn't finished importing this staged group.
+    #[sqlx(skip)]
+    pub waiting_intake: bool,
 }
 
 pub async fn batches(pool: &SqlitePool) -> AppResult<Vec<PosterBatch>> {
@@ -316,7 +347,9 @@ pub async fn batches(pool: &SqlitePool) -> AppResult<Vec<PosterBatch>> {
     .await?;
     for (id, key) in open {
         if let Some(batch) = list.iter_mut().find(|b| b.id == id) {
-            batch.waiting_review = pending_in_set(pool, &key).await?;
+            let scope = set_scope(&key)?;
+            batch.waiting_intake = scope.waiting_intake(pool).await?;
+            batch.waiting_review = pending_in_set(pool, &key, &scope).await?;
         }
     }
     Ok(list)
@@ -919,7 +952,8 @@ async fn deliver_set(
     let request: client::SetsRequest = if let Some(json) = request_json {
         serde_json::from_str(&json)?
     } else {
-        if pending_in_set(pool, key).await? > 0 {
+        let scope = set_scope(key)?;
+        if scope.waiting_intake(pool).await? || pending_in_set(pool, key, &scope).await? > 0 {
             sqlx::query("UPDATE poster_batches SET state='queued',last_error='' WHERE id=?")
                 .bind(id)
                 .execute(pool)
@@ -982,6 +1016,12 @@ pub async fn settle_sets_of(
     if !load_settings(pool).await?.auto_import {
         return Ok(());
     }
+    let group = sqlx::query_scalar("SELECT poster_group_id FROM batches WHERE id=?")
+        .bind(gendesk_batch)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    let scope = SetScope::new(gendesk_batch, group);
     let open: Vec<(String, String)> = sqlx::query_as(
         "SELECT id,set_key FROM poster_batches
         WHERE set_key IS NOT NULL AND request_json IS NULL AND state='queued' ORDER BY created_at,rowid",
@@ -989,7 +1029,7 @@ pub async fn settle_sets_of(
     .fetch_all(pool)
     .await?;
     for (id, key) in open {
-        if set_key_batch(&key) != Some(gendesk_batch) {
+        if !set_scope(&key).is_ok_and(|candidate| candidate == scope) {
             continue;
         }
         if let Err(error) = deliver_one(pool, data_root, &id).await {

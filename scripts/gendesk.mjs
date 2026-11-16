@@ -33,8 +33,6 @@ gendesk import --result <成图> --prompt <正文.txt> --ref <参考图>
                --product <产品> --style <款式> --requirement <需求> [--source Codex]
                外部（如 Codex）已生成的图直接进 GenDesk 待验收：不调用生图、不花钱；
                清单每条比生图清单多一个 result（成图路径），参考图写当时实际用的那几张
-               分批导入同一套：清单顶层 posterBatch: {"id":"同一批次ID","final":false}；
-               最后一次沿用同一个 id，写 "final":true，Poster 等收齐、审完才组成图文
 gendesk status <jobId>
 gendesk confirm <jobId>      待确认的工单（超阈值或 Poster 款式对不上），仅在用户明确同意后调用
 gendesk retry <jobId>        失败或中断的工单，只补未完成步骤
@@ -78,6 +76,8 @@ gendesk poster finish-batch <id>   确认不再续做时收齐已导入的图，
 清单中的 promptFile/ref/refs 相对清单文件所在目录解析，可用绝对路径和 ~/。
 多参考图用清单 refs（有序 1～16 张），与 ref 二选一；一项仍只生成一张图。
 organization 按产品/款式/需求持续归档，条目整对象覆盖顶层；无 SKU 的任务不虚构编号。
+submit 与 import 分次提交同一套时，第一份清单顶层写 posterBatch: {"id":"同一批次ID","final":false}；
+最后一次沿用同一个 id，写 "final":true，Poster 等收齐、审完才组成图文。
 审稿通过后进 Poster 的库位按需求名自动对应：「封面」进封面库，与 Poster 图片类型同名（如「正视图」）
 进该类型，其余进未分类；需求名与类型不同名时在 organization 写 posterType（类型名、封面或未分类）。
 批量清单示例：
@@ -322,7 +322,6 @@ async function prepare(opts, mode) {
   );
   const importing = withResult > 0;
   if (spec.posterBatch !== undefined) {
-    check(importing, "posterBatch 只用于外部成图导入（gendesk import）");
     knownKeys(spec.posterBatch, ["id", "final"], "posterBatch");
     posterBatchId(spec.posterBatch.id);
     check(
@@ -656,7 +655,7 @@ async function nativePreflight(conn, prepared) {
   const group = prepared.order.posterBatch;
   check(
     !group || (group.id === report.posterBatch?.id && group.final === report.posterBatch?.final),
-    "当前 GenDesk 应用不支持分批导入同一 Poster 批次。请更新并重启 GenDesk",
+    "当前 GenDesk 应用不支持分次提交同一 Poster 批次。请更新并重启 GenDesk",
     8,
   );
   return report;
@@ -792,7 +791,13 @@ async function submit(prepared) {
     );
   if (prepared.librarySlots > 0) requireFeature(hello, "reference-library");
   if (prepared.importing) requireFeature(hello, "external-results", "外部成图导入");
-  if (order.posterBatch) requireFeature(hello, "staged-poster-batches", "分批导入同一 Poster 批次");
+  if (order.posterBatch) {
+    requireFeature(
+      hello,
+      prepared.importing ? "staged-poster-batches" : "staged-poster-generation",
+      "分次提交同一 Poster 批次",
+    );
+  }
   const knownReply = await rpc(conn, "intake.status", { jobId: order.jobId });
   const known = knownReply.job;
   const pending = path.join(pendingDir(conn.root), order.jobId);

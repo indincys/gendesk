@@ -22,7 +22,13 @@ async function fixture(
   {
     online = true,
     hold = false,
-    features = ["reference-library", "poster-link", "external-results", "staged-poster-batches"],
+    features = [
+      "reference-library",
+      "poster-link",
+      "external-results",
+      "staged-poster-batches",
+      "staged-poster-generation",
+    ],
   } = {},
 ) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gendesk-cli-"));
@@ -1098,4 +1104,41 @@ test("staged imports carry a shared Poster batch without reusing the intake job"
     id: group.id,
     closed: true,
   });
+});
+
+test("submit carries Poster grouping for GenDesk-generated samples and follow-ups", async (t) => {
+  const features = ["staged-poster-batches"];
+  const f = await fixture(t, { features });
+  const manifest = path.join(f.input, "场景清单.json");
+  const group = { id: "ju-desk-scenes", final: false };
+  const spec = {
+    version: 1,
+    organization: { product: "明星日历", style: "鞠婧祎款", requirement: "桌面场景图" },
+    items: [{ name: "灰绿画垫", promptFile: "桌面场景.txt", ref: "商品实拍.png" }],
+  };
+  await fs.writeFile(manifest, JSON.stringify({ ...spec, posterBatch: group }));
+  const previous = await f.run("submit", "--manifest", manifest);
+  assert.equal(previous.code, 8);
+  assert.match(previous.data.message, /staged-poster-generation/);
+  assert.ok(!commands(f).includes("intake.submit"));
+  await assert.rejects(fs.stat(f.pending), { code: "ENOENT" });
+
+  features.push("staged-poster-generation");
+  const first = await f.run("submit", "--manifest", manifest);
+  assert.equal(first.code, 0, first.data.message);
+  const last = { ...group, final: true };
+  await fs.writeFile(manifest, JSON.stringify({ ...spec, posterBatch: last }));
+  const remainder = await f.run("submit", "--manifest", manifest);
+  assert.equal(remainder.code, 0, remainder.data.message);
+  assert.notEqual(first.data.jobId, remainder.data.jobId);
+  for (const [jobId, posterBatch] of [
+    [first.data.jobId, group],
+    [remainder.data.jobId, last],
+  ]) {
+    const order = JSON.parse(
+      await fs.readFile(path.join(f.consumed, `${jobId}-1700000000`, "工单.json"), "utf8"),
+    );
+    assert.deepEqual(order.posterBatch, posterBatch);
+    assert.equal(order.mode, undefined, "交给 GenDesk 生图");
+  }
 });

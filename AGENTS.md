@@ -11,6 +11,6 @@
 - 先生成显式配对清单并 gendesk validate --manifest <清单>；只有已授权生图时才 gendesk submit --manifest <清单>。只写提示词不投单。submit 返回时已收录完毕：hold 先向用户说明张数并取得同意再 gendesk confirm；error 读原因后 gendesk retry（按检查点只补未完成部分）；状态不明用原 jobId 查 status，不换 ID 重投。
 - 参考图库：款式 → 分类长期存图，`gendesk library …` 管理；清单 ref/refs 写 `{"category":"正面图"}` 由应用在收录时随机抽图，冷却期内用过的图优先跳过（见规范第 8 节）。
 - 外部成图验收：Codex 等已生成的图用 gendesk import --manifest（生图清单每条多写 result），不调用生图、直接进待验收；参考图写实际用的那几张，不写分类随机抽。见规范第 9 节。
-- Codex 外部生成同一套、先送试样再续做时，从试样清单就按第 9 节声明同一个 Poster 批次；`note` 写具体主题和试样或续作阶段，方便在审图页认批次。
+- 同一套先试样再续做时，`submit` 和 `import` 都从试样清单按第 9 节声明同一个 Poster 批次。`note` 写具体主题和阶段，方便在审图页认批次。
 - 图生视频改写：gendesk v2v pending 取条目，写好后 gendesk v2v rewrite --file <结果>；不调用 dreamina。
 - CLI 校验用 pnpm test:cli；提交前全门禁 pnpm check。

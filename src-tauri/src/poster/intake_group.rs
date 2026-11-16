@@ -1,4 +1,4 @@
-//! A sample and its later imports share a Poster group while keeping their own review runs.
+//! A sample and its later submissions share a Poster group while keeping their own review runs.
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
@@ -50,7 +50,7 @@ pub async fn check(pool: &SqlitePool, spec: &Spec) -> AppResult<()> {
     }
 }
 
-/// Attach and, on the last import, close atomically with the new review tasks.
+/// Attach and, on the last submission, close atomically with the new tasks.
 pub async fn attach(tx: &mut Transaction<'_, Sqlite>, batch_id: i64, spec: &Spec) -> AppResult<()> {
     if !spec.final_import {
         sqlx::query("INSERT INTO poster_intake_groups (id) VALUES (?) ON CONFLICT(id) DO NOTHING")

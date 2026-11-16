@@ -34,6 +34,7 @@ pub const FEATURES: &[&str] = &[
     "poster-link",
     "external-results",
     "staged-poster-batches",
+    "staged-poster-generation",
 ];
 
 /// 单条请求上限。改写结果按行携带全文，几百条也远小于此。

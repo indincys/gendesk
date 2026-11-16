@@ -136,10 +136,24 @@ const REVIEW_SELECT: &str = "SELECT t.id, t.batch_id, b.note AS batch_note,
 #[tauri::command]
 #[specta::specta]
 pub async fn list_pending_review(
+    app: AppHandle,
     state: State<'_, AppState>,
     batch_id: Option<i64>,
 ) -> AppResult<Vec<ReviewItemView>> {
     let mut rows = pending_review_rows(&state.db, batch_id).await?;
+    let scope = app.asset_protocol_scope();
+    for row in &mut rows {
+        // 主参考图直接由待验收列表返回，图库链接的原图需要逐文件授权。
+        let Some(path) = &row.ref_image_path else {
+            continue;
+        };
+        if !scope.is_allowed(path) {
+            if let Err(error) = scope.allow_file(path) {
+                tracing::warn!(task_id = row.id, %error, "无法授权主参考图原图");
+                row.ref_image_path = None;
+            }
+        }
+    }
     backfill_sizes(&state.db, &mut rows).await;
     Ok(rows)
 }

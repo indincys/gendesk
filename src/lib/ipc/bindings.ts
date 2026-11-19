@@ -330,9 +330,17 @@ async setLibraryStyleArchived(id: number, archived: boolean) : Promise<Result<nu
     else return { status: "error", error: e  as any };
 }
 },
-async deleteLibraryStyle(id: number) : Promise<Result<null, AppError>> {
+async deleteLibraryStyle(id: number, expectedImageCount: number) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_library_style", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("delete_library_style", { id, expectedImageCount }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async restoreLibraryStyle(id: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_library_style", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2477,7 +2485,7 @@ relinked: LibraryImageView[];
  */
 duplicates: LibraryImportIssue[]; failed: LibraryImportIssue[] }
 export type LibraryLimits = { maxPick: number; maxCooldownDays: number; defaultCooldownDays: number }
-export type LibraryOverview = { styles: LibraryStyleView[]; categories: LibraryCategoryView[]; 
+export type LibraryOverview = { styles: LibraryStyleView[]; deletedStyles: LibraryStyleView[]; categories: LibraryCategoryView[]; 
 /**
  * 统计所用的「此刻」（unix 秒），界面据此算剩余冷却。
  */
@@ -2508,7 +2516,7 @@ freshCount: number; picks: LibraryPick[];
  */
 markedUsed: boolean; message: string }
 export type LibraryRelinkEntry = { imageId: number; oldPath: string; newPath: string | null; issue: string | null }
-export type LibraryStyleView = { archived: boolean; id: number; name: string; product: string; note: string; total: number; available: number; byCategory: LibraryCategoryCount[] }
+export type LibraryStyleView = { archived: boolean; deletedAt: number | null; id: number; name: string; product: string; note: string; total: number; removedCount: number; available: number; byCategory: LibraryCategoryCount[] }
 export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean; cooldownDays: number | null }
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }

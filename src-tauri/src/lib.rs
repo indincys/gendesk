@@ -85,6 +85,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::ref_library::save_library_style,
             commands::ref_library::set_library_style_archived,
             commands::ref_library::delete_library_style,
+            commands::ref_library::restore_library_style,
             commands::ref_library::save_library_category,
             commands::ref_library::delete_library_category,
             commands::ref_library::import_library_images,

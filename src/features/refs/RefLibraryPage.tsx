@@ -98,7 +98,9 @@ export function RefLibraryPage() {
   const anchor = useRef<number | null>(null);
   const [images, setImages] = useState<LibraryImageView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
-  const [styleEdit, setStyleEdit] = useState<LibraryStyleView | "new" | null>(null);
+  const [styleEdit, setStyleEdit] = useState<number | "new" | null>(null);
+  const [deletedStylesOpen, setDeletedStylesOpen] = useState(false);
+  const [restoringStyleId, setRestoringStyleId] = useState<number | null>(null);
   const [catsOpen, setCatsOpen] = useState(false);
   const [importAsk, setImportAsk] = useState<string[] | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -203,6 +205,8 @@ export function RefLibraryPage() {
   }, [nextCoolEnd]);
 
   const style = overview?.styles.find((s) => s.id === styleId) ?? null;
+  const editedStyle = overview?.styles.find((item) => item.id === styleEdit) ?? null;
+  const deletedStyles = overview?.deletedStyles ?? [];
   const categories = overview?.categories ?? [];
   const limits = overview?.limits ?? null;
   const category = categories.find((c) => c.id === categoryId) ?? null;
@@ -408,6 +412,50 @@ export function RefLibraryPage() {
     } else toast.success(`已加入本次生成 · ${ids.length} 张`);
   }, []);
 
+  async function restoreStyle(item: LibraryStyleView) {
+    setRestoringStyleId(item.id);
+    try {
+      await unwrap(commands.restoreLibraryStyle(item.id));
+      if (item.archived) setViewArchived(true);
+      setStyleId(item.id);
+      setCategoryId(null);
+      setImageQuery("");
+      setStatus("all");
+      setStyleQuery("");
+      setProductFilter("");
+      setFailedImport(null);
+      setDeletedStylesOpen(false);
+      await refreshOverview();
+      toast.success(`已恢复「${item.name}」及其 ${item.total} 张在库图片`);
+    } catch (error) {
+      toast.error(message(error));
+      await refreshOverview();
+    } finally {
+      setRestoringStyleId(null);
+    }
+  }
+
+  async function deleteStyle(item: LibraryStyleView) {
+    try {
+      await unwrap(commands.deleteLibraryStyle(item.id, item.total + item.removedCount));
+      setStyleEdit(null);
+      if (item.id === styleId) {
+        setStyleId(null);
+        setSel(new Set());
+        setImages([]);
+        setCategoryId(null);
+        setFailedImport(null);
+      }
+      await refreshOverview();
+      toast.success(`已删除「${item.name}」及其 ${item.total} 张在库图片`, {
+        action: { label: "撤销", onClick: () => void restoreStyle(item) },
+      });
+    } catch (error) {
+      toast.error(message(error));
+      await refreshOverview();
+    }
+  }
+
   const right = (
     <>
       <button type="button" className="btn sm gho" onClick={() => setCatsOpen(true)}>
@@ -476,6 +524,9 @@ export function RefLibraryPage() {
           />
           显示归档款式
         </label>
+        <button type="button" className="btn sm gho" onClick={() => setDeletedStylesOpen(true)}>
+          已删除款式{deletedStyles.length > 0 && ` · ${deletedStyles.length}`}
+        </button>
         {overview?.styles
           .filter(
             (item) =>
@@ -495,7 +546,7 @@ export function RefLibraryPage() {
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setStyleEdit(s);
+                setStyleEdit(s.id);
               }}
               onKeyDown={(e) => {
                 if (e.target !== e.currentTarget) return;
@@ -506,7 +557,7 @@ export function RefLibraryPage() {
                 }
                 if (e.key === "F2" || e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
                   e.preventDefault();
-                  setStyleEdit(s);
+                  setStyleEdit(s.id);
                 }
               }}
               role="button"
@@ -529,7 +580,7 @@ export function RefLibraryPage() {
                 title="款式操作"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setStyleEdit(s);
+                  setStyleEdit(s.id);
                 }}
               >
                 <Pencil className="ic12" />
@@ -844,9 +895,11 @@ export function RefLibraryPage() {
         </div>
       </div>
 
-      {styleEdit && (
+      {(styleEdit === "new" || editedStyle) && (
         <StyleModal
-          style={styleEdit === "new" ? null : styleEdit}
+          key={styleEdit}
+          style={editedStyle}
+          onDelete={deleteStyle}
           onClose={() => setStyleEdit(null)}
           onSaved={async (id) => {
             setStyleEdit(null);
@@ -874,12 +927,42 @@ export function RefLibraryPage() {
               );
             await refreshOverview();
           }}
-          onDeleted={async () => {
-            setStyleEdit(null);
-            setStyleId(null);
-            await refreshOverview();
-          }}
         />
+      )}
+      {deletedStylesOpen && (
+        <Modal title="已删除款式" width="w640" onClose={() => setDeletedStylesOpen(false)}>
+          {deletedStyles.length === 0 ? (
+            <p className="fs12 t3">暂无已删除款式。</p>
+          ) : (
+            <div className="col gap8">
+              {deletedStyles.map((item) => (
+                <div key={item.id} className="fx ac gap10">
+                  <div className="f1">
+                    <div className="fs13 fw5">
+                      {item.name}
+                      {item.product && ` · ${item.product}`}
+                    </div>
+                    <div className="fs11 t3">
+                      {item.total} 张在库图片
+                      {item.removedCount > 0 && ` · ${item.removedCount} 张此前已单独移出`}
+                      {item.deletedAt !== null &&
+                        ` · ${new Date(item.deletedAt * 1000).toLocaleString()} 删除`}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={restoringStyleId !== null}
+                    aria-label={`恢复款式 ${item.name}`}
+                    onClick={() => void restoreStyle(item)}
+                  >
+                    {restoringStyleId === item.id ? "正在恢复…" : "恢复款式"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
       )}
       {catsOpen && limits && (
         <CategoriesModal
@@ -1111,20 +1194,22 @@ function StyleModal({
   style,
   onClose,
   onSaved,
-  onDeleted,
+  onDelete,
   onImport,
   onArchive,
 }: {
   style: LibraryStyleView | null;
   onClose: () => void;
   onSaved: (id: number) => void;
-  onDeleted: () => void;
+  onDelete: (style: LibraryStyleView) => Promise<void>;
   onImport: (id: number) => void;
   onArchive: (style: LibraryStyleView) => Promise<void>;
 }) {
   const [name, setName] = useState(style?.name ?? "");
   const [product, setProduct] = useState(style?.product ?? "");
   const [note, setNote] = useState(style?.note ?? "");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   async function save() {
     if (style && (name.trim() !== style.name || product.trim() !== style.product)) {
@@ -1141,103 +1226,125 @@ function StyleModal({
   }
 
   async function remove() {
-    if (!style) return;
+    if (!style || deleting) return;
+    setDeleting(true);
     try {
-      await unwrap(commands.deleteLibraryStyle(style.id));
-      onDeleted();
-    } catch (e) {
-      toast.error(message(e));
+      await onDelete(style);
+    } finally {
+      setDeleting(false);
     }
   }
 
   return (
-    <Modal
-      title={style ? "修改款式" : "新建款式"}
-      onClose={onClose}
-      footer={
-        <>
-          {style && (
+    <>
+      <Modal
+        title={style ? "修改款式" : "新建款式"}
+        onClose={onClose}
+        footer={
+          <>
+            {style && (
+              <button
+                type="button"
+                className="btn sm gho"
+                onClick={() => void copyText(style.name, "款式名")}
+              >
+                复制款式名
+              </button>
+            )}
+            {style && (
+              <button
+                type="button"
+                className="btn sm gho dng"
+                disabled={deleting}
+                onClick={() => setConfirmDelete(true)}
+              >
+                {deleting ? "正在删除…" : "删除款式…"}
+              </button>
+            )}
+            <div className="f1" />
+            <button type="button" className="btn sm gho" onClick={onClose}>
+              取消
+            </button>
             <button
               type="button"
-              className="btn sm gho"
-              onClick={() => void copyText(style.name, "款式名")}
+              className="btn sm pri"
+              disabled={!name.trim() || deleting}
+              onClick={save}
             >
-              复制款式名
+              保存
             </button>
-          )}
-          {style && style.total === 0 && (
-            <button type="button" className="btn sm gho dng" onClick={remove}>
-              删除款式
+          </>
+        }
+      >
+        {style && (
+          <div className="fx ac gap6 wrap mt6">
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void copyText(String(style.id), "款式编号")}
+            >
+              复制编号 #{style.id}
             </button>
-          )}
-          <div className="f1" />
-          <button type="button" className="btn sm gho" onClick={onClose}>
-            取消
-          </button>
-          <button type="button" className="btn sm pri" disabled={!name.trim()} onClick={save}>
-            保存
-          </button>
-        </>
-      }
-    >
-      {style && (
-        <div className="fx ac gap6 wrap mt6">
-          <button
-            type="button"
-            className="btn xs"
-            onClick={() => void copyText(String(style.id), "款式编号")}
-          >
-            复制编号 #{style.id}
-          </button>
-          <button
-            type="button"
-            className="btn xs"
-            onClick={() => useUiStore.getState().openStyleWorks(style.name, style.product)}
-          >
-            查看关联作品
-          </button>
-          {!style.archived && (
-            <button type="button" className="btn xs" onClick={() => onImport(style.id)}>
-              导入此款式…
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => useUiStore.getState().openStyleWorks(style.name, style.product)}
+            >
+              查看关联作品
             </button>
-          )}
-          <button
-            type="button"
-            className="btn xs"
-            onClick={() => {
-              if (
-                !style.archived &&
-                !window.confirm(
-                  `归档「${style.name}」及其 ${style.total} 张在库图片？归档期间工单不会从这里抽图，可随时恢复。`,
+            {!style.archived && (
+              <button type="button" className="btn xs" onClick={() => onImport(style.id)}>
+                导入此款式…
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => {
+                if (
+                  !style.archived &&
+                  !window.confirm(
+                    `归档「${style.name}」及其 ${style.total} 张在库图片？归档期间工单不会从这里抽图，可随时恢复。`,
+                  )
                 )
-              )
-                return;
-              void onArchive(style).catch((error) => toast.error(message(error)));
-            }}
-          >
-            {style.archived ? "恢复款式" : "归档款式"}
-          </button>
+                  return;
+                void onArchive(style).catch((error) => toast.error(message(error)));
+              }}
+            >
+              {style.archived ? "恢复款式" : "归档款式"}
+            </button>
+          </div>
+        )}
+        <div className="rlform mt10">
+          <span className="fs12 t2">款式名</span>
+          <input
+            className="inp"
+            value={name}
+            placeholder="与工单 organization.style 一致，如 王一博"
+            onChange={(e) => setName(e.target.value)}
+          />
+          <span className="fs12 t2">产品</span>
+          <input
+            className="inp"
+            value={product}
+            placeholder="可空；同名款式属于不同产品时用来区分"
+            onChange={(e) => setProduct(e.target.value)}
+          />
+          <span className="fs12 t2">备注</span>
+          <input className="inp" value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
+      </Modal>
+      {style && confirmDelete && (
+        <ConfirmModal
+          title={`删除「${style.name}」？`}
+          desc={`将从参考图库移除${style.product ? `「${style.product}」下的` : "此"}款式和 ${style.total} 张在库图片${style.removedCount > 0 ? `，另有 ${style.removedCount} 张此前单独移出的图片随款式保留` : ""}。新工单将无法从此款式取图。原图保留在原位置，已建任务和使用记录仍可查看。可在「已删除款式」中恢复。`}
+          confirmLabel="删除款式"
+          danger
+          onConfirm={() => void remove()}
+          onClose={() => setConfirmDelete(false)}
+        />
       )}
-      <div className="rlform mt10">
-        <span className="fs12 t2">款式名</span>
-        <input
-          className="inp"
-          value={name}
-          placeholder="与工单 organization.style 一致，如 王一博"
-          onChange={(e) => setName(e.target.value)}
-        />
-        <span className="fs12 t2">产品</span>
-        <input
-          className="inp"
-          value={product}
-          placeholder="可空；同名款式属于不同产品时用来区分"
-          onChange={(e) => setProduct(e.target.value)}
-        />
-        <span className="fs12 t2">备注</span>
-        <input className="inp" value={note} onChange={(e) => setNote(e.target.value)} />
-      </div>
-    </Modal>
+    </>
   );
 }
 

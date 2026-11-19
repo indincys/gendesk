@@ -1,7 +1,7 @@
 //! trash 域命令（废纸篓，执行计划 2.1 / 需求 13.4）。
 //! 清理 = 物理删文件 + 级联删记录 + 编号回收，不可恢复。
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::Serialize;
 use specta::Type;
@@ -11,7 +11,7 @@ use crate::db::repo::tasks as task_repo;
 use crate::db::repo::trash as repo;
 use crate::db::repo::v2v as v2v_repo;
 use crate::db::repo::works as work_repo;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::{files, ids};
 
 /// 启动时到期自动清理（E22 批次 + E40 废纸篓，决策 D3）。
@@ -65,6 +65,9 @@ pub async fn run_startup_cleanup(
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TrashItemView {
+    pub original_id: Option<i64>,
+    pub archived_clip: bool,
+    pub work_id: Option<i64>,
     pub id: i64,
     pub entity_type: String,
     pub code: Option<String>,
@@ -129,7 +132,20 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
                 None
             };
             let restorable = r.entity_type != "work" || r.payload_json.is_some();
+            let work_id = (r.entity_type == "work")
+                .then(|| {
+                    r.payload_json
+                        .as_deref()
+                        .and_then(|json| {
+                            serde_json::from_str::<work_repo::AcceptedWorkRow>(json).ok()
+                        })
+                        .map(|work| work.id)
+                })
+                .flatten();
             TrashItemView {
+                original_id: r.ref_id,
+                archived_clip: is_archived_clip(&r),
+                work_id,
                 id: r.id,
                 restorable,
                 batch_id: batches.get(&r.id).copied(),
@@ -370,7 +386,14 @@ async fn filter_live_clip_files(
     Ok(out)
 }
 
+pub(crate) const ARCHIVED_CLIP: &str = r#""approved-clip""#;
+
+fn is_archived_clip(row: &crate::db::repo::trash::TrashItemRow) -> bool {
+    row.entity_type == "clip" && row.payload_json.as_deref() == Some(ARCHIVED_CLIP)
+}
+
 async fn purge(state: &crate::state::AppState, ids_in: &[i64]) -> AppResult<i64> {
+    let _guard = state.trash_lock.lock().await;
     let n = purge_ids(&state.db, ids_in).await?;
     // 清掉未通过结果，正是「这一批彻底了结了」的最后一步：批次的退休条件里第二条
     // 就是「没有本批的未通过结果还躺在废纸篓里」（那是还原按钮的锚点）。
@@ -401,17 +424,25 @@ pub async fn purge_ids(pool: &sqlx::SqlitePool, ids_in: &[i64]) -> AppResult<i64
         return Ok(0);
     }
 
-    // 1) 物理删文件（缩略图 + file_paths_json）。
-    for r in &rows {
-        if let Some(t) = &r.thumb_path {
-            let _ = files::purge(&PathBuf::from(t));
-        }
-        if let Ok(paths) = serde_json::from_str::<Vec<String>>(&r.file_paths_json) {
-            for p in paths {
-                let _ = files::purge(&PathBuf::from(p));
-            }
-        }
-    }
+    // Any file error keeps the corresponding record for reconsideration or retry.
+    let rows = tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .filter(|row| {
+                let paths =
+                    serde_json::from_str::<Vec<String>>(&row.file_paths_json).unwrap_or_default();
+                let mut complete = true;
+                for path in paths.iter().chain(row.thumb_path.iter()) {
+                    if let Err(error) = files::purge(Path::new(path)) {
+                        tracing::warn!(%error, trash_id = row.id, "清理文件失败，保留废纸篓记录");
+                        complete = false;
+                    }
+                }
+                complete
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))?;
 
     // 2) 级联删记录 + 编号回收（同事务）。
     let mut tx = pool.begin().await?;
@@ -438,6 +469,14 @@ pub async fn purge_ids(pool: &sqlx::SqlitePool, ids_in: &[i64]) -> AppResult<i64
                         .await?;
                 }
             }
+            "clip" if is_archived_clip(r) => {
+                if let Some(id) = r.ref_id {
+                    sqlx::query("DELETE FROM v2v_clips WHERE id=? AND archived_at IS NOT NULL")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
             _ => {}
         }
     }
@@ -453,6 +492,7 @@ pub async fn purge_ids(pool: &sqlx::SqlitePool, ids_in: &[i64]) -> AppResult<i64
 #[serde(rename_all = "camelCase")]
 pub struct RestoreResult {
     pub restored: i64,
+    pub restored_ids: Vec<i64>,
     /// 还不回去的那几条为什么还不回去。空 = 全部成功。
     pub failures: Vec<String>,
 }
@@ -472,6 +512,7 @@ pub async fn restore_trash_items(
     state: State<'_, crate::state::AppState>,
     ids: Vec<i64>,
 ) -> AppResult<RestoreResult> {
+    let _guard = state.trash_lock.lock().await;
     let rows = repo::take(&state.db, &ids).await?;
     let mut restored: Vec<i64> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -500,6 +541,10 @@ pub async fn restore_trash_items(
                     .map(|x| x.rows_affected() > 0),
                 None => Ok(false),
             },
+            "clip" if is_archived_clip(r) => restore_by_id(
+                &state.db, r.ref_id,
+                "UPDATE v2v_clips SET archived_at=NULL, updated_at=?2 WHERE id=?1 AND archived_at IS NOT NULL",
+            ).await,
             "clip" => restore_by_id(
                 &state.db,
                 r.ref_id,
@@ -552,6 +597,7 @@ pub async fn restore_trash_items(
     }
     Ok(RestoreResult {
         restored: restored.len() as i64,
+        restored_ids: restored,
         failures,
     })
 }

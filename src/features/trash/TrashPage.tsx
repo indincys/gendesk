@@ -50,7 +50,13 @@ import { toast } from "sonner";
  * ⌫ 彻底删除（走确认卡）· ⌘A 全选 · Esc 清除勾选 / 退出放大。
  */
 export function TrashPage() {
-  const [query, setQuery] = useState("");
+  const jumpTrash = useUiStore((s) => s.jumpTrash);
+  const [query, setQuery] = useState(jumpTrash === null ? "" : `废纸篓 #${jumpTrash}`);
+  const [presence, setPresence] = useState("all");
+  const [deletedSince, setDeletedSince] = useState("");
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [restoreAsk, setRestoreAsk] = useState<number[] | null>(null);
+  const actionLock = useRef(false);
   const [kind, setKind] = useState("all");
   const [rows, setRows] = useState<TrashItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
@@ -80,10 +86,14 @@ export function TrashPage() {
 
   const load = useCallback(async () => {
     try {
-      setRows(await unwrap(commands.listTrash()));
-      setSel(new Set());
+      const loaded = await unwrap(commands.listTrash());
+      setRows(loaded);
+      const stillPresent = new Set(loaded.map((item) => item.id));
+      setSel((selected) => new Set([...selected].filter((id) => stillPresent.has(id))));
+      setLoadState("ready");
     } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
+      setLoadState("error");
+      toast.error(String(e));
     }
   }, []);
   useEffect(() => {
@@ -92,21 +102,29 @@ export function TrashPage() {
 
   // 容器宽度：齐行的行高由它推出，故必须在渲染前就是对的。
   // 依赖 hasRows 是因为滚动容器只在非空时挂载（空态是另一棵子树）。
-  const filtered = useMemo(
-    () =>
-      rows.filter((item) => {
-        const text = query.trim().toLowerCase();
-        return (
-          (kind === "all" ||
-            (kind === "restorable" ? item.restorable : item.entityType === kind)) &&
-          (!text ||
-            [item.code, item.title, item.promptText, item.sourceLabel, `#${item.batchId}`].some(
-              (value) => value?.toLowerCase().includes(text),
-            ))
-        );
-      }),
-    [rows, query, kind],
-  );
+  const filtered = useMemo(() => {
+    const text = query.trim().toLowerCase();
+    const since = deletedSince ? new Date(`${deletedSince}T00:00:00`).getTime() / 1000 : 0;
+    return rows.filter((item) => {
+      const hasFile = Boolean(item.imagePath || item.videoPath);
+      return (
+        (kind === "all" || (kind === "restorable" ? item.restorable : item.entityType === kind)) &&
+        item.deletedAt >= since &&
+        (presence === "all" || (presence === "readable" ? hasFile : !hasFile)) &&
+        (!text ||
+          (/^废纸篓 #\d+$/.test(text)
+            ? text === `废纸篓 #${item.id}`
+            : [
+                item.code,
+                item.title,
+                item.promptText,
+                item.sourceLabel,
+                `#${item.batchId}`,
+                item.refName,
+              ].some((value) => value?.toLowerCase().includes(text))))
+      );
+    });
+  }, [rows, query, kind, presence, deletedSince]);
   const hasRows = filtered.length > 0;
   // biome-ignore lint/correctness/useExhaustiveDependencies: 容器挂载/卸载随 hasRows 切换，须重挂观察器
   useEffect(() => {
@@ -165,17 +183,24 @@ export function TrashPage() {
 
   const purge = useCallback(
     async (ids: number[], all: boolean) => {
+      if (actionLock.current) return;
+      actionLock.current = true;
+      const requested = all ? rows.length : ids.length;
       try {
         const n = all
           ? await unwrap(commands.purgeAllTrash())
           : await unwrap(commands.purgeTrashItems(ids));
-        toast(`已彻底删除 ${n} 项 · 编号已回收`);
+        if (n < requested)
+          toast.warning(`已清理 ${n}/${requested} 项。有有效引用或文件无法清理的记录已保留。`);
+        else toast.success(`已彻底删除 ${n} 项`);
         await load();
       } catch (e) {
-        if (e instanceof Error) toast.error(e.message);
+        toast.error(String(e));
+      } finally {
+        actionLock.current = false;
       }
     },
-    [load],
+    [load, rows.length],
   );
 
   /**
@@ -187,18 +212,28 @@ export function TrashPage() {
    */
   const restore = useCallback(
     async (ids: number[]) => {
-      if (ids.length === 0) return;
+      if (ids.length === 0 || actionLock.current) return;
+      actionLock.current = true;
       try {
         const res = await unwrap(commands.restoreTrashItems(ids));
-        if (res.restored > 0) toast.success(`已还原 ${res.restored} 项回原位`);
+        const restored = rows.filter((item) => res.restoredIds.includes(item.id));
+        const first = restored[0];
+        if (res.restored > 0) {
+          setZoom(null);
+          toast.success(`已还原 ${res.restored}/${ids.length} 项`, {
+            action: first ? { label: "前往查看", onClick: () => openRestored(first) } : undefined,
+          });
+        }
         // 失败逐条报出来：「点了还原却没回去」比直接说还不回去更难查。
         for (const f of res.failures) toast.error(f);
         await load();
       } catch (e) {
-        if (e instanceof Error) toast.error(e.message);
+        toast.error(String(e));
+      } finally {
+        actionLock.current = false;
       }
     },
-    [load],
+    [load, rows],
   );
 
   /**
@@ -316,7 +351,7 @@ export function TrashPage() {
       }
       if (e.key === "r" || e.key === "R") {
         const ids = zoom !== null && zoomItem ? [zoomItem.id] : scope();
-        void restore(ids);
+        if (ids.length) setRestoreAsk(ids);
         return;
       }
       if (e.key === "Backspace" || e.key === "Delete") {
@@ -327,21 +362,7 @@ export function TrashPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    blocks,
-    cardRow,
-    flat,
-    focus,
-    zoom,
-    zoomItem,
-    curItem,
-    sel,
-    confirm,
-    mode,
-    pick,
-    restore,
-    scope,
-  ]);
+  }, [blocks, cardRow, flat, focus, zoom, zoomItem, curItem, sel, confirm, mode, pick, scope]);
 
   // 光标滚进视野走**虚拟化的定位**，不是 `scrollIntoView`：后者要求那个元素此刻在
   // DOM 里，而虚拟化下视口外的块根本没渲染 —— 光标一旦跳出 overscan（⌘A 之后按方向键、
@@ -392,26 +413,54 @@ export function TrashPage() {
           <option value="work">作品</option>
           <option value="clip">视频</option>
         </select>
+        <select
+          className="inp sm"
+          aria-label="筛选原件可读状态"
+          value={presence}
+          onChange={(event) => {
+            setPresence(event.target.value);
+            setSel(new Set());
+          }}
+        >
+          <option value="all">所有文件状态</option>
+          <option value="readable">原件可读</option>
+          <option value="missing">无可读媒体</option>
+        </select>
+        <input
+          type="date"
+          className="inp sm"
+          aria-label="删除起始日期"
+          title="自该日期起删除"
+          value={deletedSince}
+          onChange={(event) => {
+            setDeletedSince(event.target.value);
+            setSel(new Set());
+          }}
+        />
         <span className="cnt">
           {filtered.length} / {rows.length} 项
         </span>
         <div className="seg">
-          <span
+          <button
+            type="button"
+            aria-pressed={mode === "grid"}
             className={cn("sgi", mode === "grid" && "on")}
             title="网格：按真实比例铺开，一屏看出那批图长什么样"
             onClick={() => setMode("grid")}
           >
             <LayoutGrid className="ic12" />
             网格
-          </span>
-          <span
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "list"}
             className={cn("sgi", mode === "list" && "on")}
             title="列表：一行一条，找编号最快"
             onClick={() => setMode("list")}
           >
             <List className="ic12" />
             列表
-          </span>
+          </button>
         </div>
         {mode === "grid" && (
           <>
@@ -437,7 +486,20 @@ export function TrashPage() {
       {filtered.length === 0 ? (
         <div className="bigempty">
           <Trash2 className="ic" style={{ width: 26, height: 26, opacity: 0.5 }} />
-          <div className="fs13 fw5 t2">{rows.length ? "没有匹配的废纸篓记录" : "废纸篓是空的"}</div>
+          <div className="fs13 fw5 t2" role="status">
+            {loadState === "loading"
+              ? "正在读取废纸篓…"
+              : loadState === "error"
+                ? "无法读取废纸篓"
+                : rows.length
+                  ? "没有匹配的废纸篓记录"
+                  : "废纸篓是空的"}
+          </div>
+          {loadState === "error" && (
+            <button type="button" className="btn xs" onClick={() => void load()}>
+              重试
+            </button>
+          )}
           {rows.length ? (
             <button
               type="button"
@@ -499,7 +561,7 @@ export function TrashPage() {
             item={curItem}
             now={now}
             onZoom={() => setZoom(focus)}
-            onRestore={() => curItem && void restore([curItem.id])}
+            onRestore={() => curItem && setRestoreAsk([curItem.id])}
             onPurge={() => curItem && setConfirm({ ids: [curItem.id], all: false })}
           />
         </div>
@@ -523,7 +585,7 @@ export function TrashPage() {
                     ? undefined
                     : `勾选的 ${selCount} 项里有 ${selCount - restorableSel} 条是旧版本删除的，没留下可还原的记录`
                 }
-                onClick={() => void restore([...sel])}
+                onClick={() => setRestoreAsk([...sel])}
               >
                 <Undo2 className="ic12" />
                 还原所选 · {restorableSel}
@@ -559,7 +621,7 @@ export function TrashPage() {
           total={flat.length}
           now={now}
           onSeek={(d) => setZoom((z) => clamp((z ?? 0) + d, flat.length))}
-          onRestore={() => void restore([zoomItem.id])}
+          onRestore={() => setRestoreAsk([zoomItem.id])}
           onPurge={() => setConfirm({ ids: [zoomItem.id], all: false })}
           onClose={() => {
             // 退出时把光标停在刚才看的那一条上 —— 否则接着按方向键会从头跳一次。
@@ -569,12 +631,38 @@ export function TrashPage() {
         />
       )}
 
+      {restoreAsk && (
+        <ConfirmModal
+          title={`还原 ${restoreAsk.length} 项`}
+          desc={Array.from(
+            rows
+              .filter((item) => restoreAsk.includes(item.id))
+              .reduce((summary, item) => {
+                const destination = restoreDestination(item);
+                summary.set(destination, (summary.get(destination) ?? 0) + 1);
+                return summary;
+              }, new Map<string, number>())
+              .entries(),
+          )
+            .map(([name, count]) => `${name} ${count} 项`)
+            .join(" · ")}
+          confirmLabel="还原"
+          onConfirm={() => void restore(restoreAsk)}
+          onClose={() => setRestoreAsk(null)}
+        />
+      )}
       {confirm && (
         <ConfirmModal
           title={
             confirm.all ? `清空废纸篓 · ${rows.length} 项` : `彻底删除 ${confirm.ids.length} 项`
           }
-          desc="将物理删除文件（含未通过原图）、级联清除记录并回收编号，此操作不可恢复。"
+          desc={`作用于${confirm.all ? "整个废纸篓" : "所选记录"}，清除记录及其内部文件，不可恢复。交付到外部的独立副本会保留。${(confirm.all
+            ? rows
+            : rows.filter((item) => confirm.ids.includes(item.id))
+          )
+            .slice(0, 4)
+            .map((item) => ` ${item.code ?? item.title ?? `#${item.id}`}（${item.sourceLabel}）`)
+            .join("、")}`}
           confirmLabel="彻底删除"
           danger
           onConfirm={() => void purge(confirm.ids, confirm.all)}
@@ -583,6 +671,28 @@ export function TrashPage() {
       )}
     </div>
   );
+}
+
+function restoreDestination(item: TrashItemView) {
+  if (!item.restorable) return "缺少还原记录";
+  if (item.entityType === "task") return "图片验收";
+  if (item.entityType === "work") return "作品库";
+  if (item.entityType === "clip") return item.archivedClip ? "视频成片库" : "视频验收";
+  return "生成页";
+}
+
+function openRestored(item: TrashItemView) {
+  const ui = useUiStore.getState();
+  if (item.entityType === "task" && item.batchId !== null && item.originalId !== null) {
+    ui.openTask("review", item.batchId, item.originalId);
+  } else if (item.entityType === "work" && item.workId !== null) {
+    ui.openWork(item.workId);
+  } else if (item.entityType === "clip" && item.originalId !== null) {
+    ui.openClip(item.archivedClip ? "clips" : "v2v", item.originalId);
+  } else
+    ui.go(
+      item.entityType === "work" ? "library" : item.entityType === "task" ? "review" : "generate",
+    );
 }
 
 /** 夹取到 [0, n-1]；空列表回 0。 */

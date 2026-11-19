@@ -16,6 +16,9 @@ function at(y: number, mo: number, d: number, h: number, mi = 0): number {
 let nextId = 1;
 function item(deletedAt: number, over: Partial<TrashItemView> = {}): TrashItemView {
   return {
+    originalId: null,
+    archivedClip: false,
+    workId: null,
     id: nextId++,
     entityType: "task",
     code: null,

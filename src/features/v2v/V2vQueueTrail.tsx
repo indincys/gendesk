@@ -18,9 +18,14 @@ import { useEffect, useState } from "react";
  * 一个点算不出斜率。这时只说「已入队 · 第 N 位 · 还在等下一次采样」，
  * **绝不用一条水平线冒充「队列没动」**——那是一个结论，而此刻我们没有结论。
  */
-export function V2vQueueTrail({ clipId, queueIdx }: { clipId: number; queueIdx: number | null }) {
+export function V2vQueueTrail({
+  clipId,
+  queueIdx,
+  polledAt,
+}: { clipId: number; queueIdx: number | null; polledAt: number | null }) {
   const [trail, setTrail] = useState<ClipQueueTrail | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each poll may have recorded a new point.
   useEffect(() => {
     let alive = true;
     setTrail(null);
@@ -32,7 +37,7 @@ export function V2vQueueTrail({ clipId, queueIdx }: { clipId: number; queueIdx: 
     return () => {
       alive = false;
     };
-  }, [clipId]);
+  }, [clipId, polledAt]);
 
   const pts = trail?.points ?? [];
   if (pts.length === 0) {
@@ -69,6 +74,7 @@ export function V2vQueueTrail({ clipId, queueIdx }: { clipId: number; queueIdx: 
         </svg>
       )}
       <div className="fs10 t3">
+        {pts.at(-1) && `最近采样 ${new Date((pts.at(-1)?.at ?? 0) * 1000).toLocaleTimeString()} · `}
         {pts.length < 2 ? (
           `已采样 1 次 · 第 ${idxs[0]} 位`
         ) : (

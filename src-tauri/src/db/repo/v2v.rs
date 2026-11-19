@@ -139,7 +139,9 @@ pub async fn list_by_stages(
         return Ok(Vec::new());
     }
     let holes = vec!["?"; stages.len()].join(",");
-    let sql = format!("{SELECT} WHERE c.stage IN ({holes}) ORDER BY c.group_id, c.id");
+    let sql = format!(
+        "{SELECT} WHERE c.archived_at IS NULL AND c.stage IN ({holes}) ORDER BY c.group_id, c.id"
+    );
     let mut q = sqlx::query_as::<_, ClipRow>(&sql);
     for s in stages {
         q = q.bind(*s);
@@ -151,7 +153,7 @@ pub async fn get<'e, E>(ex: E, id: i64) -> Result<Option<ClipRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let sql = format!("{SELECT} WHERE c.id = ?1");
+    let sql = format!("{SELECT} WHERE c.id = ?1 AND c.archived_at IS NULL");
     sqlx::query_as::<_, ClipRow>(&sql)
         .bind(id)
         .fetch_optional(ex)
@@ -160,9 +162,11 @@ where
 
 /// 各阶段计数（看板列头 + 侧栏徽章）。
 pub async fn stage_counts(pool: &SqlitePool) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    sqlx::query_as::<_, (String, i64)>("SELECT stage, COUNT(*) FROM v2v_clips GROUP BY stage")
-        .fetch_all(pool)
-        .await
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT stage, COUNT(*) FROM v2v_clips WHERE archived_at IS NULL GROUP BY stage",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// 写入组内公共前后缀剥离结果（工单物化时按组批量算一次）。
@@ -901,6 +905,25 @@ pub async fn credit_since(pool: &SqlitePool, since: i64) -> Result<i64, sqlx::Er
     Ok(n)
 }
 
+const CREDIT_SUBMISSIONS: &str = "WITH submissions AS (
+           SELECT s.submit_id, s.clip_id, s.channel_key, s.charged_at,
+                  COALESCE(
+                    (SELECT c.credits FROM v2v_credit_events c
+                      WHERE c.submit_id=s.submit_id AND c.event_type='charge'
+                      ORDER BY c.id DESC LIMIT 1),
+                    s.credits
+                  ) AS credits,
+                  COALESCE(
+                    (SELECT o.event_type FROM v2v_credit_events o
+                      WHERE o.submit_id=s.submit_id
+                        AND o.event_type IN ('pending','pass','rej','failed','abandoned')
+                      ORDER BY o.id DESC LIMIT 1),
+                    'pending'
+                  ) AS outcome
+             FROM v2v_credit_events s
+            WHERE s.event_type='submit'
+         )";
+
 /// 不可变消费事件按通道的汇总。`since=None` 表示全部历史。
 #[derive(Debug, Clone, FromRow)]
 pub struct CreditChannelRow {
@@ -919,25 +942,8 @@ pub async fn credit_events_by_channel(
     pool: &SqlitePool,
     since: Option<i64>,
 ) -> Result<Vec<CreditChannelRow>, sqlx::Error> {
-    sqlx::query_as::<_, CreditChannelRow>(
-        "WITH submissions AS (
-           SELECT s.submit_id, s.channel_key, s.charged_at,
-                  COALESCE(
-                    (SELECT c.credits FROM v2v_credit_events c
-                      WHERE c.submit_id=s.submit_id AND c.event_type='charge'
-                      ORDER BY c.id DESC LIMIT 1),
-                    s.credits
-                  ) AS credits,
-                  COALESCE(
-                    (SELECT o.event_type FROM v2v_credit_events o
-                      WHERE o.submit_id=s.submit_id
-                        AND o.event_type IN ('pending','pass','rej','failed','abandoned')
-                      ORDER BY o.id DESC LIMIT 1),
-                    'pending'
-                  ) AS outcome
-             FROM v2v_credit_events s
-            WHERE s.event_type='submit'
-         )
+    sqlx::query_as::<_, CreditChannelRow>(&format!(
+        "{CREDIT_SUBMISSIONS}
          SELECT channel_key,
                 COALESCE(SUM(credits),0) AS spent_total,
                 COALESCE(SUM(CASE WHEN outcome='pass' THEN credits ELSE 0 END),0) AS spent_pass,
@@ -953,8 +959,8 @@ pub async fn credit_events_by_channel(
            FROM submissions
           WHERE credits IS NOT NULL AND (?1 IS NULL OR charged_at >= ?1)
           GROUP BY channel_key
-          ORDER BY spent_total DESC, channel_key",
-    )
+          ORDER BY spent_total DESC, channel_key"
+    ))
     .bind(since)
     .fetch_all(pool)
     .await
@@ -973,29 +979,68 @@ pub async fn credit_event_trend(
     monthly: bool,
 ) -> Result<Vec<CreditTrendRow>, sqlx::Error> {
     let bucket = if monthly { "%Y-%m" } else { "%Y-%m-%d" };
-    sqlx::query_as::<_, CreditTrendRow>(
-        "WITH submissions AS (
-           SELECT s.charged_at,
-                  COALESCE(
-                    (SELECT c.credits FROM v2v_credit_events c
-                      WHERE c.submit_id=s.submit_id AND c.event_type='charge'
-                      ORDER BY c.id DESC LIMIT 1),
-                    s.credits
-                  ) AS credits
-             FROM v2v_credit_events s
-            WHERE s.event_type='submit'
-         )
+    sqlx::query_as::<_, CreditTrendRow>(&format!(
+        "{CREDIT_SUBMISSIONS}
          SELECT strftime(?2, charged_at, 'unixepoch', 'localtime') AS bucket,
                 COALESCE(SUM(credits),0) AS spent
            FROM submissions
           WHERE credits IS NOT NULL AND (?1 IS NULL OR charged_at >= ?1)
           GROUP BY bucket
-          ORDER BY bucket",
-    )
+          ORDER BY bucket"
+    ))
     .bind(since)
     .bind(bucket)
     .fetch_all(pool)
     .await
+}
+
+#[derive(Debug, Clone, FromRow, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditEntry {
+    pub clip_id: Option<i64>,
+    pub clip_code: Option<String>,
+    pub clip_stage: Option<String>,
+    pub submit_id: String,
+    pub channel_key: String,
+    pub charged_at: i64,
+    pub credits: i64,
+    pub outcome: String,
+}
+
+pub struct CreditEntryFilter<'a> {
+    pub since: Option<i64>,
+    pub monthly: bool,
+    pub bucket: Option<&'a str>,
+    pub channel: Option<&'a str>,
+    pub outcome: Option<&'a str>,
+    pub offset: i64,
+}
+
+pub async fn credit_event_entries(
+    pool: &SqlitePool,
+    filter: CreditEntryFilter<'_>,
+) -> Result<Vec<CreditEntry>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "{CREDIT_SUBMISSIONS}
+         SELECT c.id AS clip_id, w.prompt_code AS clip_code, c.stage AS clip_stage, s.submit_id, s.channel_key,
+                s.charged_at, s.credits, s.outcome
+           FROM submissions s
+           LEFT JOIN v2v_clips c ON c.id=s.clip_id AND c.archived_at IS NULL
+           LEFT JOIN accepted_works w ON w.id=c.work_id
+          WHERE s.credits IS NOT NULL AND (?1 IS NULL OR s.charged_at >= ?1)
+            AND (?3 IS NULL OR strftime(?2, s.charged_at, 'unixepoch', 'localtime')=?3)
+            AND (?4 IS NULL OR s.channel_key=?4)
+            AND (?5 IS NULL OR s.outcome=?5 OR (?5='failed' AND s.outcome='abandoned'))
+          ORDER BY s.charged_at DESC, s.submit_id
+          LIMIT 101 OFFSET ?6"
+    ))
+    .bind(filter.since)
+    .bind(if filter.monthly { "%Y-%m" } else { "%Y-%m-%d" })
+    .bind(filter.bucket)
+    .bind(filter.channel)
+    .bind(filter.outcome)
+    .bind(filter.offset.max(0))
+    .fetch_all(pool).await
 }
 
 // ─────────────────────── 排队位次轨迹（0029）───────────────────────
@@ -1152,7 +1197,7 @@ pub async fn get_many(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<ClipRow>, sq
         return Ok(Vec::new());
     }
     let holes = vec!["?"; ids.len()].join(",");
-    let sql = format!("{SELECT} WHERE c.id IN ({holes})");
+    let sql = format!("{SELECT} WHERE c.archived_at IS NULL AND c.id IN ({holes})");
     let mut q = sqlx::query_as::<_, ClipRow>(&sql);
     for i in ids {
         q = q.bind(*i);
@@ -1174,7 +1219,7 @@ pub async fn current_media_paths(
     }
     let holes = vec!["?"; ids.len()].join(",");
     let sql =
-        format!("SELECT video_path, poster_path, export_path FROM v2v_clips WHERE id IN ({holes})");
+        format!("SELECT video_path, poster_path, export_path FROM v2v_clips WHERE id IN ({holes}) AND archived_at IS NULL");
     let mut q = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(&sql);
     for i in ids {
         q = q.bind(*i);
@@ -1706,7 +1751,7 @@ pub async fn remove(pool: &SqlitePool, ids: &[i64]) -> Result<i64, sqlx::Error> 
         return Ok(0);
     }
     let holes = vec!["?"; ids.len()].join(",");
-    let sql = format!("DELETE FROM v2v_clips WHERE id IN ({holes})");
+    let sql = format!("DELETE FROM v2v_clips WHERE archived_at IS NULL AND id IN ({holes})");
     let mut q = sqlx::query(&sql);
     for i in ids {
         q = q.bind(*i);
@@ -3398,6 +3443,43 @@ mod tests {
         let daily = credit_event_trend(&pool, None, false).await.unwrap();
         assert!(!daily.is_empty());
         assert_eq!(daily.iter().map(|r| r.spent).sum::<i64>(), 100);
+        for point in &daily {
+            let entries = credit_event_entries(
+                &pool,
+                CreditEntryFilter {
+                    since: None,
+                    monthly: false,
+                    bucket: Some(&point.bucket),
+                    channel: None,
+                    outcome: None,
+                    offset: 0,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                entries.iter().map(|item| item.credits).sum::<i64>(),
+                point.spent
+            );
+        }
+        let failed = credit_event_entries(
+            &pool,
+            CreditEntryFilter {
+                since: None,
+                monthly: false,
+                bucket: None,
+                channel: Some("channel-b"),
+                outcome: Some("failed"),
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            (failed[0].submit_id.as_str(), failed[0].credits),
+            ("fail-1", 30)
+        );
         let monthly = credit_event_trend(&pool, None, true).await.unwrap();
         assert_eq!(monthly.iter().map(|r| r.spent).sum::<i64>(), 100);
     }

@@ -32,6 +32,15 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   }
 
+  private async copyDiagnostics(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(await unwrap(commands.diagnosticsInfo()));
+      window.alert("已复制脱敏诊断信息");
+    } catch (error) {
+      window.alert(String(error));
+    }
+  }
+
   render(): ReactNode {
     if (this.state.error) {
       return (
@@ -63,8 +72,13 @@ export class ErrorBoundary extends Component<Props, State> {
             >
               打开数据目录
             </button>
+            <button type="button" className="btn" onClick={() => void this.copyDiagnostics()}>
+              复制脱敏诊断
+            </button>
           </div>
-          <div className="fs11 t3">待验收文件在「_草稿／生成图片」，已验收文件在「成品」。</div>
+          <div className="fs11 t3">
+            待验收在「_草稿／生成图片」，成品在「成品／生成图片」，实况在「成品／实况照片」。外部图库原件仍在导入时的磁盘路径。
+          </div>
         </div>
       );
     }

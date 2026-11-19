@@ -129,6 +129,7 @@ pub struct V2vTick {
     /// 心跳 6 秒一次且纯内存读，拿它写「3 秒前」会让人以为数据是三秒前的新鲜货 ——
     /// 而真实查询是 5/10 分钟一次。这两个时刻差一个数量级，混用就是在骗人。
     pub last_sweep_at: Option<i64>,
+    pub next_at: Option<i64>,
 }
 
 /// `v2v://refresh` —— 人点了顶栏刷新按钮之后的逐条进度。

@@ -86,6 +86,15 @@ pub struct KeyHealth {
     pub success_rate: f64,
 }
 
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum NotificationKind {
+    Batch = 1,
+    Failure = 2,
+    Intake = 4,
+    Video = 8,
+}
+
 /// 引擎事件汇。engine 只依赖此 trait，不依赖 Tauri。
 pub trait EventSink: Send + Sync + 'static {
     fn status_changed(&self, e: TaskStatusChanged);
@@ -93,7 +102,7 @@ pub trait EventSink: Send + Sync + 'static {
     fn batch_summary(&self, e: BatchSummary);
     fn key_health(&self, e: KeyHealth);
     /// 系统通知（E18 熔断 / E04 批次完成等无人值守事件）。默认无操作。
-    fn notify(&self, _title: String, _body: String) {}
+    fn notify(&self, _kind: NotificationKind, _title: String, _body: String) {}
     /// 更新 Dock/任务栏角标（E04）：待验收任务数；None/0 清除。默认无操作。
     fn set_badge(&self, _count: Option<i64>) {}
 }
@@ -126,7 +135,21 @@ impl EventSink for TauriSink {
     fn key_health(&self, e: KeyHealth) {
         let _ = e.emit(&self.app);
     }
-    fn notify(&self, title: String, body: String) {
+    fn notify(&self, kind: NotificationKind, title: String, body: String) {
+        use tauri::Manager;
+        if self
+            .app
+            .try_state::<crate::state::AppState>()
+            .is_some_and(|state| {
+                state
+                    .notification_mask
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    & kind as u8
+                    == 0
+            })
+        {
+            return;
+        }
         use tauri_plugin_notification::NotificationExt;
         let _ = self
             .app

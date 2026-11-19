@@ -6,8 +6,8 @@ import { toast } from "sonner";
 
 const COMMANDS: [string, string][] = [
   ["gendesk doctor", "检查连接与应用能力"],
-  ["gendesk submit --manifest 清单.json", "投单并开跑"],
-  ["gendesk status --job <id>", "回读收录与生成进度"],
+  ['gendesk submit --manifest "./清单.json"', "投单并开跑"],
+  ["gendesk status 工单编号", "回读收录与生成进度"],
   ["gendesk v2v pending", "取待改写的图生视频条目"],
 ];
 
@@ -47,7 +47,10 @@ export function AgentCliSection({ id }: { id: string }) {
       </div>
       {error && (
         <div role="alert" className="fs11 t2">
-          无法读取控制通道状态 · {error}
+          无法读取控制通道状态 · {error}{" "}
+          <button type="button" className="btn xs" onClick={() => void copyText(error, "连接诊断")}>
+            复制诊断
+          </button>
         </div>
       )}
       {info && (

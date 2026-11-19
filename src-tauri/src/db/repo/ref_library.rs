@@ -4,6 +4,7 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct StyleRow {
+    pub archived: bool,
     pub id: i64,
     pub name: String,
     pub product: String,
@@ -77,10 +78,12 @@ pub async fn get_style(pool: &SqlitePool, id: i64) -> Result<Option<StyleRow>, s
 }
 
 pub async fn styles_named(pool: &SqlitePool, name: &str) -> Result<Vec<StyleRow>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM ref_library_styles WHERE name = ?1 ORDER BY product")
-        .bind(name)
-        .fetch_all(pool)
-        .await
+    sqlx::query_as(
+        "SELECT * FROM ref_library_styles WHERE name = ?1 AND archived=0 ORDER BY product",
+    )
+    .bind(name)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn insert_style(

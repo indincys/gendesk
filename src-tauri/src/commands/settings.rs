@@ -10,6 +10,35 @@ use crate::db::repo::settings as repo;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationPrefs {
+    pub batches: bool,
+    pub failures: bool,
+    pub intake: bool,
+    pub video: bool,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        Self {
+            batches: true,
+            failures: true,
+            intake: true,
+            video: true,
+        }
+    }
+}
+
+impl NotificationPrefs {
+    pub fn mask(&self) -> u8 {
+        (self.batches as u8)
+            | ((self.failures as u8) << 1)
+            | ((self.intake as u8) << 2)
+            | ((self.video as u8) << 3)
+    }
+}
+
 /// 应用设置（单行 JSON 持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +65,8 @@ pub struct Settings {
     /// 首次使用引导是否已完成（E13）：四步齐备后置 true，引导永久消失。
     #[serde(default)]
     pub onboarded: bool,
+    #[serde(default)]
+    pub notifications: NotificationPrefs,
 }
 
 /// 全局熔断默认阈值（连续失败 10 次）。
@@ -60,6 +91,7 @@ impl Settings {
             trash_retention_days: default_retention_days(),
             batch_retention_days: default_retention_days(),
             onboarded: false,
+            notifications: NotificationPrefs::default(),
         }
     }
 
@@ -98,6 +130,10 @@ pub struct SettingsPatch {
     pub trash_retention_days: Option<i64>,
     pub batch_retention_days: Option<i64>,
     pub onboarded: Option<bool>,
+    #[serde(default)]
+    pub notifications: Option<NotificationPrefs>,
+    #[serde(default)]
+    pub reset_scheduling: bool,
 }
 
 /// 从连接池加载设置（供引擎启动读取策略/重试/暂停态）。
@@ -140,7 +176,14 @@ pub async fn update_settings(
     app: AppHandle,
     patch: SettingsPatch,
 ) -> AppResult<Settings> {
+    let _guard = state.settings_lock.lock().await;
     let mut s = load(&state).await?;
+    if patch.reset_scheduling {
+        let base = Settings::defaults(s.output_dir.clone());
+        s.schedule_strategy = base.schedule_strategy;
+        s.retry_count = base.retry_count;
+        s.global_fail_threshold = base.global_fail_threshold;
+    }
     if let Some(v) = patch.schedule_strategy {
         s.schedule_strategy = v;
     }
@@ -176,8 +219,14 @@ pub async fn update_settings(
     if let Some(v) = patch.onboarded {
         s.onboarded = v;
     }
+    if let Some(prefs) = patch.notifications {
+        s.notifications = prefs;
+    }
     s.sanitize();
     save(&state, &s).await?;
+    state
+        .notification_mask
+        .store(s.notifications.mask(), std::sync::atomic::Ordering::Relaxed);
 
     // 实时应用到引擎。
     state
@@ -258,27 +307,54 @@ pub async fn diagnostics_info(state: State<'_, AppState>) -> AppResult<String> {
     .fetch_one(&state.db)
     .await?;
 
-    // 最近 5 条错误摘要（类型 + 截断消息，不含敏感内容）。
-    let errs: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT error_type, error_message FROM task_attempts
-         WHERE outcome = 'error' ORDER BY id DESC LIMIT 5",
+    // Use structured error categories. Provider messages may contain connection details or secrets.
+    let errs: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT error_type FROM task_attempts WHERE outcome='error' ORDER BY id DESC LIMIT 5",
     )
     .fetch_all(&state.db)
     .await?;
-
     let mut out = format!(
-        "GenDesk 诊断信息\n版本: v{version}\n系统: {os}/{arch}\nAPI Key: 共 {total} · 启用 {enabled} · 已熔断 {broken}\n最近错误:\n"
+        "GenDesk 诊断信息\n版本 v{version}\n系统 {os}/{arch}\nAPI Key 共 {total} · 启用 {enabled} · 已熔断 {broken}\n"
     );
+    for row in crate::db::repo::api_keys::list(&state.db).await? {
+        let masked = state
+            .secrets
+            .get(&row.keyring_account)
+            .ok()
+            .flatten()
+            .as_deref()
+            .map(crate::secrets::mask)
+            .unwrap_or_else(|| "凭据缺失".into());
+        let endpoint = reqwest::Url::parse(&row.base_url)
+            .ok()
+            .and_then(|url| {
+                url.host_str().map(|host| {
+                    format!(
+                        "{}://{host}{}",
+                        url.scheme(),
+                        url.port().map(|p| format!(":{p}")).unwrap_or_default()
+                    )
+                })
+            })
+            .unwrap_or_else(|| "端点无法解析".into());
+        let status = if row.circuit_broken != 0 {
+            "已熔断"
+        } else if row.enabled != 0 {
+            "已启用"
+        } else {
+            "已停用"
+        };
+        out.push_str(&format!(
+            "  #{} {} · {} · {} · {}\n",
+            row.id, row.name, masked, endpoint, status
+        ));
+    }
+    out.push_str("最近错误分类\n");
     if errs.is_empty() {
         out.push_str("  （无）\n");
     } else {
-        for (et, msg) in errs {
-            let et = et.unwrap_or_else(|| "Other".into());
-            let mut m = msg.unwrap_or_default();
-            if m.chars().count() > 80 {
-                m = m.chars().take(80).collect::<String>() + "…";
-            }
-            out.push_str(&format!("  [{et}] {m}\n"));
+        for kind in errs {
+            out.push_str(&format!("  {}\n", kind.as_deref().unwrap_or("Other")));
         }
     }
     Ok(out)
@@ -306,6 +382,37 @@ pub async fn open_output_dir(state: State<'_, AppState>, app: AppHandle) -> AppR
         .map_err(|e| AppError::Io(e.to_string()))
 }
 
+/// 在选中的目录写入并清理一个临时文件。离线路径不会被自动创建。
+#[tauri::command]
+#[specta::specta]
+pub async fn check_output_directory(
+    state: State<'_, AppState>,
+    proposed: Option<String>,
+) -> AppResult<String> {
+    let path = match proposed {
+        Some(path) => std::path::PathBuf::from(path),
+        None => crate::library::root(&state.db).await?,
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(AppError::InvalidInput(format!(
+                "目录不可访问：{}",
+                path.display()
+            )));
+        }
+        let mut probe = tempfile::Builder::new()
+            .prefix(".gendesk_write_check_")
+            .tempfile_in(&path)?;
+        probe.write_all(b"GenDesk")?;
+        probe.as_file().sync_all()?;
+        probe.close()?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))?
+}
+
 /// 在系统文件管理器中显示指定路径（打开所在文件夹）。
 #[tauri::command]
 #[specta::specta]
@@ -313,4 +420,12 @@ pub async fn open_path_in_folder(app: AppHandle, path: String) -> AppResult<()> 
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| AppError::Io(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn open_release_notes(app: AppHandle) -> AppResult<()> {
+    app.opener()
+        .open_url("https://github.com/indincys/gendesk/releases", None::<&str>)
+        .map_err(|error| AppError::Io(error.to_string()))
 }

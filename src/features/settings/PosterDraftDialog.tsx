@@ -2,6 +2,7 @@ import { Modal } from "@/components/ui/Modal";
 import { MediaActions, copyText } from "@/features/_shared/MediaActions";
 import { assetSrc } from "@/lib/img";
 import { type DeliveryDraft, type DraftImage, commands, unwrap } from "@/lib/ipc";
+import { useUiStore } from "@/stores/ui";
 import { ArrowDown, ArrowUp, GripVertical } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -174,7 +175,15 @@ export function PosterDraftDialog({
         <>
           <div className="fx ac gap8 wrap">
             <span className="chip">
-              {draft.state === "done" ? "已导入" : draft.editable ? "草稿" : "已冻结"}
+              {(
+                {
+                  done: "已导入",
+                  awaiting: "待人工确认",
+                  queued: "等待交付",
+                  failed: "交付失败",
+                  skipped: "已放弃",
+                } as Record<string, string>
+              )[draft.state] ?? draft.state}
             </span>
             <span className="fs12">
               {included.length} 张参与交付 · {images.length - included.length} 张已移出
@@ -182,15 +191,66 @@ export function PosterDraftDialog({
             {waiting && <span className="bdg b-amber">{waiting}</span>}
             {!enabled && draft.editable && <span className="bdg b-amber">Poster 交付已关闭</span>}
             {draft.materialId && (
-              <button
-                type="button"
-                className="btn xs"
-                onClick={() => void copyText(draft.materialId ?? "", "Poster 素材 ID")}
-              >
-                复制 Poster 素材 ID
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn xs"
+                  onClick={() => void copyText(draft.materialId ?? "", "Poster 素材 ID")}
+                >
+                  复制素材 ID
+                </button>
+                <button
+                  type="button"
+                  className="btn xs"
+                  onClick={async () => {
+                    try {
+                      const material = await unwrap(commands.openPosterReceipt(batchId));
+                      await copyText(material, "Poster 素材 ID");
+                    } catch (error) {
+                      setError(String(error));
+                    }
+                  }}
+                  title="打开配置的 Poster 应用，并将回执里的图文素材 ID 复制到剪贴板"
+                >
+                  打开 Poster 并复制素材 ID
+                </button>
+              </>
             )}
           </div>
+          {draft.pending.length > 0 && (
+            <details className="mt10">
+              <summary className="fs12">查看等待中的 {draft.pending.length} 张图</summary>
+              {draft.pending.map((item) => (
+                <div className="fx ac gap6 mt6 fs11 wrap" key={item.taskId}>
+                  <button
+                    type="button"
+                    className="btn xs"
+                    onClick={() => {
+                      onClose();
+                      useUiStore
+                        .getState()
+                        .openTask(
+                          item.status === "rev" ? "review" : "tasks",
+                          item.batchId,
+                          item.taskId,
+                        );
+                    }}
+                  >
+                    {item.code || `#${item.taskId}`}
+                  </button>
+                  <span>
+                    {item.name} ·{" "}
+                    {(
+                      { q: "待生成", run: "生成中", retry: "重试中", rev: "待验收" } as Record<
+                        string,
+                        string
+                      >
+                    )[item.status] ?? item.status}
+                  </span>
+                </div>
+              ))}
+            </details>
+          )}
           {draft.lastError && (
             <p role="status" className="fs12 t2">
               {draft.lastError}
@@ -259,7 +319,38 @@ export function PosterDraftDialog({
                         : ""}
                     </div>
                   </div>
-                  <MediaActions path={item.imagePath} label={item.itemName} />
+                  <MediaActions
+                    path={item.imagePath}
+                    label={item.itemName}
+                    actions={[
+                      ...(item.liveImage
+                        ? [
+                            {
+                              label: "在文件管理器显示实况 JPG",
+                              run: () => {
+                                if (item.liveImage)
+                                  void unwrap(commands.openPathInFolder(item.liveImage)).catch(
+                                    (error) => toast.error(String(error)),
+                                  );
+                              },
+                            },
+                          ]
+                        : []),
+                      ...(item.liveVideo
+                        ? [
+                            {
+                              label: "在文件管理器显示实况 MOV",
+                              run: () => {
+                                if (item.liveVideo)
+                                  void unwrap(commands.openPathInFolder(item.liveVideo)).catch(
+                                    (error) => toast.error(String(error)),
+                                  );
+                              },
+                            },
+                          ]
+                        : []),
+                    ]}
+                  />
                   {draft.editable && (
                     <>
                       <button

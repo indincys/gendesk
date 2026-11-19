@@ -133,6 +133,8 @@ type ChannelParams = { modelVersion: string; duration: number; videoResolution: 
 
 export function V2vPage() {
   const go = useUiStore((s) => s.go);
+  const jumpClip = useUiStore((s) => s.jumpClip);
+  const focusRow = useV2vStore((s) => s.focusRow);
   // ── 镜像（store 持有，侧栏与顶栏读的是同一份） ──────────
   const enter = useV2vStore((s) => s.enter);
   const reload = useV2vStore((s) => s.reload);
@@ -157,7 +159,15 @@ export function V2vPage() {
   const clearSel = useV2vStore((s) => s.clearSel);
   const toggleLedger = useV2vStore((s) => s.toggleLedger);
 
-  const visible = useV2vStore(selectVisible);
+  const stageRows = useV2vStore(selectVisible);
+  const [groupScope, setGroupScope] = useState<string | null>(null);
+  const visible = useMemo(
+    () =>
+      groupScope === null
+        ? stageRows
+        : stageRows.filter((row) => row.clip.groupName === groupScope),
+    [stageRows, groupScope],
+  );
   const allRows = useV2vStore(selectRows);
   const channels = useV2vStore(selectChannels);
   const chCounts = useV2vStore(selectChannelCounts);
@@ -235,7 +245,23 @@ export function V2vPage() {
   }, []);
 
   const byId = useMemo(() => new Map(allRows.map((r) => [r.clip.id, r])), [allRows]);
-  const curRow = (cur == null ? null : byId.get(cur)) ?? visible[0] ?? null;
+  const locatedClip = useRef<number | null>(null);
+  useEffect(() => {
+    if (jumpClip === null || locatedClip.current === jumpClip) return;
+    const row = byId.get(jumpClip);
+    if (row) {
+      locatedClip.current = jumpClip;
+      setGroupScope(null);
+      focusRow(row);
+    }
+  }, [byId, focusRow, jumpClip]);
+  const focusedRow = cur == null ? null : byId.get(cur);
+  const curRow =
+    (focusedRow && (groupScope === null || focusedRow.clip.groupName === groupScope)
+      ? focusedRow
+      : null) ??
+    visible[0] ??
+    null;
   const curId = curRow?.clip.id ?? null;
   const curIndex = curId == null ? 0 : visible.findIndex((r) => r.clip.id === curId) + 1;
 
@@ -837,7 +863,22 @@ export function V2vPage() {
 
   const panels = (
     <>
-      {showLog && <V2vLogPanel onClose={() => setShowLog(false)} />}
+      {showLog && (
+        <V2vLogPanel
+          onClose={() => setShowLog(false)}
+          onLocate={(id) => {
+            const row = byId.get(id);
+            if (!row) return false;
+            setShowLog(false);
+            if (row.action === "done") useUiStore.getState().openClip("clips", id);
+            else {
+              setScreen("list");
+              focusRow(row);
+            }
+            return true;
+          }}
+        />
+      )}
       {showParams && (
         <V2vParamsPanel
           models={models}
@@ -877,6 +918,23 @@ export function V2vPage() {
 
   return (
     <div className={cn("vwb", !ledgerOpen && "noled")}>
+      {groupScope !== null && (
+        <div className="fx ac gap8" style={{ padding: "6px 12px" }}>
+          <span className="fs11 t3">
+            仅看同组 · {groupScope || "未分组"} · {visible.length} 条
+          </span>
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              clearSel();
+              setGroupScope(null);
+            }}
+          >
+            清除组筛选
+          </button>
+        </div>
+      )}
       <div className="vwbrow">
         <V2vPreview
           row={curRow}
@@ -898,6 +956,10 @@ export function V2vPage() {
             onRewriteGroup={(ids) => void queueAction(ids, "rewrite")}
             onLog={() => setShowLog(true)}
             onParams={() => setShowParams(true)}
+            onFilterGroup={(group) => {
+              clearSel();
+              setGroupScope(group);
+            }}
           />
         )}
         <V2vList

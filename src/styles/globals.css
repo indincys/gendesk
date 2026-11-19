@@ -2557,9 +2557,17 @@ a:hover {
   background: var(--sub);
 }
 .stpv {
-  min-width: 26px;
+  width: 42px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  appearance: textfield;
   text-align: center;
   font: 500 12px var(--mono);
+}
+.stpv::-webkit-inner-spin-button,
+.stpv::-webkit-outer-spin-button {
+  appearance: none;
 }
 .rc {
   flex: 1;
@@ -3176,17 +3184,6 @@ a:hover {
   border-radius: 99px;
   white-space: nowrap;
   flex: none;
-}
-.car {
-  font-size: 10px;
-  color: var(--t3);
-  transition: transform 0.15s;
-  flex: none;
-  width: 14px;
-  text-align: center;
-}
-.car.open {
-  transform: rotate(180deg);
 }
 .chipflow {
   display: flex;
@@ -5282,7 +5279,7 @@ a:hover {
 }
 .creditsegments {
   width: 100%;
-  height: 7px;
+  height: 14px;
   margin-top: 7px;
   padding: 0;
   border: 0;
@@ -5291,22 +5288,25 @@ a:hover {
   display: flex;
   background: var(--inset);
 }
-.creditrow > .tipwrap {
-  display: block;
+.creditsegments > button:focus-visible {
+  outline-offset: -2px;
 }
-.creditsegments > span[data-tone="pass"],
+.creditsegments > button:hover {
+  filter: brightness(1.2);
+}
+.creditsegments > button[data-tone="pass"],
 .creditlegend i[data-tone="pass"] {
   background: var(--sg-pass);
 }
-.creditsegments > span[data-tone="rej"],
+.creditsegments > button[data-tone="rej"],
 .creditlegend i[data-tone="rej"] {
   background: var(--sg-rej);
 }
-.creditsegments > span[data-tone="pending"],
+.creditsegments > button[data-tone="pending"],
 .creditlegend i[data-tone="pending"] {
   background: var(--sg-rev);
 }
-.creditsegments > span[data-tone="failed"],
+.creditsegments > button[data-tone="failed"],
 .creditlegend i[data-tone="failed"] {
   background: var(--sg-fail);
 }
@@ -5608,6 +5608,7 @@ a:hover {
   flex: none;
 }
 .rlsub {
+  text-align: left;
   height: 14px;
   line-height: 14px;
   flex: none;
@@ -5727,4 +5728,16 @@ button.nv {
 .snavi[aria-current] {
   background: var(--accbg);
   color: var(--acc);
+}
+
+.review-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.review-comparison .rzoom {
+  height: 45vh;
+  margin-top: 6px;
+  background: var(--inset);
+  border-radius: 8px;
 }

@@ -69,6 +69,26 @@ pub async fn save_library_style(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn set_library_style_archived(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: i64,
+    archived: bool,
+) -> AppResult<()> {
+    let changed = sqlx::query("UPDATE ref_library_styles SET archived=? WHERE id=?")
+        .bind(archived)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    if changed.rows_affected() != 1 {
+        return Err(AppError::InvalidInput("款式不存在".into()));
+    }
+    emit_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn delete_library_style(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     lib::delete_style(&state.db, id).await
 }
@@ -219,4 +239,189 @@ pub async fn relink_missing_library_image(
     }
     emit_changed(&app);
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRelinkEntry {
+    pub image_id: i64,
+    pub old_path: String,
+    pub new_path: Option<String>,
+    pub issue: Option<String>,
+}
+
+/// 只替换本次选中的失效链接。应用时重新比对文件和数据库，避免预览后路径变化。
+#[tauri::command]
+#[specta::specta]
+pub async fn relink_library_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    image_ids: Vec<i64>,
+    old_directory: String,
+    new_directory: String,
+    apply: bool,
+) -> AppResult<Vec<LibraryRelinkEntry>> {
+    use std::path::{Component, Path, PathBuf};
+    let old = PathBuf::from(old_directory.trim());
+    if !old.is_absolute() || old.components().any(|c| c == Component::ParentDir) {
+        return Err(AppError::InvalidInput("请输入原目录的完整路径".into()));
+    }
+    let root = state.dirs.root.clone();
+    let mut selected = Vec::new();
+    for image_id in image_ids {
+        let row: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT r.id,r.file_path,i.content_hash FROM ref_library_images i
+             JOIN ref_images r ON r.id=i.ref_image_id WHERE i.id=? AND r.linked=1",
+        )
+        .bind(image_id)
+        .fetch_optional(&state.db)
+        .await?;
+        selected.push((image_id, row));
+    }
+    let found = tokio::task::spawn_blocking(move || {
+        let new_dir = std::fs::canonicalize(new_directory)?;
+        if !new_dir.is_dir() || new_dir.starts_with(&root) {
+            return Err(AppError::InvalidInput(
+                "请选择 GenDesk 数据目录以外的新目录".into(),
+            ));
+        }
+        let found = selected
+            .into_iter()
+            .map(|(image_id, row)| {
+                let mut entry = LibraryRelinkEntry {
+                    image_id,
+                    old_path: String::new(),
+                    new_path: None,
+                    issue: None,
+                };
+                let mut reference_id = None;
+                if let Some((id, path, hash)) = row {
+                    reference_id = Some(id);
+                    let prior = Path::new(&path);
+                    let candidate = (|| -> AppResult<PathBuf> {
+                        if prior.is_file() {
+                            return Err(AppError::InvalidInput("原文件已有，无需重新定位".into()));
+                        }
+                        let rest = prior
+                            .strip_prefix(&old)
+                            .map_err(|_| AppError::InvalidInput("原文件不在指定目录下".into()))?;
+                        let target = std::fs::canonicalize(new_dir.join(rest))?;
+                        if !target.starts_with(&new_dir)
+                            || target.starts_with(&root)
+                            || !target.is_file()
+                            || crate::files::content_hash(&target)? != hash
+                        {
+                            return Err(AppError::InvalidInput("文件位置或内容不匹配".into()));
+                        }
+                        Ok(target)
+                    })();
+                    match candidate {
+                        Ok(path) => entry.new_path = Some(path.to_string_lossy().into_owned()),
+                        Err(error) => entry.issue = Some(error.to_string()),
+                    }
+                    entry.old_path = path;
+                } else {
+                    entry.issue = Some("图库链接已变化，请刷新".into());
+                }
+                (entry, reference_id)
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, AppError>(found)
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))??;
+
+    let mut entries = Vec::with_capacity(found.len());
+    if apply {
+        let mut tx = state.db.begin().await?;
+        for (mut entry, id) in found {
+            if let (Some(id), Some(path)) = (id, &entry.new_path) {
+                let updated = sqlx::query(
+                    "UPDATE ref_images SET file_path=? WHERE id=? AND linked=1 AND file_path=?",
+                )
+                .bind(path)
+                .bind(id)
+                .bind(&entry.old_path)
+                .execute(&mut *tx)
+                .await?;
+                if updated.rows_affected() == 0 {
+                    entry.new_path = None;
+                    entry.issue = Some("链接已被修改，请刷新".into());
+                }
+            }
+            entries.push(entry);
+        }
+        tx.commit().await?;
+        emit_changed(&app);
+    } else {
+        entries.extend(found.into_iter().map(|(entry, _)| entry));
+    }
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryImportPreviewEntry {
+    pub path: String,
+    pub action: String,
+    pub detail: Option<String>,
+}
+
+/// 预检用相同的内容哈希识别同款式内的重复项。导入仍会完整解码和复核。
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_library_import(
+    state: State<'_, AppState>,
+    style_id: i64,
+    paths: Vec<String>,
+) -> AppResult<Vec<LibraryImportPreviewEntry>> {
+    let root = state.dirs.root.clone();
+    let checked = tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .map(|path| {
+                let inspected = (|| -> AppResult<String> {
+                    let file = std::fs::canonicalize(&path)?;
+                    if !file.is_file() || file.starts_with(&root) {
+                        return Err(AppError::InvalidInput("请选择数据目录以外的图片".into()));
+                    }
+                    image::ImageReader::open(&file)?
+                        .with_guessed_format()?
+                        .into_dimensions()?;
+                    crate::files::content_hash(&file)
+                })();
+                (path, inspected)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut preview = Vec::with_capacity(checked.len());
+    for (path, checked) in checked {
+        let (action, detail) = match checked {
+            Err(error) => ("invalid", Some(error.to_string())),
+            Ok(hash) => {
+                let known =
+                    crate::db::repo::ref_library::find_by_hash(&state.db, style_id, &hash).await?;
+                if !seen.insert(hash) {
+                    ("duplicate", Some("和本次选择的另一张图相同".into()))
+                } else if let Some(row) = known {
+                    if row.deleted_at.is_some() || !row.linked {
+                        ("reuse", Some(format!("沿用图库编号 #{}", row.id)))
+                    } else {
+                        ("duplicate", Some(format!("已在该款式图库 #{}", row.id)))
+                    }
+                } else {
+                    ("new", None)
+                }
+            }
+        };
+        preview.push(LibraryImportPreviewEntry {
+            path,
+            action: action.into(),
+            detail,
+        });
+    }
+    Ok(preview)
 }

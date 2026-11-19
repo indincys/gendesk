@@ -15,6 +15,8 @@ pub const MAX_CONCURRENCY: i64 = 250;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ApiKeyRow {
+    pub last_test_at: Option<i64>,
+    pub last_test_ok: Option<bool>,
     pub id: i64,
     pub name: String,
     pub keyring_account: String,

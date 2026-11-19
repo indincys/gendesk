@@ -1,14 +1,14 @@
 //! 数据备份与数据目录可见性（E19，需求 §4 数据安全）。
 //!
 //! 让用户看到数据落盘位置 + 一键导出「DB + 资产目录」为 zip：磁盘故障前有备份手段。
-//! 导出前 WAL 检查点保证一致；队列运行中拒绝（避免边写边打包出半成品）。
+//! 导出前保存一致的 SQLite 快照；队列运行中拒绝，以免打包仍在写入的资产。
 //!
 //! **密钥文件绝不入包**（`secrets.key` / `secrets.enc` 及其 .bak/.tmp 派生物）：
 //! 主密钥与密文同目录，一起打进 zip 就等于把 API Key 明文交出去（备份常被外发 /
 //! 上网盘）。备份的定位是数据抢救，Key 可在设置页重填，不是抢救对象。
 
-use std::io::Write;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -61,7 +61,7 @@ pub async fn open_data_dir(state: State<'_, AppState>, app: AppHandle) -> AppRes
         .map_err(|e| AppError::Io(e.to_string()))
 }
 
-/// 导出备份：选目标 zip → WAL 检查点 → 打包数据目录（排除 logs）。
+/// 导出备份：选目标 zip → 保存数据库快照 → 打包数据目录（排除 logs）。
 /// 队列运行中（有 run/retry 任务）拒绝，避免边写边打包出不一致备份。
 /// 返回所选路径；用户取消返回 None。
 #[tauri::command]
@@ -92,8 +92,11 @@ pub async fn export_backup(
         return Ok(None); // 取消
     };
 
-    // WAL 检查点：把 -wal 落回主库，保证打包到的 gendesk.db 是完整快照。
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+    // SQLite 自己生成独立快照，避免直接读取仍可被后台写入的数据库文件。
+    let snapshot = tempfile::tempdir()?;
+    let db_snapshot = snapshot.path().join("gendesk.db");
+    sqlx::query("VACUUM INTO ?")
+        .bind(db_snapshot.to_string_lossy().as_ref())
         .execute(&state.db)
         .await?;
 
@@ -103,14 +106,27 @@ pub async fn export_backup(
     let out = dest.clone();
     // 打包为 CPU/IO 密集同步任务，放到阻塞线程，避免占用异步执行器。
     tokio::task::spawn_blocking(move || {
-        zip_dir(&root, &logs, &out, &|done, total, phase| {
-            let _ = BackupProgress {
-                done,
-                total,
-                phase: phase.to_string(),
-            }
-            .emit(&handle);
-        })
+        let _snapshot = snapshot;
+        let parent = out
+            .parent()
+            .ok_or_else(|| AppError::InvalidInput("请选择备份目录".into()))?;
+        let tmp = tempfile::NamedTempFile::new_in(parent)?;
+        zip_dir(
+            &root,
+            &logs,
+            tmp.path(),
+            Some(&db_snapshot),
+            &|done, total, phase| {
+                let _ = BackupProgress {
+                    done,
+                    total,
+                    phase: phase.to_string(),
+                }
+                .emit(&handle);
+            },
+        )?;
+        tmp.persist(out).map_err(|error| error.error)?;
+        Ok::<_, AppError>(())
     })
     .await
     .map_err(|e| AppError::Io(format!("备份任务失败: {e}")))??;
@@ -124,6 +140,7 @@ fn zip_dir(
     root: &Path,
     skip_dir: &Path,
     dest: &Path,
+    db_snapshot: Option<&Path>,
     emit: &dyn Fn(u64, u64, &str),
 ) -> AppResult<()> {
     // 先枚举文件，得到总数用于进度分母。
@@ -131,7 +148,13 @@ fn zip_dir(
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
-        .filter(|e| !e.path().starts_with(skip_dir))
+        .filter(|e| !e.path().starts_with(skip_dir) && e.path() != dest)
+        .filter(|e| {
+            !matches!(
+                e.file_name().to_str(),
+                Some("gendesk.db-wal" | "gendesk.db-shm" | "gendesk.db-journal" | ".DS_Store")
+            )
+        })
         // 密钥文件排除（见模块头）：主密钥 + 密文同在一个 zip = 明文 API Key。
         .filter(|e| {
             !e.file_name()
@@ -152,9 +175,12 @@ fn zip_dir(
         let name = rel.to_string_lossy().replace('\\', "/");
         zip.start_file(name, opts)
             .map_err(|e| AppError::Io(e.to_string()))?;
-        // 读整文件再写：资产多为图片，单文件可控。
-        let bytes = std::fs::read(path)?;
-        zip.write_all(&bytes)?;
+        let source = if rel == Path::new("gendesk.db") {
+            db_snapshot.unwrap_or(path)
+        } else {
+            path
+        };
+        std::io::copy(&mut std::fs::File::open(source)?, &mut zip)?;
         if (i + 1) % 20 == 0 {
             emit((i + 1) as u64, total, "running");
         }
@@ -164,11 +190,187 @@ fn zip_dir(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCheck {
+    pub archive_path: String,
+    pub extracted_path: Option<String>,
+    pub schema_version: i64,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// 校验备份可读性，或将已验证的内容恢复到一个新目录。
+#[tauri::command]
+#[specta::specta]
+pub async fn check_backup(app: AppHandle, extract: bool) -> AppResult<Option<BackupCheck>> {
+    let Some(archive) = app
+        .dialog()
+        .file()
+        .add_filter("GenDesk ZIP 备份", &["zip"])
+        .blocking_pick_file()
+        .and_then(|path| path.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    let staging = if extract {
+        let Some(parent) = app
+            .dialog()
+            .file()
+            .blocking_pick_folder()
+            .and_then(|path| path.into_path().ok())
+        else {
+            return Ok(None);
+        };
+        tempfile::Builder::new()
+            .prefix("GenDesk 恢复-")
+            .tempdir_in(parent)?
+    } else {
+        tempfile::tempdir()?
+    };
+    let (staging, files, bytes) = tokio::task::spawn_blocking(move || {
+        let (files, bytes) = extract_backup(&archive, staging.path())?;
+        Ok::<_, AppError>(((staging, archive), files, bytes))
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))??;
+    let (staging, archive) = staging;
+    let schema_version = verify_backup_db(&staging.path().join("gendesk.db")).await?;
+    let extracted_path = extract.then(|| staging.keep().to_string_lossy().into_owned());
+    Ok(Some(BackupCheck {
+        archive_path: archive.to_string_lossy().into_owned(),
+        extracted_path,
+        schema_version,
+        files,
+        bytes,
+    }))
+}
+
+fn extract_backup(archive: &Path, root: &Path) -> AppResult<(u64, u64)> {
+    let invalid = |detail: String| AppError::InvalidInput(format!("备份无法校验：{detail}"));
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)
+        .map_err(|error| invalid(error.to_string()))?;
+    let mut seen = HashSet::new();
+    let mut files = 0;
+    let mut bytes = 0_u64;
+    for index in 0..zip.len() {
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|error| invalid(error.to_string()))?;
+        let path = entry
+            .enclosed_name()
+            .ok_or_else(|| invalid("文件路径无效".into()))?;
+        let forbidden = entry.name().contains(['\\', ':'])
+            || entry.is_symlink()
+            || path.components().any(|part| match part {
+                Component::Normal(name) => match name.to_str() {
+                    Some(name) => {
+                        crate::secrets::is_secret_file(&name.to_ascii_lowercase())
+                            || name.ends_with(['.', ' '])
+                    }
+                    None => true,
+                },
+                _ => true,
+            });
+        if forbidden || !seen.insert(path.clone()) {
+            return Err(invalid(format!("文件路径重复或不安全：{}", path.display())));
+        }
+        let output = root.join(path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(output)?;
+        } else {
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(output)?;
+            bytes = bytes.saturating_add(std::io::copy(&mut entry, &mut file)?);
+            files += 1;
+        }
+    }
+    Ok((files, bytes))
+}
+
+async fn verify_backup_db(path: &Path) -> AppResult<i64> {
+    use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+    let options = SqliteConnectOptions::new().filename(path).read_only(true);
+    let mut conn = SqliteConnection::connect_with(&options).await?;
+    let integrity: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_all(&mut conn)
+        .await?;
+    let schema: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success=1")
+            .fetch_one(&mut conn)
+            .await?;
+    let has_tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('tasks','batches','accepted_works')")
+        .fetch_one(&mut conn).await?;
+    if integrity != ["ok"] || has_tasks != 3 {
+        return Err(AppError::InvalidInput(
+            "数据库损坏或并非 GenDesk 备份".into(),
+        ));
+    }
+    schema.ok_or_else(|| AppError::InvalidInput("数据库缺少 GenDesk 版本记录".into()))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[tokio::test]
+    async fn backup_round_trip_checks_the_database_and_files() {
+        let (pool, fixture) = crate::db::test_support::test_pool().await;
+        let root = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let snapshot = root.path().join("gendesk.db");
+        sqlx::query("VACUUM INTO ?")
+            .bind(snapshot.to_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::write(root.path().join("sample.png"), b"fixture").unwrap();
+        let archive = fixture.path().join("backup.zip");
+        zip_dir(
+            root.path(),
+            &root.path().join("logs"),
+            &archive,
+            None,
+            &|_, _, _| {},
+        )
+        .unwrap();
+        let (count, bytes) = extract_backup(&archive, dst.path()).unwrap();
+        assert_eq!(count, 2);
+        assert!(bytes > 7);
+        assert_eq!(
+            std::fs::read(dst.path().join("sample.png")).unwrap(),
+            b"fixture"
+        );
+        assert_eq!(
+            verify_backup_db(&dst.path().join("gendesk.db"))
+                .await
+                .unwrap(),
+            crate::db::latest_embedded_migration()
+        );
+    }
+
+    #[test]
+    fn backup_reader_refuses_traversal() {
+        use std::io::Write;
+        let fixture = tempfile::tempdir().unwrap();
+        let archive = fixture.path().join("backup.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("../escape", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"not valid").unwrap();
+        zip.finish().unwrap();
+        let root = fixture.path().join("restored");
+        std::fs::create_dir(&root).unwrap();
+        assert!(extract_backup(&archive, &root).is_err());
+        assert!(!fixture.path().join("escape").exists());
+    }
 
     // E19：备份 zip 必须含数据文件、排除 logs 子树，进度终值为总数。
     #[test]
@@ -184,7 +386,7 @@ mod tests {
 
         let dest = root.join("backup.zip");
         let last = Cell::new((0u64, 0u64));
-        zip_dir(root, &logs, &dest, &|done, total, _| {
+        zip_dir(root, &logs, &dest, None, &|done, total, _| {
             last.set((done, total))
         })
         .unwrap();
@@ -221,7 +423,7 @@ mod tests {
 
         let dest = root.join("backup.zip");
         let last = Cell::new((0u64, 0u64));
-        zip_dir(root, &logs, &dest, &|done, total, _| {
+        zip_dir(root, &logs, &dest, None, &|done, total, _| {
             last.set((done, total))
         })
         .unwrap();

@@ -76,6 +76,7 @@ pub struct LibraryCategoryCount {
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryStyleView {
+    pub archived: bool,
     pub id: i64,
     pub name: String,
     pub product: String,
@@ -520,6 +521,7 @@ pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview>
                 })
                 .collect();
             LibraryStyleView {
+                archived: s.archived,
                 total: by_category.iter().map(|c| c.total).sum(),
                 available: by_category.iter().map(|c| c.available).sum(),
                 id: s.id,
@@ -817,7 +819,11 @@ pub async fn import_files(
     paths: &[String],
     progress: &(dyn Fn(i64, i64, &str, i64) + Send + Sync),
 ) -> AppResult<LibraryImportReport> {
-    if repo::get_style(pool, style_id).await?.is_none() {
+    if repo::get_style(pool, style_id)
+        .await?
+        .filter(|style| !style.archived)
+        .is_none()
+    {
         return Err(AppError::InvalidInput("款式不存在".into()));
     }
     if repo::get_category(pool, category_id).await?.is_none() {
@@ -1067,6 +1073,7 @@ pub async fn pick(
     }
     let style = repo::get_style(pool, style_id)
         .await?
+        .filter(|style| !style.archived)
         .ok_or_else(|| AppError::InvalidInput("款式不存在".into()))?;
     let category = repo::get_category(pool, category_id)
         .await?

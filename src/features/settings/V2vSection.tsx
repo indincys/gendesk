@@ -1,6 +1,9 @@
 import { DescriptionHint } from "@/components/ui/Tooltip";
+import { copyText } from "@/features/_shared/MediaActions";
 import { type ModelInfo, type SessionInfo, type V2vSettings, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
+import { useV2vStore } from "@/stores/v2v";
 import { AlertTriangle, Check, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +24,10 @@ export function V2vSection({ id }: { id: string }) {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   /** 当前设置实际会执行哪个文件（后端探测结果）；null = 没找到。 */
   const [resolved, setResolved] = useState<string | null>(null);
+  const [lastProbe, setLastProbe] = useState<number | null>(null);
+  const [probeError, setProbeError] = useState("");
+  const [probing, setProbing] = useState(false);
+  const tick = useV2vStore((state) => state.tick);
   /** 当前生效的成片交付目录（留空时是回落后的默认，故要问后端而不是显示空串）。 */
   const [clipsDir, setClipsDir] = useState<string>("");
 
@@ -29,10 +36,20 @@ export function V2vSection({ id }: { id: string }) {
       .then(setClipsDir)
       .catch(() => setClipsDir(""));
 
-  const refreshResolved = () =>
-    void unwrap(commands.resolveV2vBin())
-      .then(setResolved)
-      .catch(() => setResolved(null));
+  const refreshResolved = async () => {
+    setProbing(true);
+    try {
+      const path = await unwrap(commands.resolveV2vBin());
+      setResolved(path);
+      setProbeError(path ? "" : "未找到可执行文件，请选择安装位置。");
+    } catch (error) {
+      setResolved(null);
+      setProbeError(String(error));
+    } finally {
+      setLastProbe(Date.now());
+      setProbing(false);
+    }
+  };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 两个 refresh 是稳定的模块级闭包，只在挂载时跑一次
   useEffect(() => {
@@ -88,6 +105,14 @@ export function V2vSection({ id }: { id: string }) {
         <div className="pathwell f1">{clipsDir || "—"}</div>
         <button
           type="button"
+          className="btn xs"
+          disabled={!clipsDir}
+          onClick={() => void copyText(clipsDir, "成片目录")}
+        >
+          复制路径
+        </button>
+        <button
+          type="button"
           className="btn sm gho"
           onClick={() =>
             void unwrap(commands.openClipsOutputDir()).catch((e) => toast.error(String(e)))
@@ -125,7 +150,7 @@ export function V2vSection({ id }: { id: string }) {
         </button>
       </div>
       {/* 「路径填什么」不该由人回答：直接把解析结果摆出来，说清实际会执行哪个文件。 */}
-      <div className="fs11 t3 mt6">
+      <div className="fx ac gap8 fs11 t3 mt6 wrap">
         {resolved ? (
           <span className="fx ac gap6">
             <Check className="ic12" style={{ color: "var(--ok)" }} />
@@ -134,27 +159,48 @@ export function V2vSection({ id }: { id: string }) {
         ) : (
           <span className="fx ac gap6" style={{ color: "var(--wr)" }}>
             <AlertTriangle className="ic12" />
-            未找到即梦 CLI
+            {probeError || "正在探测即梦 CLI…"}
           </span>
         )}
+        {lastProbe && <span>上次探测 {new Date(lastProbe).toLocaleTimeString()}</span>}
+        <button
+          type="button"
+          className="btn xs"
+          disabled={probing}
+          onClick={() => void refreshResolved()}
+        >
+          重新探测 CLI
+        </button>
       </div>
 
       <div className="fx ac gap10 mt14">
         <span className="fs12 fw5">后台轮询</span>
         <div className="seg">
-          <span
+          <button
+            type="button"
+            aria-pressed={s.pollEnabled}
             className={cn("sgi", s.pollEnabled && "on")}
             onClick={() => void save({ pollEnabled: true })}
           >
             开
-          </span>
-          <span
+          </button>
+          <button
+            type="button"
+            aria-pressed={!s.pollEnabled}
             className={cn("sgi", !s.pollEnabled && "on")}
             onClick={() => void save({ pollEnabled: false })}
           >
             关
-          </span>
+          </button>
         </div>
+        {tick?.nextAt && s.pollEnabled && (
+          <span className="fs11 t3">
+            下次轮询 {new Date(tick.nextAt * 1000).toLocaleTimeString()}
+          </span>
+        )}
+        <button type="button" className="btn xs" onClick={() => useUiStore.getState().go("v2v")}>
+          查看视频队列
+        </button>
         <DescriptionHint label="后台轮询说明">
           关闭后停止自动取回；已提交任务不会丢失，重新开启后继续查询。
         </DescriptionHint>

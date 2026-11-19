@@ -106,6 +106,7 @@ interface V2vState {
   reloadEff: () => Promise<void>;
   /** 换流程档（侧栏）。**保留通道那一维** —— 交集的意义就在这里。 */
   setAction: (a: NextAction) => void;
+  focusRow: (row: Row) => void;
   /** 通道快捷片：点已选中的那一枚 = 取消通道这一维，回到看这一档的全部。 */
   toggleChannel: (key: string) => void;
   setCur: (id: number | null) => void;
@@ -291,6 +292,13 @@ export const useV2vStore = create<V2vState>((set, get) => ({
       sel: new Set(),
       anchor: null,
     })),
+  focusRow: (row) =>
+    set({
+      filter: { action: row.action, channel: null },
+      cur: row.clip.id,
+      sel: new Set(),
+      anchor: row.clip.id,
+    }),
   setCur: (cur) => set({ cur }),
   setSel: (fn) => set((c) => ({ sel: fn(c.sel) })),
   setAnchor: (anchor) => set({ anchor }),

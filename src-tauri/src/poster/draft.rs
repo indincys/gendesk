@@ -11,7 +11,7 @@ use crate::{
     files::copy::copy_batch_new,
 };
 
-use super::{pending_in_set, set_scope};
+use super::{pending_images, set_scope, PendingImage};
 
 #[derive(Debug, Clone, Serialize, FromRow, Type)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,7 @@ pub struct DeliveryDraft {
     pub revision: i64,
     pub editable: bool,
     pub waiting_review: i64,
+    pub pending: Vec<PendingImage>,
     pub waiting_intake: bool,
     pub material_id: Option<String>,
     pub last_error: String,
@@ -61,18 +62,18 @@ pub async fn read(pool: &SqlitePool, id: &str) -> AppResult<DeliveryDraft> {
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::InvalidInput("Poster 批次不存在".into()))?;
-    let (waiting_review, waiting_intake) = if let Some(key) = &row.set_key {
+    let (pending, waiting_intake) = if let Some(key) = &row.set_key {
         let scope = set_scope(key)?;
         if row.frozen {
-            (0, false)
+            (Vec::new(), false)
         } else {
             (
-                pending_in_set(pool, key, &scope).await?,
+                pending_images(pool, key, &scope).await?,
                 scope.waiting_intake(pool).await?,
             )
         }
     } else {
-        (0, false)
+        (Vec::new(), false)
     };
     let images = sqlx::query_as(
         "SELECT i.uid,i.item_name,i.task_id,COALESCE(w.image_path,i.image_path) AS image_path,w.thumb_path,
@@ -90,7 +91,8 @@ pub async fn read(pool: &SqlitePool, id: &str) -> AppResult<DeliveryDraft> {
             && matches!(row.state.as_str(), "awaiting" | "queued" | "failed"),
         state: row.state,
         revision: row.draft_revision,
-        waiting_review,
+        waiting_review: pending.len() as i64,
+        pending,
         waiting_intake,
         material_id: row.material_id,
         last_error: row.last_error,

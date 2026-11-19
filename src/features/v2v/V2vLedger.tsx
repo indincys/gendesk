@@ -1,4 +1,6 @@
+import { Modal } from "@/components/ui/Modal";
 import { DescriptionHint, Tooltip } from "@/components/ui/Tooltip";
+import { copyText } from "@/features/_shared/MediaActions";
 import { V2vQueueTrail } from "@/features/v2v/V2vQueueTrail";
 import {
   type Filter,
@@ -10,10 +12,12 @@ import {
   fmtDur,
   trailOf,
 } from "@/features/v2v/model";
+import { type V2vPriorRevision, commands, unwrap } from "@/lib/ipc";
 import type { ActivityEntry } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { ScrollText, SlidersHorizontal } from "lucide-react";
 import { type CSSProperties, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 /**
  * 工作台中栏 —— 「这一条的账与进度」。
@@ -42,6 +46,7 @@ export function V2vLedger({
   onRewriteGroup,
   onLog,
   onParams,
+  onFilterGroup,
 }: {
   row: Row | null;
   slice: SliceSummary;
@@ -56,6 +61,7 @@ export function V2vLedger({
   onRewriteGroup: (ids: number[]) => void;
   onLog: () => void;
   onParams: () => void;
+  onFilterGroup: (name: string) => void;
 }) {
   return (
     <div className="vled">
@@ -92,7 +98,13 @@ export function V2vLedger({
             选择任务查看账与进度。
           </div>
         ) : (
-          <ClipLedger row={row} activity={activity} onLog={onLog} />
+          <ClipLedger
+            key={row.clip.id}
+            row={row}
+            activity={activity}
+            onLog={onLog}
+            onFilterGroup={onFilterGroup}
+          />
         )}
       </div>
     </div>
@@ -221,10 +233,12 @@ function ClipLedger({
   row,
   activity,
   onLog,
+  onFilterGroup,
 }: {
   row: Row;
   activity: ActivityEntry[];
   onLog: () => void;
+  onFilterGroup: (name: string) => void;
 }) {
   const c = row.clip;
   const hint = hintFor(row);
@@ -241,6 +255,7 @@ function ClipLedger({
    * 重点一次展开，等于把这个开关变成一次性的。
    */
   const [promptOpen, setPromptOpen] = useState(false);
+  const [prior, setPrior] = useState<V2vPriorRevision | null>(null);
 
   // 左边那个大数字：回执优先，没回执时退回预估。两者都没有才是「—」。
   const credit = row.credit ?? row.estimate;
@@ -248,6 +263,78 @@ function ClipLedger({
   return (
     <>
       {hint && <div className={cn("vhint", hint.tone)}>{hint.text}</div>}
+      <div className="fx ac gap6 wrap">
+        <button type="button" className="btn xs" onClick={() => onFilterGroup(c.groupName)}>
+          筛选同组
+        </button>
+        <button
+          type="button"
+          className="btn xs"
+          onClick={() =>
+            void copyText(
+              [
+                `#${c.id}`,
+                c.promptCode,
+                c.groupName,
+                c.stage,
+                c.errorType,
+                c.submitId,
+                c.polledAt === null
+                  ? null
+                  : `最后查询 ${new Date(c.polledAt * 1000).toLocaleString()}`,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              "条目诊断",
+            )
+          }
+        >
+          复制条目诊断
+        </button>
+        <button
+          type="button"
+          className="btn xs"
+          onClick={async () => {
+            try {
+              setPrior(await unwrap(commands.v2vPriorRevision(c.id)));
+            } catch (error) {
+              toast.error(String(error));
+            }
+          }}
+        >
+          上次参数与提示词
+        </button>
+      </div>
+      {prior && (
+        <Modal title="视频参数与提示词对照" width="w700" onClose={() => setPrior(null)}>
+          <div className="review-comparison">
+            <div>
+              <strong className="fs12">上一次</strong>
+              <p className="fs11">
+                {prior.params
+                  ? [
+                      prior.params.modelVersion ?? "默认通道",
+                      prior.params.duration ?? "默认时长",
+                      prior.params.videoResolution ?? "默认分辨率",
+                    ].join(" · ")
+                  : "尚无上次参数记录"}
+              </p>
+              <div className="vprompt">{prior.prompt ?? "尚无上次提示词记录"}</div>
+            </div>
+            <div>
+              <strong className="fs12">当前</strong>
+              <p className="fs11">
+                {[
+                  row.modelFull ?? "默认通道",
+                  row.duration ?? "默认时长",
+                  row.resolution ?? "默认分辨率",
+                ].join(" · ")}
+              </p>
+              <div className="vprompt">{c.videoPrompt ?? "尚无当前提示词"}</div>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       <div className="vsec">这一条的账</div>
       {/* **Bento**：一格多宽由它装得下什么决定，不是九个一样大的方块。
@@ -334,7 +421,7 @@ function ClipLedger({
       {/* 位次的**轨迹**：一个静止的「第 4485 位」答不出「今晚能不能出片」，
           而那正是看这一栏时真正要决定的事。只在即梦手上的条目才有队可排。 */}
       {row.stage === "run" && row.action !== "queued" && (
-        <V2vQueueTrail clipId={c.id} queueIdx={c.queueIdx} />
+        <V2vQueueTrail clipId={c.id} queueIdx={c.queueIdx} polledAt={c.polledAt} />
       )}
 
       <div className="vsec">

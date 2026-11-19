@@ -294,18 +294,65 @@ pub async fn list_ref_images(
     Ok(rows
         .into_iter()
         .filter(|r| include_ephemeral || !r.ephemeral)
-        .map(|r| RefImageView {
-            id: r.id,
-            name: r.name,
-            file_path: r.file_path,
-            thumb_path: r.thumb_path,
-            width: r.width,
-            height: r.height,
-            last_group_id: r.last_group_id,
-            archived: r.archived_at.is_some(),
-            ephemeral: r.ephemeral,
-        })
+        .map(ref_view)
         .collect())
+}
+
+/// Resolve explicitly selected references, including linked library originals.
+#[tauri::command]
+#[specta::specta]
+pub async fn generation_references(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> AppResult<Vec<RefImageView>> {
+    use tauri::Manager;
+    let mut result = Vec::new();
+    for id in ids {
+        let Some(row) = repo::get(&state.db, id).await? else {
+            continue;
+        };
+        if row.deleted_at.is_some() {
+            continue;
+        }
+        if std::path::Path::new(&row.file_path).is_file() {
+            let _ = app.asset_protocol_scope().allow_file(&row.file_path);
+        }
+        result.push(ref_view(row));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn generation_library_ref(state: State<'_, AppState>, id: i64) -> AppResult<i64> {
+    let row: Option<(i64, String)> = sqlx::query_as(
+        "SELECT r.id,r.file_path FROM ref_library_images i JOIN ref_images r ON r.id=i.ref_image_id
+          WHERE i.id=? AND i.deleted_at IS NULL AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    match row {
+        Some((id, path)) if std::path::Path::new(&path).is_file() => Ok(id),
+        _ => Err(AppError::InvalidInput(
+            "图库原件不可用，请先重新定位".into(),
+        )),
+    }
+}
+
+fn ref_view(r: repo::RefImageRow) -> RefImageView {
+    RefImageView {
+        id: r.id,
+        name: r.name,
+        file_path: r.file_path,
+        thumb_path: r.thumb_path,
+        width: r.width,
+        height: r.height,
+        last_group_id: r.last_group_id,
+        archived: r.archived_at.is_some(),
+        ephemeral: r.ephemeral,
+    }
 }
 
 // ───────────────────────────── 存量方向修复 ─────────────────────────────

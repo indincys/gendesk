@@ -30,6 +30,7 @@ const GROUPS: { key: NavGroup; label: string }[] = [
 export function Sidebar() {
   const route = useUiStore((s) => s.route);
   const go = useUiStore((s) => s.go);
+  const toggleHelp = useUiStore((s) => s.toggleHelp);
   const platform = useUiStore((s) => s.platform);
   const mod = modKeyLabel(platform);
   const badges = useEngineStore(useShallow(navBadges));
@@ -41,7 +42,7 @@ export function Sidebar() {
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
 
-  const NavItem = ({ r }: { r: RouteDef }) => {
+  const navItem = (r: RouteDef) => {
     const badge =
       r.key === "tasks" && badges.running > 0
         ? { cls: "nb-run", n: `${badges.running}`, spin: true }
@@ -57,12 +58,12 @@ export function Sidebar() {
                 ? { cls: "", n: `${badges.trash}`, spin: false }
                 : null;
     return (
-      <div
+      <button
+        key={r.key}
+        type="button"
         className={cn("nv", route === r.key && "on")}
         onClick={() => go(r.key)}
-        onKeyDown={(e) => e.key === "Enter" && go(r.key)}
-        role="button"
-        tabIndex={0}
+        aria-current={route === r.key ? "page" : undefined}
       >
         <span className="f1">{r.label}</span>
         {badge && (
@@ -77,7 +78,7 @@ export function Sidebar() {
             {r.shortcut}
           </span>
         )}
-      </div>
+      </button>
     );
   };
 
@@ -92,7 +93,7 @@ export function Sidebar() {
           <div className={cn("ngrp", g.key)}>
             {ROUTES.filter((r) => r.group === g.key).map((r) => (
               <div key={r.key}>
-                <NavItem r={r} />
+                {navItem(r)}
                 {/* 筛选列挂在「视频流水线」这一行下面而不是列表末尾：它筛的是那一页，
                     离得远就成了两件看不出关系的东西。 */}
                 {r.key === "v2v" && route === "v2v" && <V2vNavCards />}
@@ -105,9 +106,11 @@ export function Sidebar() {
       <div className="f1" />
 
       <div className="nsys">
-        {ROUTES.filter((r) => r.group === "system").map((r) => (
-          <NavItem key={r.key} r={r} />
-        ))}
+        {ROUTES.filter((r) => r.group === "system").map(navItem)}
+        <button type="button" className="nv" onClick={toggleHelp} title="快捷键速查">
+          <span className="f1">快捷键</span>
+          <span className="kbd">{mod}/</span>
+        </button>
       </div>
 
       <div className="sfoot">

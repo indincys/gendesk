@@ -1,3 +1,4 @@
+import { MediaActions, copyText, exportOriginals } from "@/features/_shared/MediaActions";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, delivered, deriveRows, fmtAgo, shortModel } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -309,6 +310,19 @@ export function V2vClipsPage() {
       <div className="vfoot">
         {sel.size > 0 ? (
           <>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => {
+                const paths = rows
+                  .filter((row) => sel.has(row.clip.id))
+                  .flatMap((row) => (row.clip.videoPath ? [row.clip.videoPath] : []));
+                if (!paths.length) toast.error("所选记录没有可导出的原片");
+                else void exportOriginals(paths);
+              }}
+            >
+              导出所选原片
+            </button>
             <button type="button" className="btn xs" onClick={() => setSel(new Set())}>
               已选 <b>{sel.size}</b> ✕
             </button>
@@ -397,7 +411,14 @@ function ClipCard({
         {r.stage === "pass" && !delivered(c) && <span className="tag er">交付失败</span>}
       </div>
       <div className="fx ac gap5" style={{ marginTop: 5 }}>
-        <span className="pid">{c.promptCode}</span>
+        <button
+          type="button"
+          className="pid"
+          title="复制编号"
+          onClick={() => void copyText(c.promptCode, "编号")}
+        >
+          {c.promptCode}
+        </button>
         <span className="f1" />
         <span className="fs10 mono t3">{c.creditCount == null ? "—" : `${c.creditCount}`}</span>
       </div>
@@ -427,7 +448,21 @@ function ClipSide({
         </span>
       </div>
       {video ? (
-        <V2vVideo className="mt8" src={video} fps={c.fps} portrait videoKey={c.id} />
+        <>
+          <V2vVideo className="mt8" src={video} fps={c.fps} portrait videoKey={c.id} />
+          {c.videoPath && (
+            <div className="fx ac gap6 mt6">
+              <button
+                type="button"
+                className="btn xs"
+                onClick={() => void exportOriginals(c.videoPath ? [c.videoPath] : [])}
+              >
+                导出原片
+              </button>
+              <MediaActions path={c.videoPath} label="内部原片" />
+            </div>
+          )}
+        </>
       ) : (
         <div className="vstage pt mt8">
           <span className="vstagenote">
@@ -443,11 +478,14 @@ function ClipSide({
           {delivered(c) ? (
             <div className="pathwell mt5" style={{ wordBreak: "break-all" }}>
               {c.exportPath}
+              {c.exportPath && <MediaActions path={c.exportPath} label="交付副本" />}
             </div>
           ) : (
             <div className="vhint er mt5">
-              验收通过了，但成片没能拷进交付目录 —— 验收那一刻的拷贝失败**不回滚验收**
-              （判定是人做的，文件可以补）。原片还在，点下面重新交付。
+              {c.exportPresent === false
+                ? "交付副本已移动或无法访问。可尝试从流水线原片重新交付。"
+                : "成片还未写入交付目录。可以尝试重新交付。"}
+              {c.exportPath && <div>{c.exportPath}</div>}
             </div>
           )}
           <button
@@ -481,9 +519,29 @@ function ClipSide({
         <Fact k="放行" v={c.autoSubmitted ? "常驻队列" : "手动"} />
       </div>
 
-      <div className="vsec">视频提示词</div>
+      <div className="vsec">
+        视频提示词{" "}
+        {c.videoPrompt && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => void copyText(c.videoPrompt ?? "", "视频提示词")}
+          >
+            复制
+          </button>
+        )}
+      </div>
       <div className="vprompt mt4">{c.videoPrompt ?? "（无）"}</div>
-      <div className="vsec">生图提示词</div>
+      <div className="vsec">
+        生图提示词{" "}
+        <button
+          type="button"
+          className="btn xs"
+          onClick={() => void copyText(c.sourcePrompt, "生图提示词")}
+        >
+          复制
+        </button>
+      </div>
       <div className="vprompt mt4">{c.sourcePrompt}</div>
       <div style={{ height: 8 }} />
     </div>

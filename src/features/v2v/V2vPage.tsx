@@ -132,6 +132,7 @@ function RemoveConfirm({
 type ChannelParams = { modelVersion: string; duration: number; videoResolution: string };
 
 export function V2vPage() {
+  const go = useUiStore((s) => s.go);
   // ── 镜像（store 持有，侧栏与顶栏读的是同一份） ──────────
   const enter = useV2vStore((s) => s.enter);
   const reload = useV2vStore((s) => s.reload);
@@ -857,7 +858,17 @@ export function V2vPage() {
         <div className="bigempty">
           <Clapperboard className="ic" style={{ width: 26, height: 26, opacity: 0.5 }} />
           <div className="fs13 fw5 t2">暂无视频生成任务</div>
-          <div className="fs12 t3">图片验收通过后会自动进入这里。</div>
+          <div className="fs12 t3">
+            图生视频用途的图片通过验收后自动入队，也可从作品库手动加入。
+          </div>
+          <div className="fx ac gap8 mt10">
+            <button type="button" className="btn sm pri" onClick={() => go("library")}>
+              去作品库选图
+            </button>
+            <button type="button" className="btn sm" onClick={() => go("review")}>
+              去验收
+            </button>
+          </div>
         </div>
         {panels}
       </div>

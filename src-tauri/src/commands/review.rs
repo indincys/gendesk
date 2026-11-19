@@ -729,9 +729,9 @@ pub async fn reject_tasks(
     state: State<'_, AppState>,
     app: AppHandle,
     task_ids: Vec<i64>,
-) -> AppResult<i64> {
+) -> AppResult<Vec<i64>> {
     let _guard = state.review_lock.lock().await;
-    let mut rejected = 0i64;
+    let mut trash_ids = Vec::new();
     let mut batches: Vec<i64> = Vec::new();
     let mut wake_codex = false;
     let at = now_unix();
@@ -751,7 +751,7 @@ pub async fn reject_tasks(
         // E02：原图不再立即物理删除，随缩略图一并暂存进废纸篓 file_paths，
         // 由「彻底删除/清空废纸篓」时的 purge 统一物理删除。误触「不通过」不再丢原图。
         let file_paths = rejected_file_paths(&row.result_image_path, &row.result_thumb_path);
-        trash_repo::insert(
+        let trash_id = trash_repo::insert(
             &mut tx,
             &trash_repo::NewTrashItem {
                 entity_type: "task".into(),
@@ -767,7 +767,7 @@ pub async fn reject_tasks(
         )
         .await?;
         wake_codex |= crate::codex_review::decide(&mut tx, row.id, "reject", at).await?;
-        rejected += 1;
+        trash_ids.push(trash_id);
         if !batches.contains(&row.batch_id) {
             batches.push(row.batch_id);
         }
@@ -787,7 +787,7 @@ pub async fn reject_tasks(
     // 这里通常**不会**真的退休任何批次：刚判的这几条正躺在废纸篓里等着「误删可还原」，
     // 而那正是退休条件里的第二条。等废纸篓清干净了才轮到它。
     crate::commands::batches::retire_batches_quietly(&state.db).await;
-    Ok(rejected)
+    Ok(trash_ids)
 }
 
 #[cfg(test)]

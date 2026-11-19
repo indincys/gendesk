@@ -111,6 +111,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     autoSubmitted: false,
     submitQueuedAt: null,
     exportPath: null,
+    exportPresent: null,
     phantomSuspect: false,
     billed: false,
     awaitingDownload: false,

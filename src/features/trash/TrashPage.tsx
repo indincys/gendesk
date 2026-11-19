@@ -50,6 +50,8 @@ import { toast } from "sonner";
  * ⌫ 彻底删除（走确认卡）· ⌘A 全选 · Esc 清除勾选 / 退出放大。
  */
 export function TrashPage() {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState("all");
   const [rows, setRows] = useState<TrashItemView[]>([]);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [focus, setFocus] = useState(0);
@@ -90,7 +92,22 @@ export function TrashPage() {
 
   // 容器宽度：齐行的行高由它推出，故必须在渲染前就是对的。
   // 依赖 hasRows 是因为滚动容器只在非空时挂载（空态是另一棵子树）。
-  const hasRows = rows.length > 0;
+  const filtered = useMemo(
+    () =>
+      rows.filter((item) => {
+        const text = query.trim().toLowerCase();
+        return (
+          (kind === "all" ||
+            (kind === "restorable" ? item.restorable : item.entityType === kind)) &&
+          (!text ||
+            [item.code, item.title, item.promptText, item.sourceLabel, `#${item.batchId}`].some(
+              (value) => value?.toLowerCase().includes(text),
+            ))
+        );
+      }),
+    [rows, query, kind],
+  );
+  const hasRows = filtered.length > 0;
   // biome-ignore lint/correctness/useExhaustiveDependencies: 容器挂载/卸载随 hasRows 切换，须重挂观察器
   useEffect(() => {
     const el = scrollRef.current;
@@ -106,7 +123,7 @@ export function TrashPage() {
     return () => ro.disconnect();
   }, [hasRows]);
 
-  const days = useMemo(() => groupTrash(rows, now), [rows, now]);
+  const days = useMemo(() => groupTrash(filtered, now), [filtered, now]);
   // 两种布局产出同一种块（列表就是「每行一条」），于是键盘导航、选区、光标滚动
   // 三处对两种布局是同一份代码 —— 换布局时光标停在原处。
   const { blocks, cardRow, flat } = useMemo(
@@ -347,7 +364,37 @@ export function TrashPage() {
         <span className="ptt">废纸篓</span>
         <span className="pcap">清理前可还原回原位 · 清理后彻底删除、编号回收、不可恢复</span>
         <div className="f1" />
-        <span className="cnt">{rows.length} 项</span>
+        <input
+          type="search"
+          className="inp sm"
+          placeholder="搜编号、批次或提示词"
+          aria-label="搜索废纸篓"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setSel(new Set());
+            scrollRef.current?.scrollTo({ top: 0 });
+          }}
+        />
+        <select
+          className="inp sm"
+          aria-label="筛选废纸篓"
+          value={kind}
+          onChange={(event) => {
+            setKind(event.target.value);
+            setSel(new Set());
+            scrollRef.current?.scrollTo({ top: 0 });
+          }}
+        >
+          <option value="all">全部类型</option>
+          <option value="restorable">可还原</option>
+          <option value="task">生成图片</option>
+          <option value="work">作品</option>
+          <option value="clip">视频</option>
+        </select>
+        <span className="cnt">
+          {filtered.length} / {rows.length} 项
+        </span>
         <div className="seg">
           <span
             className={cn("sgi", mode === "grid" && "on")}
@@ -387,11 +434,24 @@ export function TrashPage() {
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {filtered.length === 0 ? (
         <div className="bigempty">
           <Trash2 className="ic" style={{ width: 26, height: 26, opacity: 0.5 }} />
-          <div className="fs13 fw5 t2">废纸篓是空的</div>
-          <div className="fs12 t3">验收未通过与手动删除的内容会先进入这里等待清理</div>
+          <div className="fs13 fw5 t2">{rows.length ? "没有匹配的废纸篓记录" : "废纸篓是空的"}</div>
+          {rows.length ? (
+            <button
+              type="button"
+              className="btn xs mt6"
+              onClick={() => {
+                setQuery("");
+                setKind("all");
+              }}
+            >
+              清除筛选
+            </button>
+          ) : (
+            <div className="fs12 t3">验收未通过与手动删除的内容会先进入这里等待清理</div>
+          )}
         </div>
       ) : (
         <div className="trwbrow">

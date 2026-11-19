@@ -5,7 +5,7 @@ use specta::Type;
 use tauri::{AppHandle, State};
 use tauri_specta::Event;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::ref_library::{
     self as lib, LibraryImagePatch, LibraryImageView, LibraryImportReport, LibraryOverview,
     LibraryPickResult, LibraryUsageView,
@@ -166,4 +166,57 @@ pub async fn library_image_usage(
     id: i64,
 ) -> AppResult<Vec<LibraryUsageView>> {
     lib::usage_of_image(&state.db, id).await
+}
+
+/// 仅接受与原图库文件字节一致的重新定位，保留原编号、上传副本、分类和冷却记录。
+#[tauri::command]
+#[specta::specta]
+pub async fn relink_missing_library_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    image_id: i64,
+    source: String,
+) -> AppResult<()> {
+    let current: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT r.id,r.file_path,i.content_hash FROM ref_library_images i
+         JOIN ref_images r ON r.id=i.ref_image_id WHERE i.id=? AND r.linked=1",
+    )
+    .bind(image_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (id, old_path, expected) =
+        current.ok_or_else(|| AppError::InvalidInput("这张图不是可重新定位的图库链接".into()))?;
+    let data_root = state.dirs.root.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        use std::path::Path;
+        if Path::new(&old_path).is_file() {
+            return Err(AppError::InvalidInput("原文件仍在，无需重新定位".into()));
+        }
+        let path = std::fs::canonicalize(&source)?;
+        if !path.is_file() || path.starts_with(&data_root) {
+            return Err(AppError::InvalidInput(
+                "请选择应用数据目录以外的原图".into(),
+            ));
+        }
+        if crate::files::content_hash(&path)? != expected {
+            return Err(AppError::InvalidInput("所选文件和图库原图内容不同".into()));
+        }
+        Ok((path.to_string_lossy().into_owned(), old_path))
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))??;
+    let changed =
+        sqlx::query("UPDATE ref_images SET file_path=? WHERE id=? AND linked=1 AND file_path=?")
+            .bind(source.0)
+            .bind(id)
+            .bind(source.1)
+            .execute(&state.db)
+            .await?;
+    if changed.rows_affected() != 1 {
+        return Err(AppError::InvalidInput(
+            "图库链接已经变化，请刷新后再试".into(),
+        ));
+    }
+    emit_changed(&app);
+    Ok(())
 }

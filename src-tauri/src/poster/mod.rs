@@ -28,6 +28,7 @@ use crate::library::Organization;
 
 pub mod backfill;
 pub mod client;
+pub mod draft;
 pub(crate) mod intake_group;
 pub mod slot;
 pub(crate) mod storage;
@@ -40,6 +41,8 @@ pub struct PosterSettings {
     /// 审稿通过后自动导入。新字段名：旧版 `enabled`（逐批询问）不会被当成同意自动导入。
     #[serde(default)]
     pub auto_import: bool,
+    #[serde(default)]
+    pub confirm_sets: bool,
     pub executable: String,
 }
 
@@ -62,6 +65,7 @@ pub async fn load_settings(pool: &SqlitePool) -> AppResult<PosterSettings> {
             .map_err(|e| AppError::InvalidInput(format!("Poster 设置无法读取：{e}"))),
         None => Ok(PosterSettings {
             auto_import: false,
+            confirm_sets: false,
             executable: client::discover_executable().to_string_lossy().into(),
         }),
     }
@@ -213,6 +217,16 @@ pub async fn track_image(
     .bind(placement.task_id)
     .execute(&mut **tx)
     .await?;
+    // 迟到的补图使已确认但还未冻结的草稿回到人工确认。
+    sqlx::query(
+        "UPDATE poster_batches SET
+        state=CASE WHEN draft_confirmed=1 THEN 'awaiting' ELSE state END,
+        draft_confirmed=0,draft_revision=draft_revision+1
+        WHERE id=? AND set_key IS NOT NULL AND request_json IS NULL",
+    )
+    .bind(&target)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -228,10 +242,9 @@ async fn open_set_batch(
     .bind(key)
     .fetch_all(&mut **tx)
     .await?;
-    if let Some((id, _, _)) = existing
-        .iter()
-        .find(|(_, state, open)| *open && matches!(state.as_str(), "queued" | "failed"))
-    {
+    if let Some((id, _, _)) = existing.iter().find(|(_, state, open)| {
+        *open && matches!(state.as_str(), "queued" | "failed" | "awaiting")
+    }) {
         return Ok(id.clone());
     }
     if !existing.is_empty() {
@@ -241,7 +254,9 @@ async fn open_set_batch(
     // 直接排队：交付时先看这一组还有没有图待审，有就继续等，不会提前组成。
     sqlx::query(
         "INSERT INTO poster_batches(id,created_at,state,library_root,set_key)
-        SELECT ?,?,'queued',library_root,? FROM poster_batches WHERE id=?",
+        SELECT ?,?,CASE WHEN COALESCE((SELECT json_extract(value_json,'$.confirmSets')
+            FROM settings WHERE key='poster'),0) THEN 'awaiting' ELSE 'queued' END,
+        library_root,? FROM poster_batches WHERE id=?",
     )
     .bind(&id)
     .bind(now_unix())
@@ -330,18 +345,18 @@ pub struct PosterBatch {
 pub async fn batches(pool: &SqlitePool) -> AppResult<Vec<PosterBatch>> {
     let mut list: Vec<PosterBatch> = sqlx::query_as(
         "SELECT b.id,b.created_at,b.state,b.last_error,COUNT(i.work_id) AS count,
-            SUM(i.wants_live=1 AND i.live_image IS NULL) AS waiting_live,
+            SUM(i.excluded=0 AND i.wants_live=1 AND (i.live_image IS NULL OR i.live_video IS NULL)) AS waiting_live,
             b.set_key IS NOT NULL AS is_set
         FROM poster_batches b JOIN poster_images i ON i.batch_id=b.id
         WHERE b.state<>'skipped'
-        GROUP BY b.id ORDER BY CASE b.state WHEN 'failed' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+        GROUP BY b.id ORDER BY CASE b.state WHEN 'failed' THEN 0 WHEN 'awaiting' THEN 1 WHEN 'queued' THEN 1 ELSE 2 END,
         b.created_at DESC,b.rowid DESC LIMIT 50",
     )
     .fetch_all(pool)
     .await?;
     let open: Vec<(String, String)> = sqlx::query_as(
         "SELECT id,set_key FROM poster_batches
-        WHERE set_key IS NOT NULL AND request_json IS NULL AND state IN ('queued','failed')",
+        WHERE set_key IS NOT NULL AND request_json IS NULL AND state IN ('queued','failed','awaiting')",
     )
     .fetch_all(pool)
     .await?;
@@ -380,8 +395,8 @@ async fn images(pool: &SqlitePool, batch: &str) -> AppResult<Vec<Image>> {
         "SELECT i.uid,i.item_name,i.sku,i.style,i.image_path,i.product_id,i.product_name,
             i.wants_live,i.live_image,i.live_video, w.image_path AS canonical_path,
             w.organization_json
-        FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=?
-        ORDER BY i.task_id,i.work_id",
+        FROM poster_images i LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE i.batch_id=? AND i.excluded=0
+        ORDER BY i.draft_position IS NULL,i.draft_position,i.task_id,i.work_id",
     )
     .bind(batch)
     .fetch_all(pool)
@@ -770,7 +785,7 @@ pub async fn bind(pool: &SqlitePool, id: &str, choices: &[PosterChoice]) -> AppR
         .bind(id)
         .fetch_optional(pool)
         .await?;
-    if !matches!(state.as_deref(), Some("failed" | "queued")) {
+    if !matches!(state.as_deref(), Some("failed" | "queued" | "awaiting")) {
         return Err(AppError::InvalidInput("本批已处理，请刷新后查看".into()));
     }
     let preview = preview(pool, id).await?;
@@ -794,13 +809,16 @@ pub async fn bind(pool: &SqlitePool, id: &str, choices: &[PosterChoice]) -> AppR
 
 /// 放弃导入一个失败批次（图片仍在成品目录，只是不进 Poster）。
 pub async fn skip(pool: &SqlitePool, id: &str) -> AppResult<()> {
-    let updated =
-        sqlx::query("UPDATE poster_batches SET state='skipped' WHERE id=? AND state='failed'")
-            .bind(id)
-            .execute(pool)
-            .await?;
+    let updated = sqlx::query(
+        "UPDATE poster_batches SET state='skipped' WHERE id=? AND state IN ('failed','awaiting')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     if updated.rows_affected() != 1 {
-        return Err(AppError::InvalidInput("只有失败的批次可以放弃导入".into()));
+        return Err(AppError::InvalidInput(
+            "只有待确认或失败的批次可以放弃交付".into(),
+        ));
     }
     Ok(())
 }
@@ -813,11 +831,31 @@ pub async fn deliver_pending(pool: &SqlitePool, data_root: &Path) -> AppResult<(
         if !load_settings(pool).await?.auto_import {
             break;
         }
-        if let Err(error) = deliver_one(pool, data_root, &id).await {
-            sqlx::query("UPDATE poster_batches SET state='failed',last_error=? WHERE id=? AND state IN ('queued','failed')")
-                .bind(error.to_string()).bind(&id).execute(pool).await?;
+        if let Err(error) = retry_one(pool, data_root, &id).await {
             tracing::warn!(%error, batch=%id, "Poster 图片导入待重试");
         }
+    }
+    Ok(())
+}
+
+/// 重试单一批次。调用方持 poster_lock，未确认的草稿没有交付资格。
+pub async fn retry_one(pool: &SqlitePool, data_root: &Path, id: &str) -> AppResult<()> {
+    if !load_settings(pool).await?.auto_import {
+        return Err(AppError::InvalidInput("请先开启 Poster 交付".into()));
+    }
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM poster_batches WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    if !matches!(state.as_deref(), Some("queued" | "failed")) {
+        return Err(AppError::InvalidInput(
+            "批次不在可交付状态，请刷新后查看".into(),
+        ));
+    }
+    if let Err(error) = deliver_one(pool, data_root, id).await {
+        sqlx::query("UPDATE poster_batches SET state='failed',last_error=? WHERE id=? AND state IN ('queued','failed')")
+            .bind(error.to_string()).bind(id).execute(pool).await?;
+        return Err(error);
     }
     Ok(())
 }
@@ -973,8 +1011,8 @@ async fn deliver_set(
         // 冻结与「这一组的图都在请求里」同一条语句判定：验收与交付不共用一把锁，冻结前若又登记
         // 进了一张图，这次不冻结，等登记它的那次验收结束再来组。
         let frozen = sqlx::query(
-            "UPDATE poster_batches SET request_json=? WHERE id=? AND request_json IS NULL
-            AND (SELECT COUNT(*) FROM poster_images WHERE batch_id=?)=?",
+            "UPDATE poster_batches SET request_json=? WHERE id=? AND request_json IS NULL AND state IN ('queued','failed')
+            AND (SELECT COUNT(*) FROM poster_images WHERE batch_id=? AND excluded=0)=?",
         )
         .bind(serde_json::to_string(&request)?)
         .bind(id)

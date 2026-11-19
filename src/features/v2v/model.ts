@@ -355,7 +355,7 @@ function median(xs: number[]): number {
  * 真实会出现、且今天界面上完全不提的状态 —— 片子做出来了，却没人知道它没落地。
  */
 export function delivered(c: ClipView): boolean {
-  return (c.exportPath ?? "").trim() !== "";
+  return (c.exportPath ?? "").trim() !== "" && c.exportPresent !== false;
 }
 
 /** 换通道时把当前参数带过去的结果。`*Changed` 为真即「原值这条通道接不了，夹过了」。 */

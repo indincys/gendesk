@@ -71,8 +71,9 @@ pub struct TrashItemView {
     pub title: Option<String>,
     pub ref_name: Option<String>,
     pub thumb_path: Option<String>,
-    /// 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
+    /// 仍可读取的原图（待清理的生成结果或作品输出）。
     pub image_path: Option<String>,
+    pub video_path: Option<String>,
     pub prompt_text: Option<String>,
     pub source_label: String,
     pub deleted_at: i64,
@@ -106,14 +107,27 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
     let mut out: Vec<TrashItemView> = rows
         .into_iter()
         .map(|r| {
-            // 未通过任务的原图存于 file_paths 首位（E02）；仅 task 类暴露供查看。
-            let image_path = (r.entity_type == "task")
-                .then(|| {
-                    serde_json::from_str::<Vec<String>>(&r.file_paths_json)
-                        .ok()
-                        .and_then(|v| v.into_iter().next())
+            let paths = serde_json::from_str::<Vec<String>>(&r.file_paths_json).unwrap_or_default();
+            let image_path = match r.entity_type.as_str() {
+                "task" => paths.first().cloned(),
+                "work" => r
+                    .payload_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<work_repo::AcceptedWorkRow>(json).ok())
+                    .map(|work| work.image_path),
+                _ => None,
+            }
+            .filter(|path| std::path::Path::new(path).is_file());
+            let video_path = if r.entity_type == "clip" {
+                paths.into_iter().find(|path| {
+                    let path = std::path::Path::new(path);
+                    path.extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("mov")
+                    }) && path.is_file()
                 })
-                .flatten();
+            } else {
+                None
+            };
             let restorable = r.entity_type != "work" || r.payload_json.is_some();
             TrashItemView {
                 id: r.id,
@@ -128,6 +142,7 @@ pub async fn list_trash(state: State<'_, crate::state::AppState>) -> AppResult<V
                 ref_name: None, // trash_items 不冗余参考图名；列表以编号 + 提示词为主
                 thumb_path: r.thumb_path,
                 image_path,
+                video_path,
                 prompt_text: r.prompt_text,
                 source_label: r.source_label,
                 deleted_at: r.deleted_at,

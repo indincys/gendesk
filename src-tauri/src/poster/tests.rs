@@ -79,6 +79,7 @@ async fn set_settings(pool: &SqlitePool, settings: &PosterSettings) {
 fn enabled(executable: &Path) -> PosterSettings {
     PosterSettings {
         auto_import: true,
+        confirm_sets: false,
         executable: executable.to_string_lossy().into(),
     }
 }
@@ -1283,4 +1284,89 @@ fn set_receipt_must_match_the_group_images_and_product() {
         .is_err(),
         "预览不该已落库"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_draft_preserves_cover_exclusions_and_export_order() {
+    let (pool, root) = crate::db::test_support::test_pool().await;
+    initialize(&pool).await.unwrap();
+    let mut settings = enabled(&fake_poster_sets(root.path(), true));
+    settings.confirm_sets = true;
+    set_settings(&pool, &settings).await;
+    let scene = calendar("檀健次", "桌面场景图");
+    let tasks: Vec<_> = (1..=4).map(|id| (id, scene.clone())).collect();
+    seed_review(&pool, &tasks).await;
+    pass(&pool, root.path(), &tasks[..3]).await;
+
+    let (id, state, _, _) = set_batches(&pool).await.remove(0);
+    assert_eq!(state, "awaiting");
+    let original = draft::read(&pool, &id).await.unwrap();
+    let edits: Vec<_> = [("u003", false), ("u002", true), ("u001", false)]
+        .into_iter()
+        .map(|(uid, excluded)| draft::DraftPlacement {
+            uid: uid.into(),
+            excluded,
+        })
+        .collect();
+    assert!(draft::save(&pool, &id, original.revision, &edits, true)
+        .await
+        .is_err());
+    draft::save(&pool, &id, original.revision, &edits, false)
+        .await
+        .unwrap();
+    assert!(draft::save(&pool, &id, original.revision, &edits, false)
+        .await
+        .is_err());
+
+    pass(&pool, root.path(), &tasks[3..]).await;
+    deliver_pending(&pool, root.path()).await.unwrap();
+    assert!(calls(root.path(), "import-image-sets").is_empty());
+    let current = draft::read(&pool, &id).await.unwrap();
+    assert_eq!(current.images[0].uid, "u003");
+    assert_eq!(current.images.last().unwrap().uid, "u004");
+    assert!(draft::save(&pool, &id, current.revision, &edits, true)
+        .await
+        .is_err());
+
+    let placements: Vec<_> = current
+        .images
+        .iter()
+        .map(|item| draft::DraftPlacement {
+            uid: item.uid.clone(),
+            excluded: item.excluded,
+        })
+        .collect();
+    let exported =
+        draft::export(draft::read(&pool, &id).await.unwrap(), root.path(), false).unwrap();
+    assert_eq!(exported.exported, 3);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(Path::new(&exported.directory).join("交付清单.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["files"][0]["position"], 1);
+    assert_eq!(manifest["files"][0]["cover"], true);
+    let first_name = manifest["files"][0]["files"][0].as_str().unwrap();
+    assert_eq!(
+        std::fs::read(Path::new(&exported.directory).join(first_name)).unwrap(),
+        std::fs::read(&current.images[0].image_path).unwrap()
+    );
+    draft::save(&pool, &id, current.revision, &placements, true)
+        .await
+        .unwrap();
+    retry_one(&pool, root.path(), &id).await.unwrap();
+    let (_, state, frozen, _) = set_batches(&pool).await.remove(0);
+    assert_eq!(state, "done");
+    let request: client::SetsRequest = serde_json::from_str(frozen.as_deref().unwrap()).unwrap();
+    let order: Vec<_> = request.items[0]
+        .images
+        .iter()
+        .map(|item| item.external_id.as_str())
+        .collect();
+    assert_eq!(order, ["u003", "u001", "u004"]);
+    let accepted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accepted_works")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(accepted, 4);
 }

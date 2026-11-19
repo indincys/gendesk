@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Pause, Play, StepBack, StepForward } from "lucide-react";
+import { Maximize, Pause, Play, StepBack, StepForward, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
@@ -51,6 +51,8 @@ export function V2vVideo({
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
   const [rate, setRate] = useState(1);
+  const [muted, setMuted] = useState(true);
+  const [failed, setFailed] = useState(false);
 
   const step = 1 / (fps && fps > 0 ? fps : 24);
 
@@ -61,12 +63,14 @@ export function V2vVideo({
     setDur(0);
     setPlaying(true);
     setRate(1);
+    setMuted(true);
+    setFailed(false);
   }, [videoKey, src]);
 
   const toggle = useCallback(() => {
     const v = ref.current;
     if (!v) return;
-    if (v.paused) void v.play().catch(() => {});
+    if (v.paused) void v.play().catch(() => setFailed(true));
     else v.pause();
   }, []);
 
@@ -77,14 +81,10 @@ export function V2vVideo({
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + d));
   }, []);
 
-  const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const v = ref.current;
-    if (!v || !v.duration) return;
-    const box = e.currentTarget.getBoundingClientRect();
-    v.currentTime = Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)) * v.duration;
-  }, []);
-
-  const pct = dur > 0 ? (cur / dur) * 100 : 0;
+  function seek(value: number) {
+    const video = ref.current;
+    if (video && Number.isFinite(video.duration)) video.currentTime = value;
+  }
 
   return (
     <div className={cn("vplay", dark && "dk", className)}>
@@ -95,14 +95,18 @@ export function V2vVideo({
           src={src}
           loop
           autoPlay
-          muted
+          muted={muted}
           playsInline
           tabIndex={-1}
           onClick={toggle}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+          onLoadedMetadata={(e) => {
+            setDur(Number.isFinite(e.currentTarget.duration) ? e.currentTarget.duration : 0);
+            setFailed(false);
+          }}
+          onError={() => setFailed(true)}
         />
       </div>
       <div className="vplaybar">
@@ -133,22 +137,18 @@ export function V2vVideo({
         >
           <StepForward className="ic12" />
         </button>
-        <div
+        <input
           className="tk"
-          onClick={seek}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowLeft") nudge(-step);
-            if (e.key === "ArrowRight") nudge(step);
-          }}
-          role="slider"
+          type="range"
+          min={0}
+          max={dur || 1}
+          step={step}
+          value={Math.min(cur, dur || 1)}
+          disabled={!dur}
           aria-label="播放进度"
-          aria-valuemin={0}
-          aria-valuemax={Math.round(dur * 10)}
-          aria-valuenow={Math.round(cur * 10)}
-          tabIndex={-1}
-        >
-          <div style={{ width: `${pct}%` }} />
-        </div>
+          aria-valuetext={fmtT(cur)}
+          onChange={(event) => seek(Number(event.target.value))}
+        />
         <span className="tm">
           {fmtT(cur)}/{fmtT(dur)}
         </span>
@@ -165,7 +165,48 @@ export function V2vVideo({
         >
           {rate}×
         </button>
+        <button
+          type="button"
+          className="ic"
+          title={muted ? "打开声音" : "静音"}
+          aria-label={muted ? "打开声音" : "静音"}
+          aria-pressed={!muted}
+          onClick={() => setMuted((value) => !value)}
+        >
+          {muted ? <VolumeX className="ic12" /> : <Volume2 className="ic12" />}
+        </button>
+        <button
+          type="button"
+          className="ic"
+          title="全屏播放"
+          aria-label="全屏播放"
+          onClick={() => {
+            const video = ref.current as
+              | (HTMLVideoElement & { webkitEnterFullscreen?: () => void })
+              | null;
+            if (video?.requestFullscreen)
+              void video.requestFullscreen().catch(() => video.webkitEnterFullscreen?.());
+            else video?.webkitEnterFullscreen?.();
+          }}
+        >
+          <Maximize className="ic12" />
+        </button>
       </div>
+      {failed && (
+        <div className="fx ac gap8 fs11" role="alert">
+          视频播放失败
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              setFailed(false);
+              ref.current?.load();
+            }}
+          >
+            重新加载
+          </button>
+        </div>
+      )}
     </div>
   );
 }

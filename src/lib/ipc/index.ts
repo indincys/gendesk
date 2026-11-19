@@ -9,6 +9,8 @@ import { events, type AppError, type Result, commands } from "./bindings";
 
 export { commands, events };
 export type {
+  DeliveryDraft,
+  DraftImage,
   AddApiKeyInput,
   ApiKeyView,
   AppError,

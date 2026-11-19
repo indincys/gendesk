@@ -1,3 +1,4 @@
+import { MediaActions, copyText, exportOriginals } from "@/features/_shared/MediaActions";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { moveByRow, packGroups } from "@/features/_shared/justified";
@@ -15,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowRight, Check, Clock, Maximize2, Trash2, X } from "lucide-react";
+import { ArrowRight, Check, Clock, Download, Maximize2, Trash2, X } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -52,6 +53,17 @@ const OTHER_MODES = [
 
 /** 组色板 gc0–gc4：相邻两组颜色不同，组头左轨与组内每张卡的色点同色。 */
 const TONES = 5;
+const PENDING_KEY = "gendesk.review.pending";
+
+function readPending(): Set<number> {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(PENDING_KEY) ?? "[]");
+    if (Array.isArray(stored)) return new Set(stored.filter((id) => Number.isSafeInteger(id)));
+  } catch {
+    // 首次启动或存储不可用时仍可标记本次待定。
+  }
+  return new Set();
+}
 
 function ClusterHead({
   head,
@@ -59,12 +71,14 @@ function ClusterHead({
   pending,
   onAccept,
   onReject,
+  onExport,
 }: {
   head: Extract<ReviewHead, { kind: "cluster" }>;
   tone: number;
   pending: ReadonlySet<number>;
   onAccept: (ids: number[]) => void;
   onReject: (ids: number[]) => void;
+  onExport: (ids: number[]) => void;
 }) {
   const count = head.ids.length;
   const ready = head.ids.filter((id) => !pending.has(id));
@@ -90,6 +104,15 @@ function ClusterHead({
         onClick={() => onAccept(ready)}
       >
         {held > 0 ? `通过其余 ${ready.length} 张` : "通过本组"}
+      </button>
+      <button
+        type="button"
+        className="btn xs gho"
+        aria-label={`导出 ${head.name} 本组 ${count} 张原件`}
+        title="导出本组原件"
+        onClick={() => onExport(head.ids)}
+      >
+        <Download className="ic12" />
       </button>
       <button
         type="button"
@@ -152,7 +175,13 @@ const ReviewCard = memo(function ReviewCard({
       onMouseEnter={() => onHover(idx)}
     >
       {/* 图框铺满这一格：格子本身已按真实宽高比算好，故 cover 不会裁掉任何东西。 */}
-      <NatThumb path={item.resultThumbPath} className="rcimg rjimg" />
+      {item.resultImagePath ? (
+        <MediaActions path={item.resultImagePath} label={name} onPreview={() => onZoom(idx)}>
+          <NatThumb path={item.resultThumbPath} className="rcimg rjimg" />
+        </MediaActions>
+      ) : (
+        <NatThumb path={item.resultThumbPath} className="rcimg rjimg" />
+      )}
       <button
         type="button"
         className="rck"
@@ -231,7 +260,10 @@ export function ReviewPage() {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cols, setCols] = useState(5);
   const [focusId, setFocusId] = useState<number | null>(null);
-  const [pending, setPending] = useState<Set<number>>(new Set());
+  const [pending, setPending] = useState(readPending);
+  const jumpBatch = useUiStore((s) => s.jumpBatch);
+  const openBatch = useUiStore((s) => s.openBatch);
+  const [search, setSearch] = useState(jumpBatch ? `#${jumpBatch}` : "");
   const [onlyPending, setOnlyPending] = useState(false);
   // 默认按提交（一次工单一组）：审图时最常对照的是「这一单交了什么」，按需求放第二位。
   const [sortMode, setSortMode] = useState<ReviewMode>("batch");
@@ -253,6 +285,14 @@ export function ReviewPage() {
   const wasZoom = useRef(false);
   const reviewRevision = useEngineStore((s) => s.reviewRevision);
   const modKey = useUiStore((s) => modKeyLabel(s.platform));
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PENDING_KEY, JSON.stringify([...pending]));
+    } catch {
+      // 存储不可用时保留本次待定。
+    }
+  }, [pending]);
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -309,9 +349,25 @@ export function ReviewPage() {
         }
         if (dropIds.length) {
           try {
-            const count = await unwrap(commands.rejectTasks(dropIds));
-            setProcessed((total) => total + count);
-            toast(`${count} 张移入废纸篓`, { id: "review-reject" });
+            const trashIds = await unwrap(commands.rejectTasks(dropIds));
+            setProcessed((total) => total + trashIds.length);
+            if (trashIds.length > 0)
+              toast.success(`${trashIds.length} 张移入废纸篓`, {
+                action: {
+                  label: "还原到验收",
+                  onClick: async () => {
+                    try {
+                      const result = await unwrap(commands.restoreTrashItems(trashIds));
+                      if (result.restored > 0)
+                        toast.success(`已将 ${result.restored} 张还原到验收`);
+                      for (const error of result.failures) toast.error(error);
+                      await load();
+                    } catch (error) {
+                      toast.error(String(error));
+                    }
+                  },
+                },
+              });
           } catch (error) {
             toast.error(error instanceof Error ? error.message : "移入废纸篓失败");
           }
@@ -366,13 +422,34 @@ export function ReviewPage() {
 
   const pendingCount =
     items?.filter((item) => pending.has(item.id) && !hidden.has(item.id)).length ?? 0;
-  const filtered = useMemo(
-    () =>
-      (items ?? []).filter(
-        (item) => !hidden.has(item.id) && (!onlyPending || pending.has(item.id)),
-      ),
-    [items, hidden, onlyPending, pending],
-  );
+  const filtered = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return (
+      items?.filter(
+        (item) =>
+          !hidden.has(item.id) &&
+          (!onlyPending || pending.has(item.id)) &&
+          (/^#\d+$/.test(query)
+            ? query === `#${item.batchId}`
+            : [
+                item.itemName,
+                item.promptCode,
+                item.refName,
+                item.batchNote,
+                item.organization?.style,
+                item.organization?.requirement,
+              ].some((value) => value?.toLowerCase().includes(query))),
+      ) ?? []
+    );
+  }, [items, hidden, onlyPending, pending, search]);
+  const exportSelection = (ids: number[]) => {
+    const selected = new Set(ids);
+    const paths = filtered.flatMap((item) =>
+      selected.has(item.id) && item.resultImagePath ? [item.resultImagePath] : [],
+    );
+    if (paths.length < ids.length) toast.warning(`${ids.length - paths.length} 张没有可导出的原件`);
+    void exportOriginals(paths);
+  };
   const visibleIds = useMemo(() => new Set(filtered.map((item) => item.id)), [filtered]);
   const selectedIds = useMemo(() => [...sel].filter((id) => visibleIds.has(id)), [sel, visibleIds]);
   const sections = useMemo(() => buildSections(filtered, sortMode, now), [filtered, sortMode, now]);
@@ -625,6 +702,20 @@ export function ReviewPage() {
             <AfterReviewHint />
           </div>
           <div className="f1" />
+          <input
+            type="search"
+            className="inp sm"
+            aria-label="搜索待验收图片"
+            placeholder="搜款式、需求、批次…"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setSel(new Set());
+              setFocusId(null);
+              lastClicked.current = null;
+              parentRef.current?.scrollTo({ top: 0 });
+            }}
+          />
           {pendingCount > 0 || onlyPending ? (
             <button
               type="button"
@@ -687,6 +778,9 @@ export function ReviewPage() {
           <div className="rselection">
             <span className="fw6">已选 {selectedIds.length} 张</span>
             <div className="f1" />
+            <button type="button" className="btn xs" onClick={() => exportSelection(selectedIds)}>
+              导出所选原件
+            </button>
             <button type="button" className="btn xs" onClick={() => accept(selectedIds)}>
               通过所选
             </button>
@@ -710,15 +804,21 @@ export function ReviewPage() {
           {filtered.length === 0 ? (
             <div className="bigempty">
               <div className="fs13 fw5 t2">
-                {onlyPending
-                  ? "没有标记为待定的图片"
-                  : items === null
-                    ? loadError
-                      ? "暂时无法打开验收列表"
-                      : "正在加载图片…"
-                    : "没有待验收的图片"}
+                {search.trim()
+                  ? "没有匹配的待验收图片"
+                  : onlyPending
+                    ? "没有标记为待定的图片"
+                    : items === null
+                      ? loadError
+                        ? "暂时无法打开验收列表"
+                        : "正在加载图片…"
+                      : "没有待验收的图片"}
               </div>
-              {onlyPending ? (
+              {search.trim() ? (
+                <button type="button" className="btn sm" onClick={() => setSearch("")}>
+                  清除搜索
+                </button>
+              ) : onlyPending ? (
                 <button
                   type="button"
                   className="btn sm"
@@ -755,6 +855,7 @@ export function ReviewPage() {
                           pending={pending}
                           onAccept={accept}
                           onReject={reject}
+                          onExport={exportSelection}
                         />
                       )
                     ) : (
@@ -869,18 +970,53 @@ export function ReviewPage() {
                 </div>
                 <div className="f1" style={{ overflow: "auto", padding: "12px 14px" }}>
                   <div className="fx ac gap6 wrap">
-                    {zoomItem.promptCode && <span className="pid">{zoomItem.promptCode}</span>}
-                    <span className="chip" title={zoomItem.batchNote ?? undefined}>
+                    {zoomItem.promptCode && (
+                      <button
+                        type="button"
+                        className="pid"
+                        title="复制提示词编号"
+                        onClick={() => void copyText(zoomItem.promptCode, "编号")}
+                      >
+                        {zoomItem.promptCode}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn xs"
+                      title="查看该批任务"
+                      onClick={() => openBatch("tasks", zoomItem.batchId)}
+                    >
                       提交 #{zoomItem.batchId}
-                    </span>
+                    </button>
                     <span className="chip">
                       {dayLabel(zoomItem.createdAt, now)} {hhmm(zoomItem.createdAt)}
                     </span>
                     {zoomItem.skill && <span className="sk">{zoomItem.skill}</span>}
                   </div>
+                  {zoomItem.resultImagePath && (
+                    <div className="fx ac gap6 mt10 wrap">
+                      <button
+                        type="button"
+                        className="btn xs"
+                        onClick={() =>
+                          void exportOriginals(
+                            zoomItem.resultImagePath ? [zoomItem.resultImagePath] : [],
+                          )
+                        }
+                      >
+                        导出生成图
+                      </button>
+                      <MediaActions path={zoomItem.resultImagePath} label="生成图" />
+                    </div>
+                  )}
                   {refPath && (
                     <>
-                      <div className="fs11 fw6 t3 mt14">参考图对比</div>
+                      <div className="fx ac gap8 mt14">
+                        <span className="fs11 fw6 t3">参考图对比</span>
+                        {zoomItem.refImagePath && (
+                          <MediaActions path={zoomItem.refImagePath} label="主参考图" />
+                        )}
+                      </div>
                       <button
                         type="button"
                         className={cn("refcmp mt6", showingRef && "on")}
@@ -973,6 +1109,7 @@ export function ReviewPage() {
  * 两项都关时不占位置。
  */
 function AfterReviewHint() {
+  const openSettings = useUiStore((s) => s.openSettings);
   const [live, setLive] = useState(false);
   const [poster, setPoster] = useState(false);
 
@@ -1006,7 +1143,10 @@ function AfterReviewHint() {
       )}
       {poster && (
         <>
-          <ArrowRight className="ic12" />进 Poster
+          <ArrowRight className="ic12" />
+          <button type="button" className="btn xs" onClick={() => openSettings("s-auto")}>
+            Poster 交付
+          </button>
         </>
       )}
     </span>
@@ -1041,7 +1181,10 @@ function ReviewReferenceImage({ position, imagePath }: ReviewReferenceView) {
   const [loadFailed, setLoadFailed] = useState(false);
   return (
     <figure className="rdreference mt14">
-      <figcaption className="fs11 fw6 t3">参考图 {position} · 原图</figcaption>
+      <figcaption className="fx ac gap6 fs11 fw6 t3">
+        参考图 {position} · 原图
+        <MediaActions path={imagePath} label={`参考图 ${position}`} />
+      </figcaption>
       {loadFailed ? (
         <div className="fs11 t3 mt6">原图无法打开</div>
       ) : (

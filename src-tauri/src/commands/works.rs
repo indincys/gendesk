@@ -144,19 +144,23 @@ pub async fn toggle_work_favorite(state: State<'_, AppState>, id: i64) -> AppRes
 /// 删除作品 → 进废纸篓（记录删除，文件待清理时物理删）。
 #[tauri::command]
 #[specta::specta]
-pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+pub async fn trash_work(state: State<'_, AppState>, id: i64) -> AppResult<i64> {
     trash_one_work(&state.db, id, "手动删除").await
 }
 
 /// 一条作品进废纸篓。整行序列化进 `payload_json`（0027）——作品是唯一「删除即真删行」
 /// 的实体，不留快照就还原不回来，而误删一张已经验收通过的图恰恰是最该能撤回的一种。
-async fn trash_one_work(pool: &sqlx::SqlitePool, id: i64, label: &str) -> AppResult<()> {
-    let Some(row) = work_repo::delete(pool, id).await? else {
-        return Ok(());
-    };
-    let payload = work_repo::to_payload(&row);
+async fn trash_one_work(pool: &sqlx::SqlitePool, id: i64, label: &str) -> AppResult<i64> {
     let mut tx = pool.begin().await?;
-    trash_repo::insert(
+    let row = sqlx::query_as::<_, work_repo::AcceptedWorkRow>(
+        "DELETE FROM accepted_works WHERE id = ? RETURNING *",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::InvalidInput("作品已移动或不存在，请刷新作品库".into()))?;
+    let payload = serde_json::to_string(&row)?;
+    let trash_id = trash_repo::insert(
         &mut tx,
         &trash_repo::NewTrashItem {
             entity_type: "work".into(),
@@ -168,12 +172,12 @@ async fn trash_one_work(pool: &sqlx::SqlitePool, id: i64, label: &str) -> AppRes
             source_label: label.into(),
             // E21 决策：默认**不**物理删除外部输出文件（用户可能已发布/引用）；仅清缩略图。
             file_paths: vec![row.thumb_path],
-            payload_json: payload,
+            payload_json: Some(payload),
         },
     )
     .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(trash_id)
 }
 
 /// 批量收藏（E15）。favorite=true 收藏，false 取消。
@@ -198,13 +202,33 @@ pub async fn set_works_favorite(
 }
 
 /// 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTrashResult {
+    pub work_id: i64,
+    pub trash_id: Option<i64>,
+    pub error: Option<String>,
+}
+
 #[tauri::command]
 #[specta::specta]
-pub async fn trash_works(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
+pub async fn trash_works(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> AppResult<Vec<WorkTrashResult>> {
+    let mut result = Vec::with_capacity(ids.len());
     for id in ids {
-        trash_one_work(&state.db, id, "批量删除").await?;
+        let (trash_id, error) = match trash_one_work(&state.db, id, "批量删除").await {
+            Ok(trash_id) => (Some(trash_id), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        result.push(WorkTrashResult {
+            work_id: id,
+            trash_id,
+            error,
+        });
     }
-    Ok(())
+    Ok(result)
 }
 
 /// 批量导出作品到指定文件夹（E15）：复制各作品输出文件（image_path）到目标目录。
@@ -332,9 +356,30 @@ pub(crate) async fn reexport_from_snapshot(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)] // 测试断言失败即失败
 mod tests {
-    use super::{reexport_from_snapshot, WorkView, WORK_SELECT};
+    use super::{reexport_from_snapshot, trash_one_work, work_repo, WorkView, WORK_SELECT};
     use crate::db::test_support::test_pool;
     use sqlx::SqlitePool;
+
+    #[tokio::test]
+    async fn trash_insertion_failure_keeps_the_original_work() {
+        let (pool, _dir) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO accepted_works(id,image_path,thumb_path,prompt_text,accepted_at)
+            VALUES(1,'/original.jpg','/thumb.jpg','',0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_trash BEFORE INSERT ON trash_items
+            BEGIN SELECT RAISE(ABORT,'cannot write trash'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(trash_one_work(&pool, 1, "测试").await.is_err());
+        assert!(work_repo::get(&pool, 1).await.unwrap().is_some());
+    }
 
     /// R2：重新导出**复用原 uid**，绝不重摇。
     ///

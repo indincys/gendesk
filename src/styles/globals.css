@@ -4631,15 +4631,12 @@ a:hover {
 .vplaybar .tk {
   flex: 1;
   min-width: 24px;
-  height: 4px;
-  border-radius: 99px;
-  background: var(--inset);
+  height: 20px;
+  accent-color: var(--acc);
   cursor: pointer;
-  overflow: hidden;
 }
-.vplaybar .tk > div {
-  height: 100%;
-  background: var(--acc);
+.vplaybar .tk:disabled {
+  cursor: default;
 }
 .vplaybar .tm {
   font: 400 9.5px var(--mono);
@@ -5626,4 +5623,108 @@ a:hover {
   grid-template-columns: 1fr 90px 50px 56px;
   align-items: center;
   gap: 8px 10px;
+}
+
+.media-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.media-actions-popup {
+  position: absolute;
+  z-index: 12;
+  top: 100%;
+  right: 0;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--t1);
+  box-shadow: 0 4px 16px #0002;
+}
+
+.media-actions-popup > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.media-actions-popup > button:hover,
+.media-actions-popup > button:focus-visible {
+  background: var(--accbg);
+}
+
+.original-preview {
+  display: flex;
+  align-items: start;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.original-preview img {
+  max-width: none;
+  object-fit: contain;
+}
+
+.work-image-button {
+  display: block;
+  width: 100%;
+}
+
+.poster-draft-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+
+.poster-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+
+.poster-draft-row > img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+.poster-drag-grip {
+  cursor: grab;
+  padding: 5px;
+  color: var(--t3);
+}
+
+.media-with-preview {
+  display: block;
+}
+.media-with-preview > button {
+  position: absolute;
+  z-index: 2;
+  top: 5px;
+  right: 5px;
+}
+.media-with-preview .media-actions-popup {
+  top: 30px;
+}
+
+button.nv {
+  width: 100%;
+  text-align: left;
+}
+.snavi[aria-current] {
+  background: var(--accbg);
+  color: var(--acc);
 }

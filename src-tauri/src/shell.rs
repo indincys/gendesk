@@ -30,11 +30,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 /// 自定义「退出」菜单项的 id（应用菜单与托盘菜单共用一条处理路径）。
 const QUIT_ID: &str = "gendesk-quit";
 /// 托盘菜单里的「显示主窗口」。
 const SHOW_ID: &str = "gendesk-show";
+const OPEN_WORKS_ID: &str = "file-open-works";
+const OPEN_DRAFTS_ID: &str = "file-open-drafts";
+const OPEN_LOGS_ID: &str = "file-open-logs";
 
 /// 最近一次算出来的待办数。托盘标题只在**变了**的时候才写。
 ///
@@ -115,8 +120,40 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     match event.id().as_ref() {
         QUIT_ID => request_quit(app),
         SHOW_ID => show_main_window(app),
+        OPEN_WORKS_ID | OPEN_DRAFTS_ID | OPEN_LOGS_ID => {
+            let handle = app.clone();
+            let id = event.id().as_ref().to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = open_rescue_folder(&handle, &id).await {
+                    handle
+                        .dialog()
+                        .message(error.to_string())
+                        .title("无法打开文件夹")
+                        .show(|_| {});
+                }
+            });
+        }
         _ => {}
     }
+}
+
+async fn open_rescue_folder(app: &AppHandle, id: &str) -> crate::error::AppResult<()> {
+    let state = app
+        .try_state::<crate::state::AppState>()
+        .ok_or_else(|| crate::error::AppError::InvalidInput("GenDesk 尚未完成启动".into()))?;
+    let path = if id == OPEN_LOGS_ID {
+        state.dirs.logs()
+    } else {
+        let root = crate::library::root(&state.db).await?;
+        if id == OPEN_DRAFTS_ID {
+            root.join("_草稿").join("生成图片")
+        } else {
+            root
+        }
+    };
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|error| crate::error::AppError::Io(error.to_string()))
 }
 
 /// 菜单栏托盘图标 —— 后台常驻时它是这个进程唯一的存在证明。
@@ -230,6 +267,16 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "文件",
                 true,
                 &[
+                    &MenuItem::with_id(app, OPEN_WORKS_ID, "打开作品目录", true, None::<&str>)?,
+                    &MenuItem::with_id(
+                        app,
+                        OPEN_DRAFTS_ID,
+                        "打开待验收草稿目录",
+                        true,
+                        None::<&str>,
+                    )?,
+                    &MenuItem::with_id(app, OPEN_LOGS_ID, "打开日志目录", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::close_window(app, Some("收起窗口（后台继续跑）"))?,
                     #[cfg(not(target_os = "macos"))]
                     &quit,

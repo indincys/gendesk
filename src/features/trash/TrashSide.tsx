@@ -1,3 +1,4 @@
+import { MediaActions, copyText } from "@/features/_shared/MediaActions";
 import { dayLabel, hhmm } from "@/features/_shared/timeline";
 import { entityLabel } from "@/features/trash/TrashRows";
 import { assetSrc } from "@/lib/img";
@@ -40,6 +41,8 @@ export function TrashSide({
   }
 
   const src = assetSrc(item.imagePath) ?? assetSrc(item.thumbPath);
+  const video = assetSrc(item.videoPath);
+  const original = item.videoPath ?? item.imagePath;
   const title = item.code ? promptLabel(item.code, item.title) : entityLabel(item);
 
   return (
@@ -51,7 +54,17 @@ export function TrashSide({
       </div>
 
       <div className="trsidebody">
-        {src ? (
+        {video ? (
+          <video
+            className="trbig"
+            src={video}
+            controls
+            preload="metadata"
+            aria-label="废纸篓视频原片"
+          >
+            <track kind="captions" />
+          </video>
+        ) : src ? (
           <button type="button" className="trbig" title="铺满查看（⏎）" onClick={onZoom}>
             <img src={src} alt="被丢弃的内容" />
             <span className="zi">
@@ -62,6 +75,15 @@ export function TrashSide({
           <div className="trbiggone fs12 t3">原图已随上一次清理删除，只剩这条记录与提示词。</div>
         )}
 
+        {original && (
+          <div className="fx ac gap6 mt6">
+            <span className="fs11">原件</span>
+            <MediaActions path={original} label={title} />
+          </div>
+        )}
+        {item.entityType === "clip" && !video && (
+          <div className="fs11 t3 mt6">原视频无法读取，仍可查看记录。</div>
+        )}
         <dl className="trmeta">
           <Meta k="删除于" v={`${dayLabel(item.deletedAt, now)} ${hhmm(item.deletedAt)}`} />
           <Meta k="类型" v={entityLabel(item)} />
@@ -69,7 +91,18 @@ export function TrashSide({
           <Meta k="可还原" v={item.restorable ? "是 · 回原位" : "否 · 旧版本删的，没留记录"} />
         </dl>
 
-        <div className="fs11 fw6 t3 trlab">提示词原文</div>
+        <div className="fx ac gap6 fs11 fw6 t3 trlab">
+          提示词原文
+          {item.promptText && (
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void copyText(item.promptText ?? "", "提示词")}
+            >
+              复制
+            </button>
+          )}
+        </div>
         <div className="ptext mt6">{item.promptText ?? "（无提示词记录）"}</div>
       </div>
 

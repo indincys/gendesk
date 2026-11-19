@@ -75,11 +75,12 @@ pub async fn set_library_style_archived(
     id: i64,
     archived: bool,
 ) -> AppResult<()> {
-    let changed = sqlx::query("UPDATE ref_library_styles SET archived=? WHERE id=?")
-        .bind(archived)
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    let changed =
+        sqlx::query("UPDATE ref_library_styles SET archived=? WHERE id=? AND deleted_at IS NULL")
+            .bind(archived)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
     if changed.rows_affected() != 1 {
         return Err(AppError::InvalidInput("款式不存在".into()));
     }
@@ -89,8 +90,27 @@ pub async fn set_library_style_archived(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_library_style(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    lib::delete_style(&state.db, id).await
+pub async fn delete_library_style(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: i64,
+    expected_image_count: i64,
+) -> AppResult<()> {
+    lib::delete_style(&state.db, id, expected_image_count).await?;
+    emit_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_library_style(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: i64,
+) -> AppResult<()> {
+    lib::restore_style(&state.db, id).await?;
+    emit_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -199,7 +219,9 @@ pub async fn relink_missing_library_image(
 ) -> AppResult<()> {
     let current: Option<(i64, String, String)> = sqlx::query_as(
         "SELECT r.id,r.file_path,i.content_hash FROM ref_library_images i
-         JOIN ref_images r ON r.id=i.ref_image_id WHERE i.id=? AND r.linked=1",
+         JOIN ref_images r ON r.id=i.ref_image_id
+         JOIN ref_library_styles s ON s.id=i.style_id
+         WHERE i.id=? AND r.linked=1 AND s.deleted_at IS NULL",
     )
     .bind(image_id)
     .fetch_optional(&state.db)
@@ -271,7 +293,9 @@ pub async fn relink_library_directory(
     for image_id in image_ids {
         let row: Option<(i64, String, String)> = sqlx::query_as(
             "SELECT r.id,r.file_path,i.content_hash FROM ref_library_images i
-             JOIN ref_images r ON r.id=i.ref_image_id WHERE i.id=? AND r.linked=1",
+             JOIN ref_images r ON r.id=i.ref_image_id
+         JOIN ref_library_styles s ON s.id=i.style_id
+         WHERE i.id=? AND r.linked=1 AND s.deleted_at IS NULL",
         )
         .bind(image_id)
         .fetch_optional(&state.db)

@@ -5,6 +5,7 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 #[derive(Debug, Clone, FromRow)]
 pub struct StyleRow {
     pub archived: bool,
+    pub deleted_at: Option<i64>,
     pub id: i64,
     pub name: String,
     pub product: String,
@@ -24,6 +25,7 @@ pub struct CategoryRow {
 pub struct ImageRow {
     pub id: i64,
     pub style_id: i64,
+    pub style_deleted_at: Option<i64>,
     pub category_id: i64,
     pub ref_image_id: i64,
     pub note: String,
@@ -48,7 +50,7 @@ pub struct ImageRow {
 const IMAGE_SELECT: &str = "SELECT i.id, i.style_id, i.category_id, i.ref_image_id,
         i.note, i.enabled, i.last_used_at, i.use_count, i.created_at, i.deleted_at,
         r.name, r.file_path, r.thumb_path, r.width, r.height, r.linked,
-        s.name AS style, s.product, c.name AS category, c.cooldown_days
+        s.deleted_at AS style_deleted_at, s.name AS style, s.product, c.name AS category, c.cooldown_days
      FROM ref_library_images i
      JOIN ref_images r ON r.id = i.ref_image_id
      JOIN ref_library_styles s ON s.id = i.style_id
@@ -60,6 +62,7 @@ pub struct CountRow {
     pub style_id: i64,
     pub category_id: i64,
     pub total: i64,
+    pub removed: i64,
     pub enabled: i64,
     pub available: i64,
 }
@@ -70,16 +73,19 @@ pub async fn list_styles(pool: &SqlitePool) -> Result<Vec<StyleRow>, sqlx::Error
         .await
 }
 
-pub async fn get_style(pool: &SqlitePool, id: i64) -> Result<Option<StyleRow>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM ref_library_styles WHERE id = ?1")
+pub async fn get_style<'e, E>(executor: E, id: i64) -> Result<Option<StyleRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_as("SELECT * FROM ref_library_styles WHERE id = ?1 AND deleted_at IS NULL")
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
 }
 
 pub async fn styles_named(pool: &SqlitePool, name: &str) -> Result<Vec<StyleRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT * FROM ref_library_styles WHERE name = ?1 AND archived=0 ORDER BY product",
+        "SELECT * FROM ref_library_styles WHERE name = ?1 AND (archived=0 OR deleted_at IS NOT NULL) ORDER BY product",
     )
     .bind(name)
     .fetch_all(pool)
@@ -113,7 +119,7 @@ pub async fn update_style(
     note: &str,
 ) -> Result<bool, sqlx::Error> {
     let n = sqlx::query(
-        "UPDATE ref_library_styles SET name = ?2, product = ?3, note = ?4 WHERE id = ?1",
+        "UPDATE ref_library_styles SET name = ?2, product = ?3, note = ?4 WHERE id = ?1 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(name)
@@ -125,17 +131,33 @@ pub async fn update_style(
     Ok(n > 0)
 }
 
-/// 只删从没放过图的款式（含已移出的图）：使用台账还指着那些图。
-pub async fn delete_empty_style(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
-    let n = sqlx::query(
-        "DELETE FROM ref_library_styles WHERE id = ?1
-           AND NOT EXISTS (SELECT 1 FROM ref_library_images WHERE style_id = ?1)",
+/// 核对确认界面看到的图片总数后，再改变整组可见性。
+pub async fn delete_style(
+    pool: &SqlitePool,
+    id: i64,
+    expected_image_count: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ref_library_styles SET deleted_at=?2 WHERE id=?1 AND deleted_at IS NULL
+         AND (SELECT COUNT(*) FROM ref_library_images WHERE style_id=?1)=?3",
+    )
+    .bind(id)
+    .bind(now)
+    .bind(expected_image_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn restore_style(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ref_library_styles SET deleted_at=NULL WHERE id=?1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
     .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(n > 0)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn list_categories(pool: &SqlitePool) -> Result<Vec<CategoryRow>, sqlx::Error> {
@@ -219,17 +241,18 @@ pub async fn max_category_order(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
         .await
 }
 
-/// 按（款式, 分类）汇总未移出的图片。`now` 决定冷却期判断。
+/// 按（款式, 分类）汇总图库图片，已单独移出的另计。`now` 决定冷却期判断。
 pub async fn counts(pool: &SqlitePool, now: i64) -> Result<Vec<CountRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT i.style_id, i.category_id, COUNT(*) AS total,
-                COALESCE(SUM(i.enabled), 0) AS enabled,
-                COALESCE(SUM(CASE WHEN i.enabled = 1 AND (i.last_used_at IS NULL
+        "SELECT i.style_id, i.category_id,
+                SUM(CASE WHEN i.deleted_at IS NULL THEN 1 ELSE 0 END) AS total,
+                SUM(CASE WHEN i.deleted_at IS NOT NULL THEN 1 ELSE 0 END) AS removed,
+                SUM(CASE WHEN i.deleted_at IS NULL THEN i.enabled ELSE 0 END) AS enabled,
+                COALESCE(SUM(CASE WHEN i.deleted_at IS NULL AND i.enabled = 1 AND (i.last_used_at IS NULL
                     OR i.last_used_at <= ?1 - c.cooldown_days * 86400) THEN 1 ELSE 0 END), 0)
                   AS available
          FROM ref_library_images i
          JOIN ref_library_categories c ON c.id = i.category_id
-         WHERE i.deleted_at IS NULL
          GROUP BY i.style_id, i.category_id",
     )
     .bind(now)
@@ -282,7 +305,7 @@ pub async fn list_images(
     sqlx::query_as(&format!(
         "{IMAGE_SELECT}
          WHERE (?1 IS NULL OR i.style_id = ?1) AND (?2 IS NULL OR i.category_id = ?2)
-           AND (?3 OR i.deleted_at IS NULL)
+           AND s.deleted_at IS NULL AND (?3 OR i.deleted_at IS NULL)
          ORDER BY c.sort_order, i.created_at DESC, i.id DESC"
     ))
     .bind(style_id)
@@ -343,6 +366,7 @@ pub async fn candidates(
     sqlx::query_as(&format!(
         "{IMAGE_SELECT}
          WHERE i.style_id = ?1 AND i.category_id = ?2 AND i.enabled = 1 AND i.deleted_at IS NULL
+           AND s.deleted_at IS NULL
          ORDER BY i.id"
     ))
     .bind(style_id)

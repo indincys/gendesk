@@ -77,11 +77,13 @@ pub struct LibraryCategoryCount {
 #[serde(rename_all = "camelCase")]
 pub struct LibraryStyleView {
     pub archived: bool,
+    pub deleted_at: Option<i64>,
     pub id: i64,
     pub name: String,
     pub product: String,
     pub note: String,
     pub total: i64,
+    pub removed_count: i64,
     pub available: i64,
     pub by_category: Vec<LibraryCategoryCount>,
 }
@@ -90,6 +92,7 @@ pub struct LibraryStyleView {
 #[serde(rename_all = "camelCase")]
 pub struct LibraryOverview {
     pub styles: Vec<LibraryStyleView>,
+    pub deleted_styles: Vec<LibraryStyleView>,
     pub categories: Vec<LibraryCategoryView>,
     /// 统计所用的「此刻」（unix 秒），界面据此算剩余冷却。
     pub now: i64,
@@ -491,13 +494,19 @@ pub fn os_rng(n: usize) -> usize {
 
 pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview> {
     let counts = repo::counts(pool, now).await?;
+    let style_rows = repo::list_styles(pool).await?;
+    let active_ids: HashSet<_> = style_rows
+        .iter()
+        .filter(|style| style.deleted_at.is_none())
+        .map(|style| style.id)
+        .collect();
     let categories = repo::list_categories(pool)
         .await?
         .into_iter()
         .map(|c| LibraryCategoryView {
             image_count: counts
                 .iter()
-                .filter(|n| n.category_id == c.id)
+                .filter(|n| n.category_id == c.id && active_ids.contains(&n.style_id))
                 .map(|n| n.total)
                 .sum(),
             id: c.id,
@@ -506,13 +515,12 @@ pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview>
             sort_order: c.sort_order,
         })
         .collect();
-    let styles = repo::list_styles(pool)
-        .await?
+    let (styles, deleted_styles) = style_rows
         .into_iter()
         .map(|s| {
             let by_category: Vec<_> = counts
                 .iter()
-                .filter(|n| n.style_id == s.id)
+                .filter(|n| n.style_id == s.id && n.total > 0)
                 .map(|n| LibraryCategoryCount {
                     category_id: n.category_id,
                     total: n.total,
@@ -522,6 +530,12 @@ pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview>
                 .collect();
             LibraryStyleView {
                 archived: s.archived,
+                deleted_at: s.deleted_at,
+                removed_count: counts
+                    .iter()
+                    .filter(|n| n.style_id == s.id)
+                    .map(|n| n.removed)
+                    .sum(),
                 total: by_category.iter().map(|c| c.total).sum(),
                 available: by_category.iter().map(|c| c.available).sum(),
                 id: s.id,
@@ -531,9 +545,10 @@ pub async fn overview(pool: &SqlitePool, now: i64) -> AppResult<LibraryOverview>
                 by_category,
             }
         })
-        .collect();
+        .partition(|style| style.deleted_at.is_none());
     Ok(LibraryOverview {
         styles,
+        deleted_styles,
         categories,
         now,
         limits: LibraryLimits::current(),
@@ -569,10 +584,21 @@ pub async fn find_style(pool: &SqlitePool, name: &str, product: &str) -> AppResu
     let name = name.trim();
     let product = product.trim();
     let mut rows = repo::styles_named(pool, name).await?;
+    let exact_deleted = rows
+        .iter()
+        .any(|style| style.deleted_at.is_some() && style.product == product);
+    let has_deleted = rows.iter().any(|style| style.deleted_at.is_some());
+    rows.retain(|style| style.deleted_at.is_none());
+    if (!product.is_empty() && exact_deleted) || (rows.is_empty() && has_deleted) {
+        return Err(AppError::InvalidInput(format!(
+            "款式「{name}」已删除，请在参考图库的「已删除款式」中恢复"
+        )));
+    }
     if rows.is_empty() {
         let all: Vec<String> = repo::list_styles(pool)
             .await?
             .into_iter()
+            .filter(|s| s.deleted_at.is_none())
             .map(|s| s.name)
             .collect();
         return Err(AppError::InvalidInput(format!(
@@ -675,7 +701,7 @@ pub async fn save_style(
         Ok(Some(id)) => Ok(id),
         Ok(None) => Err(AppError::InvalidInput("款式不存在".into())),
         Err(e) if unique_violation(&e) => Err(AppError::InvalidInput(format!(
-            "已有同名款式「{name}」{}",
+            "已有同名款式「{name}」{}。如果已删除，可从「已删除款式」恢复后改名。",
             if product.is_empty() {
                 String::new()
             } else {
@@ -686,13 +712,21 @@ pub async fn save_style(
     }
 }
 
-pub async fn delete_style(pool: &SqlitePool, id: i64) -> AppResult<()> {
-    if repo::delete_empty_style(pool, id).await? {
+pub async fn delete_style(pool: &SqlitePool, id: i64, expected_image_count: i64) -> AppResult<()> {
+    if repo::delete_style(pool, id, expected_image_count, crate::db::now_unix()).await? {
         Ok(())
     } else {
         Err(AppError::InvalidInput(
-            "款式下还有图片（含已移出的），不能删除；可以改名".into(),
+            "款式或图片数量已变化，请重新打开款式操作后再确认".into(),
         ))
+    }
+}
+
+pub async fn restore_style(pool: &SqlitePool, id: i64) -> AppResult<()> {
+    if repo::restore_style(pool, id).await? {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput("这款已恢复，或已不存在".into()))
     }
 }
 
@@ -786,7 +820,11 @@ pub async fn update_images(
     let mut tx = pool.begin().await?;
     let mut changed = 0;
     for &id in ids {
-        if repo::get_image(&mut tx, id).await?.is_none() {
+        if repo::get_image(&mut tx, id)
+            .await?
+            .filter(|image| image.style_deleted_at.is_none())
+            .is_none()
+        {
             return Err(AppError::InvalidInput(format!("图库里没有 #{id}")));
         }
         if let Some(c) = patch.category_id {
@@ -967,26 +1005,34 @@ async fn commit_one(
     prepared: Prepared,
     now: i64,
 ) -> AppResult<Imported> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if repo::get_style(&mut *tx, style_id)
+        .await?
+        .filter(|style| !style.archived)
+        .is_none()
+    {
+        if let Prepared::Fresh(ing) = prepared {
+            discard_import_copies(ing);
+        }
+        return Err(AppError::InvalidInput("款式已删除或归档".into()));
+    }
     let ing = match prepared {
         Prepared::Known(found) => {
             // 旧版本拷进来的副本，这次导入的正是它的原图（内容哈希相同）：改指向原图、删掉副本。
             // 用户把原来那批文件夹再导一遍，图库占的空间就回来了，抽图记录、冷却、分类都不动。
-            let mut conn = pool.acquire().await?;
-            let relinked = match repo::relink(&mut conn, found.ref_image_id, path).await? {
-                Some(old) => {
-                    drop_library_copy(refs_dir, &old, path);
-                    true
-                }
-                None => false,
-            };
+            let old_path = repo::relink(&mut tx, found.ref_image_id, path).await?;
             if found.deleted_at.is_some() {
-                repo::revive(&mut conn, found.id, category_id).await?;
-            } else if !relinked {
+                repo::revive(&mut tx, found.id, category_id).await?;
+            } else if old_path.is_none() {
                 return Ok(Imported::Duplicate(found.id));
             }
-            let row = repo::get_image(&mut conn, found.id)
+            let row = repo::get_image(&mut tx, found.id)
                 .await?
                 .ok_or_else(|| AppError::Internal("图库图片读不到".into()))?;
+            tx.commit().await?;
+            if let Some(old) = old_path {
+                drop_library_copy(refs_dir, &old, path);
+            }
             let view = LibraryImageView::from_row(row, now);
             return Ok(if found.deleted_at.is_some() {
                 Imported::Restored(view)
@@ -997,11 +1043,10 @@ async fn commit_one(
         Prepared::Fresh(ing) => ing,
     };
     let content_hash = ing.content_hash.clone().unwrap_or_default();
-    let mut tx = pool.begin().await?;
     let ref_id = refs_repo::insert(
         &mut *tx,
         &refs_repo::NewRefImage {
-            name: ing.name,
+            name: ing.name.clone(),
             file_path: ing.file_path.clone(),
             thumb_path: ing.thumb_path.clone(),
             width: ing.width,
@@ -1021,12 +1066,7 @@ async fn commit_one(
         Err(e) if unique_violation(&e) => {
             drop(tx);
             // 只清本次写进数据目录的缩略图与上传副本；file_path 是用户的原图，绝不能删。
-            for f in [Some(ing.thumb_path), ing.upload_path]
-                .into_iter()
-                .flatten()
-            {
-                let _ = std::fs::remove_file(f);
-            }
+            discard_import_copies(ing);
             let found = repo::find_by_hash(pool, style_id, &content_hash)
                 .await?
                 .ok_or_else(|| AppError::Internal("重复图片读不到".into()))?;
@@ -1039,6 +1079,13 @@ async fn commit_one(
         .ok_or_else(|| AppError::Internal("刚导入的图片读不到".into()))?;
     tx.commit().await?;
     Ok(Imported::New(LibraryImageView::from_row(row, now)))
+}
+
+fn discard_import_copies(ing: crate::commands::refs::Ingested) {
+    let _ = std::fs::remove_file(ing.thumb_path);
+    if let Some(upload) = ing.upload_path {
+        let _ = std::fs::remove_file(upload);
+    }
 }
 
 /// 删掉一份已被原图取代的旧副本。只删数据目录 `refs/library/` 里、且不是原图本身的那份——
@@ -1160,6 +1207,7 @@ pub async fn mark_used(pool: &SqlitePool, ids: &[i64], now: i64) -> AppResult<i6
     for &id in ids {
         let row = repo::get_image(&mut tx, id)
             .await?
+            .filter(|row| row.style_deleted_at.is_none())
             .ok_or_else(|| AppError::InvalidInput(format!("图库里没有 #{id}")))?;
         let fallback = cooling_until(row.last_used_at, row.cooldown_days * DAY, now).is_some();
         repo::record_usage(
@@ -1225,7 +1273,7 @@ pub async fn draw_for_job(
         };
         let row = repo::get_image(&mut *conn, id)
             .await?
-            .filter(|r| r.deleted_at.is_none())
+            .filter(|r| r.deleted_at.is_none() && r.style_deleted_at.is_none())
             .ok_or_else(|| {
                 AppError::InvalidInput(format!(
                     "条目「{}」点名的图库图片 #{id} 不存在或已移出",
@@ -1670,7 +1718,7 @@ pub async fn check_slots(pool: &SqlitePool, slots: &[LibrarySlot]) -> AppResult<
             if let Some(id) = slot.library_id {
                 let row = repo::get_image(&mut conn, id)
                     .await?
-                    .filter(|r| r.deleted_at.is_none())
+                    .filter(|r| r.deleted_at.is_none() && r.style_deleted_at.is_none())
                     .ok_or_else(|| {
                         AppError::InvalidInput(format!("图库图片 #{id} 不存在或已移出"))
                     })?;
@@ -2259,6 +2307,112 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_populated_style_preserves_files_history_and_image_states() {
+        let (pool, dir) = test_pool().await;
+        let (style, category, ids) = seed(&pool, dir.path(), 2).await;
+        save_style(&pool, Some(style), "王一博", "日历", "测试备注")
+            .await
+            .unwrap();
+        let other = save_style(&pool, None, "王一博", "水杯", "").await.unwrap();
+        let now = crate::db::now_unix();
+        mark_used(&pool, &[ids[0]], now).await.unwrap();
+        update_images(
+            &pool,
+            &[ids[1]],
+            &LibraryImagePatch {
+                removed: Some(true),
+                enabled: Some(false),
+                note: Some("此前移出".into()),
+                category_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let before = list_images(&pool, Some(style), None, true, now)
+            .await
+            .unwrap();
+
+        // 单独移出的图片也属于这款，不能按界面可见图片数误确认。
+        assert!(delete_style(&pool, style, 1).await.is_err());
+        delete_style(&pool, style, 2).await.unwrap();
+        let library = overview(&pool, now).await.unwrap();
+        assert!(library.styles.iter().all(|item| item.id != style));
+        assert_eq!(library.deleted_styles.len(), 1);
+        assert_eq!(
+            (
+                library.deleted_styles[0].total,
+                library.deleted_styles[0].removed_count
+            ),
+            (1, 1)
+        );
+        assert!(list_images(&pool, Some(style), None, true, now)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            find_style(&pool, "王一博", "日历").await.is_err(),
+            "不能回退到另一个产品"
+        );
+        assert_eq!(find_style(&pool, "王一博", "水杯").await.unwrap().id, other);
+        assert!(pick(&pool, style, category, 1, false, now, &mut |_| 0)
+            .await
+            .is_err());
+        assert!(mark_used(&pool, &[ids[0]], now).await.is_err());
+        let direct = LibrarySlot {
+            library_id: Some(ids[0]),
+            style: String::new(),
+            product: String::new(),
+            category: String::new(),
+        };
+        assert!(
+            !check_slots(&pool, std::slice::from_ref(&direct))
+                .await
+                .unwrap()[0]
+                .ok
+        );
+        let mut tx = pool.begin().await.unwrap();
+        assert!(draw_for_job(
+            &mut tx,
+            &pool,
+            "new-job",
+            &[SlotRequest {
+                item: 0,
+                slot: 1,
+                item_name: "删除款式工单",
+                spec: &direct,
+            }],
+            now,
+            &mut |_| 0
+        )
+        .await
+        .is_err());
+        tx.rollback().await.unwrap();
+
+        assert_eq!(usage_of_image(&pool, ids[0]).await.unwrap().len(), 1);
+        for image in &before {
+            assert!(Path::new(&image.file_path).is_file());
+        }
+        restore_style(&pool, style).await.unwrap();
+        assert!(overview(&pool, now)
+            .await
+            .unwrap()
+            .deleted_styles
+            .is_empty());
+        assert_eq!(
+            find_style(&pool, "王一博", "日历").await.unwrap().note,
+            "测试备注"
+        );
+        assert!(check_slots(&pool, &[direct]).await.unwrap()[0].ok);
+        let after = list_images(&pool, Some(style), None, true, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
     }
 
     #[tokio::test]

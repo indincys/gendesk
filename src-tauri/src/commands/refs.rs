@@ -328,7 +328,8 @@ pub async fn generation_references(
 pub async fn generation_library_ref(state: State<'_, AppState>, id: i64) -> AppResult<i64> {
     let row: Option<(i64, String)> = sqlx::query_as(
         "SELECT r.id,r.file_path FROM ref_library_images i JOIN ref_images r ON r.id=i.ref_image_id
-          WHERE i.id=? AND i.deleted_at IS NULL AND r.deleted_at IS NULL",
+          JOIN ref_library_styles s ON s.id=i.style_id
+          WHERE i.id=? AND i.deleted_at IS NULL AND r.deleted_at IS NULL AND s.deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)

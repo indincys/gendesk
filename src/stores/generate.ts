@@ -22,6 +22,10 @@ interface GenerateState {
   selGroupIds: number[];
   selRefIds: number[];
   mapping: Record<number, number>;
+  attachments: Record<number, number[]>;
+  promptEdits: Record<number, { text: string | null; excluded: boolean }>;
+  setAttachments: (v: Updater<Record<number, number[]>>) => void;
+  setPromptEdits: (v: Updater<Record<number, { text: string | null; excluded: boolean }>>) => void;
   // ── 会发到远端的生成参数（字段名与端点文档的参数表一一对应）──────────
   // null = 未设置 → 不带该字段。**画幅走 aspectRatio**：提示词里写「9:16」
   // 对模型不构成约束，不显式给参数多数会回来 1:1。
@@ -73,6 +77,10 @@ export const useGenerateStore = create<GenerateState>()(
       selGroupIds: [],
       selRefIds: [],
       mapping: {},
+      attachments: {},
+      promptEdits: {},
+      setAttachments: (v) => set((s) => ({ attachments: apply(v, s.attachments) })),
+      setPromptEdits: (v) => set((s) => ({ promptEdits: apply(v, s.promptEdits) })),
       aspectRatio: null,
       size: null,
       outputFormat: null,
@@ -95,6 +103,8 @@ export const useGenerateStore = create<GenerateState>()(
         set({
           selRefIds: [...new Set(refs.map((r) => r.refImageId))],
           selGroupIds: [...new Set(refs.map((r) => r.promptGroupId))],
+          attachments: {},
+          promptEdits: {},
           mapping: Object.fromEntries(refs.map((r) => [r.refImageId, r.promptGroupId])),
           product: params.organization?.product ?? "",
           style: params.organization?.style ?? "",

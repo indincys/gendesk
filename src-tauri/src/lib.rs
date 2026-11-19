@@ -57,6 +57,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::settings::pick_image_files,
             commands::settings::open_logs_dir,
             commands::settings::open_output_dir,
+            commands::settings::check_output_directory,
+            commands::settings::open_release_notes,
             commands::settings::open_path_in_folder,
             commands::settings::diagnostics_info,
             live_photo::get_live_photo_status,
@@ -75,10 +77,13 @@ fn specta_builder() -> Builder<tauri::Wry> {
             // refs 域
             commands::refs::import_ref_images,
             commands::refs::list_ref_images,
+            commands::refs::generation_references,
+            commands::refs::generation_library_ref,
             // 参考图库（0051）
             commands::ref_library::library_overview,
             commands::ref_library::list_library_images,
             commands::ref_library::save_library_style,
+            commands::ref_library::set_library_style_archived,
             commands::ref_library::delete_library_style,
             commands::ref_library::save_library_category,
             commands::ref_library::delete_library_category,
@@ -88,11 +93,15 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::ref_library::mark_library_used,
             commands::ref_library::library_image_usage,
             commands::ref_library::relink_missing_library_image,
+            commands::ref_library::relink_library_directory,
+            commands::ref_library::preview_library_import,
             // prompts 域
             commands::prompts::list_prompt_groups,
             commands::prompts::list_purposes,
             commands::prompts::list_prompts,
             commands::prompts::parse_prompt_txt,
+            commands::prompts::parse_prompt_text,
+            commands::prompts::rename_prompt_group,
             commands::prompts::repreview_import,
             commands::prompts::commit_prompt_import,
             commands::prompts::save_prompt_template,
@@ -103,6 +112,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::batches::pause_queue,
             commands::batches::resume_queue,
             commands::tasks::list_tasks,
+            commands::tasks::inspect_task,
             commands::tasks::recover_task,
             commands::tasks::recover_failed_tasks,
             commands::tasks::delete_task,
@@ -118,6 +128,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::review::accept_tasks,
             commands::review::reject_tasks,
             commands::intake::get_agent_cli_info,
+            commands::intake::recent_intake_jobs,
             commands::intake::open_agent_root,
             commands::poster::get_poster_settings,
             commands::poster::update_poster_settings,
@@ -128,6 +139,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::poster::retry_poster_imports,
             commands::poster::pick_poster_app,
             commands::poster::get_poster_draft,
+            commands::poster::poster_drafts_for_image_batch,
+            commands::poster::open_poster_receipt,
             commands::poster::save_poster_draft,
             commands::poster::export_poster_draft,
             commands::poster::retry_poster_batch,
@@ -140,6 +153,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::media::preview_library_original,
             commands::media::export_media_files,
             commands::works::reexport_work,
+            commands::works::export_work_snapshot,
             commands::works::set_works_favorite,
             commands::works::trash_works,
             commands::works::export_works,
@@ -154,6 +168,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::v2v_credit,
             commands::v2v::v2v_balance,
             commands::v2v::v2v_credit_report,
+            commands::v2v::v2v_credit_entries,
+            commands::v2v::export_v2v_activity,
             commands::v2v::v2v_queue_stats,
             commands::v2v::v2v_queue_trend,
             commands::v2v::v2v_autofill_status,
@@ -181,6 +197,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::v2v::remove_v2v_clips,
             commands::v2v::open_clips_output_dir,
             commands::v2v::redeliver_v2v_clips,
+            commands::v2v::trash_approved_clips,
+            commands::v2v::related_clip,
+            commands::v2v::v2v_prior_revision,
+            commands::v2v::clip_trash_item,
             // stats 域（E25）
             commands::stats::production_overview,
             // trash 域
@@ -197,6 +217,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::backup::data_dir_info,
             commands::backup::open_data_dir,
             commands::backup::export_backup,
+            commands::backup::check_backup,
         ])
         .events(collect_events![
             commands::poster::PosterChanged,
@@ -211,6 +232,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::ref_library::LibraryChanged,
             // CLI 工单收录事件
             commands::intake::IntakeChanged,
+            shell::ShellHelp,
             // 视频流水线事件
             v2v::events::V2vChanged,
             v2v::events::V2vProgress,
@@ -523,13 +545,12 @@ fn setup_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 视频流水线执行日志：轮询器 / 提交 / CLI 改写交回共用同一份环形缓冲，
     // 命令层从 AppState 读它。在 manage 之前建好，好让后台任务拿到同一个句柄。
     let v2v_log = v2v::activity::Activity::new(app.handle().clone());
-    app.manage(state::AppState::new(
-        pool.clone(),
-        secrets,
-        dirs,
-        engine,
-        v2v_log.clone(),
-    ));
+    let runtime_state = state::AppState::new(pool.clone(), secrets, dirs, engine, v2v_log.clone());
+    runtime_state.notification_mask.store(
+        settings.notifications.mask(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    app.manage(runtime_state);
     // 只重试已登记、尚未完成的 Poster 交接批次。
     commands::poster::start_delivery(app.handle().clone());
     live_photo::start(app.handle().clone());

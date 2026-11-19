@@ -1,8 +1,10 @@
+import { Modal } from "@/components/ui/Modal";
 import { MediaActions, copyText, exportOriginals } from "@/features/_shared/MediaActions";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { moveByRow, packGroups } from "@/features/_shared/justified";
 import { dayLabel, hhmm } from "@/features/_shared/timeline";
+import { PosterBatchLink } from "@/features/settings/PosterBatchLink";
 import { assetSrc, bg } from "@/lib/img";
 import {
   type ReviewItemView,
@@ -17,6 +19,7 @@ import { useEngineStore } from "@/stores/engine";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowRight, Check, Clock, Download, Maximize2, Trash2, X } from "lucide-react";
+import type { Dispatch, SetStateAction } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -263,12 +266,16 @@ export function ReviewPage() {
   const [pending, setPending] = useState(readPending);
   const jumpBatch = useUiStore((s) => s.jumpBatch);
   const openBatch = useUiStore((s) => s.openBatch);
-  const [search, setSearch] = useState(jumpBatch ? `#${jumpBatch}` : "");
+  const jumpTask = useUiStore((s) => s.jumpTask);
+  const [search, setSearch] = useState(
+    jumpTask ? `任务 #${jumpTask}` : jumpBatch ? `#${jumpBatch}` : "",
+  );
   const [onlyPending, setOnlyPending] = useState(false);
   // 默认按提交（一次工单一组）：审图时最常对照的是「这一单交了什么」，按需求放第二位。
   const [sortMode, setSortMode] = useState<ReviewMode>("batch");
   const lastClicked = useRef<number | null>(null);
   const [compareRef, setCompareRef] = useState(false);
+  const [compareSideBySide, setCompareSideBySide] = useState(false);
   const [holdRef, setHoldRef] = useState(false);
   const [measureW, setMeasureW] = useState(0);
   const [zoom, setZoom] = useState(false);
@@ -342,7 +349,19 @@ export function ReviewPage() {
           try {
             const result = await unwrap(commands.acceptTasks(passIds));
             setProcessed((count) => count + result.accepted);
-            toast.success(`已通过 ${result.accepted} 张`, { id: "review-accept" });
+            toast.success(`已通过 ${result.accepted}/${passIds.length} 张`, {
+              id: "review-accept",
+              description: result.queuedV2V ? `${result.queuedV2V} 张已加入视频生成` : undefined,
+              action: result.deliveryDir
+                ? {
+                    label: "显示落盘目录",
+                    onClick: () =>
+                      void unwrap(commands.openPathInFolder(result.deliveryDir)).catch((error) =>
+                        toast.error(String(error)),
+                      ),
+                  }
+                : undefined,
+            });
           } catch (error) {
             toast.error(error instanceof Error ? error.message : "通过失败");
           }
@@ -429,16 +448,18 @@ export function ReviewPage() {
         (item) =>
           !hidden.has(item.id) &&
           (!onlyPending || pending.has(item.id)) &&
-          (/^#\d+$/.test(query)
-            ? query === `#${item.batchId}`
-            : [
-                item.itemName,
-                item.promptCode,
-                item.refName,
-                item.batchNote,
-                item.organization?.style,
-                item.organization?.requirement,
-              ].some((value) => value?.toLowerCase().includes(query))),
+          (/^任务 #\d+$/.test(query)
+            ? query === `任务 #${item.id}`
+            : /^#\d+$/.test(query)
+              ? query === `#${item.batchId}`
+              : [
+                  item.itemName,
+                  item.promptCode,
+                  item.refName,
+                  item.batchNote,
+                  item.organization?.style,
+                  item.organization?.requirement,
+                ].some((value) => value?.toLowerCase().includes(query))),
       ) ?? []
     );
   }, [items, hidden, onlyPending, pending, search]);
@@ -988,7 +1009,11 @@ export function ReviewPage() {
                     >
                       提交 #{zoomItem.batchId}
                     </button>
-                    <span className="chip">
+                    <PosterBatchLink batchId={zoomItem.batchId} />
+                    <span
+                      className="chip"
+                      title={new Date(zoomItem.createdAt * 1000).toLocaleString()}
+                    >
                       {dayLabel(zoomItem.createdAt, now)} {hhmm(zoomItem.createdAt)}
                     </span>
                     {zoomItem.skill && <span className="sk">{zoomItem.skill}</span>}
@@ -1036,6 +1061,13 @@ export function ReviewPage() {
                     </>
                   )}
                   <ReviewReferences key={zoomItem.id} taskId={zoomItem.id} />
+                  <button
+                    type="button"
+                    className="btn sm mt10"
+                    onClick={() => setCompareSideBySide(true)}
+                  >
+                    并排对照参考图…
+                  </button>
                 </div>
                 <div className="rdbar">
                   <button
@@ -1097,6 +1129,13 @@ export function ReviewPage() {
                   </button>
                 </div>
               </div>
+              {zoomItem && compareSideBySide && (
+                <ReviewComparison
+                  key={zoomItem.id}
+                  item={zoomItem}
+                  onClose={() => setCompareSideBySide(false)}
+                />
+              )}
             </div>
           );
         })()}
@@ -1206,12 +1245,109 @@ function ReviewReferenceImage({ position, imagePath }: ReviewReferenceView) {
  * 拖拽平移、双击在「适应」与「100%（原始像素）」间切换。用于检查 AI 图高发的
  * 手部/文字/边缘缺陷。
  */
-function BigImage({ path, caption }: { path?: string | null; caption: string }) {
+type ComparisonViewport = { scale: number; pan: { x: number; y: number } };
+
+function ReviewComparison({ item, onClose }: { item: ReviewItemView; onClose: () => void }) {
+  const [refs, setRefs] = useState<ReviewReferenceView[]>([]);
+  const [active, setActive] = useState(1);
+  const [viewport, setViewport] = useState<ComparisonViewport>({ scale: 1, pan: { x: 0, y: 0 } });
+  const [issue, setIssue] = useState("");
+  const read = useCallback(async () => {
+    setIssue("");
+    try {
+      setRefs(await unwrap(commands.listReviewReferences(item.id)));
+    } catch (error) {
+      setIssue(String(error));
+    }
+  }, [item.id]);
+  useEffect(() => {
+    void read();
+  }, [read]);
+  const refPath =
+    active === 1
+      ? (item.refImagePath ?? item.refThumbPath)
+      : refs.find((entry) => entry.position === active)?.imagePath;
+  const resultPath = item.resultImagePath ?? item.resultThumbPath;
+  return (
+    <Modal title="生成图与参考原件对照" width="w700" onClose={onClose}>
+      <div className="fx ac gap8 wrap">
+        <label className="fx ac gap6 fs12">
+          参考图
+          <select
+            className="inp sm"
+            value={active}
+            onChange={(event) => setActive(Number(event.target.value))}
+          >
+            <option value={1}>Image 1 · {item.refName || "主参考图"}</option>
+            {refs
+              .filter((entry) => entry.position !== 1)
+              .map((entry) => (
+                <option key={entry.position} value={entry.position}>
+                  Image {entry.position} · {entry.imagePath.split(/[/\\]/).at(-1)}
+                </option>
+              ))}
+          </select>
+        </label>
+        <span className="fs11 t3">两侧同步缩放与平移</span>
+        {refPath && <MediaActions path={refPath} label={`Image ${active}`} />}
+        {resultPath && <MediaActions path={resultPath} label="生成图" />}
+      </div>
+      {issue && (
+        <p className="fs12">
+          {issue}{" "}
+          <button type="button" className="btn xs" onClick={() => void read()}>
+            重读参考图
+          </button>
+        </p>
+      )}
+      <div className="review-comparison mt10">
+        <div>
+          <span className="fs11 t3">生成图</span>
+          <BigImage
+            key={resultPath}
+            path={resultPath}
+            caption={itemLabel(item)}
+            viewport={viewport}
+            onViewport={setViewport}
+          />
+        </div>
+        <div>
+          <span className="fs11 t3">Image {active} · 参考原件</span>
+          <BigImage
+            key={refPath}
+            path={refPath}
+            caption={`Image ${active}`}
+            viewport={viewport}
+            onViewport={setViewport}
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function BigImage({
+  path,
+  caption,
+  viewport,
+  onViewport,
+}: {
+  path?: string | null | undefined;
+  caption: string;
+  viewport?: ComparisonViewport;
+  onViewport?: Dispatch<SetStateAction<ComparisonViewport>>;
+}) {
   const src = assetSrc(path);
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const [scale, setScale] = useState(1); // 相对「适应」尺寸的倍数
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [independent, setIndependent] = useState<ComparisonViewport>({
+    scale: 1,
+    pan: { x: 0, y: 0 },
+  });
+  const { scale, pan } = viewport ?? independent;
+  const changeViewport = onViewport ?? setIndependent;
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [dragging, setDragging] = useState(false);
   // 自然像素 / 适应像素，用于双击 100% 与真实百分比显示。
   const [fitRatio, setFitRatio] = useState(1);
@@ -1220,8 +1356,8 @@ function BigImage({ path, caption }: { path?: string | null; caption: string }) 
   // 切换图片时复位缩放/平移。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 仅在图源变化时复位视图
   useEffect(() => {
-    setScale(1);
-    setPan({ x: 0, y: 0 });
+    setIndependent({ scale: 1, pan: { x: 0, y: 0 } });
+    setLoadError(false);
   }, [src]);
 
   // 滚轮缩放：以非 passive 原生监听保证 preventDefault 生效。
@@ -1230,14 +1366,14 @@ function BigImage({ path, caption }: { path?: string | null; caption: string }) 
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      setScale((s) => {
-        const next = e.deltaY < 0 ? s * 1.15 : s / 1.15;
-        return Math.min(4, Math.max(0.1, next));
+      changeViewport((state) => {
+        const next = e.deltaY < 0 ? state.scale * 1.15 : state.scale / 1.15;
+        return { ...state, scale: Math.min(4, Math.max(0.1, next)) };
       });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [changeViewport]);
 
   // 拖拽平移：拖动期间挂 window 监听，松开即卸。
   useEffect(() => {
@@ -1245,7 +1381,10 @@ function BigImage({ path, caption }: { path?: string | null; caption: string }) 
     const onMove = (e: MouseEvent) => {
       const d = drag.current;
       if (!d) return;
-      setPan({ x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) });
+      changeViewport((state) => ({
+        ...state,
+        pan: { x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) },
+      }));
     };
     const onUp = () => {
       setDragging(false);
@@ -1257,15 +1396,14 @@ function BigImage({ path, caption }: { path?: string | null; caption: string }) 
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [dragging]);
+  }, [dragging, changeViewport]);
 
   const onDoubleClick = () => {
     if (scale !== 1) {
-      setScale(1);
-      setPan({ x: 0, y: 0 });
+      changeViewport({ scale: 1, pan: { x: 0, y: 0 } });
       return;
     }
-    setScale(Math.min(4, Math.max(1, fitRatio))); // 适应 → 100% 原始像素
+    changeViewport((state) => ({ ...state, scale: Math.min(4, Math.max(1, fitRatio)) })); // 适应 → 100% 原始像素
   };
 
   const onLoad = () => {
@@ -1287,14 +1425,30 @@ function BigImage({ path, caption }: { path?: string | null; caption: string }) 
       }}
       onDoubleClick={onDoubleClick}
     >
-      {src ? (
+      {loadError ? (
+        <div className="bigempty">
+          <p className="fs12">原图无法读取</p>
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              setLoadError(false);
+              setAttempt((n) => n + 1);
+            }}
+          >
+            重试
+          </button>
+        </div>
+      ) : src ? (
         <img
+          key={attempt}
           ref={imgRef}
           src={src}
           alt={caption}
           className="rzimg"
           draggable={false}
           onLoad={onLoad}
+          onError={() => setLoadError(true)}
           style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}
         />
       ) : (

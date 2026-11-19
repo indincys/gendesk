@@ -2,12 +2,14 @@ import { UpdateInstallButton } from "@/components/app-shell/UpdateInstallButton"
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { Stepper, Toggle } from "@/components/ui/Stepper";
 import { DescriptionHint } from "@/components/ui/Tooltip";
+import { copyText } from "@/features/_shared/MediaActions";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { AgentCliSection } from "@/features/settings/AgentCliSection";
 import { AutomationSection } from "@/features/settings/AutomationSection";
 import { V2vSection } from "@/features/settings/V2vSection";
 import {
   type ApiKeyView,
+  type BackupCheck,
   type DataDirInfo,
   commands,
   subscribeBackupProgress,
@@ -49,6 +51,11 @@ export function SettingsPage() {
   const settings = useSettingsStore((s) => s.settings);
   const loadSettings = useSettingsStore((s) => s.load);
   const updateSettings = useSettingsStore((s) => s.update);
+  const saving = useSettingsStore((s) => s.saving);
+  const settingsError = useSettingsStore((s) => s.error);
+  const [newOutput, setNewOutput] = useState<string | null>(null);
+  const [checkingOutput, setCheckingOutput] = useState(false);
+  const [resetSchedule, setResetSchedule] = useState(false);
 
   const version = useAppVersion();
   const [keys, setKeys] = useState<ApiKeyView[]>([]);
@@ -56,10 +63,22 @@ export function SettingsPage() {
   const [editing, setEditing] = useState<ApiKeyView | null>(null);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
   // 任务4：API Key 区块默认折叠，减少设置页初始噪音。
-  const [apiOpen, setApiOpen] = useState(settingsSection === "s-keys");
+  const [apiOpen, setApiOpen] = useState(
+    () =>
+      settingsSection === "s-keys" || sessionStorage.getItem("gendesk.settings.api-open") === "yes",
+  );
+  useEffect(() => {
+    sessionStorage.setItem("gendesk.settings.api-open", apiOpen ? "yes" : "no");
+  }, [apiOpen]);
+  useEffect(() => {
+    if (settingsSection === "s-keys") setApiOpen(true);
+  }, [settingsSection]);
   // E19：数据目录信息 + 备份导出进度。
   const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
   const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
+  const [backupCheck, setBackupCheck] = useState<BackupCheck | null>(null);
+  const [checkingBackup, setCheckingBackup] = useState(false);
+  const go = useUiStore((s) => s.go);
   // 队列是否有在途任务（run/retry）——运行中禁止备份（避免边写边打包）。
   const queueRunning = useEngineStore((s) => Object.values(s.summaries).some((b) => b.running > 0));
   const updateState = useEngineStore((s) => s.updateState);
@@ -109,6 +128,18 @@ export function SettingsPage() {
     }
   };
 
+  const checkBackup = async (extract: boolean) => {
+    setCheckingBackup(true);
+    try {
+      const checked = await unwrap(commands.checkBackup(extract));
+      if (checked) setBackupCheck(checked);
+    } catch (error) {
+      toast.error(`备份校验失败：${String(error)}`);
+    } finally {
+      setCheckingBackup(false);
+    }
+  };
+
   const patchKeyConcurrency = async (k: ApiKeyView, v: number) => {
     setKeys((cur) => cur.map((x) => (x.id === k.id ? { ...x, concurrencyLimit: v } : x)));
     try {
@@ -129,21 +160,43 @@ export function SettingsPage() {
 
   const toggleKey = async (k: ApiKeyView) => {
     setKeys((cur) => cur.map((x) => (x.id === k.id ? { ...x, enabled: !x.enabled } : x)));
-    await unwrap(commands.setApiKeyEnabled(k.id, !k.enabled)).catch(() => void loadKeys());
+    await unwrap(commands.setApiKeyEnabled(k.id, !k.enabled)).catch((error) => {
+      toast.error(String(error));
+      void loadKeys();
+    });
   };
 
   const deleteKey = async (k: ApiKeyView) => {
-    await unwrap(commands.deleteApiKey(k.id)).catch(() => {});
-    void loadKeys();
-    toast("已删除 API Key");
+    try {
+      await unwrap(commands.deleteApiKey(k.id));
+      void loadKeys();
+      toast.success("已删除 API Key");
+    } catch (error) {
+      toast.error(String(error));
+    }
   };
 
-  // E18：恢复被熔断的 Key。
   const recoverKey = async (k: ApiKeyView) => {
-    await unwrap(commands.recoverApiKey(k.id)).catch((e) => toast.error(String(e)));
-    void loadKeys();
-    toast(`已恢复「${k.name || "未命名"}」`);
+    try {
+      await unwrap(commands.recoverApiKey(k.id));
+      void loadKeys();
+      toast.success(`已恢复「${k.name || "未命名"}」`);
+    } catch (error) {
+      toast.error(String(error));
+    }
   };
+
+  async function checkOutput(proposed: string | null = null) {
+    setCheckingOutput(true);
+    try {
+      const directory = await unwrap(commands.checkOutputDirectory(proposed));
+      toast.success("目录可写", { description: directory });
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setCheckingOutput(false);
+    }
+  }
 
   // E11：测试已保存 Key 的连接。
   const [testingId, setTestingId] = useState<number | null>(null);
@@ -156,6 +209,7 @@ export function SettingsPage() {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setTestingId(null);
+      void loadKeys();
     }
   };
 
@@ -191,18 +245,31 @@ export function SettingsPage() {
           ))}
         </nav>
 
+        {saving > 0 && (
+          <span className="fs11 t3" role="status">
+            正在保存设置…
+          </span>
+        )}
+        {settingsError && (
+          <p className="fs12" role="alert">
+            设置读写失败 · {settingsError}
+          </p>
+        )}
         {/* ---------------- API Key（默认折叠） ---------------- */}
         <section className="sec" id="s-keys">
-          <div
-            className="sechead collh"
-            onClick={() => setApiOpen((v) => !v)}
-            title={apiOpen ? "收起" : "展开"}
-          >
-            <ChevronDown className={cn("ic12 chevr", apiOpen && "open")} />
-            <span className="fw6 fs13">API Key</span>
-            <span className="cnt">
-              {enabledCount}/{keys.length} 启用
-            </span>
+          <div className="sechead">
+            <button
+              type="button"
+              className="fx ac gap6 collh"
+              aria-expanded={apiOpen}
+              onClick={() => setApiOpen((value) => !value)}
+            >
+              <ChevronDown className={cn("ic12 chevr", apiOpen && "open")} />
+              <span className="fw6 fs13">API Key</span>
+              <span className="cnt">
+                {enabledCount}/{keys.length} 启用
+              </span>
+            </button>
             <div className="f1" />
             <button
               type="button"
@@ -254,12 +321,14 @@ export function SettingsPage() {
                     {k.secretMissing ? (
                       // 密钥本体丢失（迁移被拒 / 密钥文件损坏重建）：引擎会静默跳过这个
                       // Key，不显式标出来的话用户只会看到任务永远排不到它。
-                      <span
+                      <button
+                        type="button"
                         className="bdg b-red"
-                        title="密钥本体已丢失，引擎不会使用这个 Key —— 请点「编辑」重新填入 Key"
+                        title="重新填写缺失的密钥"
+                        onClick={() => setEditing(k)}
                       >
-                        密钥缺失
-                      </span>
+                        密钥缺失 · 编辑
+                      </button>
                     ) : k.circuitBroken ? (
                       <span className="bdg b-red" title="连续鉴权/欠费失败已自动熔断">
                         已熔断
@@ -286,12 +355,26 @@ export function SettingsPage() {
                       className="btn sm gho"
                       disabled={testingId === k.id}
                       onClick={() => testSaved(k)}
-                      title="测试连接"
+                      title={
+                        k.lastTestAt
+                          ? `上次测试 ${new Date(k.lastTestAt * 1000).toLocaleString()} · ${k.lastTestOk ? "通过" : "失败"}`
+                          : "测试连接"
+                      }
                     >
-                      {testingId === k.id ? "测试中…" : "测试"}
+                      {testingId === k.id
+                        ? "测试中…"
+                        : k.lastTestAt
+                          ? k.lastTestOk
+                            ? "通过 · 重测"
+                            : "失败 · 重测"
+                          : "测试"}
                     </button>
                   )}
-                  <Toggle on={k.enabled} onClick={() => toggleKey(k)} />
+                  <Toggle
+                    label={`启用 ${k.name || "未命名 Key"}`}
+                    on={k.enabled}
+                    onClick={() => toggleKey(k)}
+                  />
                   <button type="button" className="icb" onClick={() => setEditing(k)} title="编辑">
                     <Pencil className="ic12" />
                   </button>
@@ -325,20 +408,24 @@ export function SettingsPage() {
             </DescriptionHint>
           </div>
           <div className="fx gap10">
-            <div
+            <button
+              type="button"
+              aria-pressed={settings?.scheduleStrategy === "round_robin"}
               className={cn("rc", settings?.scheduleStrategy === "round_robin" && "on")}
               title="任务平均分配到全部可用 Key"
               onClick={() => updateSettings({ scheduleStrategy: "round_robin" })}
             >
-              <div className="fw5 fs13">平均轮询</div>
-            </div>
-            <div
+              <span className="fw5 fs13">平均轮询</span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={settings?.scheduleStrategy === "success_rate"}
               className={cn("rc", settings?.scheduleStrategy === "success_rate" && "on")}
               title="优先使用历史成功率较高的 Key"
               onClick={() => updateSettings({ scheduleStrategy: "success_rate" })}
             >
-              <div className="fw5 fs13">成功率优先</div>
-            </div>
+              <span className="fw5 fs13">成功率优先</span>
+            </button>
           </div>
           <div className="fx ac gap10 mt14 wrap">
             <span className="fs12 t2 nowrap">自动恢复次数</span>
@@ -346,6 +433,7 @@ export function SettingsPage() {
               超时、限流或违规时切换可用 Key 再试；次数用尽后保留失败原因，等待人工处理。
             </DescriptionHint>
             <Stepper
+              label="自动恢复次数"
               value={settings?.retryCount ?? 1}
               min={0}
               max={3}
@@ -355,6 +443,7 @@ export function SettingsPage() {
           <div className="fx ac gap10 mt14 wrap">
             <span className="fs12 t2 nowrap">连续失败自动暂停</span>
             <Toggle
+              label="连续失败阈值"
               on={(settings?.globalFailThreshold ?? 0) > 0}
               onClick={() =>
                 updateSettings({
@@ -364,15 +453,24 @@ export function SettingsPage() {
             />
             {(settings?.globalFailThreshold ?? 0) > 0 && (
               <Stepper
+                label="连续失败阈值"
                 value={settings?.globalFailThreshold ?? 10}
                 min={3}
-                max={50}
+                max={100}
                 onChange={(v) => updateSettings({ globalFailThreshold: v })}
               />
             )}
             <span className="fs11" style={{ color: "var(--wr2)" }}>
               达到阈值后自动暂停，防止持续消耗
             </span>
+            <button
+              type="button"
+              className="btn xs"
+              disabled={saving > 0}
+              onClick={() => setResetSchedule(true)}
+            >
+              恢复调度默认值
+            </button>
           </div>
         </section>
 
@@ -398,11 +496,31 @@ export function SettingsPage() {
               type="button"
               className="btn sm"
               onClick={async () => {
-                const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
-                if (dir) updateSettings({ outputDir: dir });
+                try {
+                  const dir = await unwrap(commands.pickOutputDir());
+                  if (dir && dir !== settings?.outputDir) setNewOutput(dir);
+                } catch (error) {
+                  toast.error(String(error));
+                }
               }}
             >
-              更改目录
+              更改目录…
+            </button>
+            <button
+              type="button"
+              className="btn sm gho"
+              disabled={!settings?.outputDir}
+              onClick={() => settings?.outputDir && void copyText(settings.outputDir, "作品目录")}
+            >
+              复制路径
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={checkingOutput}
+              onClick={() => void checkOutput()}
+            >
+              {checkingOutput ? "检查中…" : "检查可写性"}
             </button>
           </div>
           <div className="fs11 t3 mt10">
@@ -415,6 +533,7 @@ export function SettingsPage() {
               废纸篓保留
             </span>
             <Toggle
+              label="废纸篓保留天数"
               on={(settings?.trashRetentionDays ?? 0) > 0}
               onClick={() =>
                 updateSettings({
@@ -425,6 +544,7 @@ export function SettingsPage() {
             {(settings?.trashRetentionDays ?? 0) > 0 && (
               <>
                 <Stepper
+                  label="废纸篓保留天数"
                   value={settings?.trashRetentionDays ?? 30}
                   min={1}
                   max={365}
@@ -443,6 +563,7 @@ export function SettingsPage() {
               归档批次保留
             </span>
             <Toggle
+              label="归档批次保留天数"
               on={(settings?.batchRetentionDays ?? 0) > 0}
               onClick={() =>
                 updateSettings({
@@ -453,6 +574,7 @@ export function SettingsPage() {
             {(settings?.batchRetentionDays ?? 0) > 0 && (
               <>
                 <Stepper
+                  label="归档批次保留天数"
                   value={settings?.batchRetentionDays ?? 30}
                   min={1}
                   max={365}
@@ -502,7 +624,26 @@ export function SettingsPage() {
             <span className="fs12 t2" style={{ width: 72 }}>
               更新
             </span>
-            <span className="fs12 nowrap">当前 {version ? `v${version}` : "…"}</span>
+            <button
+              type="button"
+              className="btn xs"
+              disabled={!version}
+              title="复制当前版本"
+              onClick={() => version && void copyText(`v${version}`, "版本")}
+            >
+              当前 {version ? `v${version}` : "…"}
+            </button>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() =>
+                void unwrap(commands.openReleaseNotes()).catch((error) =>
+                  toast.error(String(error)),
+                )
+              }
+            >
+              更新说明
+            </button>
             {updateReady ? (
               <UpdateInstallButton className="btn sm pri">
                 v{updateVersion} 已下载 · 重启安装
@@ -534,10 +675,34 @@ export function SettingsPage() {
             <span className="fs12 t2" style={{ width: 72 }}>
               通知
             </span>
-            <span className="fs11 t3">
-              批次完成、失败达阈值、Key 熔断、Agent 投单（开跑/待确认/失败）时发系统通知；
-              Dock/任务栏角标显示待验收任务数
-            </span>
+            <div className="fx ac gap10 wrap">
+              {(
+                [
+                  ["batches", "批次完成"],
+                  ["failures", "熔断与自动暂停"],
+                  ["intake", "Agent 工单"],
+                  ["video", "视频队列"],
+                ] as const
+              ).map(([key, label]) => (
+                <span className="fx ac gap6 fs11" key={key}>
+                  <Toggle
+                    label={label}
+                    disabled={saving > 0 || !settings}
+                    on={settings?.notifications?.[key] ?? true}
+                    onClick={() => {
+                      if (settings?.notifications)
+                        void updateSettings({
+                          notifications: {
+                            ...settings.notifications,
+                            [key]: !settings.notifications[key],
+                          },
+                        });
+                    }}
+                  />
+                  {label}
+                </span>
+              ))}
+            </div>
           </div>
           <div className="fx ac gap10 mt14">
             <span className="fs12 t2" style={{ width: 72 }}>
@@ -587,6 +752,14 @@ export function SettingsPage() {
               <FolderOpen className="ic12" />
               打开目录
             </button>
+            <button
+              type="button"
+              className="btn sm gho"
+              disabled={!dataDir}
+              onClick={() => dataDir && void copyText(dataDir.root, "数据目录")}
+            >
+              复制路径
+            </button>
           </div>
           <div className="fx ac gap10 mt14">
             <span className="fs12 t2" style={{ width: 72 }}>
@@ -615,17 +788,126 @@ export function SettingsPage() {
                 >
                   导出备份（zip）
                 </button>
-                <span className="fs11 t3">
-                  {queueRunning
-                    ? "队列运行中不可备份，请先暂停队列"
-                    : "打包数据库与全部资产到所选 zip；导出前自动检查点保证一致"}
-                </span>
+                {queueRunning && (
+                  <button type="button" className="btn sm gho" onClick={() => go("tasks")}>
+                    前往队列查看在途任务
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={checkingBackup}
+                  onClick={() => void checkBackup(false)}
+                >
+                  校验备份…
+                </button>
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={checkingBackup}
+                  onClick={() => void checkBackup(true)}
+                >
+                  恢复到新目录…
+                </button>
+                {checkingBackup && (
+                  <span role="status" className="fs11 t3">
+                    正在校验备份文件…
+                  </span>
+                )}
               </>
             )}
           </div>
+          <p className="fs11 t3 mt10">
+            ZIP
+            包含数据库快照和数据目录内的资产。另行备份外部作品、图库原件和交付文件。恢复后在设置里重新填写
+            API Key。
+          </p>
         </section>
       </div>
 
+      {newOutput && (
+        <Modal
+          title="更改作品根目录"
+          width="w700"
+          onClose={() => setNewOutput(null)}
+          footer={
+            <>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={checkingOutput}
+                onClick={() => void checkOutput(newOutput)}
+              >
+                检查新目录可写性
+              </button>
+              <button
+                type="button"
+                className="btn sm pri"
+                disabled={saving > 0 || checkingOutput}
+                onClick={async () => {
+                  setCheckingOutput(true);
+                  try {
+                    await unwrap(commands.checkOutputDirectory(newOutput));
+                    if (await updateSettings({ outputDir: newOutput })) {
+                      toast.success("作品根目录已更新");
+                      setNewOutput(null);
+                    }
+                  } catch (error) {
+                    toast.error(String(error));
+                  } finally {
+                    setCheckingOutput(false);
+                  }
+                }}
+              >
+                使用新目录
+              </button>
+            </>
+          }
+        >
+          <p className="fs12 t2">已有文件保留在原位置</p>
+          <p className="mono fs11">{settings?.outputDir}</p>
+          <p className="fs12 t2">后续成品示例</p>
+          <p className="mono fs11">{newOutput} / 成品 / 生成图片 / 产品 / 款式 / 需求</p>
+        </Modal>
+      )}
+      {resetSchedule && (
+        <ConfirmModal
+          title="恢复调度默认值"
+          desc="恢复为平均轮询、失败自动重试 1 次、连续失败 10 次自动暂停。"
+          onClose={() => setResetSchedule(false)}
+          onConfirm={() => void updateSettings({ resetScheduling: true })}
+        />
+      )}
+      {backupCheck && (
+        <Modal title="备份校验通过" onClose={() => setBackupCheck(null)}>
+          <p className="fs12 t2">
+            {backupCheck.files} 个文件 · {(backupCheck.bytes / 1024 / 1024).toFixed(1)} MB ·
+            数据库版本 {backupCheck.schemaVersion}
+          </p>
+          <p className="fs11 mono">{backupCheck.archivePath}</p>
+          {backupCheck.extractedPath && (
+            <>
+              <p className="fs12 t2">
+                已恢复到独立目录。需要启用该备份时，先退出
+                GenDesk，把现有数据目录改名保留，再将恢复目录移到原数据目录的位置。恢复后保持外部文件原路径可用。
+              </p>
+              <p className="fs11 mono">{backupCheck.extractedPath}</p>
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => {
+                  if (backupCheck.extractedPath)
+                    void unwrap(commands.openPathInFolder(backupCheck.extractedPath)).catch(
+                      (error) => toast.error(String(error)),
+                    );
+                }}
+              >
+                在文件管理器中显示恢复目录
+              </button>
+            </>
+          )}
+        </Modal>
+      )}
       {showAdd && (
         <AddKeyModal
           onClose={() => setShowAdd(false)}

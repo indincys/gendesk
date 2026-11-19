@@ -215,7 +215,6 @@ pub async fn dir_known(pool: &SqlitePool, dir_name: &str) -> Result<bool, sqlx::
 }
 
 /// 最近若干条（测试回读台账用）。
-#[cfg(test)]
 pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<JobView>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
         "{SELECT} ORDER BY created_at DESC, id DESC LIMIT ?1"

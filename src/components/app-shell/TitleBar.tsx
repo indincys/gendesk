@@ -1,9 +1,11 @@
+import { IntakeNotifications } from "@/components/app-shell/IntakeNotifications";
 import { UpdateInstallButton } from "@/components/app-shell/UpdateInstallButton";
 import { V2vTitleChrome } from "@/features/v2v/V2vTitleChrome";
 import { windowControls } from "@/lib/window";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
 import { useUiStore } from "@/stores/ui";
+import { CircleHelp } from "lucide-react";
 
 /**
  * 44px 自绘标题栏（执行计划 0.4）。macOS 用原生交通灯（Overlay），Windows 自绘窗控。
@@ -16,8 +18,11 @@ import { useUiStore } from "@/stores/ui";
  *   它们回答的是「远端此刻是什么状况」，而页头装不下 —— 那一屏要留给看片。
  */
 export function TitleBar() {
+  const openHelp = useUiStore((s) => s.openHelp);
   const platform = useUiStore((s) => s.platform);
   const route = useUiStore((s) => s.route);
+  const returnToQueue = useUiStore((s) => s.returnToQueue);
+  const goBackToQueue = useUiStore((s) => s.goBackToQueue);
   const updateReady = useEngineStore((s) => s.updateReady);
   const updateVersion = useEngineStore((s) => s.updateVersion);
   const isMac = platform === "mac";
@@ -56,6 +61,22 @@ export function TitleBar() {
           {updateVersion ? `v${updateVersion} ` : ""}已就绪 · 重启安装
         </UpdateInstallButton>
       )}
+
+      {returnToQueue && (route === "review" || route === "library") && (
+        <button type="button" className="btn xs" onClick={goBackToQueue}>
+          返回任务队列
+        </button>
+      )}
+      <IntakeNotifications />
+      <button
+        type="button"
+        className="icb"
+        onClick={openHelp}
+        aria-label="快捷键与帮助"
+        title="快捷键与帮助"
+      >
+        <CircleHelp className="ic12" />
+      </button>
 
       {isWin && (
         <div className="fx ac noshrink">

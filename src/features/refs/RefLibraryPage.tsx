@@ -14,6 +14,7 @@ import {
   type LibraryImageView,
   type LibraryLimits,
   type LibraryOverview,
+  type LibraryPickResult,
   type LibraryStyleView,
   commands,
   subscribeFileDrop,
@@ -22,10 +23,13 @@ import {
   unwrap,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useGenerateStore } from "@/stores/generate";
+import { useUiStore } from "@/stores/ui";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Dices, ImagePlus, Pencil, Plus, Settings2 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LibraryImportDialog, LibraryUsageDialog, RelinkDirectoryDialog } from "./LibraryDialogs";
 
 const NO_PATCH: LibraryImagePatch = { categoryId: null, enabled: null, note: null, removed: null };
 
@@ -77,6 +81,17 @@ export function RefLibraryPage() {
   const [categoryId, setCategoryId] = useState<number | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
   const [styleQuery, setStyleQuery] = useState("");
+  const [productFilter, setProductFilter] = useState("");
+  const [viewArchived, setViewArchived] = useState(false);
+  const [failedImport, setFailedImport] = useState<{
+    category: number;
+    paths: string[];
+    report: string;
+  } | null>(null);
+  const [usageImage, setUsageImage] = useState<LibraryImageView | null>(null);
+  const [showRelink, setShowRelink] = useState<LibraryImageView[] | null>(null);
+  const [pickResult, setPickResult] = useState<LibraryPickResult | null>(null);
+  const [picking, setPicking] = useState(false);
   const [imageQuery, setImageQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
@@ -99,10 +114,7 @@ export function RefLibraryPage() {
     let active = true;
     const subscription = subscribeFileDrop((paths) => {
       if (!active || busy.current) return;
-      const supported = paths.filter((path) => /\.(jpe?g|png|webp|bmp)$/i.test(path));
-      if (supported.length) setImportAsk(supported);
-      if (supported.length < paths.length)
-        toast.warning(`跳过 ${paths.length - supported.length} 个不支持的文件`);
+      if (paths.length) setImportAsk(paths);
     });
     return () => {
       active = false;
@@ -115,7 +127,9 @@ export function RefLibraryPage() {
       const o = await unwrap(commands.libraryOverview());
       setOverview(o);
       setStyleId((cur) =>
-        cur !== null && o.styles.some((s) => s.id === cur) ? cur : (o.styles[0]?.id ?? null),
+        cur !== null && o.styles.some((s) => s.id === cur)
+          ? cur
+          : (o.styles.find((item) => !item.archived)?.id ?? null),
       );
     } catch (e) {
       toast.error(`读取参考图库失败：${message(e)}`);
@@ -297,17 +311,18 @@ export function RefLibraryPage() {
       if (r.duplicates.length) parts.push(`${r.duplicates.length} 张已在库里`);
       if (r.failed.length) parts.push(`${r.failed.length} 张读不了`);
       if (r.failed.length) {
+        const report = r.failed.map((item) => `${item.path} · ${item.message}`).join("\n");
+        setFailedImport({ category: cid, paths: r.failed.map((item) => item.path), report });
         toast.warning(parts.join("，"), {
           action: {
             label: "复制失败清单",
-            onClick: () =>
-              void copyText(
-                r.failed.map((item) => `${item.path} · ${item.message}`).join("\n"),
-                "失败清单",
-              ),
+            onClick: () => void copyText(report, "失败清单"),
           },
         });
-      } else toast.success(parts.join("，"));
+      } else {
+        setFailedImport(null);
+        toast.success(parts.join("，"));
+      }
       setCategoryId(cid);
     } catch (e) {
       toast.error(`导入失败：${message(e)}`);
@@ -324,17 +339,36 @@ export function RefLibraryPage() {
       toast.info("先新建一个款式");
       return;
     }
-    const paths = await unwrap(commands.pickImageFiles()).catch(() => []);
-    if (paths.length === 0) return;
-    if (category) await runImport(paths, category.id);
-    else setImportAsk(paths);
+    const paths = await unwrap(commands.pickImageFiles()).catch((error) => {
+      toast.error(message(error));
+      return [];
+    });
+    if (paths.length) setImportAsk(paths);
   }
 
   async function patch(p: Partial<LibraryImagePatch>, done: string) {
     try {
       const n = await unwrap(commands.updateLibraryImages([...sel], { ...NO_PATCH, ...p }));
-      toast.success(`${done} ${n} 张`);
-      setSel(new Set());
+      const changed = selected.filter((item) => p.removed !== item.removed).map((item) => item.id);
+      toast.success(`${done} ${n}/${sel.size} 张`, {
+        action:
+          p.removed !== undefined && changed.length === n
+            ? {
+                label: "撤销",
+                onClick: () => {
+                  void unwrap(
+                    commands.updateLibraryImages(changed, { ...NO_PATCH, removed: !p.removed }),
+                  )
+                    .then(async (count) => {
+                      toast.success(`已撤销 ${count} 张`);
+                      await refreshRef.current();
+                    })
+                    .catch((error) => toast.error(message(error)));
+                },
+              }
+            : undefined,
+      });
+      if (n === sel.size) setSel(new Set());
       await refresh();
     } catch (e) {
       toast.error(message(e));
@@ -342,15 +376,37 @@ export function RefLibraryPage() {
   }
 
   async function tryPick() {
-    if (!style || !category) return;
+    if (!style || !category || picking) return;
+    setPicking(true);
     try {
-      const r = await unwrap(commands.pickLibraryImages(style.id, category.id, pickCount, false));
-      setSel(new Set(r.picks.map((p) => p.image.id)));
-      toast.info(`试抽 ${r.picks.length} 张（已选中，不记为使用）：${r.message}`);
+      setPickResult(
+        await unwrap(commands.pickLibraryImages(style.id, category.id, pickCount, false)),
+      );
     } catch (e) {
       toast.error(message(e));
+    } finally {
+      setPicking(false);
     }
   }
+
+  const addToGeneration = useCallback(async (items: LibraryImageView[]) => {
+    const results = await Promise.allSettled(
+      items.map((item) => unwrap(commands.generationLibraryRef(item.id))),
+    );
+    const ids = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    if (ids.length) {
+      useGenerateStore.getState().setSelRefIds((current) => [...new Set([...current, ...ids])]);
+      useUiStore.getState().go("generate");
+    }
+    if (ids.length < items.length) {
+      const reasons = results.flatMap((result, index) =>
+        result.status === "rejected" ? [`#${items[index]?.id} · ${message(result.reason)}`] : [],
+      );
+      toast.warning(`已加入 ${ids.length}/${items.length} 张`, {
+        description: reasons.slice(0, 4).join("\n"),
+      });
+    } else toast.success(`已加入本次生成 · ${ids.length} 张`);
+  }, []);
 
   const right = (
     <>
@@ -362,7 +418,12 @@ export function RefLibraryPage() {
         <Plus className="ic12" />
         新建款式
       </button>
-      <button type="button" className="btn sm pri" disabled={!style} onClick={startImport}>
+      <button
+        type="button"
+        className="btn sm pri"
+        disabled={!style || style.archived}
+        onClick={startImport}
+      >
         <ImagePlus className="ic12" />
         导入图片
       </button>
@@ -388,15 +449,50 @@ export function RefLibraryPage() {
           value={styleQuery}
           onChange={(event) => setStyleQuery(event.target.value)}
         />
+        <select
+          className="inp sm"
+          aria-label="按产品筛选款式"
+          value={productFilter}
+          onChange={(event) => setProductFilter(event.target.value)}
+        >
+          <option value="">所有产品</option>
+          {[...new Set(overview?.styles.map((item) => item.product).filter(Boolean))]
+            .sort()
+            .map((product) => (
+              <option key={product} value={product}>
+                {product}
+              </option>
+            ))}
+        </select>
+        <label className="fx ac gap6 fs11 t3">
+          <input
+            type="checkbox"
+            checked={viewArchived}
+            onChange={(event) => {
+              setViewArchived(event.target.checked);
+              if (!event.target.checked && style?.archived)
+                setStyleId(overview?.styles.find((item) => !item.archived)?.id ?? null);
+            }}
+          />
+          显示归档款式
+        </label>
         {overview?.styles
-          .filter((item) =>
-            `${item.name} ${item.product}`.toLowerCase().includes(styleQuery.trim().toLowerCase()),
+          .filter(
+            (item) =>
+              (viewArchived || !item.archived) &&
+              (!productFilter || item.product === productFilter) &&
+              `${item.name} ${item.product}`
+                .toLowerCase()
+                .includes(styleQuery.trim().toLowerCase()),
           )
           .map((s) => (
             <div
               key={s.id}
               className={cn("rlstyle", s.id === styleId && "on")}
-              onClick={() => setStyleId(s.id)}
+              onClick={() => {
+                setStyleId(s.id);
+                setFailedImport(null);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setStyleEdit(s);
@@ -406,6 +502,7 @@ export function RefLibraryPage() {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   setStyleId(s.id);
+                  setFailedImport(null);
                 }
                 if (e.key === "F2" || e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
                   e.preventDefault();
@@ -416,7 +513,10 @@ export function RefLibraryPage() {
               tabIndex={0}
             >
               <div className="f1 ohide">
-                <div className="fs12 fw5 nowrap ohide">{s.name}</div>
+                <div className="fs12 fw5 nowrap ohide">
+                  {s.name}
+                  {s.archived ? " · 已归档" : ""}
+                </div>
                 {s.product && <div className="fs10 t3 nowrap ohide">{s.product}</div>}
               </div>
               <span className="fs11 t3 mono nowrap" title="可用 / 总数">
@@ -425,7 +525,8 @@ export function RefLibraryPage() {
               <button
                 type="button"
                 className="icb rledit"
-                title="改名"
+                aria-label={`${s.name}款式操作`}
+                title="款式操作"
                 onClick={(e) => {
                   e.stopPropagation();
                   setStyleEdit(s);
@@ -476,11 +577,12 @@ export function RefLibraryPage() {
             />
             显示已移出
           </label>
-          {category && (
+          {category && !style?.archived && (
             <span className="fx ac gap6">
               <input
                 className="inp sm rlnum"
                 type="number"
+                aria-label="试抽图片数量"
                 min={1}
                 max={limits?.maxPick}
                 value={pickCount}
@@ -494,6 +596,7 @@ export function RefLibraryPage() {
                 type="button"
                 className="btn sm"
                 onClick={tryPick}
+                disabled={picking}
                 title="按工单规则随机抽，不记为使用"
               >
                 <Dices className="ic12" />
@@ -546,6 +649,28 @@ export function RefLibraryPage() {
           </div>
         )}
 
+        {failedImport && (
+          <div className="fbar">
+            <span className="fs12 t2">{failedImport.paths.length} 张图片未导入</span>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void copyText(failedImport.report, "失败清单")}
+            >
+              复制失败清单
+            </button>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void runImport(failedImport.paths, failedImport.category)}
+            >
+              仅重试失败项
+            </button>
+            <button type="button" className="btn xs gho" onClick={() => setFailedImport(null)}>
+              关闭反馈
+            </button>
+          </div>
+        )}
         {sel.size > 0 && (
           <div className="rlbar">
             <span className="fs12 fw5">已选 {sel.size} 张</span>
@@ -556,6 +681,20 @@ export function RefLibraryPage() {
             >
               导出原件
             </button>
+            <button type="button" className="btn sm" onClick={() => void addToGeneration(selected)}>
+              加入本次生成
+            </button>
+            {selected.some((item) => item.missing && item.linked) && (
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() =>
+                  setShowRelink(selected.filter((item) => item.missing && item.linked))
+                }
+              >
+                批量替换目录前缀…
+              </button>
+            )}
             {selected.length === 1 && selected[0]?.missing && selected[0].linked && (
               <button
                 type="button"
@@ -687,6 +826,9 @@ export function RefLibraryPage() {
                         showCategory={categoryId === null}
                         onToggle={toggle}
                         onPreview={previewImage}
+                        onUsage={setUsageImage}
+                        onGenerate={addToGeneration}
+                        onRelink={setShowRelink}
                         exportSelection={
                           sel.has(img.id) && sel.size > 1
                             ? selected.map((item) => item.filePath)
@@ -702,13 +844,6 @@ export function RefLibraryPage() {
         </div>
       </div>
 
-      {preview && (
-        <OriginalPreview
-          title={preview.name}
-          path={preview.path}
-          onClose={() => setPreview(null)}
-        />
-      )}
       {styleEdit && (
         <StyleModal
           style={styleEdit === "new" ? null : styleEdit}
@@ -716,6 +851,27 @@ export function RefLibraryPage() {
           onSaved={async (id) => {
             setStyleEdit(null);
             setStyleId(id);
+            await refreshOverview();
+          }}
+          onImport={async (id) => {
+            setStyleEdit(null);
+            setStyleId(id);
+            try {
+              const paths = await unwrap(commands.pickImageFiles());
+              if (paths.length) setImportAsk(paths);
+            } catch (error) {
+              toast.error(message(error));
+            }
+          }}
+          onArchive={async (item) => {
+            await unwrap(commands.setLibraryStyleArchived(item.id, !item.archived));
+            toast.success(item.archived ? "款式已恢复" : "款式已归档");
+            setStyleEdit(null);
+            if (!item.archived && !viewArchived && styleId === item.id)
+              setStyleId(
+                overview?.styles.find((style) => !style.archived && style.id !== item.id)?.id ??
+                  null,
+              );
             await refreshOverview();
           }}
           onDeleted={async () => {
@@ -733,30 +889,99 @@ export function RefLibraryPage() {
           onChanged={refresh}
         />
       )}
-      {importAsk && (
-        <Modal
-          title={`导入 ${importAsk.length} 张至 ${style?.name ?? "当前款式"}`}
+      {importAsk && style && (
+        <LibraryImportDialog
+          key={importAsk.join("\n")}
+          paths={importAsk}
+          style={style}
+          categories={categories}
+          initialCategory={categoryId}
           onClose={() => setImportAsk(null)}
-        >
-          <div className="fs12 t2">
-            {importAsk.length} 张图导入「{style?.name}」，选一个分类：
-          </div>
-          <div className="fx ac gap8 mt10 wrap">
-            {categories.map((c) => (
+          onImport={(paths, cid) => {
+            setImportAsk(null);
+            void runImport(paths, cid);
+          }}
+        />
+      )}
+      {usageImage && (
+        <LibraryUsageDialog
+          image={usageImage}
+          onClose={() => setUsageImage(null)}
+          onSaved={refresh}
+        />
+      )}
+      {showRelink && (
+        <RelinkDirectoryDialog
+          images={showRelink}
+          onClose={() => setShowRelink(null)}
+          onApplied={refresh}
+        />
+      )}
+      {pickResult && (
+        <Modal
+          title={`试抽 · ${pickResult.style} · ${pickResult.category}`}
+          onClose={() => setPickResult(null)}
+          footer={
+            <>
               <button
-                key={c.id}
                 type="button"
                 className="btn sm"
+                disabled={picking}
+                onClick={() => void tryPick()}
+              >
+                再抽一次
+              </button>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={!pickResult.picks.length}
                 onClick={() => {
-                  const paths = importAsk;
-                  setImportAsk(null);
-                  void runImport(paths, c.id);
+                  setSel(new Set(pickResult.picks.map((item) => item.image.id)));
+                  setPickResult(null);
                 }}
               >
-                {c.name}
+                选中这些图
               </button>
+              <button
+                type="button"
+                className="btn sm pri"
+                disabled={!pickResult.picks.length}
+                onClick={() => {
+                  void addToGeneration(pickResult.picks.map((item) => item.image));
+                }}
+              >
+                按此顺序加入生成
+              </button>
+            </>
+          }
+        >
+          <p className="fs12 t2">
+            {pickResult.message}。试抽不计使用。可用 {pickResult.freshCount}/{pickResult.poolSize}{" "}
+            张。
+          </p>
+          <ol>
+            {pickResult.picks.map((item, index) => (
+              <li key={`${item.image.id}-${index}`} className="fx ac gap8 mt10">
+                <span className="mono fs11">
+                  Image {index + 1} · #{item.image.id}
+                </span>
+                <button
+                  type="button"
+                  className="btn xs"
+                  onClick={() => void previewImage(item.image)}
+                >
+                  {item.image.name}
+                </button>
+                <span className="fs11 t3">
+                  {item.tier === "fresh"
+                    ? "可用"
+                    : item.tier === "repeat"
+                      ? "本次重复"
+                      : `冷却回退 · ${item.cooldownDays} 天`}
+                </span>
+              </li>
             ))}
-          </div>
+          </ol>
         </Modal>
       )}
       {confirmRemove && (
@@ -770,6 +995,13 @@ export function RefLibraryPage() {
             setConfirmRemove(false);
             void patch({ removed: true }, "已移出");
           }}
+        />
+      )}
+      {preview && (
+        <OriginalPreview
+          title={preview.name}
+          path={preview.path}
+          onClose={() => setPreview(null)}
         />
       )}
       {importing && <RefImportOverlay state={importing} title="导入参考图库" />}
@@ -787,6 +1019,9 @@ const LibraryCard = memo(function LibraryCard({
   showCategory,
   onToggle,
   onPreview,
+  onUsage,
+  onGenerate,
+  onRelink,
   exportSelection,
 }: {
   img: LibraryImageView;
@@ -794,6 +1029,9 @@ const LibraryCard = memo(function LibraryCard({
   showCategory: boolean;
   onToggle: (id: number, shift: boolean) => void;
   onPreview: (img: LibraryImageView) => Promise<void>;
+  onUsage: (img: LibraryImageView) => void;
+  onGenerate: (items: LibraryImageView[]) => Promise<void>;
+  onRelink: (items: LibraryImageView[]) => void;
   exportSelection?: string[] | undefined;
 }) {
   const b = statusBadge(img);
@@ -810,8 +1048,8 @@ const LibraryCard = memo(function LibraryCard({
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget || (e.key !== " " && e.key !== "Enter")) return;
         e.preventDefault();
-        if (e.key === "Enter") void onPreview(img);
-        else onToggle(img.id, e.shiftKey);
+        if (e.key === "Enter" || !e.shiftKey) void onPreview(img);
+        else onToggle(img.id, true);
       }}
       role="button"
       aria-pressed={selected}
@@ -823,6 +1061,16 @@ const LibraryCard = memo(function LibraryCard({
         paths={exportSelection}
         label={img.name}
         onPreview={() => void onPreview(img)}
+        actions={[
+          { label: "用量记录与备注", run: () => onUsage(img) },
+          { label: "复制素材编号", run: () => void copyText(String(img.id), "素材编号") },
+          ...(img.missing && img.linked
+            ? [{ label: "替换失效目录…", run: () => onRelink([img]) }]
+            : []),
+          ...(!img.missing && !img.removed
+            ? [{ label: "加入本次生成", run: () => void onGenerate([img]) }]
+            : []),
+        ]}
       >
         <div className="rlimg ph">
           {src ? (
@@ -837,12 +1085,24 @@ const LibraryCard = memo(function LibraryCard({
         <span className="f1" />
         <span className="fs10 t3 mono">#{img.id}</span>
       </div>
-      <div className="rlsub fs10 t3 nowrap ohide">
+      <button
+        type="button"
+        className="rlsub fs10 t3 nowrap ohide"
+        onClick={(event) => {
+          event.stopPropagation();
+          onUsage(img);
+        }}
+        title={
+          img.coolingUntil
+            ? `冷却至 ${new Date(img.coolingUntil * 1000).toLocaleString()}`
+            : "用量记录与备注"
+        }
+      >
         {showCategory ? `${img.category} · ` : ""}
         {img.useCount > 0
           ? `用过 ${img.useCount} 次 · 上次 ${shortDate(img.lastUsedAt ?? 0)}`
           : "还没用过"}
-      </div>
+      </button>
     </div>
   );
 });
@@ -852,17 +1112,27 @@ function StyleModal({
   onClose,
   onSaved,
   onDeleted,
+  onImport,
+  onArchive,
 }: {
   style: LibraryStyleView | null;
   onClose: () => void;
   onSaved: (id: number) => void;
   onDeleted: () => void;
+  onImport: (id: number) => void;
+  onArchive: (style: LibraryStyleView) => Promise<void>;
 }) {
   const [name, setName] = useState(style?.name ?? "");
   const [product, setProduct] = useState(style?.product ?? "");
   const [note, setNote] = useState(style?.note ?? "");
 
   async function save() {
+    if (style && (name.trim() !== style.name || product.trim() !== style.product)) {
+      const ok = window.confirm(
+        `该款式当前有 ${style.total} 张在库图片。改名后，后续工单需要使用新的款式名和产品；历史作品及工单仍保留原归属。继续保存？`,
+      );
+      if (!ok) return;
+    }
     try {
       onSaved(await unwrap(commands.saveLibraryStyle(style?.id ?? null, name, product, note)));
     } catch (e) {
@@ -910,7 +1180,46 @@ function StyleModal({
         </>
       }
     >
-      <div className="rlform">
+      {style && (
+        <div className="fx ac gap6 wrap mt6">
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => void copyText(String(style.id), "款式编号")}
+          >
+            复制编号 #{style.id}
+          </button>
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => useUiStore.getState().openStyleWorks(style.name, style.product)}
+          >
+            查看关联作品
+          </button>
+          {!style.archived && (
+            <button type="button" className="btn xs" onClick={() => onImport(style.id)}>
+              导入此款式…
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              if (
+                !style.archived &&
+                !window.confirm(
+                  `归档「${style.name}」及其 ${style.total} 张在库图片？归档期间工单不会从这里抽图，可随时恢复。`,
+                )
+              )
+                return;
+              void onArchive(style).catch((error) => toast.error(message(error)));
+            }}
+          >
+            {style.archived ? "恢复款式" : "归档款式"}
+          </button>
+        </div>
+      )}
+      <div className="rlform mt10">
         <span className="fs12 t2">款式名</span>
         <input
           className="inp"

@@ -16,20 +16,19 @@ import {
   unwrap,
 } from "@/lib/ipc";
 import { cn, promptLabel, sortGroupsByPinyin } from "@/lib/utils";
-import { useEngineStore } from "@/stores/engine";
 import { useGenerateStore } from "@/stores/generate";
 import { useUiStore } from "@/stores/ui";
 import { Check, ChevronDown, FileUp, Play, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /** 分组配色板（gc0–gc4，循环）；按分组在已选序列中的位置分配，稳定可预期。 */
 const GC = ["gc0", "gc1", "gc2", "gc3", "gc4"] as const;
 
 /** 按扩展名分拣拖入路径（E14）。 */
-function sortDrops(paths: string[]): { txt: string | undefined; images: string[] } {
+function sortDrops(paths: string[]): { txt: string[]; images: string[] } {
   const images = paths.filter((p) => /\.(png|jpe?g|webp|bmp)$/i.test(p));
-  const txt = paths.find((p) => p.toLowerCase().endsWith(".txt"));
+  const txt = paths.filter((p) => p.toLowerCase().endsWith(".txt"));
   return { txt, images };
 }
 
@@ -39,7 +38,23 @@ export function GeneratePage() {
   const requirement = useGenerateStore((s) => s.requirement);
   const setOrganization = useGenerateStore((s) => s.setOrganization);
   const go = useUiStore((s) => s.go);
-  const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
+  const openBatch = useUiStore((s) => s.openBatch);
+  const openSettings = useUiStore((s) => s.openSettings);
+  const attachments = useGenerateStore((s) => s.attachments);
+  const setAttachments = useGenerateStore((s) => s.setAttachments);
+  const promptEdits = useGenerateStore((s) => s.promptEdits);
+  const setPromptEdits = useGenerateStore((s) => s.setPromptEdits);
+  const [explicitRefs, setExplicitRefs] = useState<RefImageView[]>([]);
+  const [checkedRefs, setCheckedRefs] = useState<number[]>([]);
+  const [attachTo, setAttachTo] = useState<RefImageView | null>(null);
+  const [replaceRef, setReplaceRef] = useState<RefImageView | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [promptFiles, setPromptFiles] = useState<string[]>([]);
+  const [editPrompt, setEditPrompt] = useState<PromptView | null>(null);
+  const [draftText, setDraftText] = useState("");
+  const [renameGroup, setRenameGroup] = useState<GroupView | null>(null);
+  const startingLock = useRef(false);
 
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [refs, setRefs] = useState<RefImageView[]>([]);
@@ -138,13 +153,34 @@ export function GeneratePage() {
     });
   }, [selRefIds, selGroupIds, refs, setMapping]);
 
+  useEffect(() => {
+    let current = true;
+    const ids = [...new Set([...selRefIds, ...Object.values(attachments).flat()])];
+    void unwrap(commands.generationReferences(ids))
+      .then((rows) => {
+        if (current) setExplicitRefs(rows);
+      })
+      .catch((error) => toast.error(String(error)));
+    return () => {
+      current = false;
+    };
+  }, [selRefIds, attachments]);
+
   const selGroups = groups.filter((g) => selGroupIds.includes(g.id));
-  const selRefs = refs.filter((r) => selRefIds.includes(r.id));
-  const allMapped = selRefs.length > 0 && selRefs.every((r) => mapping[r.id] != null);
+  const refById = new Map([...refs, ...explicitRefs].map((ref) => [ref.id, ref]));
+  const selRefs = selRefIds.flatMap((id) =>
+    refById.get(id) ? [refById.get(id) as RefImageView] : [],
+  );
+  const allMapped =
+    selRefs.length > 0 && selRefs.every((r) => selGroupIds.includes(mapping[r.id] ?? 0));
   // 组合数 = Σ(参考图 × 挂靠组提示词数)；一个组合 = 一个任务 = 一张图。
   const combos = selRefs.reduce((sum, r) => {
     const g = groups.find((x) => x.id === mapping[r.id]);
-    return sum + (g?.count ?? 0);
+    const items = g && promptsByGroup[g.id];
+    return (
+      sum +
+      (items ? items.filter((item) => !promptEdits[item.id]?.excluded).length : (g?.count ?? 0))
+    );
   }, 0);
   const taskTotal = combos;
   const enabledKeys = keys.filter((k) => k.enabled && !k.circuitBroken && !k.secretMissing);
@@ -218,15 +254,17 @@ export function GeneratePage() {
     let un = () => {};
     void subscribeFileDrop((paths) => {
       const { txt, images } = sortDrops(paths);
-      if (txt) void parseTxt(txt);
+      if (txt.length) setPromptFiles(txt);
       if (images.length > 0) void importImages(images);
-      if (!txt && images.length === 0 && paths.length > 0)
-        toast.error("仅支持拖入 .txt 或图片文件");
+      if (paths.length > txt.length + images.length)
+        toast.warning(
+          `跳过 ${paths.length - txt.length - images.length} 个文件，仅接收 .txt 和图片`,
+        );
     }).then((f) => {
       un = f;
     });
     return () => un();
-  }, [parseTxt, importImages]);
+  }, [importImages]);
 
   // 仅收集显式设置的参数（D1：未设置的键不出现在 JSON 中 → provider 不透传）。
   //
@@ -270,11 +308,21 @@ export function GeneratePage() {
   };
 
   const start = async () => {
+    if (startingLock.current) return;
+    startingLock.current = true;
     setStarting(true);
     try {
       const batch = await unwrap(
         commands.createBatch({
-          refs: selRefs.map((r) => ({ refImageId: r.id, promptGroupId: mapping[r.id] as number })),
+          refs: selRefs.map((r) => ({
+            refImageId: r.id,
+            promptGroupId: mapping[r.id] as number,
+            attachments: attachments[r.id] ?? [],
+          })),
+          promptEdits: Object.entries(promptEdits).map(([id, edit]) => ({
+            id: Number(id),
+            ...edit,
+          })),
           paramsJson: buildParamsJson(),
         }),
       );
@@ -283,20 +331,99 @@ export function GeneratePage() {
       setSelGroupIds([]);
       setSelRefIds([]);
       setMapping({});
+      setAttachments({});
+      setPromptEdits({});
       setExpG(null);
       setHovG(null);
       setHovR(null);
       // 后端已随批次同事务归档本批的组与图（0016）；重新拉一遍库，让选择器立刻反映归档态。
       void load();
-      toast(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`);
-      await loadBatchTasks(batch.id, null);
-      go("tasks");
+      toast.success(`已创建批次 #${batch.id} · ${batch.taskCount} 个任务`, {
+        action: { label: "打开批次", onClick: () => openBatch("tasks", batch.id) },
+      });
+      openBatch("tasks", batch.id);
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     } finally {
+      startingLock.current = false;
       setStarting(false);
     }
   };
+
+  function updateAttachment(id: number, list: number[]) {
+    setAttachments((current) => ({ ...current, [id]: list }));
+  }
+
+  async function replaceImage() {
+    if (!replaceRef) return;
+    try {
+      const paths = await unwrap(commands.pickImageFiles());
+      if (!paths.length) return;
+      if (paths.length !== 1) {
+        toast.error("请选择一张替换图片");
+        return;
+      }
+      const [next] = await runImport(paths, true);
+      if (!next) return;
+      const old = replaceRef;
+      setRefs((current) => [...current, next]);
+      setSelRefIds((current) => current.map((id) => (id === old.id ? next.id : id)));
+      setMapping((current) => ({ ...current, [next.id]: current[old.id] ?? 0 }));
+      updateAttachment(next.id, attachments[old.id] ?? []);
+      setReplaceRef(null);
+      toast.success("参考图已替换，保留原挂靠", {
+        action: {
+          label: "撤销",
+          onClick: () =>
+            setSelRefIds((current) => current.map((id) => (id === next.id ? old.id : id))),
+        },
+      });
+    } catch (error) {
+      toast.error(String(error));
+    }
+  }
+
+  async function copyGroup(group: GroupView) {
+    try {
+      const [rows, purposes] = await Promise.all([
+        unwrap(commands.listPrompts(group.id)),
+        unwrap(commands.listPurposes()),
+      ]);
+      const draft = {
+        encoding: "UTF-8",
+        total: rows.length,
+        warnings: [],
+        groups: [
+          {
+            name: `${group.name} 副本`,
+            prefix: "",
+            scene: group.scene,
+            tags: group.tags,
+            count: rows.length,
+            codeRange: "",
+            isNewGroup: true,
+            inferred: false,
+            skill: null,
+            purposes: purposes.map((item) => item.tag).filter((tag) => group.tags.includes(tag)),
+            purposeInferred: false,
+            prefixExplicit: false,
+            prompts: rows
+              .filter((item) => !promptEdits[item.id]?.excluded)
+              .map((item) => ({
+                title: item.title,
+                text: promptEdits[item.id]?.text ?? item.text,
+                itemName: "",
+                sku: "",
+                style: "",
+              })),
+          },
+        ],
+      };
+      setImportPreview(await unwrap(commands.repreviewImport(draft)));
+    } catch (error) {
+      toast.error(String(error));
+    }
+  }
 
   /** 移除某分组：同时清掉其挂靠。 */
   const removeGroup = (gid: number) => {
@@ -373,6 +500,9 @@ export function GeneratePage() {
             <span className="fw6 fs13">提示词</span>
             {selGroups.length > 0 && <span className="cnt">{selGroups.length} 组</span>}
             <div className="f1" />
+            <button type="button" className="btn xs gho" onClick={() => setPasteOpen(true)}>
+              粘贴提示词
+            </button>
             <button type="button" className="btn sm" onClick={importTxt}>
               <FileUp className="ic12" />
               导入 .txt
@@ -430,19 +560,64 @@ export function GeneratePage() {
                   >
                     <div className="gchd">
                       <i className="gdot" style={{ background: "var(--gc)" }} />
-                      <span className="fw6 fs13 nowrap ohide">{g.name}</span>
+                      <button
+                        type="button"
+                        className="fw6 fs13 nowrap ohide"
+                        aria-expanded={exp}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setExpG(exp ? null : g.id);
+                        }}
+                      >
+                        {g.name}
+                      </button>
                       <span className="chip">{g.prefix}</span>
                       {g.isTemp && <span className="bdg b-amber">临时</span>}
                       <div className="f1" />
                       <span className="grcnt">{nref > 0 ? `× ${nref} 图` : "未挂靠"}</span>
                       <span className="t3 fs11 nowrap">{g.count} 条</span>
-                      <span className={cn("car", exp && "open")}>▾</span>
+                      <button
+                        type="button"
+                        className="btn xs"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setRenameGroup(g);
+                          setDraftText(g.name);
+                        }}
+                      >
+                        改名
+                      </button>
+                      <button
+                        type="button"
+                        className="btn xs"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void copyGroup(g);
+                        }}
+                      >
+                        复制组
+                      </button>
                       <button
                         type="button"
                         className="icb"
                         onClick={(e) => {
                           e.stopPropagation();
+                          const associated = Object.entries(mapping).filter(
+                            ([, group]) => group === g.id,
+                          );
                           removeGroup(g.id);
+                          toast(`已移除 ${g.name}`, {
+                            action: {
+                              label: "撤销",
+                              onClick: () => {
+                                setSelGroupIds((ids) => [...new Set([...ids, g.id])]);
+                                setMapping((current) => ({
+                                  ...current,
+                                  ...Object.fromEntries(associated),
+                                }));
+                              },
+                            },
+                          });
                         }}
                       >
                         <X className="ic12" />
@@ -464,6 +639,11 @@ export function GeneratePage() {
                             >
                               {p.favorite && <i className="favdot" />}
                               {p.code}
+                              {promptEdits[p.id]?.excluded
+                                ? " · 已移出"
+                                : promptEdits[p.id]?.text != null
+                                  ? " · 已改"
+                                  : ""}
                             </button>
                           ))
                         ) : (
@@ -489,12 +669,46 @@ export function GeneratePage() {
             <span className="fw6 fs13">参考图</span>
             {selRefs.length > 0 && <span className="cnt">{selRefs.length} 张</span>}
             <div className="f1" />
+            <button type="button" className="btn xs" onClick={() => go("refs")}>
+              从参考图库选择
+            </button>
             <button type="button" className="btn sm gho" onClick={uploadRefs}>
               <Upload className="ic12" />
               上传
             </button>
           </div>
           <div className="colsc">
+            {checkedRefs.length > 0 && (
+              <div className="fx ac gap6 wrap">
+                <span>已选 {checkedRefs.length} 张</span>
+                <select
+                  className="inp sm"
+                  aria-label="批量分配提示词组"
+                  value=""
+                  onChange={(event) => {
+                    const group = Number(event.target.value);
+                    setMapping((current) => ({
+                      ...current,
+                      ...Object.fromEntries(checkedRefs.map((id) => [id, group])),
+                    }));
+                    setCheckedRefs([]);
+                  }}
+                >
+                  <option value="" disabled>
+                    批量分配提示词组
+                  </option>
+                  <option value="0">清除挂靠</option>
+                  {selGroups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
+                <button className="btn xs" type="button" onClick={() => setCheckedRefs([])}>
+                  清除选择
+                </button>
+              </div>
+            )}
             {selRefs.length === 0 ? (
               <div className="empt">
                 <div className="fs13 fw5 t2">尚未选择参考图</div>
@@ -515,6 +729,7 @@ export function GeneratePage() {
                   return (
                     <div
                       key={r.id}
+                      id={`gen-ref-${r.id}`}
                       className={cn("rt", cc, apop === r.id && "pz")}
                       onMouseEnter={() => setHovR(r.id)}
                       onMouseLeave={() => setHovR(null)}
@@ -547,7 +762,7 @@ export function GeneratePage() {
                         }
                         onClick={(e) => {
                           e.stopPropagation();
-                          setApop((c) => (c === r.id ? null : r.id));
+                          setPreviewRef(r);
                         }}
                       >
                         {!src && <span className="phl">参考图</span>}
@@ -583,6 +798,18 @@ export function GeneratePage() {
                         </button>
                       </div>
                       <div className="fx ac gap6">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择 ${r.name}`}
+                          checked={checkedRefs.includes(r.id)}
+                          onChange={(event) =>
+                            setCheckedRefs((ids) =>
+                              event.target.checked
+                                ? [...ids, r.id]
+                                : ids.filter((id) => id !== r.id),
+                            )
+                          }
+                        />
                         <div className="rtname f1" title={r.name}>
                           {r.name}
                         </div>
@@ -605,6 +832,14 @@ export function GeneratePage() {
                         </span>
                         <ChevronDown className="ic12" />
                       </button>
+                      <div className="fx ac gap6">
+                        <button type="button" className="btn xs" onClick={() => setReplaceRef(r)}>
+                          替换原图
+                        </button>
+                        <button type="button" className="btn xs" onClick={() => setAttachTo(r)}>
+                          参考顺序 · {1 + (attachments[r.id]?.length ?? 0)} 张
+                        </button>
+                      </div>
                       {apop === r.id && (
                         <div className="apop">
                           {selGroups.length === 0 ? (
@@ -613,7 +848,8 @@ export function GeneratePage() {
                             </div>
                           ) : (
                             selGroups.map((g2) => (
-                              <div
+                              <button
+                                type="button"
                                 key={g2.id}
                                 className="apopi"
                                 onClick={(e) => {
@@ -630,7 +866,7 @@ export function GeneratePage() {
                                 {mapping[r.id] === g2.id && (
                                   <Check className="ic12" style={{ color: "var(--acc2)" }} />
                                 )}
-                              </div>
+                              </button>
                             ))
                           )}
                         </div>
@@ -675,7 +911,7 @@ export function GeneratePage() {
             type="button"
             className="fs12 nowrap"
             style={{ color: "var(--wr)", textDecoration: "underline" }}
-            onClick={() => go("settings")}
+            onClick={() => openSettings("s-keys")}
           >
             无可用 API Key · 去设置
           </button>
@@ -688,17 +924,30 @@ export function GeneratePage() {
         >
           参数 {paramShort} {paramErr && <span style={{ color: "var(--wr)" }}>· 有误</span>} ▾
         </button>
-        {(!selGroups.length || !selRefs.length || !allMapped || !hasUsableKey) && (
-          <span role="status" className="fs11 t3">
-            {[
-              !selGroups.length && "导入提示词",
-              !selRefs.length && "上传参考图",
-              selRefs.length > 0 && !allMapped && "分配提示词组",
-              !hasUsableKey && "配置可用 Key",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
+        {!selGroups.length && (
+          <button type="button" className="btn xs" onClick={importTxt}>
+            导入提示词
+          </button>
+        )}
+        {!selRefs.length && (
+          <button type="button" className="btn xs" onClick={uploadRefs}>
+            上传参考图
+          </button>
+        )}
+        {!!selRefs.length && !allMapped && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              const item = selRefs.find((ref) => !selGroupIds.includes(mapping[ref.id] ?? 0));
+              if (item) {
+                setApop(item.id);
+                document.getElementById(`gen-ref-${item.id}`)?.scrollIntoView({ block: "nearest" });
+              }
+            }}
+          >
+            定位未挂靠图
+          </button>
         )}
         <button
           type="button"
@@ -717,7 +966,27 @@ export function GeneratePage() {
               <span className="fw6 fs12">生成参数</span>
               <span className="fs11 t3">未设置 = 跟随提示词与模型默认</span>
               <div className="f1" />
-              <button type="button" className="icb" onClick={() => setParamPop(false)}>
+              <button
+                type="button"
+                className="btn xs"
+                onClick={() => {
+                  setAspectRatio(null);
+                  setSize(null);
+                  setOutputFormat(null);
+                  setQuality("high");
+                  setWatermark("none");
+                  setClearAiMetadata(true);
+                  setRemoveC2pa(true);
+                }}
+              >
+                恢复默认
+              </button>
+              <button
+                type="button"
+                className="icb"
+                aria-label="关闭生成参数"
+                onClick={() => setParamPop(false)}
+              >
                 <X className="ic12" />
               </button>
             </div>
@@ -734,6 +1003,11 @@ export function GeneratePage() {
             </div>
             <div className="prow2 mt8">
               <span className="plabel">精确尺寸</span>
+              {aspectRatio && (
+                <button type="button" className="btn xs" onClick={() => pickRatio(aspectRatio)}>
+                  采用配套尺寸
+                </button>
+              )}
               <input
                 className="inp"
                 style={{ width: 148 }}
@@ -902,6 +1176,16 @@ export function GeneratePage() {
             />
             {/* 把「远端到底会收到什么」摆在确认前：设置了却没生效，只能在这里被看见。 */}
             <SummaryLine label="接口参数" value={wireParamsLabel(wire)} />
+            {selRefs.map((ref) => (
+              <SummaryLine
+                key={ref.id}
+                label={ref.name}
+                value={[ref.id, ...(attachments[ref.id] ?? [])]
+                  .map((id, i) => `Image ${i + 1} · ${refById.get(id)?.name ?? `#${id}`}`)
+                  .join(" / ")}
+              />
+            ))}
+            <SummaryLine label="落盘位置" value="作品目录 / _草稿 / 生成图片" />
             <div>
               <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
                 参与的启用 Key（{enabledKeys.length}）
@@ -932,7 +1216,218 @@ export function GeneratePage() {
           index={viewer.index}
           onIndex={(i) => setViewer((v) => (v ? { ...v, index: i } : v))}
           onClose={() => setViewer(null)}
+          onEdit={(item) => {
+            setViewer(null);
+            setEditPrompt(item);
+            setDraftText(promptEdits[item.id]?.text ?? item.text);
+          }}
+          onExclude={(item) => {
+            const prior = promptEdits[item.id] ?? { text: null, excluded: false };
+            setPromptEdits((edits) => ({
+              ...edits,
+              [item.id]: { ...prior, excluded: !prior.excluded },
+            }));
+            toast(prior.excluded ? "已放回本次" : "已从本次移除", {
+              action: {
+                label: "撤销",
+                onClick: () => setPromptEdits((edits) => ({ ...edits, [item.id]: prior })),
+              },
+            });
+            setViewer(null);
+          }}
         />
+      )}
+      {promptFiles.length > 0 && (
+        <Modal title="拖入的提示词文件" onClose={() => setPromptFiles([])}>
+          {promptFiles.map((path) => (
+            <div key={path} className="fx ac gap8 mt6">
+              <span className="f1">{path}</span>
+              <button
+                type="button"
+                className="btn xs"
+                onClick={() => {
+                  setPromptFiles((current) => current.filter((file) => file !== path));
+                  void parseTxt(path);
+                }}
+              >
+                解析预览
+              </button>
+            </div>
+          ))}
+        </Modal>
+      )}
+      {pasteOpen && (
+        <Modal
+          title="粘贴提示词"
+          onClose={() => setPasteOpen(false)}
+          footer={
+            <button
+              type="button"
+              className="btn pri"
+              disabled={!pasteText.trim()}
+              onClick={async () => {
+                try {
+                  setImportPreview(await unwrap(commands.parsePromptText(pasteText)));
+                  setPasteOpen(false);
+                  setPasteText("");
+                } catch (error) {
+                  toast.error(String(error));
+                }
+              }}
+            >
+              解析预览
+            </button>
+          }
+        >
+          <p className="fs11 t3">
+            直接粘贴一段正文，或用「【分组名】」分组，空行分隔多条。导入预览可继续调整。
+          </p>
+          <textarea
+            className="ta w100"
+            rows={8}
+            aria-label="待导入的提示词"
+            value={pasteText}
+            onChange={(event) => setPasteText(event.target.value)}
+          />
+        </Modal>
+      )}
+      {(editPrompt || renameGroup) && (
+        <Modal
+          title={editPrompt ? "编辑本批提示词副本" : "修改分组名"}
+          onClose={() => {
+            setEditPrompt(null);
+            setRenameGroup(null);
+          }}
+          footer={
+            <button
+              type="button"
+              className="btn pri"
+              disabled={!draftText.trim()}
+              onClick={async () => {
+                try {
+                  if (editPrompt) {
+                    const prior = promptEdits[editPrompt.id] ?? { text: null, excluded: false };
+                    setPromptEdits((edits) => ({
+                      ...edits,
+                      [editPrompt.id]: { ...prior, text: draftText.trim() },
+                    }));
+                    toast.success("已保存本批副本", {
+                      action: {
+                        label: "撤销",
+                        onClick: () =>
+                          setPromptEdits((edits) => ({ ...edits, [editPrompt.id]: prior })),
+                      },
+                    });
+                  } else if (renameGroup) {
+                    await unwrap(commands.renamePromptGroup(renameGroup.id, draftText));
+                    await load();
+                  }
+                  setEditPrompt(null);
+                  setRenameGroup(null);
+                } catch (error) {
+                  toast.error(String(error));
+                }
+              }}
+            >
+              保存
+            </button>
+          }
+        >
+          <textarea
+            className="ta w100"
+            aria-label={editPrompt ? "本批提示词" : "分组名称"}
+            rows={editPrompt ? 8 : 2}
+            value={draftText}
+            onChange={(event) => setDraftText(event.target.value)}
+          />
+          {editPrompt && <p className="fs11 t3">本批副本只写入提交后的任务快照，可随时撤销。</p>}
+        </Modal>
+      )}
+      {replaceRef && (
+        <Modal
+          title="替换参考图"
+          onClose={() => setReplaceRef(null)}
+          footer={
+            <button className="btn pri" type="button" onClick={() => void replaceImage()}>
+              选择新图
+            </button>
+          }
+        >
+          <div className="fx ac gap8">
+            <img
+              width={90}
+              src={assetSrc(replaceRef.thumbPath) ?? undefined}
+              alt={replaceRef.name}
+            />
+            <span>替换 {replaceRef.name}，沿用当前提示词挂靠和附加参考图。</span>
+          </div>
+        </Modal>
+      )}
+      {attachTo && (
+        <Modal title="一条任务的参考图顺序" onClose={() => setAttachTo(null)}>
+          <p className="fs11 t3">Image 1 是主图。以下附加参考图随这一组提示词按序发送。</p>
+          <div className="chip">Image 1 · {attachTo.name}</div>
+          {(attachments[attachTo.id] ?? []).map((id, index, list) => (
+            <div className="fx ac gap6 mt6" key={id}>
+              <span className="f1">
+                Image {index + 2} · {refById.get(id)?.name ?? `#${id}`}
+              </span>
+              {[-1, 1].map((direction) => (
+                <button
+                  key={direction}
+                  type="button"
+                  className="btn xs"
+                  disabled={index + direction < 0 || index + direction >= list.length}
+                  onClick={() => {
+                    const reordered = list.filter((item) => item !== id);
+                    reordered.splice(index + direction, 0, id);
+                    updateAttachment(attachTo.id, reordered);
+                  }}
+                >
+                  {direction < 0 ? "上移" : "下移"}
+                </button>
+              ))}
+              <button
+                type="button"
+                className="btn xs"
+                onClick={() =>
+                  updateAttachment(
+                    attachTo.id,
+                    list.filter((item) => item !== id),
+                  )
+                }
+              >
+                移除
+              </button>
+            </div>
+          ))}
+          <select
+            className="inp sm mt10"
+            aria-label="添加附加参考图"
+            value=""
+            disabled={(attachments[attachTo.id]?.length ?? 0) >= 15}
+            onChange={(event) =>
+              updateAttachment(attachTo.id, [
+                ...(attachments[attachTo.id] ?? []),
+                Number(event.target.value),
+              ])
+            }
+          >
+            <option value="" disabled>
+              添加附加参考图
+            </option>
+            {[...refById.values()]
+              .filter(
+                (ref) =>
+                  ref.id !== attachTo.id && !(attachments[attachTo.id] ?? []).includes(ref.id),
+              )
+              .map((ref) => (
+                <option key={ref.id} value={ref.id}>
+                  {ref.name}
+                </option>
+              ))}
+          </select>
+        </Modal>
       )}
       {previewRef && (
         <OriginalPreview
@@ -1093,6 +1588,8 @@ function PromptViewer({
   index,
   onIndex,
   onClose,
+  onEdit,
+  onExclude,
 }: {
   prompts: PromptView[] | undefined;
   group: GroupView | undefined;
@@ -1100,6 +1597,8 @@ function PromptViewer({
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
+  onEdit: (item: PromptView) => void;
+  onExclude: (item: PromptView) => void;
 }) {
   const p = prompts?.[index];
   const total = prompts?.length ?? 0;
@@ -1134,6 +1633,16 @@ function PromptViewer({
           >
             下一条 ›
           </button>
+          {p && (
+            <>
+              <button type="button" className="btn xs" onClick={() => onEdit(p)}>
+                编辑本批副本
+              </button>
+              <button type="button" className="btn xs" onClick={() => onExclude(p)}>
+                移出 / 放回
+              </button>
+            </>
+          )}
           <div className="f1" />
           <button
             type="button"

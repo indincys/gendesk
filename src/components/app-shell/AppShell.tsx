@@ -2,7 +2,13 @@ import { HelpPanel } from "@/components/HelpPanel";
 import { Onboarding } from "@/components/Onboarding";
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { TitleBar } from "@/components/app-shell/TitleBar";
-import { commands, subscribeIntake, subscribeLivePhoto, unwrap } from "@/lib/ipc";
+import {
+  commands,
+  subscribeIntake,
+  subscribeLivePhoto,
+  subscribeShellHelp,
+  unwrap,
+} from "@/lib/ipc";
 import { useGlobalKeyboard } from "@/lib/keyboard";
 import { ROUTE_BY_KEY } from "@/routes";
 import { useEngineStore } from "@/stores/engine";
@@ -28,6 +34,14 @@ export function AppShell() {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    const subscription = subscribeShellHelp((onboarding) => {
+      if (onboarding) useUiStore.getState().setOnboardingOpen(true);
+      else useUiStore.getState().openHelp();
+    });
+    return () => void subscription.then((unlisten) => unlisten());
+  }, []);
 
   useEffect(() => {
     const subscription = subscribeLivePhoto((error) => {
@@ -81,6 +95,19 @@ export function AppShell() {
             j.message
               ? `收到工单「${j.jobId}」· 批次 ${b} · ${j.message}`
               : `收到工单「${j.jobId}」· 批次 ${b} · ${j.taskCount} 张已开跑`,
+            {
+              action:
+                j.batchIds[0] === undefined
+                  ? undefined
+                  : {
+                      label: "打开批次",
+                      onClick: () => {
+                        const id = j.batchIds[0];
+                        if (id !== undefined)
+                          useUiStore.getState().openBatch(j.message ? "review" : "tasks", id);
+                      },
+                    },
+            },
           );
         } else if (j.status === "hold") {
           // 超阈值：琥珀而不是红——它不是错误，是在等人表态。放行只在 Agent 里经用户同意后

@@ -87,6 +87,7 @@ function clip(over: Partial<ClipView> = {}): ClipView {
     videoResolution: null,
     submitId: "sub-1",
     creditCount: null,
+    videoPresent: null,
     videoPath: "/clips/1.mp4",
     posterPath: "/clips/1.jpg",
     width: 720,

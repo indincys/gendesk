@@ -34,6 +34,8 @@ function task(id: number, status = "run"): TaskView {
     promptId: id,
     promptCode: `P-${id}`,
     promptTitle: null,
+    style: "",
+    workId: null,
     groupName: "group",
     apiKeyId: 1,
     keyAlias: "key",

@@ -55,12 +55,14 @@ export function MediaActions({
   label = "原件",
   paths,
   onPreview,
+  actions = [],
   children,
 }: {
   path: string;
   label?: string;
   paths?: string[] | undefined;
   onPreview?: () => void;
+  actions?: { label: string; run: () => void }[];
   children?: ReactNode;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -153,6 +155,11 @@ export function MediaActions({
           <button type="button" onClick={() => act(() => void exportOriginals(paths ?? [path]))}>
             {paths && paths.length > 1 ? `导出所选原件 · ${paths.length} 个` : "导出原件…"}
           </button>
+          {actions.map((item) => (
+            <button key={item.label} type="button" onClick={() => act(item.run)}>
+              {item.label}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -163,15 +170,36 @@ export function OriginalPreview({
   path,
   title,
   onClose,
+  previous,
+  next,
 }: {
   path: string;
   title: string;
   onClose: () => void;
+  previous?: (() => void) | undefined;
+  next?: (() => void) | undefined;
 }) {
   const [actualSize, setActualSize] = useState(false);
   const [failed, setFailed] = useState(false);
   return (
-    <Modal title={title} width="w700" onClose={onClose} headerExtra={<MediaActions path={path} />}>
+    <Modal
+      title={title}
+      width="w700"
+      onClose={onClose}
+      headerExtra={<MediaActions path={path} />}
+      footer={
+        previous || next ? (
+          <>
+            <button type="button" className="btn sm" disabled={!previous} onClick={previous}>
+              上一张
+            </button>
+            <button type="button" className="btn sm" disabled={!next} onClick={next}>
+              下一张
+            </button>
+          </>
+        ) : undefined
+      }
+    >
       {failed ? (
         <div className="bigempty">原件无法预览，可尝试用系统应用打开。</div>
       ) : (

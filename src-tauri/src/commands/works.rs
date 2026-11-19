@@ -52,6 +52,12 @@ pub struct WorkFilter {
     /// 只看某一批次。
     #[serde(default)]
     pub batch_id: Option<i64>,
+    #[serde(default)]
+    pub work_id: Option<i64>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub product: Option<String>,
 }
 
 /// 编号与组名读**作品自己的快照列**（0027），不再 JOIN prompts/prompt_groups。
@@ -89,6 +95,15 @@ pub async fn list_works(
     if filter.batch_id.is_some() {
         conds.push("w.batch_id = ?".into());
     }
+    if filter.work_id.is_some() {
+        conds.push("w.id = ?".into());
+    }
+    if filter.style.is_some() {
+        conds.push("COALESCE(json_extract(w.organization_json,'$.style'),'') = ?".into());
+    }
+    if filter.product.is_some() {
+        conds.push("COALESCE(json_extract(w.organization_json,'$.product'),'') = ?".into());
+    }
     // 全文搜索一次覆盖四处：编号 / 分组名 / 参考图名 / 提示词正文。
     // 分开成四个筛选器毫无意义——人搜的时候并不知道自己记住的是哪一处。
     let query = filter
@@ -123,6 +138,15 @@ pub async fn list_works(
     }
     if let Some(b) = filter.batch_id {
         q = q.bind(b);
+    }
+    if let Some(id) = filter.work_id {
+        q = q.bind(id);
+    }
+    if let Some(style) = filter.style {
+        q = q.bind(style);
+    }
+    if let Some(product) = filter.product {
+        q = q.bind(product);
     }
     if let Some(pat) = &query {
         q = q
@@ -311,6 +335,20 @@ pub(crate) async fn reexport_from_snapshot(
     results_dir: std::path::PathBuf,
     id: i64,
 ) -> AppResult<()> {
+    let (src, image_path) = work_snapshot(pool, results_dir, id).await?;
+    let dst = std::path::PathBuf::from(&image_path);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::Io(e.to_string()))?;
+    }
+    std::fs::copy(&src, &dst).map_err(|e| AppError::Io(e.to_string()))?;
+    Ok(())
+}
+
+async fn work_snapshot(
+    pool: &sqlx::SqlitePool,
+    results_dir: std::path::PathBuf,
+    id: i64,
+) -> AppResult<(std::path::PathBuf, String)> {
     let row: Option<(Option<i64>, String)> =
         sqlx::query_as("SELECT task_id, image_path FROM accepted_works WHERE id = ?1")
             .bind(id)
@@ -345,12 +383,26 @@ pub(crate) async fn reexport_from_snapshot(
             "资产区源快照已不存在（可能随批次清理删除），无法重新导出".into(),
         ));
     }
-    let dst = std::path::PathBuf::from(&image_path);
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::Io(e.to_string()))?;
-    }
-    std::fs::copy(&src, &dst).map_err(|e| AppError::Io(e.to_string()))?;
-    Ok(())
+    Ok((src, image_path))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn export_work_snapshot(
+    state: State<'_, AppState>,
+    id: i64,
+    destination: String,
+) -> AppResult<String> {
+    let (source, prior) = work_snapshot(&state.db, state.dirs.results(), id).await?;
+    let name = std::path::Path::new(&prior)
+        .file_name()
+        .ok_or_else(|| AppError::InvalidInput("作品文件名无法识别".into()))?;
+    let target = std::path::Path::new(&destination).join(name);
+    let copy_target = target.clone();
+    tokio::task::spawn_blocking(move || crate::files::copy::copy_new(&source, &copy_target))
+        .await
+        .map_err(|error| AppError::Io(error.to_string()))??;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

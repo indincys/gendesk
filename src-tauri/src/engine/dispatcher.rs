@@ -15,7 +15,8 @@ use tokio::time::Instant;
 
 use super::classify::{classify, decide, ErrorType};
 use super::events::{
-    BatchSummary, KeyHealth, KeyState, SharedSink, TaskProgress, TaskStatusChanged,
+    BatchSummary, KeyHealth, KeyState, NotificationKind, SharedSink, TaskProgress,
+    TaskStatusChanged,
 };
 use super::progress::{compute_pct, expected_from_history, Phase};
 use super::status::TaskStatus;
@@ -310,6 +311,12 @@ impl Scheduler {
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
     }
+    pub fn retry_ready_at(&self, task_id: i64) -> Option<i64> {
+        let at = *lock(&self.ready_retry).get(&task_id)?;
+        let remaining = at.saturating_duration_since(Instant::now()).as_secs();
+        Some(now_unix().saturating_add(remaining as i64))
+    }
+
     pub fn notify(&self) {
         self.notify.notify_one();
     }
@@ -928,6 +935,7 @@ impl Scheduler {
             success_rate: 0.0,
         });
         self.sink.notify(
+            NotificationKind::Failure,
             "API Key 已熔断".into(),
             format!("Key #{id} 连续鉴权/欠费失败已达 {CIRCUIT_BREAK_THRESHOLD} 次，已自动停用。请到设置检查并恢复。"),
         );
@@ -957,6 +965,7 @@ impl Scheduler {
         }
         self.paused.store(true, Ordering::SeqCst);
         self.sink.notify(
+            NotificationKind::Failure,
             "队列已自动暂停".into(),
             format!("连续 {threshold} 个任务失败，队列已自动暂停以防继续消耗额度。请检查设置后继续队列。"),
         );
@@ -1051,6 +1060,7 @@ impl Scheduler {
     async fn notify_batch_complete(&self, batch_id: i64) {
         if let Ok(c) = task_repo::counts_for_batch(&self.pool, batch_id).await {
             self.sink.notify(
+                NotificationKind::Batch,
                 format!("批次 #{batch_id} 已完成"),
                 format!(
                     "共 {} 个任务：待验收 {} · 通过 {} · 未通过 {} · 失败 {}",

@@ -8,6 +8,7 @@ import {
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
+import { PosterBatchLink } from "@/features/settings/PosterBatchLink";
 import { assetSrc, bg } from "@/lib/img";
 import { type GroupView, type PurposeView, type WorkView, commands, unwrap } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -50,6 +51,11 @@ export function WorksPage() {
   const jumpBatch = useUiStore((s) => s.jumpBatch);
   const openBatch = useUiStore((s) => s.openBatch);
   const [batchFilter, setBatchFilter] = useState(jumpBatch);
+  const jumpWork = useUiStore((s) => s.jumpWork);
+  const workStyle = useUiStore((s) => s.workStyle);
+  const [workFilter, setWorkFilter] = useState(jumpWork);
+  const [styleFilter, setStyleFilter] = useState(workStyle);
+  const [reference, setReference] = useState<{ path: string; name: string } | null>(null);
   const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
   const [works, setWorks] = useState<WorkView[]>([]);
   const [groups, setGroups] = useState<GroupView[]>([]);
@@ -86,6 +92,9 @@ export function WorksPage() {
         tag: purposeFilter,
         query: query.trim() === "" ? null : query.trim(),
         batchId: batchFilter,
+        workId: workFilter,
+        style: styleFilter?.style ?? null,
+        product: styleFilter?.product || null,
       };
       const rows = await unwrap(commands.listWorks(f, page));
       setWorks(rows);
@@ -94,7 +103,7 @@ export function WorksPage() {
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [groupFilter, favOnly, purposeFilter, query, page, batchFilter]);
+  }, [groupFilter, favOnly, purposeFilter, query, page, batchFilter, workFilter, styleFilter]);
 
   useEffect(() => {
     void unwrap(commands.listPurposes())
@@ -332,6 +341,31 @@ export function WorksPage() {
   return (
     <PageScaffold title="作品库" caption={`本页 ${works.length} 张已通过`}>
       <div className="fbar">
+        {styleFilter && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              setStyleFilter(null);
+              setPage(0);
+            }}
+          >
+            {styleFilter.product && `${styleFilter.product} · `}
+            {styleFilter.style} ×
+          </button>
+        )}
+        {workFilter !== null && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              setWorkFilter(null);
+              setPage(0);
+            }}
+          >
+            作品 #{workFilter} ×
+          </button>
+        )}
         {batchFilter != null && (
           <button
             type="button"
@@ -626,7 +660,28 @@ export function WorksPage() {
                 }}
               />
               <div className="fx ac gap6 mt10 wrap">
-                <span className="chip">{detail.refName}</span>
+                {detail.refImageId != null && detail.refName && (
+                  <button
+                    type="button"
+                    className="btn xs"
+                    onClick={async () => {
+                      try {
+                        const rows = await unwrap(
+                          commands.generationReferences(
+                            detail.refImageId === null ? [] : [detail.refImageId],
+                          ),
+                        );
+                        const row = rows[0];
+                        if (!row) throw new Error("参考图记录已移除");
+                        setReference({ path: row.filePath, name: row.name });
+                      } catch (error) {
+                        toast.error(String(error));
+                      }
+                    }}
+                  >
+                    查看参考图 · {detail.refName}
+                  </button>
+                )}
                 <span className="chip">{fmtDate(detail.acceptedAt)}</span>
                 {detail.batchId != null && (
                   <button
@@ -639,6 +694,7 @@ export function WorksPage() {
                   </button>
                 )}
               </div>
+              <PosterBatchLink batchId={detail.batchId ?? 0} workId={detail.id} />
               <div className="pathwell mt10" style={{ fontSize: "10.5px" }}>
                 {detail.imagePath}
               </div>
@@ -666,15 +722,41 @@ export function WorksPage() {
                 <MediaActions path={detail.imagePath} />
               </div>
               {sourceMissing && (
-                <button
-                  type="button"
-                  className="btn sm mt6 w100"
-                  style={{ justifyContent: "center" }}
-                  onClick={() => void reexport(detail)}
-                >
-                  <RefreshCw className="ic12" />
-                  重新导出
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn sm mt6 w100"
+                    style={{ justifyContent: "center" }}
+                    onClick={() => void reexport(detail)}
+                  >
+                    <RefreshCw className="ic12" />
+                    重建原输出
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm mt6 w100"
+                    onClick={async () => {
+                      try {
+                        const dir = await unwrap(commands.pickOutputDir());
+                        if (!dir) return;
+                        const path = await unwrap(commands.exportWorkSnapshot(detail.id, dir));
+                        toast.success("已导出内部快照", {
+                          action: {
+                            label: "显示文件",
+                            onClick: () =>
+                              void unwrap(commands.openPathInFolder(path)).catch((error) =>
+                                toast.error(String(error)),
+                              ),
+                          },
+                        });
+                      } catch (error) {
+                        toast.error(String(error));
+                      }
+                    }}
+                  >
+                    导出内部快照到…
+                  </button>
+                </>
               )}
             </div>
             <div className="f1" style={{ minWidth: 0 }}>
@@ -706,6 +788,31 @@ export function WorksPage() {
                   <Wand2 className="ic12" />
                   用此配置再生成
                 </button>
+                {detail.inPipeline && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={async () => {
+                      try {
+                        const linked = await unwrap(commands.relatedClip(detail.id));
+                        if (!linked) {
+                          toast.info("相关视频已移入废纸篓或已移除");
+                          return;
+                        }
+                        useUiStore
+                          .getState()
+                          .openClip(
+                            linked[1] === "pass" || linked[1] === "rej" ? "clips" : "v2v",
+                            linked[0],
+                          );
+                      } catch (error) {
+                        toast.error(String(error));
+                      }
+                    }}
+                  >
+                    定位关联视频
+                  </button>
+                )}
                 {!detail.inPipeline && (
                   <button
                     type="button"
@@ -731,19 +838,32 @@ export function WorksPage() {
         </Modal>
       )}
 
+      {reference && (
+        <OriginalPreview
+          path={reference.path}
+          title={reference.name}
+          onClose={() => setReference(null)}
+        />
+      )}
       {fullSize && detail && (
         <OriginalPreview
           key={detail.id}
           title={detail.promptCode}
           path={detail.imagePath}
+          previous={detailIndex > 0 ? () => setDetail(works[detailIndex - 1] ?? detail) : undefined}
+          next={
+            detailIndex >= 0 && detailIndex < works.length - 1
+              ? () => setDetail(works[detailIndex + 1] ?? detail)
+              : undefined
+          }
           onClose={() => setFullSize(false)}
         />
       )}
       {confirmDel && (
         <ConfirmModal
-          title="删除作品"
+          title="将作品移入废纸篓"
           desc="删除后作品记录进入废纸篓，清理后不可恢复；已导出到本地文件夹的图片文件不会被删除（需自行清理）。"
-          confirmLabel="删除"
+          confirmLabel="移入废纸篓"
           danger
           onConfirm={() => del(confirmDel)}
           onClose={() => setConfirmDel(null)}

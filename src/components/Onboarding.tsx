@@ -21,6 +21,8 @@ export function Onboarding() {
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
   const go = useUiStore((s) => s.go);
+  const reopening = useUiStore((s) => s.onboardingOpen);
+  const setReopening = useUiStore((s) => s.setOnboardingOpen);
   const route = useUiStore((s) => s.route);
   const [steps, setSteps] = useState<Step[] | null>(null);
 
@@ -84,8 +86,8 @@ export function Onboarding() {
   // 未完成引导时：挂载 + 每次切页回来重新校验各步完成度。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 依赖 route 触发重查
   useEffect(() => {
-    if (settings && !settings.onboarded) void check();
-  }, [settings?.onboarded, route, check]);
+    if (settings && (!settings.onboarded || reopening)) void check();
+  }, [settings?.onboarded, route, check, reopening]);
 
   // 四步齐备 → 持久化完成，永久消失。
   useEffect(() => {
@@ -94,7 +96,7 @@ export function Onboarding() {
     }
   }, [steps, settings, update]);
 
-  if (!settings || settings.onboarded || !steps) return null;
+  if (!settings || (settings.onboarded && !reopening) || !steps) return null;
 
   return (
     <div className="onbwrap">
@@ -104,15 +106,26 @@ export function Onboarding() {
           <button
             type="button"
             className="fs11 t3"
-            onClick={() => void update({ onboarded: true })}
-            title="跳过引导（可在完成任一步后消失）"
+            onClick={() => {
+              if (reopening) setReopening(false);
+              else void update({ onboarded: true });
+            }}
           >
-            跳过
+            {reopening ? "关闭引导" : "跳过"}
           </button>
         </div>
         <div className="col mt10" style={{ gap: 8 }}>
           {steps.map((s, i) => (
-            <button key={s.key} type="button" className="onbstep" onClick={() => go(s.route)}>
+            <button
+              key={s.key}
+              type="button"
+              className="onbstep"
+              onClick={() => {
+                setReopening(false);
+                if (s.key === "key") useUiStore.getState().openSettings("s-keys");
+                else go(s.route);
+              }}
+            >
               <span className={s.done ? "onbtick done" : "onbtick"}>
                 {s.done ? <Check className="ic12" /> : i + 1}
               </span>
@@ -120,7 +133,7 @@ export function Onboarding() {
                 <span className="fs12 fw5">{s.label}</span>
                 <span className="fs11 t3">{s.hint}</span>
               </span>
-              <span className="fs11 t3">{s.done ? "已完成" : "去设置 ›"}</span>
+              <span className="fs11 t3">{s.done ? "已完成" : "前往 ›"}</span>
             </button>
           ))}
         </div>

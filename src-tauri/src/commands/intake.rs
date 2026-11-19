@@ -104,7 +104,7 @@ fn notify_job(app: &AppHandle, j: &JobView) {
             format!("{} · {}", j.job_id, j.message),
         ),
     };
-    sink.notify(title, body);
+    sink.notify(crate::engine::events::NotificationKind::Intake, title, body);
 }
 
 /// 投单时按当前绑定与 Poster 商品目录检查归属。读不到 Poster（未安装、接口超时）时
@@ -189,4 +189,10 @@ pub async fn open_agent_root(app: AppHandle) -> AppResult<()> {
     app.opener()
         .open_path(root.to_string_lossy().as_ref(), None::<&str>)
         .map_err(|e| crate::error::AppError::Io(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn recent_intake_jobs(state: tauri::State<'_, AppState>) -> AppResult<Vec<JobView>> {
+    Ok(crate::db::repo::intake::list_recent(&state.db, 50).await?)
 }

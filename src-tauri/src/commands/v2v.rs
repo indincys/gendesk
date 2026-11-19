@@ -481,6 +481,69 @@ pub struct ChannelStat {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn v2v_credit_entries(
+    state: State<'_, AppState>,
+    range: CreditRange,
+    bucket: Option<String>,
+    channel: Option<String>,
+    outcome: Option<String>,
+    offset: i64,
+) -> AppResult<Vec<repo::CreditEntry>> {
+    Ok(repo::credit_event_entries(
+        &state.db,
+        repo::CreditEntryFilter {
+            since: range.since(now_unix()),
+            monthly: matches!(range, CreditRange::All),
+            bucket: bucket.as_deref(),
+            channel: channel.as_deref(),
+            outcome: outcome.as_deref(),
+            offset,
+        },
+    )
+    .await?)
+}
+
+/// Export only filterable structured fields. Command arguments and remote output can contain secrets.
+#[tauri::command]
+#[specta::specta]
+pub async fn export_v2v_activity(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    sequence: Vec<i64>,
+) -> AppResult<Option<String>> {
+    use std::fmt::Write as _;
+    use tauri_plugin_dialog::DialogExt;
+    let selected: std::collections::HashSet<i64> = sequence.into_iter().collect();
+    let mut output = String::from("时间（Unix 秒）\t级别\t阶段\t条目编号\n");
+    let mut count = 0;
+    for row in state.v2v_log.snapshot() {
+        if selected.contains(&row.seq) {
+            let code = row.code.replace(['\t', '\r', '\n'], " ");
+            let _ = writeln!(output, "{}\t{}\t{}\t{}", row.at, row.level, row.phase, code);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err(AppError::InvalidInput(
+            "当前日志已清理或没有匹配条目".into(),
+        ));
+    }
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("脱敏日志", &["tsv"])
+        .set_file_name("GenDesk 视频日志.tsv")
+        .blocking_save_file()
+        .and_then(|path| path.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    tokio::fs::write(&path, output).await?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn v2v_queue_stats(state: State<'_, AppState>) -> AppResult<QueueStats> {
     let now = now_unix();
     let s = load_settings(&state.db).await?;
@@ -913,6 +976,7 @@ pub struct ClipView {
     pub submit_id: Option<String>,
     pub credit_count: Option<i64>,
     pub video_path: Option<String>,
+    pub video_present: Option<bool>,
     pub poster_path: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -1024,6 +1088,7 @@ impl From<repo::ClipRow> for ClipView {
             submit_id: r.submit_id,
             credit_count: r.credit_count,
             video_path: r.video_path,
+            video_present: None,
             poster_path: r.poster_path,
             width: r.width,
             height: r.height,
@@ -1076,6 +1141,13 @@ pub async fn list_v2v_clips(
         rows.into_iter()
             .map(|row| {
                 let mut clip = ClipView::from(row);
+                if clip.stage == "pass" || clip.stage == "rej" {
+                    clip.video_present = Some(
+                        clip.video_path
+                            .as_deref()
+                            .is_some_and(|path| Path::new(path).is_file()),
+                    );
+                }
                 if clip.stage == "pass" {
                     clip.export_present = clip
                         .export_path
@@ -2006,6 +2078,7 @@ pub async fn review_v2v_clips(
     pass: bool,
 ) -> AppResult<V2vAction> {
     let now = now_unix();
+    let _guard = state.trash_lock.lock().await;
     let requested = ids.len() as i64;
     // 交付目录读一次即可：一轮验收里它不会变，而每条读一次要多几十次 DB 往返。
     let settings = load_settings(&state.db).await?;
@@ -2174,6 +2247,124 @@ async fn export_clip(
         .map_err(|e| AppError::Io(format!("成片交付任务失败：{e}")))?
 }
 
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipTrashResult {
+    pub trash_ids: Vec<i64>,
+    pub skipped: Vec<i64>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn trash_approved_clips(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> AppResult<ClipTrashResult> {
+    let _guard = state.trash_lock.lock().await;
+    let mut tx = state.db.begin().await?;
+    let mut result = ClipTrashResult {
+        trash_ids: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for id in ids {
+        let Some(clip) = repo::get(&mut *tx, id).await? else {
+            result.skipped.push(id);
+            continue;
+        };
+        if clip.stage != "pass" {
+            result.skipped.push(id);
+            continue;
+        }
+        sqlx::query("UPDATE v2v_clips SET archived_at=? WHERE id=?")
+            .bind(now_unix())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let paths = clip
+            .video_path
+            .into_iter()
+            .chain(clip.poster_path.clone())
+            .collect();
+        result.trash_ids.push(
+            trash_repo::insert(
+                &mut tx,
+                &trash_repo::NewTrashItem {
+                    entity_type: "clip".into(),
+                    ref_id: Some(id),
+                    thumb_path: clip.poster_path,
+                    prompt_text: clip.video_prompt,
+                    code: Some(clip.prompt_code),
+                    title: Some(clip.group_name),
+                    source_label: "从成片库移入废纸篓".into(),
+                    file_paths: paths,
+                    payload_json: Some(crate::commands::trash::ARCHIVED_CLIP.into()),
+                },
+            )
+            .await?,
+        );
+    }
+    tx.commit().await?;
+    emit_changed(&state.db, &app, None).await;
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn related_clip(
+    state: State<'_, AppState>,
+    work_id: i64,
+) -> AppResult<Option<(i64, String)>> {
+    Ok(
+        sqlx::query_as("SELECT id,stage FROM v2v_clips WHERE work_id=? AND archived_at IS NULL")
+            .bind(work_id)
+            .fetch_optional(&state.db)
+            .await?,
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn clip_trash_item(state: State<'_, AppState>, clip_id: i64) -> AppResult<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM trash_items WHERE entity_type='clip' AND ref_id=? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(clip_id)
+    .fetch_optional(&state.db)
+    .await?)
+}
+
+#[derive(Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vPriorParams {
+    pub model_version: Option<String>,
+    pub duration: Option<i64>,
+    pub video_resolution: Option<String>,
+}
+
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct V2vPriorRevision {
+    pub params: Option<V2vPriorParams>,
+    pub prompt: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn v2v_prior_revision(
+    state: State<'_, AppState>,
+    id: i64,
+) -> AppResult<V2vPriorRevision> {
+    let (params, prompt): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT prior_params_json,prior_video_prompt FROM v2v_clips WHERE id=? AND archived_at IS NULL",
+    ).bind(id).fetch_optional(&state.db).await?
+        .ok_or_else(|| AppError::InvalidInput("视频条目已移除".into()))?;
+    Ok(V2vPriorRevision {
+        params: params.as_deref().map(serde_json::from_str).transpose()?,
+        prompt,
+    })
+}
+
 /// 重新交付：把成片再拷一次到当前交付目录。
 ///
 /// 三种情况都会走到它，而它们在库里长得一模一样（`stage='pass'` 且 `export_path` 空
@@ -2191,6 +2382,7 @@ pub async fn redeliver_v2v_clips(
     app: AppHandle,
     ids: Vec<i64>,
 ) -> AppResult<i64> {
+    let _guard = state.trash_lock.lock().await;
     let settings = load_settings(&state.db).await?;
     let mut n = 0i64;
     let mut first_err: Option<String> = None;

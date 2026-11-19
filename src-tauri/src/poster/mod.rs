@@ -269,35 +269,73 @@ async fn open_set_batch(
 
 /// 这一组还有几张图没审完（待生成、生成中、重试中、待验收）。生成失败的不等：它要人工恢复，
 /// 恢复后再通过的图散进图片库。批次退休后任务行不在了，自然是 0。
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingImage {
+    pub task_id: i64,
+    pub batch_id: i64,
+    pub code: String,
+    pub name: String,
+    pub status: String,
+}
+
 async fn pending_in_set(pool: &SqlitePool, key: &str, scope: &SetScope) -> AppResult<i64> {
+    Ok(pending_images(pool, key, scope).await?.len() as i64)
+}
+
+async fn pending_images(
+    pool: &SqlitePool,
+    key: &str,
+    scope: &SetScope,
+) -> AppResult<Vec<PendingImage>> {
     let by_scope = match scope {
         SetScope::Submission(_) => "t.batch_id=?",
         SetScope::Staged(_) => "t.batch_id IN (SELECT id FROM batches WHERE poster_group_id=?)",
     };
     let sql = format!(
-        "SELECT t.id,t.params_json,COALESCE(p.sku_code,''),COALESCE(p.style,''),COALESCE(g.name,'')
+        "SELECT t.id,t.batch_id,t.status,t.params_json,COALESCE(p.sku_code,''),
+                COALESCE(p.style,''),COALESCE(g.name,''),COALESCE(p.code,''),COALESCE(p.title,'')
         FROM tasks t LEFT JOIN prompts p ON p.id=t.prompt_id LEFT JOIN prompt_groups g ON g.id=p.group_id
-        WHERE {by_scope} AND t.status IN ('q','run','retry','rev')",
+        WHERE {by_scope} AND t.status IN ('q','run','retry','rev')
+        ORDER BY t.batch_id,t.id",
     );
-    let query = sqlx::query_as(&sql);
-    let rows: Vec<(i64, String, String, String, String)> = match scope {
+    let query = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ),
+    >(&sql);
+    let rows = match scope {
         SetScope::Submission(batch) => query.bind(batch),
         SetScope::Staged(id) => query.bind(id),
     }
     .fetch_all(pool)
     .await?;
-    let mut pending = 0;
-    for (task, params, sku, style, group) in rows {
-        // 与验收时同一口径定归属；归属读不出的任务验收也会报错，不可能进这一组，不等它。
+    let mut pending = Vec::new();
+    for (task_id, batch_id, status, params, sku, style, group, code, title) in rows {
         let organization = match Organization::from_params(&params) {
             Ok(found) => found.unwrap_or_else(|| Organization::legacy(&sku, &style, &group)),
             Err(error) => {
-                tracing::warn!(%error, task, "任务归属无法读取，不计入图片包等待");
+                tracing::warn!(%error, task_id, "任务归属无法读取，不计入图片包等待");
                 continue;
             }
         };
         if set_key(scope, &organization, &sku, &style).as_deref() == Some(key) {
-            pending += 1;
+            pending.push(PendingImage {
+                task_id,
+                batch_id,
+                status,
+                code,
+                name: if title.is_empty() { group } else { title },
+            });
         }
     }
     Ok(pending)

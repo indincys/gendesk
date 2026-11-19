@@ -1,3 +1,4 @@
+import { ConfirmModal } from "@/components/ui/Modal";
 import { MediaActions, copyText, exportOriginals } from "@/features/_shared/MediaActions";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, delivered, deriveRows, fmtAgo, shortModel } from "@/features/v2v/model";
@@ -13,7 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 import { Clapperboard, FolderOpen, RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
@@ -43,6 +44,7 @@ type Deliv = "all" | "missing";
 
 export function V2vClipsPage() {
   const go = useUiStore((s) => s.go);
+  const jumpClip = useUiStore((s) => s.jumpClip);
   const [clips, setClips] = useState<ClipView[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [eff, setEff] = useState<EffectiveParams | null>(null);
@@ -54,6 +56,7 @@ export function V2vClipsPage() {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [cur, setCur] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [trashAsk, setTrashAsk] = useState<number[] | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   const load = useCallback(async () => {
@@ -93,6 +96,21 @@ export function V2vClipsPage() {
 
   const rows = useMemo(() => deriveRows(clips, models, eff, now), [clips, models, eff, now]);
 
+  const locatedClip = useRef<number | null>(null);
+  useEffect(() => {
+    if (jumpClip === null || locatedClip.current === jumpClip) return;
+    const row = rows.find((item) => item.clip.id === jumpClip);
+    if (row?.stage === "pass" || row?.stage === "rej") {
+      locatedClip.current = jumpClip;
+      setTab(row.stage);
+      setCur(row.clip.id);
+      setGroup(null);
+      setQuery("");
+      setDeliv("all");
+    }
+    // Only the loaded target and its phase can change which library section opens.
+  }, [jumpClip, rows]);
+
   const groups = useMemo(() => {
     const m = new Map<string, number>();
     for (const r of rows) {
@@ -111,6 +129,7 @@ export function V2vClipsPage() {
       if (deliv === "missing" && delivered(r.clip)) return false;
       if (q === "") return true;
       return (
+        `#${r.clip.id}` === q ||
         r.clip.promptCode.toLowerCase().includes(q) ||
         r.clip.groupName.toLowerCase().includes(q) ||
         (r.clip.videoPrompt ?? "").toLowerCase().includes(q) ||
@@ -150,6 +169,40 @@ export function V2vClipsPage() {
     },
     [load],
   );
+
+  const trash = async (ids: number[]) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await unwrap(commands.trashApprovedClips(ids));
+      setSel((current) => new Set([...current].filter((id) => result.skipped.includes(id))));
+      toast.success(`已移入废纸篓 ${result.trashIds.length}/${ids.length} 条`, {
+        description: result.skipped.length
+          ? `跳过 ${result.skipped.length} 条，状态已经改变。`
+          : undefined,
+        action: result.trashIds.length
+          ? {
+              label: "撤销",
+              onClick: async () => {
+                try {
+                  const restored = await unwrap(commands.restoreTrashItems(result.trashIds));
+                  toast.success(`已还原 ${restored.restored} 条成片`);
+                  for (const issue of restored.failures) toast.error(issue);
+                  await load();
+                } catch (error) {
+                  toast.error(String(error));
+                }
+              },
+            }
+          : undefined,
+      });
+      await load();
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /** 选中项里真正缺交付的那些 —— 已交付的重拷一次没有意义。 */
   const missing = useMemo(
@@ -303,7 +356,12 @@ export function V2vClipsPage() {
         </div>
 
         {curRow && (
-          <ClipSide row={curRow} busy={busy} onRedeliver={() => void redeliver([curRow.clip.id])} />
+          <ClipSide
+            row={curRow}
+            busy={busy}
+            onRedeliver={() => void redeliver([curRow.clip.id])}
+            onTrash={() => setTrashAsk([curRow.clip.id])}
+          />
         )}
       </div>
 
@@ -316,13 +374,29 @@ export function V2vClipsPage() {
               onClick={() => {
                 const paths = rows
                   .filter((row) => sel.has(row.clip.id))
-                  .flatMap((row) => (row.clip.videoPath ? [row.clip.videoPath] : []));
+                  .flatMap(({ clip }) =>
+                    clip.videoPresent && clip.videoPath
+                      ? [clip.videoPath]
+                      : delivered(clip) && clip.exportPath
+                        ? [clip.exportPath]
+                        : [],
+                  );
                 if (!paths.length) toast.error("所选记录没有可导出的原片");
                 else void exportOriginals(paths);
               }}
             >
-              导出所选原片
+              导出所选视频
             </button>
+            {tab === "pass" && (
+              <button
+                type="button"
+                className="btn xs gho dng"
+                disabled={busy}
+                onClick={() => setTrashAsk([...sel])}
+              >
+                移入废纸篓 · {sel.size} 条
+              </button>
+            )}
             <button type="button" className="btn xs" onClick={() => setSel(new Set())}>
               已选 <b>{sel.size}</b> ✕
             </button>
@@ -358,6 +432,16 @@ export function V2vClipsPage() {
           打开数据目录
         </button>
       </div>
+      {trashAsk && (
+        <ConfirmModal
+          title={`将 ${trashAsk.length} 条成片移入废纸篓`}
+          desc="内部原片将随记录移入废纸篓，可还原到成片库。已交付到外部的副本、源图片和消费账单会保留。"
+          confirmLabel="移入废纸篓"
+          danger
+          onClose={() => setTrashAsk(null)}
+          onConfirm={() => void trash(trashAsk)}
+        />
+      )}
     </div>
   );
 }
@@ -435,13 +519,20 @@ function ClipSide({
   row,
   busy,
   onRedeliver,
-}: { row: Row; busy: boolean; onRedeliver: () => void }) {
+  onTrash,
+}: { row: Row; busy: boolean; onRedeliver: () => void; onTrash: () => void }) {
   const c = row.clip;
-  const video = assetSrc(c.videoPath);
+  const video = c.videoPresent === false ? undefined : assetSrc(c.videoPath);
   return (
     <div className="vinsp">
       <div className="fx ac gap6">
-        <span className="pid">{c.promptCode}</span>
+        <button
+          type="button"
+          className="pid"
+          onClick={() => void copyText(c.promptCode || String(c.id), "条目编号")}
+        >
+          {c.promptCode || `#${c.id}`}
+        </button>
         <span className="f1" />
         <span className="fs10 t3 nowrap ohide">
           {row.modelShort} · {c.groupName || "未分组"}
@@ -470,6 +561,38 @@ function ClipSide({
           </span>
         </div>
       )}
+      <div className="fx ac gap6 mt6 wrap">
+        {c.imagePath && <MediaActions path={c.imagePath} label="源图片" />}
+        <button
+          type="button"
+          className="btn xs"
+          onClick={() => useUiStore.getState().openWork(c.workId)}
+        >
+          查看源作品
+        </button>
+        {row.stage === "rej" && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={async () => {
+              try {
+                const id = await unwrap(commands.clipTrashItem(c.id));
+                if (id === null) toast.info("废纸篓中已没有这条视频的文件记录");
+                else useUiStore.getState().openTrash(id);
+              } catch (error) {
+                toast.error(String(error));
+              }
+            }}
+          >
+            在废纸篓查看
+          </button>
+        )}
+        {row.stage === "pass" && (
+          <button type="button" className="btn xs gho dng" disabled={busy} onClick={onTrash}>
+            移入废纸篓
+          </button>
+        )}
+      </div>
       {/* 交付路径是这一栏最要紧的一件事：clips/clip{id}.mp4 那个内部名字人在 Finder
           里认不出谁是谁，而这里给的是真正交付出去的那份。 */}
       {row.stage === "pass" && (
@@ -482,9 +605,11 @@ function ClipSide({
             </div>
           ) : (
             <div className="vhint er mt5">
-              {c.exportPresent === false
-                ? "交付副本已移动或无法访问。可尝试从流水线原片重新交付。"
-                : "成片还未写入交付目录。可以尝试重新交付。"}
+              {c.videoPresent === false
+                ? "内部原片也不可读取。可回到源作品检查或从备份找回文件。"
+                : c.exportPresent === false
+                  ? "交付副本已移动或无法访问。可从内部原片重新交付。"
+                  : "成片尚未写入交付目录。可从内部原片交付。"}
               {c.exportPath && <div>{c.exportPath}</div>}
             </div>
           )}
@@ -492,7 +617,7 @@ function ClipSide({
             type="button"
             className={cn("btn sm mt5", !delivered(c) && "pri")}
             style={{ width: "100%" }}
-            disabled={busy || c.videoPath == null}
+            disabled={busy || !c.videoPresent}
             onClick={onRedeliver}
             title="把成片再拷一次到当前交付目录"
           >
@@ -502,7 +627,28 @@ function ClipSide({
         </>
       )}
 
-      <div className="vsec">这一条的账</div>
+      <div className="vsec fx ac gap6">
+        这一条的账
+        <button
+          type="button"
+          className="btn xs"
+          onClick={() =>
+            void copyText(
+              [
+                c.promptCode || `#${c.id}`,
+                row.modelShort,
+                c.width && c.height ? `${c.width}×${c.height}` : "规格未知",
+                c.creditCount === null ? "实际扣费未知" : `实际扣费 ${c.creditCount}`,
+                `尝试 ${Math.max(1, c.attempt)} 次`,
+                row.stage,
+              ].join(" · "),
+              "成片信息",
+            )
+          }
+        >
+          复制规格与消费
+        </button>
+      </div>
       <div className="vfacts mt5">
         <Fact k="实际扣费" v={c.creditCount == null ? "—" : `${c.creditCount} 额度`} />
         <Fact k="计费型号" v={c.benefitType ?? "—"} />

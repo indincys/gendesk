@@ -233,6 +233,31 @@ pub async fn parse_prompt_txt(
     build_preview(&state.db, &bytes, stem.as_deref()).await
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn parse_prompt_text(
+    state: State<'_, AppState>,
+    text: String,
+) -> AppResult<ImportPreview> {
+    build_preview(&state.db, text.as_bytes(), Some("粘贴提示词")).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_prompt_group(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> AppResult<()> {
+    let name = name.trim();
+    if name.is_empty() || !repo::rename_group(&state.db, id, name).await? {
+        return Err(AppError::InvalidInput(
+            "请输入有效的分组名，且分组仍在库中".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// txt 字节 → 导入预览（不落库）。
 ///
 /// 从命令里提出来只为一件事：**工单收件（`intake`）与手动导入必须是同一条解析路径**。

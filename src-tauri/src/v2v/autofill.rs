@@ -333,7 +333,11 @@ pub async fn tick(
         );
         log.warn("submit", None, format!("常驻队列告急：{body}"), None);
         use crate::engine::events::EventSink;
-        crate::engine::events::TauriSink::new(app.clone()).notify("视频常驻队列告急".into(), body);
+        crate::engine::events::TauriSink::new(app.clone()).notify(
+            crate::engine::events::NotificationKind::Video,
+            "视频常驻队列告急".into(),
+            body,
+        );
     }
 
     if p.take <= 0 {

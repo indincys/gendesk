@@ -6,8 +6,9 @@ interface SettingsState {
   settings: Settings | null;
   loading: boolean;
   error: string | null;
+  saving: number;
   load: () => Promise<void>;
-  update: (patch: Partial<SettingsPatch>) => Promise<void>;
+  update: (patch: Partial<SettingsPatch>) => Promise<boolean>;
 }
 
 /** 全字段 null 的补丁基底：仅传入变更字段即可，其余保持不变。 */
@@ -21,12 +22,15 @@ const EMPTY_PATCH: SettingsPatch = {
   trashRetentionDays: null,
   batchRetentionDays: null,
   onboarded: null,
+  notifications: null,
+  resetScheduling: false,
 };
 
 export const useSettingsStore = create<SettingsState>((set) => ({
   settings: null,
   loading: false,
   error: null,
+  saving: 0,
 
   load: async () => {
     set({ loading: true, error: null });
@@ -39,12 +43,16 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 
   update: async (patch) => {
-    // 乐观：以 Rust 返回的规整后设置为准（含 clamp / 枚举纠偏）。
+    set((current) => ({ saving: current.saving + 1, error: null }));
     try {
       const settings = await unwrap(commands.updateSettings({ ...EMPTY_PATCH, ...patch }));
       set({ settings });
+      return true;
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
+      return false;
+    } finally {
+      set((current) => ({ saving: current.saving - 1 }));
     }
   },
 }));

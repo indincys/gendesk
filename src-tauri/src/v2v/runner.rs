@@ -2042,6 +2042,7 @@ pub fn spawn(
                 failed: 0,
                 error: None,
                 last_sweep_at: last_sweep_at(),
+                next_at: None,
             };
             let settings = match crate::commands::v2v::load_settings(&pool).await {
                 Ok(s) => s,
@@ -2133,6 +2134,7 @@ pub fn spawn(
                             if sum.finished > 0 {
                                 use crate::engine::events::EventSink;
                                 crate::engine::events::TauriSink::new(app.clone()).notify(
+                                    crate::engine::events::NotificationKind::Video,
                                     "视频已出片".into(),
                                     format!("{} 条成片待验收", sum.finished),
                                 );
@@ -2165,6 +2167,9 @@ pub fn spawn(
             // 扫描**之前**填的。不重读的话，顶栏那句「上次查询 N 前」会整整慢一拍
             // ——刚扫完却显示「10 分钟前」，正是这颗按钮要消灭的那种误导。
             tick.last_sweep_at = last_sweep_at();
+            tick.next_at = tick
+                .last_sweep_at
+                .map(|last| last.saturating_add(every).max(tick.at));
             let _ = tick.emit(&app);
         }
     });

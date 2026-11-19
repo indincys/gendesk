@@ -67,6 +67,8 @@ function task(id: number): TaskView {
     promptId: id,
     promptCode: `P-${id}`,
     promptTitle: null,
+    style: "",
+    workId: null,
     groupName: "group",
     apiKeyId: null,
     keyAlias: null,

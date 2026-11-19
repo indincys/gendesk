@@ -101,6 +101,25 @@ async openOutputDir() : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * 在选中的目录写入并清理一个临时文件。离线路径不会被自动创建。
+ */
+async checkOutputDirectory(proposed: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_output_directory", { proposed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openReleaseNotes() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_release_notes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 在系统文件管理器中显示指定路径（打开所在文件夹）。
  */
 async openPathInFolder(path: string) : Promise<Result<null, AppError>> {
@@ -260,6 +279,25 @@ async listRefImages(includeEphemeral: boolean) : Promise<Result<RefImageView[], 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Resolve explicitly selected references, including linked library originals.
+ */
+async generationReferences(ids: number[]) : Promise<Result<RefImageView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generation_references", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generationLibraryRef(id: number) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generation_library_ref", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async libraryOverview() : Promise<Result<LibraryOverview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("library_overview") };
@@ -279,6 +317,14 @@ async listLibraryImages(styleId: number | null, categoryId: number | null, inclu
 async saveLibraryStyle(id: number | null, name: string, product: string, note: string) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_library_style", { id, name, product, note }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setLibraryStyleArchived(id: number, archived: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_library_style_archived", { id, archived }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -363,6 +409,28 @@ async relinkMissingLibraryImage(imageId: number, source: string) : Promise<Resul
 }
 },
 /**
+ * 只替换本次选中的失效链接。应用时重新比对文件和数据库，避免预览后路径变化。
+ */
+async relinkLibraryDirectory(imageIds: number[], oldDirectory: string, newDirectory: string, apply: boolean) : Promise<Result<LibraryRelinkEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("relink_library_directory", { imageIds, oldDirectory, newDirectory, apply }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 预检用相同的内容哈希识别同款式内的重复项。导入仍会完整解码和复核。
+ */
+async previewLibraryImport(styleId: number, paths: string[]) : Promise<Result<LibraryImportPreviewEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_library_import", { styleId, paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 列出全部提示词分组（含 active 提示词数 + 标签）。
  */
 async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
@@ -398,6 +466,22 @@ async listPrompts(groupId: number) : Promise<Result<PromptView[], AppError>> {
 async parsePromptTxt(path: string) : Promise<Result<ImportPreview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("parse_prompt_txt", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async parsePromptText(text: string) : Promise<Result<ImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("parse_prompt_text", { text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async renamePromptGroup(id: number, name: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_prompt_group", { id, name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -500,6 +584,14 @@ async resumeQueue() : Promise<Result<null, AppError>> {
 async listTasks(batchId: number | null, statusGroup: string | null, page: number | null) : Promise<Result<TaskView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_tasks", { batchId, statusGroup, page }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async inspectTask(id: number) : Promise<Result<TaskInspection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("inspect_task", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -674,6 +766,14 @@ async getAgentCliInfo() : Promise<Result<AgentCliInfo, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async recentIntakeJobs() : Promise<Result<JobView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recent_intake_jobs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * 在 Finder / 资源管理器里打开交接根。
  */
@@ -761,6 +861,25 @@ async pickPosterApp() : Promise<Result<string | null, AppError>> {
 async getPosterDraft(batchId: string) : Promise<Result<DeliveryDraft, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_poster_draft", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async posterDraftsForImageBatch(imageBatchId: number, workId: number | null) : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("poster_drafts_for_image_batch", { imageBatchId, workId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从已核验回执取得素材编号，并用系统打开配置的 Poster。
+ */
+async openPosterReceipt(batchId: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_poster_receipt", { batchId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -859,6 +978,14 @@ async exportMediaFiles(paths: string[], destDir: string) : Promise<Result<MediaE
 async reexportWork(id: number) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reexport_work", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportWorkSnapshot(id: number, destination: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_work_snapshot", { id, destination }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1006,6 +1133,25 @@ async v2vBalance() : Promise<Result<number | null, AppError>> {
 async v2vCreditReport(range: CreditRange) : Promise<Result<V2vCreditReport, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("v2v_credit_report", { range }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vCreditEntries(range: CreditRange, bucket: string | null, channel: string | null, outcome: string | null, offset: number) : Promise<Result<CreditEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_credit_entries", { range, bucket, channel, outcome, offset }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Export only filterable structured fields. Command arguments and remote output can contain secrets.
+ */
+async exportV2vActivity(sequence: number[]) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_v2v_activity", { sequence }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1386,6 +1532,38 @@ async redeliverV2vClips(ids: number[]) : Promise<Result<number, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async trashApprovedClips(ids: number[]) : Promise<Result<ClipTrashResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trash_approved_clips", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async relatedClip(workId: number) : Promise<Result<[number, string] | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("related_clip", { workId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async v2vPriorRevision(id: number) : Promise<Result<V2vPriorRevision, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("v2v_prior_revision", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clipTrashItem(clipId: number) : Promise<Result<number | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clip_trash_item", { clipId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async productionOverview() : Promise<Result<ProductionOverview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("production_overview") };
@@ -1498,13 +1676,24 @@ async openDataDir() : Promise<Result<null, AppError>> {
 }
 },
 /**
- * 导出备份：选目标 zip → WAL 检查点 → 打包数据目录（排除 logs）。
+ * 导出备份：选目标 zip → 保存数据库快照 → 打包数据目录（排除 logs）。
  * 队列运行中（有 run/retry 任务）拒绝，避免边写边打包出不一致备份。
  * 返回所选路径；用户取消返回 None。
  */
 async exportBackup() : Promise<Result<string | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_backup") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 校验备份可读性，或将已验证的内容恢复到一个新目录。
+ */
+async checkBackup(extract: boolean) : Promise<Result<BackupCheck | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_backup", { extract }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1524,6 +1713,7 @@ libraryChanged: LibraryChanged,
 livePhotoChanged: LivePhotoChanged,
 posterChanged: PosterChanged,
 refImportProgress: RefImportProgress,
+shellHelp: ShellHelp,
 taskProgress: TaskProgress,
 taskStatusChanged: TaskStatusChanged,
 updateStateChanged: UpdateStateChanged,
@@ -1541,6 +1731,7 @@ libraryChanged: "library-changed",
 livePhotoChanged: "live-photo-changed",
 posterChanged: "poster-changed",
 refImportProgress: "ref-import-progress",
+shellHelp: "shell-help",
 taskProgress: "task-progress",
 taskStatusChanged: "task-status-changed",
 updateStateChanged: "update-state-changed",
@@ -1620,7 +1811,7 @@ listening: boolean; protocol: number; features: string[]; taskThreshold: number 
 /**
  * API Key 脱敏视图（Key 本体永不出 Rust）。
  */
-export type ApiKeyView = { id: number; name: string; 
+export type ApiKeyView = { lastTestAt: number | null; lastTestOk: boolean | null; id: number; name: string; 
 /**
  * 脱敏 Key：`****后4位`
  */
@@ -1766,6 +1957,7 @@ phantom: number; credits: number;
  * 此刻待验收总数（横幅那句「待验收涨到 N 条」）。
  */
 revNow: number }
+export type BackupCheck = { archivePath: string; extractedPath: string | null; schemaVersion: number; files: number; bytes: number }
 /**
  * `backup://progress`：导出进度（前端进度条）。
  */
@@ -1904,6 +2096,7 @@ ratePerHour: number | null;
  * 按上面那个速度估算，这一条还要排多久（秒）。
  */
 etaSecs: number | null }
+export type ClipTrashResult = { trashIds: number[]; skipped: number[] }
 /**
  * 看板条目视图。
  */
@@ -1911,7 +2104,7 @@ export type ClipView = { id: number; workId: number; groupId: number | null; gro
 /**
  * 首帧图（父作品）原图与缩略图。
  */
-imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string; videoPrompt: string | null; modelVersion: string | null; duration: number | null; videoResolution: string | null; submitId: string | null; creditCount: number | null; videoPath: string | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; attempt: number; errorType: string | null; errorMessage: string | null; 
+imagePath: string; thumbPath: string; sourcePrompt: string; variablePart: string; videoPrompt: string | null; modelVersion: string | null; duration: number | null; videoResolution: string | null; submitId: string | null; creditCount: number | null; videoPath: string | null; videoPresent: boolean | null; posterPath: string | null; width: number | null; height: number | null; fps: number | null; durationSec: number | null; attempt: number; errorType: string | null; errorMessage: string | null; 
 /**
  * 即梦状态原文 + 队列位次 + 我们最后一次问到答案的时刻（0021）。
  * 落库而非只走事件：切页/重启后「这条在排队还是在跑」仍要答得出。
@@ -1995,7 +2188,8 @@ billed: boolean;
  * （大小写不统一、还有 `PartialSuccess` 这种），在前端拿字符串再判一遍必然分叉。
  */
 awaitingDownload: boolean; acceptedAt: number; updatedAt: number }
-export type CreateBatchInput = { refs: RefMappingInput[]; paramsJson: string }
+export type CreateBatchInput = { refs: RefMappingInput[]; promptEdits?: PromptEdit[]; paramsJson: string }
+export type CreditEntry = { clipId: number | null; clipCode: string | null; clipStage: string | null; submitId: string; channelKey: string; chargedAt: number; credits: number; outcome: string }
 /**
  * 账号与余额（`user_credit` 的完整回体）。
  * 
@@ -2012,7 +2206,7 @@ export type CreditTrendPoint = { bucket: string; spent: number }
  * 数据目录信息（E19：暴露落盘位置）。
  */
 export type DataDirInfo = { root: string; dbPath: string }
-export type DeliveryDraft = { id: string; state: string; revision: number; editable: boolean; waitingReview: number; waitingIntake: boolean; materialId: string | null; lastError: string; images: DraftImage[] }
+export type DeliveryDraft = { id: string; state: string; revision: number; editable: boolean; waitingReview: number; pending: PendingImage[]; waitingIntake: boolean; materialId: string | null; lastError: string; images: DraftImage[] }
 export type DraftExport = { directory: string; exported: number; failures: string[] }
 export type DraftImage = { uid: string; itemName: string; taskId: number | null; imagePath: string; thumbPath: string | null; style: string; productName: string | null; wantsLive: boolean; liveImage: string | null; liveVideo: string | null; excluded: boolean }
 export type DraftPlacement = { uid: string; excluded: boolean }
@@ -2268,6 +2462,7 @@ export type LibraryImportIssue = { path: string; message: string;
  * 重复时指向库里已有的那张。
  */
 imageId: number | null }
+export type LibraryImportPreviewEntry = { path: string; action: string; detail: string | null }
 export type LibraryImportReport = { imported: LibraryImageView[]; 
 /**
  * 之前移出、这次重新导入而放回的图。
@@ -2312,7 +2507,8 @@ freshCount: number; picks: LibraryPick[];
  * 是否已记为使用。
  */
 markedUsed: boolean; message: string }
-export type LibraryStyleView = { id: number; name: string; product: string; note: string; total: number; available: number; byCategory: LibraryCategoryCount[] }
+export type LibraryRelinkEntry = { imageId: number; oldPath: string; newPath: string | null; issue: string | null }
+export type LibraryStyleView = { archived: boolean; id: number; name: string; product: string; note: string; total: number; available: number; byCategory: LibraryCategoryCount[] }
 export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean; cooldownDays: number | null }
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
@@ -2340,12 +2536,18 @@ resPrices: ResPrice[];
  * 是否是 vip 通道 —— 界面上要把它标出来（同规格贵 5.5 倍，只买到不排队）。
  */
 vip: boolean }
+export type NotificationPrefs = { batches: boolean; failures: boolean; intake: boolean; video: boolean }
 export type Organization = { product: string; style: string; requirement: string; source: string; 
 /**
  * 审稿通过后进 Poster 的哪个库位：Poster 图片类型名、`封面` 或 `未分类`。空 = 按需求名自动对应
  * （见 `poster::slot`）。只影响 Poster，不参与目录；空时不写出，旧快照与内容指纹逐字节不变。
  */
 posterType?: string | null }
+/**
+ * 这一组还有几张图没审完（待生成、生成中、重试中、待验收）。生成失败的不等：它要人工恢复，
+ * 恢复后再通过的图散进图片库。批次退休后任务行不在了，自然是 0。
+ */
+export type PendingImage = { taskId: number; batchId: number; code: string; name: string; status: string }
 export type Phase = "queued" | "requestStarted" | "generating" | "downloading" | "saved"
 export type PosterBatch = { id: string; createdAt: number; state: string; lastError: string; count: number; 
 /**
@@ -2410,6 +2612,7 @@ acceptedToday: number;
  * 今日请求次数（含重试，全部 task_attempts）。
  */
 requestsToday: number }
+export type PromptEdit = { id: number; text: string | null; excluded: boolean }
 /**
  * 提示词视图（编号网格 / 详情）。
  */
@@ -2555,7 +2758,7 @@ phase: string;
  * 失败张数（逐张容错：一张坏图不该中断整批）。
  */
 failed: number }
-export type RefMappingInput = { refImageId: number; promptGroupId: number }
+export type RefMappingInput = { refImageId: number; promptGroupId: number; attachments?: number[] }
 /**
  * 某分辨率下的每秒单价（前端算「这一批预估多少额度」用）。
  */
@@ -2568,7 +2771,7 @@ creditPerSec: number }
 /**
  * 还原回执：还原了几条、几条还不回去（连同原因）。
  */
-export type RestoreResult = { restored: number; 
+export type RestoreResult = { restored: number; restoredIds: number[]; 
 /**
  * 还不回去的那几条为什么还不回去。空 = 全部成功。
  */
@@ -2645,11 +2848,12 @@ batchRetentionDays?: number;
 /**
  * 首次使用引导是否已完成（E13）：四步齐备后置 true，引导永久消失。
  */
-onboarded?: boolean }
+onboarded?: boolean; notifications?: NotificationPrefs }
 /**
  * 设置补丁（部分更新）。
  */
-export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null }
+export type SettingsPatch = { scheduleStrategy: string | null; retryCount: number | null; outputDir: string | null; motion: string | null; paused: boolean | null; globalFailThreshold: number | null; trashRetentionDays: number | null; batchRetentionDays: number | null; onboarded: boolean | null; notifications?: NotificationPrefs | null; resetScheduling?: boolean }
+export type ShellHelp = { onboarding: boolean }
 /**
  * 七态计数。看板列头、侧栏徽章、开屏提示都读它。
  */
@@ -2752,6 +2956,7 @@ passed: number;
  * 未通过 rej
  */
 rejected: number; total: number }
+export type TaskInspection = { task: TaskView; retryReadyAt: number | null; outputDirectories: string[] }
 /**
  * `task://progress`（按全局活跃 worker 数自适应节流）
  */
@@ -2792,8 +2997,8 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
 /**
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
-export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; resultImagePath: string | null; refImagePath: string | null; updatedAt: number; promptTextSnapshot: string }
-export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
+export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; style: string; workId: number | null; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; resultImagePath: string | null; refImagePath: string | null; updatedAt: number; promptTextSnapshot: string }
+export type TrashItemView = { originalId: number | null; archivedClip: boolean; workId: number | null; id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
 /**
  * 仍可读取的原图（待清理的生成结果或作品输出）。
  */
@@ -2872,6 +3077,8 @@ clipId: number | null }
  * 回填：升级前被删除或覆盖的尝试无法还原，界面不得把它冒充完整历史。
  */
 export type V2vCreditReport = { balance: number | null; balanceError: string | null; vipLevel: string; spentTotal: number; spentPass: number; spentRej: number; spentPending: number; spentFailedAbandoned: number; reviewed: number; passed: number; passRate: number | null; trend: CreditTrendPoint[]; channels: ChannelCreditView[]; hasBackfill: boolean }
+export type V2vPriorParams = { modelVersion: string | null; duration: number | null; videoResolution: string | null }
+export type V2vPriorRevision = { params: V2vPriorParams | null; prompt: string | null }
 /**
  * `v2v://progress` —— 已提交条目的轮询进度（队列位次 / 状态原文）。
  */
@@ -2979,7 +3186,7 @@ error: string | null;
  * 心跳 6 秒一次且纯内存读，拿它写「3 秒前」会让人以为数据是三秒前的新鲜货 ——
  * 而真实查询是 5/10 分钟一次。这两个时刻差一个数量级，混用就是在骗人。
  */
-lastSweepAt: number | null }
+lastSweepAt: number | null; nextAt: number | null }
 /**
  * 一条 clip 的撤销原料 = 改动前的整份快照（+ 不通过时产生的废纸篓行）。
  */
@@ -3014,7 +3221,7 @@ query?: string | null;
 /**
  * 只看某一批次。
  */
-batchId?: number | null }
+batchId?: number | null; workId?: number | null; style?: string | null; product?: string | null }
 /**
  * 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
  */

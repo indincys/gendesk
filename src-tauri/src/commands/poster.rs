@@ -156,6 +156,61 @@ pub async fn pick_poster_app(app: AppHandle) -> AppResult<Option<String>> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn poster_drafts_for_image_batch(
+    state: State<'_, AppState>,
+    image_batch_id: i64,
+    work_id: Option<i64>,
+) -> AppResult<Vec<String>> {
+    if let Some(work_id) = work_id {
+        return Ok(sqlx::query_scalar(
+            "SELECT DISTINCT i.batch_id FROM poster_images i
+             JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid WHERE w.id=?",
+        )
+        .bind(work_id)
+        .fetch_all(&state.db)
+        .await?);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT p.id FROM poster_batches p
+         LEFT JOIN poster_images i ON i.batch_id=p.id
+         LEFT JOIN accepted_works w ON w.id=i.work_id AND w.uid=i.uid
+         LEFT JOIN tasks t ON t.id=i.task_id
+         WHERE w.batch_id=?1 OR t.batch_id=?1
+         ORDER BY p.created_at DESC",
+    )
+    .bind(image_batch_id)
+    .fetch_all(&state.db)
+    .await?)
+}
+
+/// 从已核验回执取得素材编号，并用系统打开配置的 Poster。
+#[tauri::command]
+#[specta::specta]
+pub async fn open_poster_receipt(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    batch_id: String,
+) -> AppResult<String> {
+    use tauri_plugin_opener::OpenerExt;
+    let material_id: Option<String> = sqlx::query_scalar(
+        "SELECT material_id FROM poster_batches WHERE id=? AND state='done' AND receipt_json IS NOT NULL AND material_id IS NOT NULL"
+    ).bind(batch_id).fetch_optional(&state.db).await?;
+    let material_id =
+        material_id.ok_or_else(|| AppError::InvalidInput("该批还没有可定位的图文回执".into()))?;
+    let config = poster::load_settings(&state.db).await?;
+    let executable = std::path::Path::new(&config.executable);
+    let bundle = executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+        .ok_or_else(|| AppError::InvalidInput("请在设置的审稿后自动化里选择 Poster 应用".into()))?;
+    app.opener()
+        .open_path(bundle.to_string_lossy(), None::<&str>)
+        .map_err(|error| AppError::Io(error.to_string()))?;
+    Ok(material_id)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_poster_draft(
     state: State<'_, AppState>,
     batch_id: String,

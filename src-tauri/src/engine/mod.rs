@@ -332,6 +332,10 @@ impl Engine {
     pub fn set_strategy(&self, s: Strategy) {
         self.scheduler.set_strategy(s);
     }
+    pub fn retry_ready_at(&self, task_id: i64) -> Option<i64> {
+        self.scheduler.retry_ready_at(task_id)
+    }
+
     pub fn set_user_retry(&self, n: u32) {
         self.scheduler.set_user_retry(n);
     }
@@ -388,6 +392,8 @@ mod tests {
 
     fn row(id: i64, account: &str, enabled: i64, concurrency: i64) -> ApiKeyRow {
         ApiKeyRow {
+            last_test_at: None,
+            last_test_ok: None,
             id,
             name: format!("k{id}"),
             keyring_account: account.into(),

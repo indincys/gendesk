@@ -14,6 +14,7 @@ export type {
   AddApiKeyInput,
   ApiKeyView,
   AppError,
+  BackupCheck,
   BackupProgress,
   BatchSummary,
   BatchView,
@@ -31,6 +32,9 @@ export type {
   LibraryCategoryView,
   LibraryImagePatch,
   LibraryImageView,
+  LibraryImportPreviewEntry,
+  LibraryRelinkEntry,
+  LibraryUsageView,
   LibraryLimits,
   LibraryOverview,
   LibraryPickResult,
@@ -48,6 +52,7 @@ export type {
   TaskProgress,
   TaskStatusChanged,
   TaskView,
+  TaskInspection,
   TrashItemView,
   UpdateApiKeyPatch,
   WorkView,
@@ -66,9 +71,11 @@ export type {
   SessionInfo,
   CreditInfo,
   CreditRange,
+  CreditEntry,
   CreditTrendPoint,
   ChannelCreditView,
   V2vCreditReport,
+  V2vPriorRevision,
   EffectiveParams,
   QueueStats,
   ChannelStat,
@@ -92,8 +99,14 @@ export type {
   PosterGroup,
   PosterProduct,
   AgentCliInfo,
+  JobView,
   UpdateStateChanged,
 } from "./bindings";
+
+export async function subscribeShellHelp(handler: (onboarding: boolean) => void) {
+  if (!isTauri()) return () => {};
+  return events.shellHelp.listen(({ payload }) => handler(payload.onboarding));
+}
 
 export async function subscribeLivePhoto(handler: (error: string | null) => void) {
   if (!isTauri()) return () => {};

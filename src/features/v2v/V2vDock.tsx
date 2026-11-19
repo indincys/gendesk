@@ -73,10 +73,14 @@ export function V2vDock({
   const hasRewrite = scope.some((r) => r.action === "rewrite");
   const hasWait = scope.some((r) => r.action === "wait");
   const removal = scope.some((r) => removalRisk(r) !== "free");
-  const count = (label: string, ids: number[]) => `${label} · ${ids.length}`;
+  const count = (label: string, ids: number[]) =>
+    `${label} · ${ids.length}${scope.length > ids.length ? `/${scope.length}` : ""}`;
 
   return (
     <div className="vdock">
+      <span className="fs11 t3 nowrap" aria-live="polite">
+        {sel.size ? `选中 ${scope.length} 条` : scope.length ? "当前 1 条" : "暂无选中条目"}
+      </span>
       {submit.length > 0 && (
         <button
           type="button"
@@ -96,7 +100,7 @@ export function V2vDock({
             disabled={busy}
             onClick={() => h.onUnqueue(queued)}
           >
-            {count("撤回放行", queued)}
+            {count("退出本地队列", queued)}
           </button>
         </Tooltip>
       )}

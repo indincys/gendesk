@@ -17,6 +17,8 @@ const RATE_WINDOW: i64 = 50;
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyView {
+    pub last_test_at: Option<i64>,
+    pub last_test_ok: Option<bool>,
     pub id: i64,
     pub name: String,
     /// 脱敏 Key：`****后4位`
@@ -81,6 +83,8 @@ async fn to_view(state: &AppState, row: repo::ApiKeyRow) -> AppResult<ApiKeyView
     let (rate, count) = repo::success_rate(&state.db, row.id, RATE_WINDOW).await?;
     Ok(ApiKeyView {
         id: row.id,
+        last_test_at: row.last_test_at,
+        last_test_ok: row.last_test_ok,
         name: row.name,
         masked_key: masked,
         secret_missing: secret.is_none(),
@@ -157,6 +161,7 @@ pub async fn update_api_key(
     id: i64,
     patch: UpdateApiKeyPatch,
 ) -> AppResult<ApiKeyView> {
+    let _guard = state.settings_lock.lock().await;
     let base = patch.base_url.map(|u| normalize_base_url(&u));
     let concurrency = patch.concurrency_limit.map(|c| c.clamp(1, MAX_CONCURRENCY));
     // rpm_limit：None 不改；Some(n>0) 设值；Some(n<=0) 清除。→ repo 的 Option<Option>。
@@ -192,6 +197,14 @@ pub async fn update_api_key(
         row = repo::get(&state.db, id)
             .await?
             .ok_or_else(|| AppError::InvalidInput("Key 不存在".into()))?;
+    }
+    if rotated || base.is_some() {
+        sqlx::query("UPDATE api_keys SET last_test_at=NULL,last_test_ok=NULL WHERE id=?")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+        row.last_test_at = None;
+        row.last_test_ok = None;
     }
     let view = to_view(&state, row).await?;
     let _ = state
@@ -309,7 +322,14 @@ pub async fn test_api_key_saved(state: State<'_, AppState>, id: i64) -> AppResul
         .secrets
         .get(&row.keyring_account)?
         .ok_or_else(|| AppError::Internal("钥匙串中未找到该 Key 的凭据".into()))?;
-    probe(&row.base_url, &secret).await
+    let result = probe(&row.base_url, &secret).await;
+    let _guard = state.settings_lock.lock().await;
+    if state.secrets.get(&row.keyring_account)?.as_deref() == Some(secret.as_str()) {
+        sqlx::query("UPDATE api_keys SET last_test_at=?,last_test_ok=? WHERE id=? AND base_url=? AND keyring_account=?")
+            .bind(now_unix()).bind(result.is_ok()).bind(id).bind(&row.base_url).bind(&row.keyring_account)
+            .execute(&state.db).await?;
+    }
+    result
 }
 
 /// 纳秒级后缀，用于生成唯一 keyring 账户名。

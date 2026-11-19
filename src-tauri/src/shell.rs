@@ -32,6 +32,7 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_specta::Event;
 
 /// 自定义「退出」菜单项的 id（应用菜单与托盘菜单共用一条处理路径）。
 const QUIT_ID: &str = "gendesk-quit";
@@ -40,6 +41,17 @@ const SHOW_ID: &str = "gendesk-show";
 const OPEN_WORKS_ID: &str = "file-open-works";
 const OPEN_DRAFTS_ID: &str = "file-open-drafts";
 const OPEN_LOGS_ID: &str = "file-open-logs";
+const OPEN_DATA_ID: &str = "file-open-data";
+const OPEN_RECENT_ID: &str = "file-open-recent";
+const EXPORT_RECENT_ID: &str = "file-export-recent";
+const HELP_SHORTCUTS_ID: &str = "help-shortcuts";
+const HELP_ONBOARDING_ID: &str = "help-onboarding";
+
+#[derive(Clone, serde::Serialize, specta::Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellHelp {
+    pub onboarding: bool,
+}
 
 /// 最近一次算出来的待办数。托盘标题只在**变了**的时候才写。
 ///
@@ -83,25 +95,26 @@ pub fn install_close_to_hide(window: &tauri::WebviewWindow) {
 /// 事件循环连同它自己一起卡住。
 pub fn request_quit(app: &AppHandle) {
     let state = app.state::<crate::state::AppState>();
-    let pending: i64 = tauri::async_runtime::block_on(async {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM tasks WHERE status IN ('q','run','retry')",
-        )
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0)
+    let counts = tauri::async_runtime::block_on(async {
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT
+                (SELECT count(*) FROM tasks WHERE status IN ('q','run','retry')),
+                (SELECT count(*) FROM v2v_clips WHERE stage='run'),
+                (SELECT count(*) FROM v2v_clips WHERE stage='ready' AND submit_queued_at IS NOT NULL)",
+        ).fetch_one(&state.db).await
     });
-    if pending == 0 {
-        app.exit(0);
-        return;
-    }
+    let details = match counts {
+        Ok((0, 0, 0)) => { app.exit(0); return; }
+        Ok((images, remote, queued)) => format!(
+            "生图待处理 {images} 张，远端视频在途 {remote} 条，本机待提交视频 {queued} 条。退出会停止本机调度和轮询。远端已受理的视频仍由服务方处理。"
+        ),
+        Err(_) => "暂时无法读取在途数量。退出会停止本机调度和轮询。".into(),
+    };
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let handle = app.clone();
     app.dialog()
         .message(format!(
-            "仍有 {pending} 个任务未完成，退出将中断当前生成。\
-             下次启动可继续未完成的任务。\
-             （只想收起界面的话，关掉窗口就行 —— 那不会中断任何东西。）确定退出吗？"
+            "{details} 如果只想收起界面，可关闭窗口，再从菜单栏图标打开。确定退出吗？"
         ))
         .title("确认退出 GenDesk")
         .buttons(MessageDialogButtons::OkCancelCustom(
@@ -120,7 +133,15 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     match event.id().as_ref() {
         QUIT_ID => request_quit(app),
         SHOW_ID => show_main_window(app),
-        OPEN_WORKS_ID | OPEN_DRAFTS_ID | OPEN_LOGS_ID => {
+        HELP_SHORTCUTS_ID | HELP_ONBOARDING_ID => {
+            show_main_window(app);
+            let _ = (ShellHelp {
+                onboarding: event.id().as_ref() == HELP_ONBOARDING_ID,
+            })
+            .emit(app);
+        }
+        OPEN_WORKS_ID | OPEN_DRAFTS_ID | OPEN_LOGS_ID | OPEN_DATA_ID | OPEN_RECENT_ID
+        | EXPORT_RECENT_ID => {
             let handle = app.clone();
             let id = event.id().as_ref().to_string();
             tauri::async_runtime::spawn(async move {
@@ -128,7 +149,7 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
                     handle
                         .dialog()
                         .message(error.to_string())
-                        .title("无法打开文件夹")
+                        .title("无法完成文件操作")
                         .show(|_| {});
                 }
             });
@@ -141,8 +162,50 @@ async fn open_rescue_folder(app: &AppHandle, id: &str) -> crate::error::AppResul
     let state = app
         .try_state::<crate::state::AppState>()
         .ok_or_else(|| crate::error::AppError::InvalidInput("GenDesk 尚未完成启动".into()))?;
+    if matches!(id, OPEN_RECENT_ID | EXPORT_RECENT_ID) {
+        let candidates: Vec<String> = sqlx::query_scalar(
+            "SELECT image_path FROM accepted_works ORDER BY accepted_at DESC,id DESC LIMIT 100",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        let original = candidates
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .ok_or_else(|| {
+                crate::error::AppError::InvalidInput("最近的作品原件均不可读取".into())
+            })?;
+        if id == OPEN_RECENT_ID {
+            return app
+                .opener()
+                .reveal_item_in_dir(original)
+                .map_err(|error| crate::error::AppError::Io(error.to_string()));
+        }
+        let Some(destination) = app
+            .dialog()
+            .file()
+            .set_title("导出最近一张可读作品")
+            .blocking_pick_folder()
+            .and_then(|path| path.into_path().ok())
+        else {
+            return Ok(());
+        };
+        let source = std::path::PathBuf::from(original);
+        let name = source
+            .file_name()
+            .ok_or_else(|| crate::error::AppError::InvalidInput("作品文件名无效".into()))?;
+        let output = destination.join(name);
+        tokio::task::spawn_blocking(move || crate::files::copy::copy_new(&source, &output))
+            .await
+            .map_err(|error| crate::error::AppError::Io(error.to_string()))??;
+        return app
+            .opener()
+            .open_path(destination.to_string_lossy(), None::<&str>)
+            .map_err(|error| crate::error::AppError::Io(error.to_string()));
+    }
     let path = if id == OPEN_LOGS_ID {
         state.dirs.logs()
+    } else if id == OPEN_DATA_ID {
+        state.dirs.root.clone()
     } else {
         let root = crate::library::root(&state.db).await?;
         if id == OPEN_DRAFTS_ID {
@@ -275,6 +338,21 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                         true,
                         None::<&str>,
                     )?,
+                    &MenuItem::with_id(
+                        app,
+                        OPEN_RECENT_ID,
+                        "在文件管理器中显示最近作品",
+                        true,
+                        None::<&str>,
+                    )?,
+                    &MenuItem::with_id(
+                        app,
+                        EXPORT_RECENT_ID,
+                        "导出最近一张可读作品…",
+                        true,
+                        None::<&str>,
+                    )?,
+                    &MenuItem::with_id(app, OPEN_DATA_ID, "打开数据目录", true, None::<&str>)?,
                     &MenuItem::with_id(app, OPEN_LOGS_ID, "打开日志目录", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::close_window(app, Some("收起窗口（后台继续跑）"))?,
@@ -291,12 +369,16 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 &[&PredefinedMenuItem::fullscreen(app, None)?],
             )?,
             &window_menu,
-            #[cfg(not(target_os = "macos"))]
             &Submenu::with_items(
                 app,
                 "帮助",
                 true,
-                &[&PredefinedMenuItem::about(app, None, Some(about_metadata))?],
+                &[
+                    &MenuItem::with_id(app, HELP_SHORTCUTS_ID, "快捷键速查", true, None::<&str>)?,
+                    &MenuItem::with_id(app, HELP_ONBOARDING_ID, "使用引导", true, None::<&str>)?,
+                    #[cfg(not(target_os = "macos"))]
+                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                ],
             )?,
         ],
     )

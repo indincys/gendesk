@@ -21,6 +21,8 @@ pub struct TaskView {
     pub prompt_code: String,
     pub prompt_title: Option<String>,
     pub group_name: String,
+    pub style: String,
+    pub work_id: Option<i64>,
     pub api_key_id: Option<i64>,
     pub key_alias: Option<String>,
     pub error_type: Option<String>,
@@ -37,6 +39,8 @@ const TASK_SELECT: &str = "SELECT t.id, t.batch_id, t.status, t.ref_image_id,
         COALESCE(r.name, '') AS ref_name, t.prompt_id,
         COALESCE(p.code, '') AS prompt_code, p.title AS prompt_title,
         COALESCE(g.name, '') AS group_name,
+        COALESCE(CASE WHEN json_valid(t.params_json) THEN NULLIF(json_extract(t.params_json,'$.organization.style'),'') END,p.style,'') AS style,
+        (SELECT w.id FROM accepted_works w WHERE w.task_id=t.id ORDER BY w.id LIMIT 1) AS work_id,
         t.api_key_id, k.name AS key_alias, t.error_type, t.error_message,
         t.retry_count, t.result_thumb_path, t.result_image_path, r.file_path AS ref_image_path,
         t.updated_at, t.prompt_text_snapshot
@@ -103,6 +107,47 @@ async fn query_tasks(
     }
     let rows = q.bind(limit).bind(offset).fetch_all(pool).await?;
     Ok(rows)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInspection {
+    pub task: TaskView,
+    pub retry_ready_at: Option<i64>,
+    pub output_directories: Vec<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn inspect_task(state: State<'_, AppState>, id: i64) -> AppResult<TaskInspection> {
+    let task: TaskView = sqlx::query_as(&format!("{TASK_SELECT} WHERE t.id=?1"))
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("任务已完成归档或已移除".into()))?;
+    let paths: Vec<String> = sqlx::query_scalar(
+        "SELECT result_image_path FROM tasks WHERE batch_id=?1 AND result_image_path IS NOT NULL
+         UNION SELECT image_path FROM accepted_works WHERE batch_id=?1",
+    )
+    .bind(task.batch_id)
+    .fetch_all(&state.db)
+    .await?;
+    let output_directories = paths
+        .iter()
+        .filter_map(|path| {
+            std::path::Path::new(path)
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let retry_ready_at = state.engine.retry_ready_at(id);
+    Ok(TaskInspection {
+        task,
+        retry_ready_at,
+        output_directories,
+    })
 }
 
 /// 批量操作回执：做成了几个、跳过了几个。

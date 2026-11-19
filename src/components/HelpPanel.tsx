@@ -1,3 +1,4 @@
+import { Modal } from "@/components/ui/Modal";
 import { ROUTES } from "@/routes";
 import { modKeyLabel, useUiStore } from "@/stores/ui";
 
@@ -5,6 +6,7 @@ import { modKeyLabel, useUiStore } from "@/stores/ui";
 export function HelpPanel() {
   const open = useUiStore((s) => s.helpOpen);
   const close = useUiStore((s) => s.closeHelp);
+  const openOnboarding = useUiStore((s) => s.setOnboardingOpen);
   const platform = useUiStore((s) => s.platform);
   if (!open) return null;
   const mod = modKeyLabel(platform);
@@ -60,24 +62,24 @@ export function HelpPanel() {
   ];
 
   return (
-    <div className="ovl" onClick={close}>
-      <div className="mdl w700" onClick={(e) => e.stopPropagation()}>
-        <div className="mhead">
-          <span className="fw6 fs13">快捷键速查</span>
-          <div className="f1" />
-          <button type="button" className="icb" onClick={close}>
-            ×
-          </button>
-        </div>
-        {/* 四栏放不进一行，故允许换行 —— 挤成四列会让每条说明断成三行。 */}
-        <div className="mlist" style={{ display: "flex", flexWrap: "wrap", gap: 24, padding: 16 }}>
-          <KeyList title="全局" items={globalKeys} />
-          <KeyList title="图片验收" items={reviewKeys} />
-          <KeyList title="视频生成" items={v2vKeys} />
-          <KeyList title="废纸篓" items={trashKeys} />
-        </div>
+    <Modal
+      title="快捷键速查"
+      width="w700"
+      onClose={close}
+      footer={
+        <button type="button" className="btn sm" onClick={() => openOnboarding(true)}>
+          重新查看使用引导
+        </button>
+      }
+    >
+      {/* 四栏放不进一行，故允许换行 —— 挤成四列会让每条说明断成三行。 */}
+      <div className="mlist" style={{ display: "flex", flexWrap: "wrap", gap: 24, padding: 16 }}>
+        <KeyList title="全局" items={globalKeys} />
+        <KeyList title="图片验收" items={reviewKeys} />
+        <KeyList title="视频生成" items={v2vKeys} />
+        <KeyList title="废纸篓" items={trashKeys} />
       </div>
-    </div>
+    </Modal>
   );
 }
 

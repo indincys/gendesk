@@ -2,7 +2,7 @@ import { ConfirmModal, Modal } from "@/components/ui/Modal";
 import { MediaActions, OriginalPreview, copyText } from "@/features/_shared/MediaActions";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
-import { type TaskView, commands, unwrap } from "@/lib/ipc";
+import { type TaskInspection, type TaskView, commands, unwrap } from "@/lib/ipc";
 import { errorLabel, statusVisual } from "@/lib/status";
 import { cn, promptLabel } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
@@ -26,7 +26,8 @@ const TASK_ROW_HEIGHT = 40;
 
 export function TasksPage() {
   const go = useUiStore((s) => s.go);
-  const openBatch = useUiStore((s) => s.openBatch);
+  const openTask = useUiStore((s) => s.openTask);
+  const jumpTask = useUiStore((s) => s.jumpTask);
   const jumpBatch = useUiStore((s) => s.jumpBatch);
   const openSettings = useUiStore((s) => s.openSettings);
   const tasks = useEngineStore((s) => s.tasks);
@@ -37,8 +38,10 @@ export function TasksPage() {
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
   const dropTasks = useEngineStore((s) => s.dropTasks);
 
-  const [filter, setFilter] = useState("all");
-  const [errorFilter, setErrorFilter] = useState<string | null>(null);
+  const remembered =
+    jumpBatch === null && jumpTask === null ? useUiStore.getState().queueLocation : null;
+  const [filter, setFilter] = useState(remembered?.filter ?? "all");
+  const [errorFilter, setErrorFilter] = useState<string | null>(remembered?.error ?? null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [deleteTarget, setDeleteTarget] = useState<TaskView | "all" | null>(null);
   const [interrupted, setInterrupted] = useState(0);
@@ -53,12 +56,30 @@ export function TasksPage() {
   const [expandedErr, setExpandedErr] = useState<Set<number>>(new Set());
   // 任务5：查看单个任务的提示词快照原文。
   const [promptView, setPromptView] = useState<TaskView | null>(null);
+  const [inspection, setInspection] = useState<TaskInspection | null>(null);
+  const [inspectionError, setInspectionError] = useState("");
+  const inspectionId = promptView?.id;
+  const inspect = useCallback(async () => {
+    if (inspectionId === undefined) return;
+    setInspectionError("");
+    try {
+      setInspection(await unwrap(commands.inspectTask(inspectionId)));
+    } catch (error) {
+      setInspectionError(String(error));
+    }
+  }, [inspectionId]);
+  useEffect(() => {
+    setInspection(null);
+    void inspect();
+  }, [inspect]);
   // 任务多选（跨筛选保留选择）+ shift 范围锚点 + 批量确认框。
   const [sel, setSel] = useState<Set<number>>(new Set());
   const lastPicked = useRef<number | null>(null);
   const [confirmBulk, setConfirmBulk] = useState<null | "delete" | "cancel">(null);
   // E10：任务搜索（参考图名 / 提示词编号）。
-  const [search, setSearch] = useState(jumpBatch ? `#${jumpBatch}` : "");
+  const [search, setSearch] = useState(
+    jumpTask ? `任务 #${jumpTask}` : jumpBatch ? `#${jumpBatch}` : (remembered?.search ?? ""),
+  );
   const [original, setOriginal] = useState<{ path: string; name: string } | null>(null);
 
   // 拉全部批次的任务。**批次不再是可切换的对象**（v0.21.0）：跑完就退出历史，
@@ -106,16 +127,19 @@ export function TasksPage() {
         match(t.status) &&
         (!errorFilter || (t.errorType ?? "Other") === errorFilter) &&
         (!q ||
-          (/^#\d+$/.test(q)
-            ? q === `#${t.batchId}`
-            : [
-                t.refName,
-                t.promptCode,
-                t.promptTitle,
-                t.groupName,
-                `#${t.batchId}`,
-                String(t.id),
-              ].some((value) => value?.toLowerCase().includes(q)))),
+          (/^任务 #\d+$/.test(q)
+            ? q === `任务 #${t.id}`
+            : /^#\d+$/.test(q)
+              ? q === `#${t.batchId}`
+              : [
+                  t.refName,
+                  t.promptCode,
+                  t.promptTitle,
+                  t.groupName,
+                  t.style,
+                  `#${t.batchId}`,
+                  String(t.id),
+                ].some((value) => value?.toLowerCase().includes(q)))),
     );
   }, [tasks, filter, errorFilter, search]);
 
@@ -134,6 +158,21 @@ export function TasksPage() {
   useEffect(() => {
     taskScrollRef.current?.scrollTo?.({ top: 0 });
   }, [filter, errorFilter, search]);
+
+  const scrollRestore = useRef(remembered?.top ?? 0);
+  useEffect(() => {
+    if (loadState !== "ready" || !scrollRestore.current) return;
+    taskScrollRef.current?.scrollTo({ top: scrollRestore.current });
+    scrollRestore.current = 0;
+  }, [loadState]);
+
+  const keepQueuePosition = () =>
+    useUiStore.getState().rememberQueue({
+      filter,
+      error: errorFilter,
+      search,
+      top: taskScrollRef.current?.scrollTop ?? 0,
+    });
 
   // E06：失败任务按错误类型分组计数。
   const failByType = useMemo(() => {
@@ -675,7 +714,10 @@ export function TasksPage() {
                     <button
                       type="button"
                       className="btn xs"
-                      onClick={() => openBatch("review", t.batchId)}
+                      onClick={() => {
+                        keepQueuePosition();
+                        openTask("review", t.batchId, t.id);
+                      }}
                     >
                       已生成 · 去验收
                     </button>
@@ -684,7 +726,11 @@ export function TasksPage() {
                     <button
                       type="button"
                       className="btn xs"
-                      onClick={() => openBatch("library", t.batchId)}
+                      onClick={() => {
+                        keepQueuePosition();
+                        if (t.workId !== null) useUiStore.getState().openWork(t.workId);
+                        else useUiStore.getState().openBatch("library", t.batchId);
+                      }}
                     >
                       已通过 · 看作品
                     </button>
@@ -878,11 +924,60 @@ export function TasksPage() {
                 {promptView.keyAlias}
               </button>
             )}
-            <span className={cn("bdg", statusVisual(promptView.status).badgeClass)}>
-              {statusVisual(promptView.status).label}
+            <span
+              className={cn(
+                "bdg",
+                statusVisual((inspection?.task ?? promptView).status).badgeClass,
+              )}
+            >
+              {statusVisual((inspection?.task ?? promptView).status).label}
             </span>
+            <button type="button" className="btn xs" onClick={() => void inspect()}>
+              刷新该条状态
+            </button>
           </div>
-          <div className="fs11 fw6 t3" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
+          {inspectionError && (
+            <p className="fs11" role="alert">
+              {inspectionError}
+            </p>
+          )}
+          <p className="fs11 t3">
+            最后更新 {new Date((inspection?.task ?? promptView).updatedAt * 1000).toLocaleString()}{" "}
+            · 已自动重试 {(inspection?.task ?? promptView).retryCount} 次
+            {inspection?.retryReadyAt != null &&
+              ` · ${new Date(inspection.retryReadyAt * 1000).toLocaleTimeString()} 后等待可用并发`}
+          </p>
+          {!!inspection?.outputDirectories.length && (
+            <details className="mt6">
+              <summary className="fs11">
+                本批落盘目录 · {inspection.outputDirectories.length} 个
+              </summary>
+              {inspection.outputDirectories.map((directory) => (
+                <div className="fx ac gap6 fs11 mt6 wrap" key={directory}>
+                  <button
+                    type="button"
+                    className="btn xs"
+                    onClick={() =>
+                      void unwrap(commands.openPathInFolder(directory)).catch((error) =>
+                        toast.error(String(error)),
+                      )
+                    }
+                  >
+                    显示目录
+                  </button>
+                  <button
+                    type="button"
+                    className="btn xs"
+                    onClick={() => void copyText(directory, "目录路径")}
+                  >
+                    复制路径
+                  </button>
+                  <span>{directory}</span>
+                </div>
+              ))}
+            </details>
+          )}
+          <div className="fs11 fw6 t3 mt10" style={{ letterSpacing: ".05em", marginBottom: 6 }}>
             提示词原文（快照）
           </div>
           <div className="ptext" style={{ maxHeight: 360, overflow: "auto" }}>

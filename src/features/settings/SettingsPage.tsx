@@ -17,6 +17,7 @@ import { useAppVersion } from "@/lib/useAppVersion";
 import { cn } from "@/lib/utils";
 import { useEngineStore } from "@/stores/engine";
 import { useSettingsStore } from "@/stores/settings";
+import { useUiStore } from "@/stores/ui";
 import { ChevronDown, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -34,6 +35,17 @@ const SECTIONS = [
 ] as const;
 
 export function SettingsPage() {
+  const settingsSection = useUiStore((s) => s.settingsSection);
+  const [activeSection, setActiveSection] = useState(settingsSection ?? "s-keys");
+  const [sectionQuery, setSectionQuery] = useState("");
+  const openSection = useCallback((id: string) => {
+    setActiveSection(id);
+    document.getElementById(id)?.scrollIntoView({ block: "start" });
+  }, []);
+  useEffect(() => {
+    if (settingsSection) openSection(settingsSection);
+  }, [settingsSection, openSection]);
+
   const settings = useSettingsStore((s) => s.settings);
   const loadSettings = useSettingsStore((s) => s.load);
   const updateSettings = useSettingsStore((s) => s.update);
@@ -44,7 +56,7 @@ export function SettingsPage() {
   const [editing, setEditing] = useState<ApiKeyView | null>(null);
   const [confirmDel, setConfirmDel] = useState<ApiKeyView | null>(null);
   // 任务4：API Key 区块默认折叠，减少设置页初始噪音。
-  const [apiOpen, setApiOpen] = useState(false);
+  const [apiOpen, setApiOpen] = useState(settingsSection === "s-keys");
   // E19：数据目录信息 + 备份导出进度。
   const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
   const [backup, setBackup] = useState<{ done: number; total: number } | null>(null);
@@ -153,14 +165,26 @@ export function SettingsPage() {
     <PageScaffold title="设置" caption="生图接口 · 审稿后自动化 · Agent CLI">
       <div className="swrap">
         <nav className="snav" aria-label="设置分区">
-          {SECTIONS.map(([id, label]) => (
+          <input
+            type="search"
+            className="inp sm"
+            aria-label="搜索设置分区"
+            placeholder="搜设置分区"
+            value={sectionQuery}
+            onChange={(event) => setSectionQuery(event.target.value)}
+          />
+          {SECTIONS.filter(([, label]) =>
+            label.toLowerCase().includes(sectionQuery.trim().toLowerCase()),
+          ).map(([id, label]) => (
             <button
               type="button"
               key={id}
               className="snavi"
-              onClick={() =>
-                document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
+              aria-current={activeSection === id ? "location" : undefined}
+              onClick={() => {
+                openSection(id);
+                if (id === "s-keys") setApiOpen(true);
+              }}
             >
               {label}
             </button>
@@ -522,7 +546,9 @@ export function SettingsPage() {
             <button
               type="button"
               className="btn sm"
-              onClick={() => void unwrap(commands.openLogsDir()).catch(() => {})}
+              onClick={() =>
+                void unwrap(commands.openLogsDir()).catch((error) => toast.error(String(error)))
+              }
             >
               打开日志目录
             </button>

@@ -23,6 +23,7 @@ function item(deletedAt: number, over: Partial<TrashItemView> = {}): TrashItemVi
     refName: null,
     thumbPath: "/t.jpg",
     imagePath: null,
+    videoPath: null,
     promptText: null,
     sourceLabel: "验收未通过",
     deletedAt,

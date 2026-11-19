@@ -1,5 +1,6 @@
 import { Modal } from "@/components/ui/Modal";
 import { Toggle } from "@/components/ui/Stepper";
+import { PosterDraftDialog } from "@/features/settings/PosterDraftDialog";
 import {
   type LivePhotoStatus,
   type PosterBatch,
@@ -32,6 +33,7 @@ export function AutomationSection({ id }: { id: string }) {
   const refreshPoster = usePosterStore((s) => s.refresh);
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState<PosterBatch | null>(null);
+  const [draft, setDraft] = useState<PosterBatch | null>(null);
 
   const loadLive = useCallback(() => unwrap(commands.getLivePhotoStatus()).then(setLive), []);
 
@@ -68,14 +70,16 @@ export function AutomationSection({ id }: { id: string }) {
   const liveOn = !!live?.supported && live.enabled;
   const posterOn = !!settings?.autoImport;
   const failed = batches.filter((b) => b.state === "failed");
-  const active = batches.filter((b) => b.state === "queued" || b.state === "preparing");
+  const active = batches.filter(
+    (b) => b.state === "queued" || b.state === "preparing" || b.state === "awaiting",
+  );
   const recentDone = batches.filter((b) => b.state === "done").slice(0, 3);
 
   return (
     <section className="sec" id={id}>
       <div className="sechead">
         <span className="fw6 fs13">审稿后自动化</span>
-        <span className="pcap">默认关闭 · 打开后不再询问</span>
+        <span className="pcap">设置实况转换与 Poster 交付方式</span>
       </div>
 
       <div className="aflow">
@@ -88,13 +92,15 @@ export function AutomationSection({ id }: { id: string }) {
         </span>
         <div className="f1" />
         <span className="fs11 t3">
-          {liveOn && posterOn
-            ? "先转实况图，配对完成后连同视频一起导入，全程不弹窗"
-            : posterOn
-              ? "通过即导入静态图，不弹窗"
-              : liveOn
-                ? "只在本机生成实况照片"
-                : "只完成审稿"}
+          {posterOn && settings?.confirmSets
+            ? "图文草稿收齐验收后，由你调整并确认交付"
+            : liveOn && posterOn
+              ? "先转实况图，配对完成后连同视频一起导入"
+              : posterOn
+                ? "通过即导入静态图，不弹窗"
+                : liveOn
+                  ? "只在本机生成实况照片"
+                  : "只完成审稿"}
         </span>
       </div>
 
@@ -166,8 +172,19 @@ export function AutomationSection({ id }: { id: string }) {
           <div className="fs11 t3 mt6">
             通过的图按款式进入 Poster 对应商品。同一次提交、同一款式、同一需求的图等这一组审完，
             组成一条图文（图片包，第 1 张作封面），标题文案在 Poster 里配；封面图进封面库。Poster
-            直接引用作品目录里的成品，导入后请保留原文件。关闭只暂停新批次，已有记录保留。
+            直接引用作品目录里的成品，导入后请保留原文件。关闭会暂停交付，已排队的记录仍可查看。
           </div>
+          {settings && posterOn && (
+            <div className="fx ac gap8 mt10 wrap">
+              <Toggle
+                label="新图文由我确认后交付"
+                on={Boolean(settings.confirmSets)}
+                onClick={() => void savePoster({ confirmSets: !settings.confirmSets })}
+              />
+              <span className="fs12">新图文由我确认后交付</span>
+              <span className="fs11 t3">只影响新建图文包，已存在的草稿仍需确认。</span>
+            </div>
+          )}
           {settings && (
             <div className="fx ac gap10 mt10">
               <span className="fs11 t3 nowrap">Poster 应用</span>
@@ -192,6 +209,16 @@ export function AutomationSection({ id }: { id: string }) {
               </button>
             </div>
           )}
+          {failed.length > 1 && (
+            <button
+              type="button"
+              className="btn sm mt10"
+              disabled={busy || !posterOn}
+              onClick={() => void run(() => unwrap(commands.retryPosterImports()))}
+            >
+              重试全部待交付批次
+            </button>
+          )}
           {(failed.length > 0 || active.length > 0 || recentDone.length > 0) && (
             <div className="pblist mt10">
               {[...failed, ...active, ...recentDone].map((b) => (
@@ -199,9 +226,14 @@ export function AutomationSection({ id }: { id: string }) {
                   key={b.id}
                   batch={b}
                   busy={busy}
+                  onOpen={() => setDraft(b)}
                   onBind={() => setBinding(b)}
-                  onSkip={() => void run(() => unwrap(commands.skipPosterBatch(b.id)))}
-                  onRetry={() => void run(() => unwrap(commands.retryPosterImports()))}
+                  onSkip={() => {
+                    if (window.confirm("放弃这一批 Poster 交付？作品文件仍可在作品库找到。")) {
+                      void run(() => unwrap(commands.skipPosterBatch(b.id)));
+                    }
+                  }}
+                  onRetry={() => void run(() => unwrap(commands.retryPosterBatch(b.id)))}
                 />
               ))}
             </div>
@@ -209,6 +241,15 @@ export function AutomationSection({ id }: { id: string }) {
         </div>
       </div>
 
+      {draft && (
+        <PosterDraftDialog
+          key={draft.id}
+          batchId={draft.id}
+          enabled={posterOn}
+          onClose={() => setDraft(null)}
+          onChange={() => void refreshPoster().catch((error) => toast.error(String(error)))}
+        />
+      )}
       {binding && (
         <BindModal
           batch={binding}
@@ -226,12 +267,14 @@ export function AutomationSection({ id }: { id: string }) {
 function BatchRow({
   batch,
   busy,
+  onOpen,
   onBind,
   onSkip,
   onRetry,
 }: {
   batch: PosterBatch;
   busy: boolean;
+  onOpen: () => void;
   onBind: () => void;
   onSkip: () => void;
   onRetry: () => void;
@@ -253,6 +296,8 @@ function BatchRow({
       <span className="bdg b-amber">等本组 {batch.waitingReview} 张审完</span>
     ) : batch.waitingLive > 0 ? (
       <span className="bdg b-amber">等 {batch.waitingLive} 张实况图</span>
+    ) : batch.state === "awaiting" ? (
+      <span className="bdg b-amber">等待你确认</span>
     ) : (
       <span className="bdg b-blue">{batch.state === "preparing" ? "审稿中" : "导入中"}</span>
     );
@@ -265,10 +310,23 @@ function BatchRow({
         </span>
         <span className="mono fs10 t3">{when}</span>
         <div className="f1" />
+        <button type="button" className="btn sm" onClick={onOpen}>
+          {batch.state === "awaiting" ? "打开交付草稿" : "查看交付清单"}
+        </button>
+        {batch.state === "awaiting" && (
+          <>
+            <button type="button" className="btn sm" disabled={busy} onClick={onBind}>
+              指定商品
+            </button>
+            <button type="button" className="btn sm gho" disabled={busy} onClick={onSkip}>
+              不导入
+            </button>
+          </>
+        )}
         {batch.state === "failed" && (
           <>
             <button type="button" className="btn sm" disabled={busy} onClick={onRetry}>
-              重试
+              重试本批
             </button>
             <button type="button" className="btn sm" disabled={busy} onClick={onBind}>
               指定商品
@@ -317,7 +375,9 @@ function BindModal({
           preview.groups.map((g) => ({ key: g.key, productId: picks[g.key] ?? "" })),
         ),
       );
-      toast.success("已记住款式对应关系，正在导入");
+      toast.success(
+        batch.state === "awaiting" ? "已指定商品，等待确认交付" : "已记住款式对应关系，正在导入",
+      );
       onDone();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -333,13 +393,13 @@ function BindModal({
       onClose={onClose}
       footer={
         <>
-          <span className="fs11 t3">只需指定一次，之后同款式自动导入</span>
+          <span className="fs11 t3">只需指定一次，之后同款式沿用</span>
           <div className="f1" />
           <button type="button" className="btn" onClick={onClose}>
             取消
           </button>
           <button type="button" className="btn pri" disabled={!ready || busy} onClick={save}>
-            保存并导入
+            {batch.state === "awaiting" ? "保存对应关系" : "保存并导入"}
           </button>
         </>
       }

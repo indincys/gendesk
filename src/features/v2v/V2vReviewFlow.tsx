@@ -1,4 +1,5 @@
 import { Tooltip } from "@/components/ui/Tooltip";
+import { MediaActions } from "@/features/_shared/MediaActions";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import type { Row } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -119,7 +120,10 @@ export function V2vReviewFlow({
             {video ? (
               // key 绑 clip id：不换 key 的话切下一条时 <video> 会复用同一个元素，
               // 播放头停在上一条的位置，看着像「这条没动」。
-              <V2vVideo src={video} fps={c.fps} dark videoKey={c.id} />
+              <>
+                <V2vVideo src={video} fps={c.fps} dark videoKey={c.id} />
+                {c.videoPath && <MediaActions path={c.videoPath} label="待验收视频" />}
+              </>
             ) : (
               <span className="vrevnote">这一条没有成片文件</span>
             )}

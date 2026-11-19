@@ -41,6 +41,9 @@ function task(id: number, status = "run"): TaskView {
     errorMessage: null,
     retryCount: 0,
     resultThumbPath: null,
+    resultImagePath: null,
+    refImagePath: null,
+    updatedAt: 0,
     promptTextSnapshot: "prompt",
   };
 }

@@ -1,4 +1,5 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import { MediaActions, OriginalPreview, copyText } from "@/features/_shared/MediaActions";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { assetSrc } from "@/lib/img";
 import { type TaskView, commands, unwrap } from "@/lib/ipc";
@@ -25,6 +26,9 @@ const TASK_ROW_HEIGHT = 40;
 
 export function TasksPage() {
   const go = useUiStore((s) => s.go);
+  const openBatch = useUiStore((s) => s.openBatch);
+  const jumpBatch = useUiStore((s) => s.jumpBatch);
+  const openSettings = useUiStore((s) => s.openSettings);
   const tasks = useEngineStore((s) => s.tasks);
   const progress = useEngineStore((s) => s.progress);
   const paused = useEngineStore((s) => s.paused);
@@ -33,8 +37,10 @@ export function TasksPage() {
   const loadBatchTasks = useEngineStore((s) => s.loadBatchTasks);
   const dropTasks = useEngineStore((s) => s.dropTasks);
 
-  // 任务7：默认展示「待处理」而非「全部」。
-  const [filter, setFilter] = useState("pending");
+  const [filter, setFilter] = useState("all");
+  const [errorFilter, setErrorFilter] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [deleteTarget, setDeleteTarget] = useState<TaskView | "all" | null>(null);
   const [interrupted, setInterrupted] = useState(0);
   const [intDismissed, setIntDismissed] = useState(false);
   // E04：总进度 ETA 估算所需——历史单张均值 + 有效并发。
@@ -52,14 +58,16 @@ export function TasksPage() {
   const lastPicked = useRef<number | null>(null);
   const [confirmBulk, setConfirmBulk] = useState<null | "delete" | "cancel">(null);
   // E10：任务搜索（参考图名 / 提示词编号）。
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(jumpBatch ? `#${jumpBatch}` : "");
+  const [original, setOriginal] = useState<{ path: string; name: string } | null>(null);
 
   // 拉全部批次的任务。**批次不再是可切换的对象**（v0.21.0）：跑完就退出历史，
   // 而人在这一页问的从来是「现在还有哪些活」，不是「第 N 批做到哪了」。
   const refresh = useCallback(async () => {
     try {
       await loadBatchTasks(null, null);
-      setInterrupted(await unwrap(commands.countInterrupted()));
+      setLoadState("ready");
+      setInterrupted(await unwrap(commands.countInterrupted()).catch(() => 0));
       setAvgSec(await unwrap(commands.estimateTaskSeconds()).catch(() => null));
       const keys = await unwrap(commands.listApiKeys()).catch(() => []);
       setConcurrency(
@@ -68,7 +76,8 @@ export function TasksPage() {
           .reduce((s, k) => s + k.concurrencyLimit, 0),
       );
     } catch (e) {
-      if (e instanceof Error) toast.error(e.message);
+      setLoadState("error");
+      toast.error(String(e));
     }
   }, [loadBatchTasks]);
 
@@ -95,9 +104,20 @@ export function TasksPage() {
     return tasks.filter(
       (t) =>
         match(t.status) &&
-        (q === "" || t.refName.toLowerCase().includes(q) || t.promptCode.toLowerCase().includes(q)),
+        (!errorFilter || (t.errorType ?? "Other") === errorFilter) &&
+        (!q ||
+          (/^#\d+$/.test(q)
+            ? q === `#${t.batchId}`
+            : [
+                t.refName,
+                t.promptCode,
+                t.promptTitle,
+                t.groupName,
+                `#${t.batchId}`,
+                String(t.id),
+              ].some((value) => value?.toLowerCase().includes(q)))),
     );
-  }, [tasks, filter, search]);
+  }, [tasks, filter, errorFilter, search]);
 
   // 500+ 任务若全部挂进 DOM，每次进度刷新都会让 WebView 对几百行做样式与布局。
   // 这里只保留视口附近的行；任务 id 做稳定 key，状态更新不会把测量缓存按索引串行。
@@ -109,6 +129,11 @@ export function TasksPage() {
     getItemKey: (index) => visible[index]?.id ?? index,
     overscan: 8,
   });
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 重置由筛选条件触发。
+  useEffect(() => {
+    taskScrollRef.current?.scrollTo?.({ top: 0 });
+  }, [filter, errorFilter, search]);
 
   // E06：失败任务按错误类型分组计数。
   const failByType = useMemo(() => {
@@ -148,9 +173,13 @@ export function TasksPage() {
   };
 
   const deleteAllFailed = async () => {
-    const n = await unwrap(commands.deleteFailedTasks());
-    toast(`已删除 ${n} 个失败任务`);
-    await refresh();
+    try {
+      const n = await unwrap(commands.deleteFailedTasks());
+      toast(`已删除 ${n} 个失败任务`);
+      await refresh();
+    } catch (error) {
+      toast.error(String(error));
+    }
   };
 
   const deleteOne = async (t: TaskView) => {
@@ -243,12 +272,11 @@ export function TasksPage() {
       toast(
         `${verb} ${res.affected} 个任务${res.skipped > 0 ? ` · ${res.skipped} 个跳过（${why}）` : ""}`,
       );
-      if (kind !== "recover") dropTasks(ids);
+      if (res.skipped === 0) clearSel();
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     } finally {
       setConfirmBulk(null);
-      clearSel();
       await refresh();
     }
   };
@@ -309,7 +337,7 @@ export function TasksPage() {
   const errAction = (t: TaskView): { label: string; run: () => void } => {
     switch (t.errorType) {
       case "Auth":
-        return { label: "检查设置", run: () => go("settings") };
+        return { label: "检查设置", run: () => openSettings("s-keys") };
       case "ContentPolicy":
         return { label: "改词后恢复", run: () => openReword(t) };
       default:
@@ -358,7 +386,7 @@ export function TasksPage() {
               恢复全部失败 · {recoverableFailed}
               {violationCount > 0 && <span className="fs10 t3">（不含违规 {violationCount}）</span>}
             </button>
-            <button type="button" className="btn sm gho" onClick={deleteAllFailed}>
+            <button type="button" className="btn sm gho" onClick={() => setDeleteTarget("all")}>
               删除全部失败 · {failedCount}
             </button>
           </>
@@ -386,13 +414,23 @@ export function TasksPage() {
         <div className="fx ac gap6 wrap" style={{ padding: "8px 14px 0" }}>
           <span className="fs11 t3 nowrap">失败分类</span>
           {[...failByType.entries()].map(([type, n]) => (
-            <span
+            <button
+              type="button"
               key={type}
-              className={cn("chip", type === "ContentPolicy" && "dng")}
+              aria-pressed={errorFilter === type}
+              onClick={() => {
+                setFilter("failed");
+                setErrorFilter(errorFilter === type ? null : type);
+              }}
+              className={cn(
+                "btn xs",
+                errorFilter === type && "on",
+                type === "ContentPolicy" && "dng",
+              )}
               title={type === "ContentPolicy" ? "违规任务需要修改提示词后逐条恢复" : undefined}
             >
               {errorLabel(type)} · {n}
-            </span>
+            </button>
           ))}
         </div>
       )}
@@ -426,23 +464,29 @@ export function TasksPage() {
       <div className="fx ac gap8" style={{ padding: "10px 14px 8px" }}>
         <div className="seg">
           {FILTERS.map((f) => (
-            <span
+            <button
+              type="button"
               key={f.key}
               className={cn("sgi", filter === f.key && "on")}
-              onClick={() => setFilter(f.key)}
+              aria-pressed={filter === f.key}
+              onClick={() => {
+                setFilter(f.key);
+                setErrorFilter(null);
+              }}
             >
               {f.label}
               <span className="fs10 mono" style={{ opacity: 0.55 }}>
                 {f.key === "all" ? tasks.length : visibleCount(tasks, f)}
               </span>
-            </span>
+            </button>
           ))}
         </div>
         <div className="f1" />
         <input
           type="search"
           className="inp"
-          placeholder="搜参考图名 / 提示词编号"
+          placeholder="搜素材、提示词、批次 #编号"
+          aria-label="搜索任务"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           style={{ width: 200 }}
@@ -498,7 +542,7 @@ export function TasksPage() {
             />
           </span>
           <span>状态</span>
-          <span>参考图</span>
+          <span>结果 / 参考图名</span>
           <span>提示词</span>
           <span>Key</span>
           <span>进度 / 结果</span>
@@ -536,7 +580,20 @@ export function TasksPage() {
                   </span>
                 </span>
                 <span className="fx ac gap8 ohide">
-                  <span className="ph thumb" style={thumbStyle(t.resultThumbPath)} />
+                  {t.resultImagePath ? (
+                    <button
+                      type="button"
+                      className="ph thumb"
+                      style={thumbStyle(t.resultThumbPath)}
+                      aria-label={`预览任务 #${t.id} 的生成图`}
+                      onClick={() =>
+                        t.resultImagePath &&
+                        setOriginal({ path: t.resultImagePath, name: `任务 #${t.id} · 生成图` })
+                      }
+                    />
+                  ) : (
+                    <span className="ph thumb" />
+                  )}
                   <span className="mono fs11 nowrap ohide">{t.refName}</span>
                 </span>
                 <span className="fx ac gap7 ohide">
@@ -592,37 +649,63 @@ export function TasksPage() {
                           </span>
                           {expandedErr.has(t.id) && t.errorMessage && (
                             <span className="fs10 t3" style={{ wordBreak: "break-all" }}>
-                              {t.errorMessage}
+                              {t.errorMessage}{" "}
+                              <button
+                                type="button"
+                                className="btn xs"
+                                onClick={() =>
+                                  void copyText(
+                                    [
+                                      `任务 #${t.id} / 批次 #${t.batchId}`,
+                                      errorLabel(t.errorType),
+                                      t.errorMessage,
+                                    ].join("\n"),
+                                    "任务错误详情",
+                                  )
+                                }
+                              >
+                                复制
+                              </button>
                             </span>
                           )}
                         </span>
                       );
                     })()}
                   {t.status === "rev" && (
-                    <span className="fs11 nowrap" style={{ color: "var(--ok)" }}>
-                      已生成 · 待验收
-                    </span>
+                    <button
+                      type="button"
+                      className="btn xs"
+                      onClick={() => openBatch("review", t.batchId)}
+                    >
+                      已生成 · 去验收
+                    </button>
                   )}
-                  {t.status === "pass" && <span className="fs11 t3">已通过</span>}
+                  {t.status === "pass" && (
+                    <button
+                      type="button"
+                      className="btn xs"
+                      onClick={() => openBatch("library", t.batchId)}
+                    >
+                      已通过 · 看作品
+                    </button>
+                  )}
                   {t.status === "rej" && <span className="fs11 t3">未通过</span>}
                 </span>
                 <span className="tc mono fs11 t3">{t.retryCount || ""}</span>
                 <span className="tract">
                   {t.status === "fail" && (
                     <>
-                      {t.errorType === "ContentPolicy" ? (
-                        <button type="button" className="btn pri sm" onClick={() => openReword(t)}>
-                          改词后恢复
-                        </button>
-                      ) : (
+                      {t.errorType === "ContentPolicy" ? null : (
                         <>
-                          <button
-                            type="button"
-                            className="btn sm gho"
-                            onClick={() => recoverOne(t)}
-                          >
-                            恢复
-                          </button>
+                          {t.errorType === "Auth" && (
+                            <button
+                              type="button"
+                              className="btn sm gho"
+                              onClick={() => recoverOne(t)}
+                            >
+                              恢复
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn sm gho"
@@ -632,7 +715,11 @@ export function TasksPage() {
                           </button>
                         </>
                       )}
-                      <button type="button" className="btn sm gho" onClick={() => deleteOne(t)}>
+                      <button
+                        type="button"
+                        className="btn sm gho"
+                        onClick={() => setDeleteTarget(t)}
+                      >
                         删除
                       </button>
                     </>
@@ -642,12 +729,41 @@ export function TasksPage() {
             );
           })}
         </div>
-        {tasks.length === 0 && (
-          <div className="bigempty">
-            <div className="fs13 fw5 t2">当前没有任务</div>
-            <button type="button" className="btn mt10" onClick={() => go("generate")}>
-              去生成
-            </button>
+        {(visible.length === 0 || loadState === "error") && (
+          <div className="bigempty" role="status">
+            <div className="fs13 fw5 t2">
+              {loadState === "loading"
+                ? "正在读取任务…"
+                : loadState === "error"
+                  ? "无法读取任务"
+                  : tasks.length > 0
+                    ? "当前筛选无匹配任务"
+                    : "当前没有任务"}
+            </div>
+            {loadState === "error" ? (
+              <button type="button" className="btn mt10" onClick={() => void refresh()}>
+                重新读取
+              </button>
+            ) : (
+              loadState === "ready" &&
+              (tasks.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn mt10"
+                  onClick={() => {
+                    setFilter("all");
+                    setErrorFilter(null);
+                    setSearch("");
+                  }}
+                >
+                  清除筛选
+                </button>
+              ) : (
+                <button type="button" className="btn mt10" onClick={() => go("generate")}>
+                  去生成
+                </button>
+              ))
+            )}
           </div>
         )}
       </div>
@@ -707,16 +823,61 @@ export function TasksPage() {
         </Modal>
       )}
 
+      {original && (
+        <OriginalPreview
+          title={original.name}
+          path={original.path}
+          onClose={() => setOriginal(null)}
+        />
+      )}
       {promptView && (
         <Modal
           title={promptLabel(promptView.promptCode, promptView.promptTitle)}
           width="w420"
           onClose={() => setPromptView(null)}
           headerExtra={<span className="chip">{promptView.groupName}</span>}
+          footer={
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(promptView.promptTextSnapshot)
+                  .then(() => toast.success("已复制提示词"))
+                  .catch((error) => toast.error(String(error)));
+              }}
+            >
+              复制原文
+            </button>
+          }
         >
           <div className="fx ac gap6 wrap" style={{ marginBottom: 10 }}>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void copyText(String(promptView.id), "任务编号")}
+            >
+              任务 #{promptView.id}
+            </button>
+            <button
+              type="button"
+              className="btn xs"
+              onClick={() => void copyText(String(promptView.batchId), "批次编号")}
+            >
+              批次 #{promptView.batchId}
+            </button>
             <span className="chip">{promptView.refName}</span>
-            {promptView.keyAlias && <span className="chip">{promptView.keyAlias}</span>}
+            {promptView.refImagePath && (
+              <MediaActions path={promptView.refImagePath} label="源参考图" />
+            )}
+            {promptView.resultImagePath && (
+              <MediaActions path={promptView.resultImagePath} label="生成结果" />
+            )}
+            {promptView.keyAlias && (
+              <button type="button" className="btn xs" onClick={() => openSettings("s-keys")}>
+                {promptView.keyAlias}
+              </button>
+            )}
             <span className={cn("bdg", statusVisual(promptView.status).badgeClass)}>
               {statusVisual(promptView.status).label}
             </span>
@@ -728,6 +889,27 @@ export function TasksPage() {
             {promptView.promptTextSnapshot}
           </div>
         </Modal>
+      )}
+
+      {deleteTarget && (
+        <ConfirmModal
+          title={
+            deleteTarget === "all"
+              ? `删除全部失败任务 · ${failedCount} 条`
+              : `删除任务 #${deleteTarget.id}`
+          }
+          desc={
+            deleteTarget === "all"
+              ? "删除所有批次的失败任务及其生成记录，包含当前筛选外的失败项。此操作不可撤销。"
+              : `删除批次 #${deleteTarget.batchId} 内该任务及其生成记录。此操作不可撤销。`
+          }
+          confirmLabel="删除任务"
+          danger
+          onConfirm={() =>
+            void (deleteTarget === "all" ? deleteAllFailed() : deleteOne(deleteTarget))
+          }
+          onClose={() => setDeleteTarget(null)}
+        />
       )}
 
       {confirmBulk === "delete" && (

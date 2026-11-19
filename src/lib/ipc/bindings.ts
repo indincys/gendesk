@@ -352,6 +352,17 @@ async libraryImageUsage(id: number) : Promise<Result<LibraryUsageView[], AppErro
 }
 },
 /**
+ * 仅接受与原图库文件字节一致的重新定位，保留原编号、上传副本、分类和冷却记录。
+ */
+async relinkMissingLibraryImage(imageId: number, source: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("relink_missing_library_image", { imageId, source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 列出全部提示词分组（含 active 提示词数 + 标签）。
  */
 async listPromptGroups() : Promise<Result<GroupView[], AppError>> {
@@ -647,7 +658,7 @@ async acceptTasks(taskIds: number[]) : Promise<Result<AcceptResult, AppError>> {
 /**
  * 不通过所选：置 rej + 原图暂存进废纸篓（E02，不立即物理删除）+ 留缩略图，单事务。
  */
-async rejectTasks(taskIds: number[]) : Promise<Result<number, AppError>> {
+async rejectTasks(taskIds: number[]) : Promise<Result<number[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reject_tasks", { taskIds }) };
 } catch (e) {
@@ -747,6 +758,38 @@ async pickPosterApp() : Promise<Result<string | null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getPosterDraft(batchId: string) : Promise<Result<DeliveryDraft, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_poster_draft", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async savePosterDraft(batchId: string, revision: number, images: DraftPlacement[], confirm: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_poster_draft", { batchId, revision, images, confirm }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportPosterDraft(batchId: string, destDir: string, staticOnly: boolean, revision: number) : Promise<Result<DraftExport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_poster_draft", { batchId, destDir, staticOnly, revision }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retryPosterBatch(batchId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_poster_batch", { batchId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listWorks(filter: WorkFilter, page: number | null) : Promise<Result<WorkView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_works", { filter, page }) };
@@ -766,7 +809,7 @@ async toggleWorkFavorite(id: number) : Promise<Result<null, AppError>> {
 /**
  * 删除作品 → 进废纸篓（记录删除，文件待清理时物理删）。
  */
-async trashWork(id: number) : Promise<Result<null, AppError>> {
+async trashWork(id: number) : Promise<Result<number, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("trash_work", { id }) };
 } catch (e) {
@@ -780,6 +823,30 @@ async trashWork(id: number) : Promise<Result<null, AppError>> {
 async fileExists(path: string) : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("file_exists", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openMedia(path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_media", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewLibraryOriginal(id: number) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_library_original", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportMediaFiles(paths: string[], destDir: string) : Promise<Result<MediaExportItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_media_files", { paths, destDir }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -808,10 +875,7 @@ async setWorksFavorite(ids: number[], favorite: boolean) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
- */
-async trashWorks(ids: number[]) : Promise<Result<null, AppError>> {
+async trashWorks(ids: number[]) : Promise<Result<WorkTrashResult[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("trash_works", { ids }) };
 } catch (e) {
@@ -1895,7 +1959,7 @@ submitQueuedAt: number | null;
  * 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
  * 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
  */
-exportPath: string | null; 
+exportPath: string | null; exportPresent: boolean | null; 
 /**
  * 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
  * 
@@ -1948,6 +2012,10 @@ export type CreditTrendPoint = { bucket: string; spent: number }
  * 数据目录信息（E19：暴露落盘位置）。
  */
 export type DataDirInfo = { root: string; dbPath: string }
+export type DeliveryDraft = { id: string; state: string; revision: number; editable: boolean; waitingReview: number; waitingIntake: boolean; materialId: string | null; lastError: string; images: DraftImage[] }
+export type DraftExport = { directory: string; exported: number; failures: string[] }
+export type DraftImage = { uid: string; itemName: string; taskId: number | null; imagePath: string; thumbPath: string | null; style: string; productName: string | null; wantsLive: boolean; liveImage: string | null; liveVideo: string | null; excluded: boolean }
+export type DraftPlacement = { uid: string; excluded: boolean }
 /**
  * 当前**实际生效**的生成参数（参数面板的唯一数据源）。
  * 
@@ -2248,6 +2316,7 @@ export type LibraryStyleView = { id: number; name: string; product: string; note
 export type LibraryUsageView = { usedAt: number; source: string; jobId: string | null; itemName: string | null; slot: number | null; fallback: boolean; cooldownDays: number | null }
 export type LivePhotoChanged = { error: string | null }
 export type LivePhotoStatus = { supported: boolean; enabled: boolean; pending: number; failed: number; error: string | null }
+export type MediaExportItem = { sourcePath: string; outputPath: string | null; error: string | null }
 /**
  * 受控模型清单（前端选择器渲染源）。
  */
@@ -2300,7 +2369,7 @@ export type PosterSettings = {
 /**
  * 审稿通过后自动导入。新字段名：旧版 `enabled`（逐批询问）不会被当成同意自动导入。
  */
-autoImport?: boolean; executable: string }
+autoImport?: boolean; confirmSets?: boolean; executable: string }
 /**
  * 确认卡上一条通道的分账。
  */
@@ -2723,12 +2792,12 @@ export type TaskStatusChanged = { taskId: number; batchId: number; status: TaskS
 /**
  * 任务视图（含参考图名/提示词编号/分组名/Key 别名，供任务表直接渲染）。
  */
-export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; promptTextSnapshot: string }
+export type TaskView = { id: number; batchId: number; status: string; refImageId: number; refName: string; promptId: number; promptCode: string; promptTitle: string | null; groupName: string; apiKeyId: number | null; keyAlias: string | null; errorType: string | null; errorMessage: string | null; retryCount: number; resultThumbPath: string | null; resultImagePath: string | null; refImagePath: string | null; updatedAt: number; promptTextSnapshot: string }
 export type TrashItemView = { id: number; entityType: string; code: string | null; title: string | null; refName: string | null; thumbPath: string | null; 
 /**
- * 未通过任务的原图路径（E02：原图暂存至清理前可查看）。仅 task 类有值。
+ * 仍可读取的原图（待清理的生成结果或作品输出）。
  */
-imagePath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number; 
+imagePath: string | null; videoPath: string | null; promptText: string | null; sourceLabel: string; deletedAt: number; 
 /**
  * 能不能还原回原位。真删行的作品与图片素材依赖 payload 快照，其余类型的行仍在。
  */
@@ -2946,6 +3015,10 @@ query?: string | null;
  * 只看某一批次。
  */
 batchId?: number | null }
+/**
+ * 批量删除作品 → 进废纸篓（E15）。默认不物理删除外部输出文件（同 trash_work 决策）。
+ */
+export type WorkTrashResult = { workId: number; trashId: number | null; error: string | null }
 export type WorkView = { id: number; promptCode: string; groupName: string; refName: string; batchId: number | null; favorite: number; acceptedAt: number; imagePath: string; thumbPath: string; promptText: string; 
 /**
  * 复刻/再生成所需的原始关联（E33）；批次删除后 task_id 可能为空。

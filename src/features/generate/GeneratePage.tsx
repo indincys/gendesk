@@ -1,4 +1,5 @@
 import { Modal } from "@/components/ui/Modal";
+import { MediaActions, OriginalPreview, copyText } from "@/features/_shared/MediaActions";
 
 import { ImportPreviewModal } from "@/features/_shared/ImportPreviewModal";
 import { RefImportOverlay, useRefImport } from "@/features/_shared/RefImport";
@@ -85,6 +86,7 @@ export function GeneratePage() {
   const [drag, setDrag] = useState<number | null>(null);
   const [apop, setApop] = useState<number | null>(null);
   const [paramPop, setParamPop] = useState(false);
+  const [previewRef, setPreviewRef] = useState<RefImageView | null>(null);
   const [viewer, setViewer] = useState<null | { gid: number; index: number }>(null);
   // 上传进度（生成页上传的图为「临时上传」，不进参考图库）。
   const { state: uploading, run: runImport } = useRefImport();
@@ -145,7 +147,7 @@ export function GeneratePage() {
     return sum + (g?.count ?? 0);
   }, 0);
   const taskTotal = combos;
-  const enabledKeys = keys.filter((k) => k.enabled);
+  const enabledKeys = keys.filter((k) => k.enabled && !k.circuitBroken && !k.secretMissing);
   // E12：有可用 Key = 至少一个启用且并发合计 > 0。
   const hasUsableKey = enabledKeys.reduce((s, k) => s + k.concurrencyLimit, 0) > 0;
 
@@ -383,6 +385,10 @@ export function GeneratePage() {
                 <div className="fs12 t3 mt4" style={{ lineHeight: 1.7 }}>
                   导入 .txt（或直接拖进来）作为本批提示词
                   <br />
+                  <button type="button" className="btn xs mt6" onClick={importTxt}>
+                    选择提示词文件
+                  </button>
+                  <br />
                   提示词是消耗品：跑完并验收干净后随批次一起清掉，没有可回头挑选的历史库
                 </div>
               </div>
@@ -492,7 +498,10 @@ export function GeneratePage() {
             {selRefs.length === 0 ? (
               <div className="empt">
                 <div className="fs13 fw5 t2">尚未选择参考图</div>
-                <div className="fs12 t3 mt4">上传参考图；每张参考图将挂靠一个提示词组</div>
+                <div className="fs12 t3 mt4">上传参考图后，为每张图分配一个提示词组</div>
+                <button type="button" className="btn xs mt6" onClick={uploadRefs}>
+                  选择参考图
+                </button>
               </div>
             ) : (
               <div className="rgrid4">
@@ -546,6 +555,8 @@ export function GeneratePage() {
                         <button
                           type="button"
                           className="rtx"
+                          aria-label={`从本次移除 ${r.name}`}
+                          title="从本次移除"
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelRefIds((c) => c.filter((x) => x !== r.id));
@@ -554,13 +565,32 @@ export function GeneratePage() {
                               delete next[r.id];
                               return next;
                             });
+                            toast(`已从本次移除 ${r.name}`, {
+                              action: {
+                                label: "撤销",
+                                onClick: () => {
+                                  setSelRefIds((current) =>
+                                    current.includes(r.id) ? current : [...current, r.id],
+                                  );
+                                  if (gid != null)
+                                    setMapping((current) => ({ ...current, [r.id]: gid }));
+                                },
+                              },
+                            });
                           }}
                         >
                           <X className="ic12" />
                         </button>
                       </div>
-                      <div className="rtname" title={r.name}>
-                        {r.name}
+                      <div className="fx ac gap6">
+                        <div className="rtname f1" title={r.name}>
+                          {r.name}
+                        </div>
+                        <MediaActions
+                          path={r.filePath}
+                          label={r.name}
+                          onPreview={() => setPreviewRef(r)}
+                        />
                       </div>
                       <button
                         type="button"
@@ -658,6 +688,18 @@ export function GeneratePage() {
         >
           参数 {paramShort} {paramErr && <span style={{ color: "var(--wr)" }}>· 有误</span>} ▾
         </button>
+        {(!selGroups.length || !selRefs.length || !allMapped || !hasUsableKey) && (
+          <span role="status" className="fs11 t3">
+            {[
+              !selGroups.length && "导入提示词",
+              !selRefs.length && "上传参考图",
+              selRefs.length > 0 && !allMapped && "分配提示词组",
+              !hasUsableKey && "配置可用 Key",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        )}
         <button
           type="button"
           className="btn pri"
@@ -892,6 +934,13 @@ export function GeneratePage() {
           onClose={() => setViewer(null)}
         />
       )}
+      {previewRef && (
+        <OriginalPreview
+          path={previewRef.filePath}
+          title={previewRef.name}
+          onClose={() => setPreviewRef(null)}
+        />
+      )}
       {uploading && <RefImportOverlay state={uploading} title="正在上传参考图" />}
       {importPreview && (
         <ImportPreviewModal
@@ -1086,6 +1135,14 @@ function PromptViewer({
             下一条 ›
           </button>
           <div className="f1" />
+          <button
+            type="button"
+            className="btn sm"
+            disabled={!p}
+            onClick={() => p && void copyText(p.text, "提示词")}
+          >
+            复制原文
+          </button>
           <button type="button" className="btn pri sm" onClick={onClose}>
             完成
           </button>

@@ -1,4 +1,4 @@
-import { reportFrontendError } from "@/lib/ipc";
+import { commands, reportFrontendError, unwrap } from "@/lib/ipc";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface Props {
@@ -24,15 +24,47 @@ export class ErrorBoundary extends Component<Props, State> {
     });
   }
 
+  private async rescue(result: ReturnType<typeof commands.openOutputDir>): Promise<void> {
+    try {
+      await unwrap(result);
+    } catch (error) {
+      window.alert(String(error));
+    }
+  }
+
   render(): ReactNode {
     if (this.state.error) {
       return (
         <div className="bigempty" style={{ height: "100vh" }}>
           <div className="fs13 fw6 t2">页面出现异常</div>
           <div className="fs12 t3">错误已记录到本地日志。可尝试重新加载。</div>
-          <button type="button" className="btn mt10" onClick={() => window.location.reload()}>
-            重新加载
-          </button>
+          <div className="fx ac gap8 mt10">
+            <button type="button" className="btn pri" onClick={() => window.location.reload()}>
+              重新加载
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void this.rescue(commands.openOutputDir())}
+            >
+              打开作品目录
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void this.rescue(commands.openLogsDir())}
+            >
+              打开日志
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void this.rescue(commands.openDataDir())}
+            >
+              打开数据目录
+            </button>
+          </div>
+          <div className="fs11 t3">待验收文件在「_草稿／生成图片」，已验收文件在「成品」。</div>
         </div>
       );
     }

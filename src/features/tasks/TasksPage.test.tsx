@@ -1,5 +1,5 @@
 import type { TaskView } from "@/lib/ipc/bindings";
-import { render } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 const engine = vi.hoisted(() => ({
@@ -74,12 +74,25 @@ function task(id: number): TaskView {
     errorMessage: null,
     retryCount: 0,
     resultThumbPath: null,
+    resultImagePath: null,
+    refImagePath: null,
+    updatedAt: 0,
     promptTextSnapshot: "prompt",
   };
 }
 
 describe("TasksPage 虚拟任务表", () => {
-  it("500 条任务只挂载视口附近的少量行", () => {
+  it("默认可见非排队任务，空筛选可返回全部", async () => {
+    engine.state.tasks = [{ ...task(1), status: "fail", errorType: "ContentPolicy" }];
+    render(<TasksPage />);
+    expect(screen.getByText("ref-1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "待处理 0" }));
+    await waitFor(() => expect(screen.getByText("当前筛选无匹配任务")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByText("ref-1")).toBeTruthy();
+  });
+
+  it("500 条任务只挂载视口附近的少量行", async () => {
     engine.state.tasks = Array.from({ length: 500 }, (_, index) => task(index + 1));
 
     const { container } = render(<TasksPage />);
@@ -87,5 +100,6 @@ describe("TasksPage 虚拟任务表", () => {
     expect(virtual.count).toBe(500);
     expect(container.querySelectorAll(".taskvrow")).toHaveLength(12);
     expect(container.querySelector<HTMLElement>(".taskvirt")?.style.height).toBe("20000px");
+    await act(async () => {});
   });
 });

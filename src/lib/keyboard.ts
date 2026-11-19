@@ -22,7 +22,7 @@ export function useGlobalKeyboard(): void {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (document.getElementById("poster-import")) return;
+      if (document.querySelector("[data-gendesk-dialog], #poster-import")) return;
       const mod = e.metaKey || e.ctrlKey;
 
       // ⌘/ —— 快捷键速查面板（E39），全局有效。

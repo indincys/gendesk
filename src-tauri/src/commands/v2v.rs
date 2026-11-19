@@ -4,6 +4,8 @@
 //! 把生图提示词改写成图生视频提示词。提交/轮询/下载/重试/验收都在这里，因为它们不是
 //! 智能任务，而 GenDesk 已经有状态机、崩溃恢复和 UI。
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
@@ -955,6 +957,7 @@ pub struct ClipView {
     /// 成片页据此回答「这条片子在哪」——`clips/clip{id}.mp4` 那个名字人在 Finder 里
     /// 认不出谁是谁。为空 = 交付失败（验收时的拷贝错误不回滚验收），可「重新交付」。
     pub export_path: Option<String>,
+    pub export_present: Option<bool>,
     /// 这一条现在看着像不像幽灵单（`runner::clip_looks_phantom`）。
     ///
     /// **由 Rust 下发而不是前端自己算**。前端原来抄了一份判据（三个字段 + 一个手抄的
@@ -1046,6 +1049,7 @@ impl From<repo::ClipRow> for ClipView {
             auto_submitted: r.auto_submitted != 0,
             submit_queued_at: r.submit_queued_at,
             export_path: r.export_path,
+            export_present: None,
             accepted_at: r.accepted_at,
             updated_at: r.updated_at,
         }
@@ -1067,11 +1071,23 @@ pub async fn list_v2v_clips(
             .filter(|s| stages.iter().any(|x| x == s))
             .collect()
     };
-    Ok(repo::list_by_stages(&state.db, &want)
-        .await?
-        .into_iter()
-        .map(ClipView::from)
-        .collect())
+    let rows = repo::list_by_stages(&state.db, &want).await?;
+    tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .map(|row| {
+                let mut clip = ClipView::from(row);
+                if clip.stage == "pass" {
+                    clip.export_present = clip
+                        .export_path
+                        .as_deref()
+                        .map(|path| Path::new(path).is_file());
+                }
+                clip
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| AppError::Io(error.to_string()))
 }
 
 #[tauri::command]

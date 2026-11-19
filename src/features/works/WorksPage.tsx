@@ -1,4 +1,10 @@
 import { ConfirmModal, Modal } from "@/components/ui/Modal";
+import {
+  MediaActions,
+  OriginalPreview,
+  copyText,
+  exportOriginals,
+} from "@/features/_shared/MediaActions";
 import { NatThumb } from "@/features/_shared/NatThumb";
 import { PageScaffold } from "@/features/_shared/PageScaffold";
 import { useDebouncedValue } from "@/features/_shared/useDebouncedValue";
@@ -41,10 +47,16 @@ interface Section {
 
 export function WorksPage() {
   const go = useUiStore((s) => s.go);
+  const jumpBatch = useUiStore((s) => s.jumpBatch);
+  const openBatch = useUiStore((s) => s.openBatch);
+  const [batchFilter, setBatchFilter] = useState(jumpBatch);
   const restoreFromBatch = useGenerateStore((s) => s.restoreFromBatch);
   const [works, setWorks] = useState<WorkView[]>([]);
   const [groups, setGroups] = useState<GroupView[]>([]);
   const [detail, setDetail] = useState<WorkView | null>(null);
+  const [fullSize, setFullSize] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const removeLock = useRef(false);
   const [confirmDel, setConfirmDel] = useState<WorkView | null>(null);
   // E21：源输出文件是否缺失（懒检测：打开详情时校验）。
   const [sourceMissing, setSourceMissing] = useState(false);
@@ -73,7 +85,7 @@ export function WorksPage() {
         favoriteOnly: favOnly,
         tag: purposeFilter,
         query: query.trim() === "" ? null : query.trim(),
-        batchId: null,
+        batchId: batchFilter,
       };
       const rows = await unwrap(commands.listWorks(f, page));
       setWorks(rows);
@@ -82,7 +94,7 @@ export function WorksPage() {
     } catch (e) {
       if (e instanceof Error) toast.error(e.message);
     }
-  }, [groupFilter, favOnly, purposeFilter, query, page]);
+  }, [groupFilter, favOnly, purposeFilter, query, page, batchFilter]);
 
   useEffect(() => {
     void unwrap(commands.listPurposes())
@@ -110,11 +122,36 @@ export function WorksPage() {
     await unwrap(commands.toggleWorkFavorite(w.id)).catch(() => void load());
   };
 
-  const del = async (w: WorkView) => {
-    await unwrap(commands.trashWork(w.id)).catch(() => {});
-    setDetail(null);
-    void load();
-    toast("已移入废纸篓");
+  const undoTrash = (ids: number[]) => ({
+    label: "撤销",
+    onClick: async () => {
+      try {
+        const result = await unwrap(commands.restoreTrashItems(ids));
+        if (result.restored > 0) toast.success(`已还原 ${result.restored} 张作品`);
+        for (const error of result.failures) toast.error(error);
+        await load();
+      } catch (error) {
+        toast.error(String(error));
+      }
+    },
+  });
+
+  const del = async (work: WorkView) => {
+    if (removeLock.current) return;
+    removeLock.current = true;
+    setRemoving(true);
+    try {
+      const id = await unwrap(commands.trashWork(work.id));
+      setDetail(null);
+      setWorks((current) => current.filter((item) => item.id !== work.id));
+      toast.success("已移入废纸篓", { action: undoTrash([id]) });
+      await load();
+    } catch (error) {
+      toast.error(`移动失败：${String(error)}`);
+    } finally {
+      removeLock.current = false;
+      setRemoving(false);
+    }
   };
 
   // E21：打开详情时懒检测源输出文件是否仍在。
@@ -138,10 +175,7 @@ export function WorksPage() {
   };
 
   // E33：复制提示词原文。
-  const copyPrompt = async (w: WorkView) => {
-    await navigator.clipboard.writeText(w.promptText);
-    toast.success("提示词已复制");
-  };
+  const copyPrompt = (work: WorkView) => copyText(work.promptText, "提示词");
 
   // E33：复制图片到系统剪贴板（jpg → png 经 canvas 转换，兼容剪贴板）。
   const copyImage = async (w: WorkView) => {
@@ -220,24 +254,26 @@ export function WorksPage() {
       return n;
     });
   };
-  const batchFavorite = async () => {
-    const ids = [...sel];
-    await unwrap(commands.setWorksFavorite(ids, true)).catch((e) => toast.error(String(e)));
-    toast.success(`已收藏 ${ids.length} 张`);
-    exitSelect();
-    void load();
+  const batchFavorite = async (favorite: boolean) => {
+    try {
+      const ids = [...sel];
+      await unwrap(commands.setWorksFavorite(ids, favorite));
+      toast.success(favorite ? "已收藏所选作品" : "已取消收藏所选作品");
+      exitSelect();
+      await load();
+    } catch (error) {
+      toast.error(String(error));
+    }
   };
   const batchExport = async () => {
-    const dir = await unwrap(commands.pickOutputDir()).catch(() => null);
-    if (!dir) return;
-    const ids = [...sel];
-    const n = await unwrap(commands.exportWorks(ids, dir)).catch((e) => {
-      toast.error(String(e));
-      return 0;
-    });
-    if (n < ids.length) toast(`已导出 ${n}/${ids.length} 张（部分源文件缺失已跳过）`);
-    else toast.success(`已导出 ${n} 张到所选文件夹`);
-    exitSelect();
+    const selected = works.filter((work) => sel.has(work.id));
+    const failed = await exportOriginals(selected.map((work) => work.imagePath));
+    if (failed === null) return;
+    if (failed.length === 0) exitSelect();
+    else
+      setSel(
+        new Set(selected.filter((work) => failed.includes(work.imagePath)).map((work) => work.id)),
+      );
   };
   /**
    * 手动加入视频流水线。
@@ -259,19 +295,55 @@ export function WorksPage() {
     }
   };
   const batchDelete = async () => {
-    const ids = [...sel];
-    await unwrap(commands.trashWorks(ids)).catch((e) => toast.error(String(e)));
-    toast(`已移入废纸篓 ${ids.length} 张`);
-    setConfirmBatchDel(false);
-    exitSelect();
-    void load();
+    if (removeLock.current) return;
+    removeLock.current = true;
+    setRemoving(true);
+    try {
+      const results = await unwrap(commands.trashWorks([...sel]));
+      const moved = results.flatMap((item) => (item.trashId == null ? [] : [item.trashId]));
+      const failures = results.filter((item) => item.error !== null);
+      if (moved.length > 0)
+        toast.success(`已移入废纸篓 ${moved.length} 张`, { action: undoTrash(moved) });
+      if (failures.length > 0) {
+        setSel(new Set(failures.map((item) => item.workId)));
+        toast.error(`${failures.length} 张移动失败`, {
+          description: failures
+            .slice(0, 6)
+            .map(
+              (item) =>
+                `${works.find((work) => work.id === item.workId)?.promptCode || `#${item.workId}`} · ${item.error}`,
+            )
+            .join("\n"),
+        });
+      } else exitSelect();
+      await load();
+    } catch (error) {
+      toast.error(`移动失败：${String(error)}`);
+    } finally {
+      setConfirmBatchDel(false);
+      removeLock.current = false;
+      setRemoving(false);
+    }
   };
 
   const activeGroup = groups.find((g) => g.id === groupFilter);
+  const detailIndex = detail ? works.findIndex((item) => item.id === detail.id) : -1;
 
   return (
-    <PageScaffold title="作品库" caption={`${works.length} 张已通过`}>
+    <PageScaffold title="作品库" caption={`本页 ${works.length} 张已通过`}>
       <div className="fbar">
+        {batchFilter != null && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => {
+              setBatchFilter(null);
+              setPage(0);
+            }}
+          >
+            批次 #{batchFilter} ×
+          </button>
+        )}
         {selectMode ? (
           <>
             <span className="fs12 t2 nowrap">已选 {sel.size}</span>
@@ -299,18 +371,26 @@ export function WorksPage() {
               type="button"
               className="btn sm gho"
               disabled={sel.size === 0}
-              onClick={batchFavorite}
+              onClick={() => void batchFavorite(true)}
             >
               <Star className="ic12" />
               收藏
             </button>
             <button
               type="button"
-              className="btn sm gho dng"
+              className="btn sm gho"
               disabled={sel.size === 0}
+              onClick={() => void batchFavorite(false)}
+            >
+              取消收藏
+            </button>
+            <button
+              type="button"
+              className="btn sm gho dng"
+              disabled={removing || sel.size === 0}
               onClick={() => setConfirmBatchDel(true)}
             >
-              删除
+              移入废纸篓
             </button>
             <button type="button" className="btn sm gho" onClick={exitSelect}>
               退出多选
@@ -400,7 +480,7 @@ export function WorksPage() {
                   onClick={() => selectSection(s)}
                   title="把本节全部作品加入选择"
                 >
-                  全选本节
+                  全选本页此节
                 </button>
               </div>
               <div className="wgrid" style={{ paddingTop: 0 }}>
@@ -412,7 +492,23 @@ export function WorksPage() {
                       className={cn("wcard", selectMode && sel.has(w.id) && "sel")}
                       onClick={(e) => onCardClick(idx, w.id, e.shiftKey)}
                     >
-                      <NatThumb path={w.thumbPath} className="wcimg wcnat" />
+                      <MediaActions
+                        path={w.imagePath}
+                        label={w.promptCode}
+                        onPreview={() => {
+                          setDetail(w);
+                          setFullSize(true);
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className="work-image-button"
+                          aria-label={`${selectMode ? "选择" : "查看"} ${w.promptCode}`}
+                          aria-pressed={selectMode ? sel.has(w.id) : undefined}
+                        >
+                          <NatThumb path={w.thumbPath} className="wcimg wcnat" />
+                        </button>
+                      </MediaActions>
                       <div className="rmeta">
                         <span className="pid">{w.promptCode}</span>
                         <span className="fs10 t3 nowrap ohide f1">{w.groupName}</span>
@@ -423,7 +519,8 @@ export function WorksPage() {
                             e.stopPropagation();
                             void toggleFav(w);
                           }}
-                          title="收藏"
+                          title={w.favorite ? "取消收藏" : "收藏"}
+                          aria-pressed={Boolean(w.favorite)}
                         >
                           <Star className="ic12" fill={w.favorite ? "currentColor" : "none"} />
                         </button>
@@ -478,14 +575,33 @@ export function WorksPage() {
           }
           footer={
             <>
-              <span className="fs11 t3">作品与提示词、参考图长期关联，可追溯</span>
+              <button
+                type="button"
+                className="btn xs"
+                disabled={detailIndex <= 0}
+                onClick={() => setDetail(works[detailIndex - 1] ?? null)}
+              >
+                上一张
+              </button>
+              <span className="fs11 t3" aria-live="polite">
+                {detailIndex >= 0 ? `${detailIndex + 1} / ${works.length}` : ""}
+              </span>
+              <button
+                type="button"
+                className="btn xs"
+                disabled={detailIndex < 0 || detailIndex === works.length - 1}
+                onClick={() => setDetail(works[detailIndex + 1] ?? null)}
+              >
+                下一张
+              </button>
               <div className="f1" />
               <button
                 type="button"
                 className="btn sm gho dng"
+                disabled={removing}
                 onClick={() => setConfirmDel(detail)}
               >
-                删除
+                移入废纸篓
               </button>
               <button type="button" className="btn sm" onClick={() => setDetail(null)}>
                 关闭
@@ -495,9 +611,14 @@ export function WorksPage() {
         >
           <div className="fx gap14">
             <div style={{ width: 300, flex: "none" }}>
-              <div
+              <button
+                type="button"
+                aria-label="放大查看原图"
+                title="放大查看原图"
+                onClick={() => setFullSize(true)}
                 className="ph"
                 style={{
+                  width: "100%",
                   ...bg(detail.thumbPath),
                   aspectRatio: "1",
                   borderRadius: 10,
@@ -507,7 +628,16 @@ export function WorksPage() {
               <div className="fx ac gap6 mt10 wrap">
                 <span className="chip">{detail.refName}</span>
                 <span className="chip">{fmtDate(detail.acceptedAt)}</span>
-                {detail.batchId != null && <span className="chip">批次 {detail.batchId}</span>}
+                {detail.batchId != null && (
+                  <button
+                    type="button"
+                    className="btn xs"
+                    title="查看该批仍在队列的任务"
+                    onClick={() => detail.batchId != null && openBatch("tasks", detail.batchId)}
+                  >
+                    批次 #{detail.batchId}
+                  </button>
+                )}
               </div>
               <div className="pathwell mt10" style={{ fontSize: "10.5px" }}>
                 {detail.imagePath}
@@ -525,6 +655,16 @@ export function WorksPage() {
                 <FolderOpen className="ic12" />
                 打开所在文件夹
               </button>
+              <div className="fx ac gap8 mt6">
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => void exportOriginals([detail.imagePath])}
+                >
+                  导出原件
+                </button>
+                <MediaActions path={detail.imagePath} />
+              </div>
               {sourceMissing && (
                 <button
                   type="button"
@@ -591,6 +731,14 @@ export function WorksPage() {
         </Modal>
       )}
 
+      {fullSize && detail && (
+        <OriginalPreview
+          key={detail.id}
+          title={detail.promptCode}
+          path={detail.imagePath}
+          onClose={() => setFullSize(false)}
+        />
+      )}
       {confirmDel && (
         <ConfirmModal
           title="删除作品"

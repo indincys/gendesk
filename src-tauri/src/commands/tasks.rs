@@ -27,6 +27,9 @@ pub struct TaskView {
     pub error_message: Option<String>,
     pub retry_count: i64,
     pub result_thumb_path: Option<String>,
+    pub result_image_path: Option<String>,
+    pub ref_image_path: Option<String>,
+    pub updated_at: i64,
     pub prompt_text_snapshot: String,
 }
 
@@ -35,7 +38,8 @@ const TASK_SELECT: &str = "SELECT t.id, t.batch_id, t.status, t.ref_image_id,
         COALESCE(p.code, '') AS prompt_code, p.title AS prompt_title,
         COALESCE(g.name, '') AS group_name,
         t.api_key_id, k.name AS key_alias, t.error_type, t.error_message,
-        t.retry_count, t.result_thumb_path, t.prompt_text_snapshot
+        t.retry_count, t.result_thumb_path, t.result_image_path, r.file_path AS ref_image_path,
+        t.updated_at, t.prompt_text_snapshot
     FROM tasks t
     JOIN batches b ON b.id = t.batch_id
     LEFT JOIN ref_images r ON r.id = t.ref_image_id

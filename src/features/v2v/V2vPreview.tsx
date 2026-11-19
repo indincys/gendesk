@@ -1,3 +1,4 @@
+import { MediaActions, copyText } from "@/features/_shared/MediaActions";
 import { V2vVideo } from "@/features/v2v/V2vVideo";
 import { type Row, STAGE_META } from "@/features/v2v/model";
 import { assetSrc } from "@/lib/img";
@@ -63,7 +64,14 @@ export function V2vPreview({
   return (
     <div className="vpv">
       <div className="vpvhd">
-        <span className="pid big">{c.promptCode}</span>
+        <button
+          type="button"
+          className="pid big"
+          title="复制编号"
+          onClick={() => void copyText(c.promptCode, "编号")}
+        >
+          {c.promptCode}
+        </button>
         <span className="vstg" style={{ background: meta.bg, color: meta.fg }}>
           <span className="d" />
           {meta.label}
@@ -71,19 +79,30 @@ export function V2vPreview({
         <div className="f1" />
         <span className="fs11 t3 nowrap">{total === 0 ? "空" : `${index} / ${total}`}</span>
         <div className="seg">
-          <span
-            className={cn("sgi", !asFrame && "on", !video && "dis")}
+          <button
+            type="button"
+            disabled={!video}
+            aria-pressed={!asFrame}
+            className={cn("sgi", !asFrame && "on")}
             onClick={() => video && onToggleFrame(false)}
           >
             成片
-          </span>
-          <span
-            className={cn("sgi", asFrame && "on", !frame && "dis")}
+          </button>
+          <button
+            type="button"
+            disabled={!frame}
+            aria-pressed={asFrame}
+            className={cn("sgi", asFrame && "on")}
             onClick={() => frame && onToggleFrame(true)}
           >
             首帧
-          </span>
+          </button>
         </div>
+        {asFrame ? (
+          <MediaActions path={c.imagePath} label="首帧" />
+        ) : (
+          c.videoPath && <MediaActions path={c.videoPath} label="视频原片" />
+        )}
       </div>
 
       <div className="vpvbody">
